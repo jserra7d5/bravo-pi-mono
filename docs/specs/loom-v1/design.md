@@ -688,6 +688,8 @@ Baseline transports:
 
 For v1, `tango-message` plus durable inbox is the primary immediate delivery path for interactive Tango agents. This keeps Loom runtime-agnostic across Pi, Claude Code, Codex, and other tmux-backed harnesses.
 
+For immediate Tango delivery, the Loom recipient agent ID should match the Tango agent name unless an explicit runtime mapping exists. The durable inbox remains canonical if transport delivery fails.
+
 A Pi extension remains useful for Loom tools, UI status, context helpers, and possibly richer in-process delivery, but it is not required for the core no-daemon notification model. V1 should avoid requiring a Pi-specific transport.
 
 ## Tango Integration

@@ -134,6 +134,8 @@ Do not manually retry delivery, clear locks, repair registry paths, or change SQ
 
 Delivered messages are wake-up packets. The durable inbox item is canonical.
 
+For immediate Tango delivery, the Loom recipient agent ID should match the Tango agent name unless an explicit runtime mapping exists. Example: if Tango starts an agent named `backend-worker`, send Loom inbox items to `backend-worker`. If the Loom recipient is `backend-worker` but the live Tango agent is named `backend-demo-worker`, delivery may fail, though the inbox item remains durable and can still be inspected manually.
+
 If you receive a Loom notification, use the included command, usually:
 
 ```bash
