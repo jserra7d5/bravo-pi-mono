@@ -1,0 +1,26 @@
+{
+  "name": "@bravo/caveman",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi extension for session-scoped caveman response mode.",
+  "keywords": [
+    "pi-package"
+  ],
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi"
+    ]
+  }
+}
