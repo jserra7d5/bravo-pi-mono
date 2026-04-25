@@ -1,0 +1,13 @@
+{
+  "name": "bravo-pi-mono",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present"
+  }
+}

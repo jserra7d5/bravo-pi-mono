@@ -1,0 +1,37 @@
+{
+  "name": "@bravo/tango",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Native tmux agent orchestration CLI with pi and other CLI harnesses.",
+  "keywords": [
+    "pi-package"
+  ],
+  "bin": {
+    "tango": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  }
+}
