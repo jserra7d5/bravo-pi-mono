@@ -4,7 +4,7 @@ Personal pi/agent tooling monorepo.
 
 ## Packages
 
-- `packages/tango` — CLI-first native/tmux agent orchestrator with a pi extension wrapper.
+- `packages/tango` — CLI-first native/tmux agent orchestrator with Pi, Claude Code, and generic harnesses.
 
 ## Tango quick start
 
@@ -26,6 +26,7 @@ Basic commands:
 ```bash
 tango roles list
 tango start repo-scout --role scout "Summarize this repo"
+tango start cc-scout --role claude-scout --model haiku --effort low "Summarize this repo"
 tango list
 tango look repo-scout
 tango result repo-scout

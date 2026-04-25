@@ -7,6 +7,7 @@ import { assembleSystemPrompt, loadRole } from "./roles.js";
 import { writeMetadata } from "./metadata.js";
 import { buildPiCommand } from "./harnesses/pi.js";
 import { buildGenericCommand } from "./harnesses/generic.js";
+import { buildClaudeCommand } from "./harnesses/claude.js";
 import { startTmux } from "./runtime/tmux.js";
 
 export async function startAgent(options: StartOptions): Promise<{ meta: AgentMetadata; command: CommandSpec; role?: RoleConfig }> {
@@ -39,16 +40,21 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
     parentRunDir: process.env.TANGO_RUN_DIR,
     model: options.model ?? role?.model,
     thinking: options.thinking ?? role?.thinking,
+    effort: options.effort ?? role?.effort,
   };
 
-  const effectiveRole = role ? { ...role, harness, model: meta.model, thinking: meta.thinking, recursive: options.recursive ?? role.recursive } : undefined;
+  const effectiveRole = role ? { ...role, harness, model: meta.model, thinking: meta.thinking, effort: meta.effort, recursive: options.recursive ?? role.recursive } : undefined;
   const system = effectiveRole ? assembleSystemPrompt(effectiveRole) : "You are a helpful coding agent.";
   const systemFile = join(runDir, "system.md");
   const taskFile = join(runDir, "task.md");
   writeFileSync(systemFile, `${system}\n`, "utf8");
   writeFileSync(taskFile, `${options.task}\n`, "utf8");
 
-  const command = harness === "generic" ? buildGenericCommand(meta, options.task) : buildPiCommand(meta, effectiveRole, systemFile, options.task);
+  const command = harness === "generic"
+    ? buildGenericCommand(meta, options.task)
+    : harness === "claude"
+      ? buildClaudeCommand(meta, effectiveRole, systemFile, options.task)
+      : buildPiCommand(meta, effectiveRole, systemFile, options.task);
   writeFileSync(join(runDir, "command.json"), `${JSON.stringify(redactCommand(command), null, 2)}\n`, "utf8");
   writeMetadata(meta);
 
@@ -62,12 +68,30 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
 }
 
 function redactCommand(command: CommandSpec): CommandSpec {
-  const keep = new Set(["HOME", "PATH", "PI_CODING_AGENT_DIR", "TANGO_AGENT_NAME", "TANGO_RUN_DIR", "TANGO_PARENT_RUN_DIR"]);
+  const keep = new Set(["HOME", "PATH", "PI_CODING_AGENT_DIR", "TANGO_HOME", "TANGO_AGENT_NAME", "TANGO_RUN_DIR", "TANGO_PARENT_RUN_DIR"]);
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(command.env)) {
     if (keep.has(key)) env[key] = /TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH/i.test(key) ? "<redacted>" : value;
   }
   return { ...command, env };
+}
+
+function extractResultText(parser: CommandSpec["resultParser"], event: any, current: string): string {
+  if (parser === "pi-json") {
+    if (event.type === "message_end" && event.message?.role === "assistant") {
+      const parts = event.message.content ?? [];
+      for (const part of parts) if (part.type === "text") current = part.text;
+    }
+    return current;
+  }
+  if (parser === "claude-stream-json") {
+    if (event.type === "result" && typeof event.result === "string") return event.result;
+    if (event.type === "assistant" && Array.isArray(event.message?.content)) {
+      const text = event.message.content.filter((part: any) => part.type === "text" && typeof part.text === "string").map((part: any) => part.text).join("\n");
+      if (text) return current ? `${current}\n${text}` : text;
+    }
+  }
+  return current;
 }
 
 async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promise<void> {
@@ -112,10 +136,7 @@ async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promise<void>
       writeFileSync(eventsFile, `${line}\n`, { flag: "a" });
       try {
         const event = JSON.parse(line);
-        if (event.type === "message_end" && event.message?.role === "assistant") {
-          const parts = event.message.content ?? [];
-          for (const part of parts) if (part.type === "text") finalText = part.text;
-        }
+        finalText = extractResultText(spec.resultParser ?? "pi-json", event, finalText);
       } catch {}
     }
   });

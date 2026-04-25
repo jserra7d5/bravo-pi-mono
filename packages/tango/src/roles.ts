@@ -74,6 +74,7 @@ function roleFromFile(filePath: string): RoleConfig {
     mode: data.mode === "interactive" ? "interactive" : data.mode === "oneshot" ? "oneshot" : undefined,
     model: data.model === undefined ? undefined : String(data.model),
     thinking: asThinkingLevel(data.thinking),
+    effort: data.effort === undefined ? undefined : String(data.effort),
     tools: asStringArray(data.tools),
     contextFiles: typeof data.contextFiles === "boolean" ? data.contextFiles : undefined,
     skills: asStringArray(data.skills),

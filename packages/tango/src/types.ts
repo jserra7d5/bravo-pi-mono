@@ -2,6 +2,7 @@ export type AgentMode = "oneshot" | "interactive";
 export type AgentStatus = "created" | "running" | "done" | "error" | "blocked" | "stopped" | "unknown";
 export type OrchestrationPolicy = "none" | "cli" | "tools" | "auto";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ResultParser = "pi-json" | "claude-stream-json" | "plain";
 
 export interface RoleConfig {
   name: string;
@@ -10,6 +11,7 @@ export interface RoleConfig {
   mode?: AgentMode;
   model?: string;
   thinking?: ThinkingLevel;
+  effort?: string;
   tools?: string[];
   contextFiles?: boolean;
   skills?: string[];
@@ -38,6 +40,7 @@ export interface AgentMetadata {
   updatedAt: string;
   model?: string;
   thinking?: ThinkingLevel;
+  effort?: string;
   pid?: number;
   exitCode?: number | null;
   summary?: string;
@@ -52,6 +55,7 @@ export interface StartOptions {
   mode?: AgentMode;
   model?: string;
   thinking?: ThinkingLevel;
+  effort?: string;
   cwd: string;
   task: string;
   clean?: boolean;
@@ -66,4 +70,5 @@ export interface CommandSpec {
   args: string[];
   env: Record<string, string>;
   cwd: string;
+  resultParser?: ResultParser;
 }
