@@ -16,8 +16,10 @@ export function buildPiCommand(meta: AgentMetadata, role: RoleConfig | undefined
   const explicitExtensions = [...(role?.extensions ?? [])];
   if (wantsToolOrchestration(role)) explicitExtensions.unshift(join(packageRoot(), "extensions", "pi", "index.ts"));
   for (const ext of explicitExtensions) args.push("-e", resolveResource(ext, "extension"));
-  const model = role?.model;
+  const model = meta.model ?? role?.model;
   if (model) args.push("--model", model);
+  const thinking = meta.thinking ?? role?.thinking;
+  if (thinking) args.push("--thinking", thinking);
   if (role?.tools?.length) args.push("--tools", role.tools.join(","));
   args.push("--append-system-prompt", systemFile);
   for (const skill of role?.skills ?? []) args.push("--skill", resolveSkill(skill));

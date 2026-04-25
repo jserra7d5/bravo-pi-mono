@@ -1,6 +1,7 @@
 export type AgentMode = "oneshot" | "interactive";
 export type AgentStatus = "created" | "running" | "done" | "error" | "blocked" | "stopped" | "unknown";
 export type OrchestrationPolicy = "none" | "cli" | "tools" | "auto";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export interface RoleConfig {
   name: string;
@@ -8,6 +9,7 @@ export interface RoleConfig {
   harness?: string;
   mode?: AgentMode;
   model?: string;
+  thinking?: ThinkingLevel;
   tools?: string[];
   contextFiles?: boolean;
   skills?: string[];
@@ -34,6 +36,8 @@ export interface AgentMetadata {
   tmuxSession: string;
   createdAt: string;
   updatedAt: string;
+  model?: string;
+  thinking?: ThinkingLevel;
   pid?: number;
   exitCode?: number | null;
   summary?: string;
@@ -47,6 +51,7 @@ export interface StartOptions {
   harness?: string;
   mode?: AgentMode;
   model?: string;
+  thinking?: ThinkingLevel;
   cwd: string;
   task: string;
   clean?: boolean;
