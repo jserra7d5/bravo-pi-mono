@@ -217,12 +217,14 @@ export default function (pi: ExtensionAPI) {
       role: Type.String({ description: "Role name, e.g. scout, planner, worker, team-lead" }),
       task: Type.String({ description: "Task for the child agent" }),
       mode: Type.Optional(StringEnum(["oneshot", "interactive"] as const)),
+      thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const)),
       clean: Type.Optional(Type.Boolean({ default: false })),
       cwd: Type.Optional(Type.String({ description: "Working directory/project root for this agent. Defaults to the current Pi process cwd." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const args = addCwd(["start", params.name, "--role", params.role, "--json"], params.cwd);
       if (params.mode) args.push("--mode", params.mode);
+      if (params.thinking) args.push("--thinking", params.thinking);
       if (params.clean) args.push("--clean");
       args.push(params.task);
       const out = toolResult(await runTango(args, signal));
@@ -230,7 +232,8 @@ export default function (pi: ExtensionAPI) {
       return out;
     },
     renderCall(args, theme) {
-      return textBlock([`${theme.fg("toolTitle", "tango start")} ${theme.fg("accent", args.name)} ${theme.fg("muted", `as ${args.role}`)}`, `  ${theme.fg("dim", preview(args.task))}`]);
+      const suffix = args.thinking ? `as ${args.role}, thinking ${args.thinking}` : `as ${args.role}`;
+      return textBlock([`${theme.fg("toolTitle", "tango start")} ${theme.fg("accent", args.name)} ${theme.fg("muted", suffix)}`, `  ${theme.fg("dim", preview(args.task))}`]);
     },
     renderResult(result, options, theme) { return renderAgentResult(result, options, theme, "Started"); },
   });

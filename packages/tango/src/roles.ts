@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { OrchestrationPolicy, RoleConfig } from "./types.js";
+import type { OrchestrationPolicy, RoleConfig, ThinkingLevel } from "./types.js";
 import { packageIncludesDir, packageRolesDir, userIncludesDir, userRolesDir } from "./paths.js";
 
 function parseScalar(value: string): unknown {
@@ -57,6 +57,12 @@ function asOrchestrationPolicy(value: unknown): OrchestrationPolicy | undefined 
   return undefined;
 }
 
+function asThinkingLevel(value: unknown): ThinkingLevel | undefined {
+  if (value === undefined) return undefined;
+  if (value === "off" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh") return value;
+  throw new Error(`Invalid thinking level: ${String(value)}. Expected off, minimal, low, medium, high, or xhigh.`);
+}
+
 function roleFromFile(filePath: string): RoleConfig {
   const content = readFileSync(filePath, "utf8");
   const { data, body } = parseFrontmatter(content);
@@ -67,6 +73,7 @@ function roleFromFile(filePath: string): RoleConfig {
     harness: data.harness === undefined ? undefined : String(data.harness),
     mode: data.mode === "interactive" ? "interactive" : data.mode === "oneshot" ? "oneshot" : undefined,
     model: data.model === undefined ? undefined : String(data.model),
+    thinking: asThinkingLevel(data.thinking),
     tools: asStringArray(data.tools),
     contextFiles: typeof data.contextFiles === "boolean" ? data.contextFiles : undefined,
     skills: asStringArray(data.skills),

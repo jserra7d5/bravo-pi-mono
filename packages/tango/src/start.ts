@@ -37,9 +37,11 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
     createdAt: now,
     updatedAt: now,
     parentRunDir: process.env.TANGO_RUN_DIR,
+    model: options.model ?? role?.model,
+    thinking: options.thinking ?? role?.thinking,
   };
 
-  const effectiveRole = role ? { ...role, harness, recursive: options.recursive ?? role.recursive } : undefined;
+  const effectiveRole = role ? { ...role, harness, model: meta.model, thinking: meta.thinking, recursive: options.recursive ?? role.recursive } : undefined;
   const system = effectiveRole ? assembleSystemPrompt(effectiveRole) : "You are a helpful coding agent.";
   const systemFile = join(runDir, "system.md");
   const taskFile = join(runDir, "task.md");

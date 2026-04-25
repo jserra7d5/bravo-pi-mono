@@ -72,6 +72,7 @@ description: Fast codebase reconnaissance and compressed handoff
 harness: pi
 mode: oneshot
 model: claude-haiku-4-5
+thinking: low
 tools: [read, grep, find, ls]
 contextFiles: false
 skills: []
@@ -220,6 +221,7 @@ Draft flags:
 --harness <name>          Override role harness
 --mode <mode>             Override role mode: oneshot | interactive
 --model <model>           Override role model
+--thinking <level>        Override role thinking level: off | minimal | low | medium | high | xhigh
 --cwd <path>              Working directory
 --workspace <path>        Workspace path
 --clean                   Remove previous same-name instance first
@@ -244,6 +246,7 @@ pi --mode json -p \
   --no-skills \
   --no-prompt-templates \
   --model <model> \
+  --thinking <level> \
   --tools <tools> \
   --append-system-prompt <system-file> \
   --skill <explicit-skill> \
@@ -265,6 +268,7 @@ pi \
   --no-skills \
   --no-prompt-templates \
   --model <model> \
+  --thinking <level> \
   --tools <tools> \
   --append-system-prompt <system-file> \
   "Task: <task>"
@@ -303,6 +307,7 @@ description: Fast codebase reconnaissance
 harness: pi
 mode: oneshot
 model: claude-haiku-4-5
+thinking: low
 tools:
   - read
   - grep
@@ -324,6 +329,7 @@ Fields:
 - `harness`: CLI adapter, e.g. `pi` or `claude`.
 - `mode`: `oneshot` or `interactive`.
 - `model`: harness-specific model selector.
+- `thinking`: harness-specific reasoning/thinking level. For the pi harness: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`.
 - `tools`: harness-specific tool allowlist.
 - `contextFiles`: whether ambient context files should be loaded. Default false.
 - `skills`: explicit skill names/paths. Default none.

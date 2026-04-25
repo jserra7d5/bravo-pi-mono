@@ -6,10 +6,12 @@ import { fail, printJson } from "./json.js";
 import { findRunDir, listMetadata, readMetadata, removeRunDir, updateStatus, writeMetadata } from "./metadata.js";
 import { listRoles, loadRole, assembleSystemPrompt } from "./roles.js";
 import { attachTmux, captureTmux, sendTmux, stopTmux, tmuxAlive } from "./runtime/tmux.js";
+import type { ThinkingLevel } from "./types.js";
 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
 const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive"]);
+const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 function parse(argv: string[]): Parsed {
   const flags: Parsed["flags"] = {};
@@ -33,6 +35,11 @@ function flagString(flags: Parsed["flags"], name: string): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 function flagBool(flags: Parsed["flags"], name: string): boolean { return flags[name] === true || flags[name] === "true"; }
+function flagThinking(flags: Parsed["flags"], name: string): ThinkingLevel | undefined {
+  const value = flagString(flags, name);
+  if (value !== undefined && !THINKING_LEVELS.has(value as ThinkingLevel)) throw new Error(`Invalid --${name}: ${value}. Expected off, minimal, low, medium, high, or xhigh.`);
+  return value as ThinkingLevel | undefined;
+}
 
 async function main() {
   const [cmd = "help", ...rest] = process.argv.slice(2);
@@ -69,6 +76,7 @@ async function cmdStart(parsed: Parsed, cwd: string, json: boolean) {
     harness: flagString(parsed.flags, "harness"),
     mode: flagString(parsed.flags, "mode") as any,
     model: flagString(parsed.flags, "model"),
+    thinking: flagThinking(parsed.flags, "thinking"),
     cwd,
     task,
     clean: flagBool(parsed.flags, "clean"),
@@ -159,7 +167,7 @@ function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
 function cmdRoles(parsed: Parsed, json: boolean) {
   const [sub = "list", name] = parsed.positionals;
   if (sub === "list") {
-    const roles = listRoles().map((r) => ({ name: r.name, description: r.description, harness: r.harness, mode: r.mode, filePath: r.filePath }));
+    const roles = listRoles().map((r) => ({ name: r.name, description: r.description, harness: r.harness, mode: r.mode, model: r.model, thinking: r.thinking, filePath: r.filePath }));
     if (json) printJson({ ok: true, roles }); else for (const r of roles) console.log(`${r.name.padEnd(16)} ${r.description ?? ""}`);
     return;
   }
@@ -187,7 +195,7 @@ function refreshStatus(meta: any) {
 }
 
 function help() {
-  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango start <name> --role <role> [task...]\n  tango list [--json] [--all]\n  tango look <name> [--lines N] [--json]\n  tango attach <name>\n  tango message <name> <message>\n  tango stop <name>\n  tango delete <name>\n  tango status <state> [message]\n  tango result <name>\n  tango roles list|show <name>\n`);
+  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango start <name> --role <role> [--thinking off|minimal|low|medium|high|xhigh] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--lines N] [--json]\n  tango attach <name>\n  tango message <name> <message>\n  tango stop <name>\n  tango delete <name>\n  tango status <state> [message]\n  tango result <name>\n  tango roles list|show <name>\n`);
 }
 
 main();
