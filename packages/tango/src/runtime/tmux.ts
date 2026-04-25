@@ -31,8 +31,14 @@ export function attachTmux(socket: string, session: string): void {
 }
 
 export function sendTmux(socket: string, session: string, message: string): void {
-  const result = spawnSync("tmux", ["-S", socket, "send-keys", "-t", session, message, "Enter"], { encoding: "utf8" });
-  if (result.status !== 0) throw new Error(result.stderr || "failed to send message");
+  const bufferName = `tango-msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const load = spawnSync("tmux", ["-S", socket, "load-buffer", "-b", bufferName, "-"], { input: message, encoding: "utf8" });
+  if (load.status !== 0) throw new Error(load.stderr || "failed to load message buffer");
+  const paste = spawnSync("tmux", ["-S", socket, "paste-buffer", "-b", bufferName, "-t", session], { encoding: "utf8" });
+  spawnSync("tmux", ["-S", socket, "delete-buffer", "-b", bufferName], { stdio: "ignore" });
+  if (paste.status !== 0) throw new Error(paste.stderr || "failed to paste message");
+  const enter = spawnSync("tmux", ["-S", socket, "send-keys", "-t", session, "C-m"], { encoding: "utf8" });
+  if (enter.status !== 0) throw new Error(enter.stderr || "failed to send message");
 }
 
 export function stopTmux(socket: string, session: string): void {

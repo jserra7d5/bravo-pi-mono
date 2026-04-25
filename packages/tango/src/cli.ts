@@ -77,6 +77,7 @@ async function cmdStart(parsed: Parsed, cwd: string, json: boolean) {
     mode: flagString(parsed.flags, "mode") as any,
     model: flagString(parsed.flags, "model"),
     thinking: flagThinking(parsed.flags, "thinking"),
+    effort: flagString(parsed.flags, "effort"),
     cwd,
     task,
     clean: flagBool(parsed.flags, "clean"),
@@ -167,7 +168,7 @@ function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
 function cmdRoles(parsed: Parsed, json: boolean) {
   const [sub = "list", name] = parsed.positionals;
   if (sub === "list") {
-    const roles = listRoles().map((r) => ({ name: r.name, description: r.description, harness: r.harness, mode: r.mode, model: r.model, thinking: r.thinking, filePath: r.filePath }));
+    const roles = listRoles().map((r) => ({ name: r.name, description: r.description, harness: r.harness, mode: r.mode, model: r.model, thinking: r.thinking, effort: r.effort, filePath: r.filePath }));
     if (json) printJson({ ok: true, roles }); else for (const r of roles) console.log(`${r.name.padEnd(16)} ${r.description ?? ""}`);
     return;
   }
@@ -195,7 +196,7 @@ function refreshStatus(meta: any) {
 }
 
 function help() {
-  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango start <name> --role <role> [--thinking off|minimal|low|medium|high|xhigh] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--lines N] [--json]\n  tango attach <name>\n  tango message <name> <message>\n  tango stop <name>\n  tango delete <name>\n  tango status <state> [message]\n  tango result <name>\n  tango roles list|show <name>\n`);
+  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--lines N] [--json]\n  tango attach <name>\n  tango message <name> <message>\n  tango stop <name>\n  tango delete <name>\n  tango status <state> [message]\n  tango result <name>\n  tango roles list|show <name>\n`);
 }
 
 main();

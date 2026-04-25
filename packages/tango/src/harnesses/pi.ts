@@ -30,6 +30,7 @@ export function buildPiCommand(meta: AgentMetadata, role: RoleConfig | undefined
     args,
     cwd: meta.cwd,
     env: baseEnv(meta),
+    resultParser: "pi-json",
   };
 }
 
@@ -39,6 +40,7 @@ export function baseEnv(meta: AgentMetadata): Record<string, string> {
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
     HOME: meta.homeDir,
+    TANGO_HOME: process.env.TANGO_HOME ?? join(process.env.HOME ?? homedir(), ".tango"),
     PI_CODING_AGENT_DIR: piAgentDir,
     TANGO_AGENT_NAME: meta.name,
     TANGO_RUN_DIR: meta.runDir,

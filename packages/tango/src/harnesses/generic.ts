@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { AgentMetadata, CommandSpec } from "../types.js";
 
 export function buildGenericCommand(meta: AgentMetadata, task: string): CommandSpec {
@@ -7,8 +9,10 @@ export function buildGenericCommand(meta: AgentMetadata, task: string): CommandS
     cwd: meta.cwd,
     env: {
       ...process.env as Record<string, string>,
+      TANGO_HOME: process.env.TANGO_HOME ?? join(process.env.HOME ?? homedir(), ".tango"),
       TANGO_AGENT_NAME: meta.name,
       TANGO_RUN_DIR: meta.runDir,
     },
+    resultParser: "plain",
   };
 }
