@@ -2,6 +2,10 @@ node_modules/
 dist/
 *.log
 .DS_Store
+.loom/index.sqlite
+.loom/runtime/
+**/.loom/index.sqlite
+**/.loom/runtime/
 .env
 .env.*
 !.env.example
