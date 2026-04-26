@@ -148,7 +148,7 @@ Generic shell agents should continue to inherit normal `HOME` by default. They h
 Loom aliases and registry resolution become less fragile when developer tooling sees real `HOME`. Loom-spawned agents should still prefer absolute Loom paths for durability:
 
 ```text
-LOOM_DEFAULT=/absolute/path/to/.loom
+LOOM_DEFAULT=/absolute/path/to/.loom/looms/<name>
 ```
 
 rather than relying only on registry aliases.

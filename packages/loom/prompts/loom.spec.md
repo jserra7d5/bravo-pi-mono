@@ -12,8 +12,9 @@ $ARGUMENTS
 ```
 
 Guidelines:
-- If no Loom exists for this work, suggest creating one and ask before running `loom init` unless the user explicitly requested creation.
-- If a Loom exists or the user provided a Loom/node reference, inspect current context first.
+- If no Loom container exists for this project, suggest creating one and ask before running `loom init` unless the user explicitly requested creation.
+- If a Loom container already exists but this is a distinct workstream, suggest `loom create-loom --name <name> --title <title>` rather than mixing unrelated work into the current Loom.
+- If a Loom exists or the user provided a Loom/node reference, inspect current context first with `loom current` / `loom list` and the relevant node context.
 - Capture the proposal at a high level: goal, scope, constraints, assumptions, open questions, and next recommended phase.
 - Prefer Loom commands (`loom create`, `loom note`, `loom decompose`, `loom resolve`) over manual `.loom` edits.
 - Keep the user-facing response concise; store granular detail in Loom.

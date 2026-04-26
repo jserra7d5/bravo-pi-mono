@@ -5,6 +5,8 @@ description: Create Loom-backed implementation plans and task graphs from chosen
 
 Use this skill only when your assignment includes Loom context/reference or explicitly asks for Loom planning.
 
+If working in a multi-Loom project, use the provided `LOOM_DEFAULT`, explicit `-L`, or `loom current` / `loom list` to confirm the target Loom before writing.
+
 1. Fetch context for the target node.
 2. Confirm a chosen design/decision exists. If not, stop and recommend a decision step.
 3. Decompose into implementable task nodes with clear scope, dependencies, target repos, validation expectations, and stop conditions.

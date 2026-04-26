@@ -8,6 +8,7 @@ This is the compact, runtime-agnostic guide for making an agent Loom-aware. Loom
 ## Core Mental Model
 
 - Loom is durable graph context for research, design, planning, decisions, and work results.
+- A project `.loom/` is a container. Individual Loom instances live under `.loom/looms/<name>/`; plain `loom ...` uses the container's current Loom.
 - Tango or another runtime owns process/session execution.
 - Agents are participants, not tasks.
 - Nodes are generic work/thought artifacts, not necessarily implementation tasks.
@@ -53,6 +54,7 @@ Useful commands:
 
 ```bash
 loom current
+loom list
 loom inbox next
 loom inbox show M-0001
 loom inbox accept M-0001
@@ -102,11 +104,11 @@ Loom-spawned agents may receive:
 
 ```txt
 LOOM_AGENT_ID=<agent-id>
-LOOM_DEFAULT=<absolute-loom-path-or-id>
+LOOM_DEFAULT=<absolute-path-to-.loom/looms/<name>-or-id>
 LOOM_CONTEXT=<path-to-context-json>
 ```
 
-You normally do not need to edit these. They help Loom commands resolve the right instance when CWD is not the Loom root.
+You normally do not need to edit these. They help Loom commands resolve the right instance when CWD is not the project root or when multiple Looms exist in the same `.loom` container.
 
 ## What Not To Do Unless Asked
 
@@ -167,6 +169,7 @@ Worker-facing:
 
 ```bash
 loom current
+loom list
 loom inbox next
 loom inbox show M-0001
 loom inbox accept M-0001

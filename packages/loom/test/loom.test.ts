@@ -95,11 +95,44 @@ test('vertical slice works from inside and outside loom root', () => {
   r = jsonRun(['-L', 'feature-x', 'inbox', 'done', 'M-0001', '--summary', 'Reviewed'], { cwd: w.outside, home: w.home });
   assert.equal(r.data.item.state, 'done');
 
-  const loomPath = join(w.cwd, '.loom');
+  const loomPath = join(w.cwd, '.loom/looms/feature-x');
+  assert.ok(existsSync(join(w.cwd, '.loom/config.json')));
   assert.ok(existsSync(join(loomPath, 'runtime/runtime.sqlite')));
   jsonRun(['-L', 'feature-x', 'index', 'rebuild'], { cwd: w.outside, home: w.home });
   const count = execFileSync('sqlite3', [join(loomPath, 'runtime/runtime.sqlite'), 'select count(*) from inbox_items;'], { encoding: 'utf8' }).trim();
   assert.equal(count, '1');
+});
+
+test('multiple looms under one container resolve by current and local name', () => {
+  const w = workspace();
+  mkdirSync(w.outside, { recursive: true });
+
+  let r = jsonRun(['init', '--name', 'main', '--title', 'Main Loom'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.path, join(w.cwd, '.loom/looms/main'));
+
+  r = jsonRun(['create-loom', '--name', 'feature-a', '--title', 'Feature A'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.path, join(w.cwd, '.loom/looms/feature-a'));
+
+  r = jsonRun(['list'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.current, 'main');
+  assert.deepEqual(r.data.looms.map((l: any) => l.name).sort(), ['feature-a', 'main']);
+
+  r = jsonRun(['create', 'Main node'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.node.id, 'N-0001');
+
+  r = jsonRun(['-L', 'feature-a', 'create', 'Feature node'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.node.id, 'N-0001');
+
+  r = jsonRun(['switch', 'feature-a'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.current, 'feature-a');
+
+  r = jsonRun(['current'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.alias, 'feature-a');
+  assert.equal(r.data.loomPath, join(w.cwd, '.loom/looms/feature-a'));
+
+  r = jsonRun(['tree'], { cwd: w.cwd, home: w.home });
+  assert.match(r.data.lines.join('\n'), /Feature node/);
+  assert.doesNotMatch(r.data.lines.join('\n'), /Main node/);
 });
 
 test('json error envelope has stable code', () => {

@@ -5,6 +5,8 @@ description: Break a Loom node into research, design, planning, implementation, 
 
 Use this skill only when your assignment includes Loom context/reference or explicitly asks for Loom breakdown.
 
+If working in a multi-Loom project, use the provided `LOOM_DEFAULT`, explicit `-L`, or `loom current` / `loom list` to confirm the target Loom before writing.
+
 1. Fetch context for the assigned node.
 2. Decide whether to decompose directly or propose/delegate a breakdown.
 3. Create or recommend child nodes that are independently understandable and useful.

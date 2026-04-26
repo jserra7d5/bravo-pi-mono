@@ -5,6 +5,8 @@ description: Create or develop alternative design variant branches for Loom-back
 
 Use this skill only when your assignment includes Loom context/reference or explicitly asks for Loom design branching.
 
+If working in a multi-Loom project, use the provided `LOOM_DEFAULT`, explicit `-L`, or `loom current` / `loom list` to confirm the target Loom before writing.
+
 1. Fetch context for the proposal/design node.
 2. Identify materially different approaches worth preserving.
 3. Create or propose variant nodes with clear assumptions, boundaries, and tradeoffs.

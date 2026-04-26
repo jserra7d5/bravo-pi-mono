@@ -5,6 +5,8 @@ description: Analyze Loom graph consistency, unresolved decisions, stale branche
 
 Use this skill only when your assignment includes Loom context/reference or explicitly asks for Loom analysis.
 
+If working in a multi-Loom project, use the provided `LOOM_DEFAULT`, explicit `-L`, or `loom current` / `loom list` to confirm the target Loom before writing.
+
 This is read-only unless explicitly told to write findings back.
 
 1. Fetch Loom context for the target node or inbox item.

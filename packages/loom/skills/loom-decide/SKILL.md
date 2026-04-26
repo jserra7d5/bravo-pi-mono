@@ -5,6 +5,8 @@ description: Compare Loom design alternatives and record explicit decisions with
 
 Use this skill only when your assignment includes Loom context/reference or explicitly asks for a Loom decision.
 
+If working in a multi-Loom project, use the provided `LOOM_DEFAULT`, explicit `-L`, or `loom current` / `loom list` to confirm the target Loom before writing.
+
 1. Fetch context for the decision area and relevant variants.
 2. Compare options against user goals, constraints, risks, architecture, validation, and rollout concerns.
 3. Ask for missing decision criteria if needed.

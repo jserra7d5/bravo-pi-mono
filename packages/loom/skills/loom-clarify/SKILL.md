@@ -11,4 +11,4 @@ Use this skill only when your assignment includes Loom context/reference or expl
 4. Record accepted answers with Loom commands when requested or when operating as the assigned Loom worker.
 5. Report remaining assumptions, deferred questions, and next recommended phase.
 
-Prefer `loom note` / `loom resolve` over manual Markdown edits. Do not edit `.loom/index.sqlite`, `.loom/runtime/runtime.sqlite`, `.loom/events.jsonl`, locks, registry, or delivery internals.
+Prefer `loom note` / `loom resolve` over manual Markdown edits. In multi-Loom projects, use the provided `LOOM_DEFAULT`, explicit `-L`, or `loom current`/`loom list` to confirm the target Loom before writing. Do not edit `.loom/looms/*/index.sqlite`, `.loom/looms/*/runtime/runtime.sqlite`, `.loom/looms/*/events.jsonl`, locks, registry, container selection, or delivery internals.

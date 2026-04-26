@@ -28,29 +28,35 @@ type NodeRef = NodeId | `${LoomRef}:${NodeId}`;
 
 Node IDs are stable local IDs and do not encode hierarchy. Cross-Loom references use qualified refs such as `lm_7k3f9x2a:N-0042` or `feature-x:N-0042`.
 
-## Instance Layout
+## Container and Instance Layout
 
 ```txt
-<loom-root>/
+<project-root>/
   .loom/
-    loom.json
-    events.jsonl
-    index.sqlite
-    nodes/
-      N-0001-title-slug.md
-    artifacts/
-      N-0001/
-        ...
-    runtime/
-      runtime.sqlite
-      loom.lock
-      context/
-        <agent-id>.json
+    config.json
+    current
+    looms/
+      <loom-name>/
+        loom.json
+        events.jsonl
+        index.sqlite
+        nodes/
+          N-0001-title-slug.md
+        artifacts/
+          N-0001/
+            ...
+        runtime/
+          runtime.sqlite
+          loom.lock
+          context/
+            <agent-id>.json
 ```
+
+`.loom/` is a project container. Individual Loom instances live under `.loom/looms/<loom-name>/`. Plain `loom ...` commands use `.loom/current`; `loom -L <loom-name>` selects another local instance.
 
 `runtime/` is for generated files. Its commit/ignore policy is user/project policy, not hardcoded by Loom.
 
-## `.loom/loom.json`
+## `.loom/looms/<loom-name>/loom.json`
 
 `loom.json` is the canonical instance metadata file.
 
@@ -60,7 +66,7 @@ interface LoomConfigV1 {
   id: LoomId;
   name?: string;             // local alias suggestion, not globally authoritative
   title: string;
-  root: string;              // usually ".", relative to directory containing .loom
+  root: string;              // usually "../..", relative to .loom/looms/<loom-name>
   workspaces?: WorkspaceRef[];
   created_at?: string;       // ISO 8601
   updated_at?: string;       // ISO 8601
@@ -323,7 +329,7 @@ Every delivered message should include the inbox item ID and fetch command.
 
 ## Agent Context File
 
-Generated context files live under `.loom/runtime/context/` or a temp directory and are passed via `LOOM_CONTEXT`.
+Generated context files live under `.loom/looms/<loom-name>/runtime/context/` or a temp directory and are passed via `LOOM_CONTEXT`.
 
 ```ts
 interface LoomAgentContextV1 {
@@ -342,7 +348,7 @@ Environment variables:
 
 ```txt
 LOOM_AGENT_ID=<agent-id>
-LOOM_DEFAULT=<absolute-loom-path-or-id-or-alias>
+LOOM_DEFAULT=<absolute-path-to-.loom/looms/<name>-or-id-or-alias>
 LOOM_CONTEXT=<path-to-context-json>
 ```
 
@@ -377,8 +383,8 @@ registry_agent_defaults(
 V1 uses two SQLite databases:
 
 ```txt
-.loom/index.sqlite
-.loom/runtime/runtime.sqlite
+.loom/looms/<loom-name>/index.sqlite
+.loom/looms/<loom-name>/runtime/runtime.sqlite
 ```
 
 `index.sqlite` is rebuildable projection/search state. `runtime/runtime.sqlite` is canonical runtime coordination state and must not be deleted by `loom index rebuild`.

@@ -5,6 +5,8 @@ description: Coordinate Loom-backed implementation tasks using safe worktrees, b
 
 Use this skill only when your assignment includes Loom context/reference or explicitly asks for Loom implementation.
 
+If working in a multi-Loom project, use the provided `LOOM_DEFAULT`, explicit `-L`, or `loom current` / `loom list` to confirm the target Loom before writing.
+
 1. Fetch task context and confirm implementation readiness.
 2. For each source repo, use worktree root: `dirname(source_repo)/.worktrees/basename(source_repo)/`.
 3. Before creating worktrees, record source repo, branch, commit, dirty state, base, validation environment, and intended worktree path/branch.

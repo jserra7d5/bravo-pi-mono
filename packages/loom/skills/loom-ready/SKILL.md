@@ -5,6 +5,8 @@ description: Check whether Loom-backed work is ready for spec, design, planning,
 
 Use this skill only when your assignment includes Loom context/reference or explicitly asks for a Loom readiness check.
 
+If working in a multi-Loom project, use the provided `LOOM_DEFAULT`, explicit `-L`, or `loom current` / `loom list` to confirm the target Loom before writing.
+
 1. Fetch context for the target node.
 2. Identify requested mode: `spec`, `design`, `plan`, `implement`, or `review`.
 3. Return one of: PASS, BLOCKED, or READY-WITH-RISKS.
