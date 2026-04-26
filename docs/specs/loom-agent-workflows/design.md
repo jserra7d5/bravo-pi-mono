@@ -41,6 +41,14 @@ The goal is a Spec Kit-inspired but graph-native workflow: instead of forcing wo
 - Pi prompt templates: user/root slash commands.
 - Pi skills: reusable agent-invoked procedures.
 
+## Root Delegation Bias
+
+The root Pi session should default to delegating broad exploratory work. When the user says “explore this,” “look into this,” “make yourself familiar with X,” “survey this repo,” or asks a broad where/how question, the root should usually send first-pass reconnaissance to a scout or researcher unless the scope is tiny.
+
+The root remains accountable for synthesis and judgment. It should personally read source-of-truth artifacts and targeted files needed for decisions, but should avoid duplicating broad file discovery or repo exploration that it delegated.
+
+When a Loom/Tango workstream already has an active relevant team-lead, design-lead, implementation-lead, researcher, reviewer, or other domain agent, the root should route questions through the closest knowledgeable active agent when reasonable. Information should flow down to the agent closest to the code/design/task and back up through concise summaries. The root should avoid bypassing active workstream owners for broad questions about their scope unless latency, triviality, or user instruction makes direct handling better.
+
 ## Conditional Loom Usage Policy
 
 Agents should use Loom only when one of these is true:

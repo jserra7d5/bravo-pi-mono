@@ -351,11 +351,14 @@ Add Loom package to `packages` if not present:
 
 Update the global root-session guidance so the main user-facing agent defaults to concise, high-level, progressively disclosed responses. The main session should synthesize proposals and decisions without dumping implementation details, code, or exhaustive breakdowns unless the user asks for that depth. Loom/spec artifacts should hold granular detail; conversation should usually summarize and offer expansion.
 
+Also encode root-session delegation bias: broad exploratory requests should usually be delegated to scouts/researchers, while active Loom/Tango workstream questions should route through the closest relevant active lead/agent when reasonable. The root should synthesize returned summaries and personally inspect source-of-truth artifacts or targeted evidence needed for judgment.
+
 ### Acceptance
 
 - New Pi sessions load Loom prompt templates and skills.
 - `/reload` in Pi should pick up prompts/skills if supported.
 - Root-session `AGENTS.md` instructs the main agent to keep user-facing planning/design discussion concise by default and verbose only when appropriate.
+- Root-session `AGENTS.md` instructs the main agent to delegate broad reconnaissance and route active workstream questions through relevant active agents when reasonable.
 
 ## Milestone 9: Validation
 
