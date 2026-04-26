@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentMetadata, CommandSpec, RoleConfig, StartOptions } from "./types.js";
 import { runDirFor } from "./paths.js";
 import { assembleSystemPrompt, loadRole } from "./roles.js";
@@ -61,10 +62,10 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
 
   if (options.dryRun) return { meta, command: redactCommand(command), role };
 
-  transitionStatus(meta.runDir, "running");
-  if (mode === "oneshot") await runOneshot(readMetadata(meta.runDir), command);
+  const running = transitionStatus(meta.runDir, "running");
+  if (mode === "oneshot") startOneshotSupervisor(running, command);
   else startTmux(meta.tmuxSocket, meta.tmuxSession, command);
-  return { meta, command: redactCommand(command), role };
+  return { meta: readMetadata(meta.runDir), command: redactCommand(command), role };
 }
 
 function redactCommand(command: CommandSpec): CommandSpec {
@@ -94,7 +95,32 @@ function extractResultText(parser: CommandSpec["resultParser"], event: any, curr
   return current;
 }
 
-async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promise<void> {
+export function runtimeCommandPath(runDir: string): string { return join(runDir, "command.runtime.json"); }
+
+function startOneshotSupervisor(meta: AgentMetadata, command: CommandSpec): void {
+  const runtimePath = runtimeCommandPath(meta.runDir);
+  writeFileSync(runtimePath, `${JSON.stringify(command, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  try { chmodSync(runtimePath, 0o600); } catch {}
+  const cliPath = join(dirname(fileURLToPath(import.meta.url)), "cli.js");
+  const supervisorEnv = { ...process.env } as Record<string, string>;
+  const tangoHome = process.env.TANGO_HOME ?? command.env.TANGO_HOME;
+  if (tangoHome) supervisorEnv.TANGO_HOME = tangoHome;
+  const supervisor = spawn(process.execPath, [cliPath, "runner", "oneshot", "--run-dir", meta.runDir], {
+    cwd: meta.cwd,
+    env: supervisorEnv,
+    detached: true,
+    stdio: "ignore",
+  });
+  supervisor.unref();
+}
+
+export async function runOneshotFromRuntime(runDir: string): Promise<void> {
+  const meta = readMetadata(runDir);
+  const command = JSON.parse(readFileSync(runtimeCommandPath(runDir), "utf8")) as CommandSpec;
+  await runOneshot(meta, command);
+}
+
+export async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promise<void> {
   const eventsFile = join(meta.runDir, "events.jsonl");
   const outFile = join(meta.runDir, "output.log");
   const errFile = join(meta.runDir, "stderr.log");

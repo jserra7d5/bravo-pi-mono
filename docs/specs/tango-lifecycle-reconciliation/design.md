@@ -47,6 +47,18 @@ The smell is that read paths can trust metadata without reconciling it against t
 
 ## Recommended architecture
 
+### 0. Non-blocking one-shot supervisor
+
+`tango start` should return after the child agent has been accepted and marked `running`; it should not block until a one-shot agent completes. For one-shot agents, Tango starts a detached finite supervisor process:
+
+```text
+tango runner oneshot --run-dir <runDir>
+```
+
+The supervisor reads a private runtime command file from the run directory, launches the real harness process, streams output/result files, records the child PID and exit code, and performs the terminal status transition. This keeps the parent TUI responsive immediately after spawn and lets normal `tango wait`, `tango result`, status events, and reconciliation handle completion.
+
+The runtime command file may contain environment/auth material and must be treated as run-local private state, not as human-facing command metadata. `command.json` remains redacted for inspection.
+
 ### 1. Central lifecycle reconciler in Tango core
 
 Add one core function, conceptually:

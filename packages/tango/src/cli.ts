@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { startAgent } from "./start.js";
+import { runOneshotFromRuntime, startAgent } from "./start.js";
 import { projectSlug } from "./paths.js";
 import { fail, printJson } from "./json.js";
 import { findRunDir, listMetadata, readMetadata, removeRunDir, transitionStatus, updateStatus } from "./metadata.js";
@@ -67,6 +67,7 @@ async function main() {
       case "doctor": return cmdDoctor(parsed, cwd, json);
       case "metrics": return cmdMetrics(parsed, json);
       case "reconcile": return cmdReconcile(parsed, cwd, json);
+      case "runner": return await cmdRunner(parsed);
       case "result": return cmdResult(parsed, cwd, json);
       case "roles": return cmdRoles(parsed, json);
       default: return fail(`Unknown command: ${cmd}`, json);
@@ -287,6 +288,14 @@ function cmdRoles(parsed: Parsed, json: boolean) {
     return;
   }
   throw new Error("Usage: tango roles list|show <name>");
+}
+
+async function cmdRunner(parsed: Parsed) {
+  const [sub] = parsed.positionals;
+  if (sub !== "oneshot") throw new Error("Usage: tango runner oneshot --run-dir <dir>");
+  const runDir = flagString(parsed.flags, "run-dir");
+  if (!runDir) throw new Error("Usage: tango runner oneshot --run-dir <dir>");
+  await runOneshotFromRuntime(runDir);
 }
 
 function cmdReconcile(parsed: Parsed, cwd: string, json: boolean) {
