@@ -44,6 +44,7 @@ export interface AgentMetadata {
   pid?: number;
   exitCode?: number | null;
   summary?: string;
+  needs?: string;
   parentRunDir?: string;
   resultFile?: string;
 }

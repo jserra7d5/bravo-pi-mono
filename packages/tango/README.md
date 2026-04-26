@@ -17,7 +17,10 @@ tango start repo-scout --role scout "Summarize this repo"
 tango list
 tango look repo-scout
 tango result repo-scout
+tango children --tree
+tango wait repo-scout --json
 tango watch --json
+tango doctor events
 ```
 
 ## Claude Code harness
@@ -54,7 +57,7 @@ Claude harness behavior:
 
 Pi harness behavior similarly keeps Pi runtime state isolated while loading a Tango Pi extension that makes the Pi `bash` tool run with `HOME=$TANGO_REAL_HOME` when `bash` is enabled for the role.
 
-Status changes are written to a durable event log at `$TANGO_HOME/events.jsonl`. `tango watch` tails this log; the Pi extension uses it to notify parent sessions when child agents finish, block, or error.
+Status changes are written to a durable event log at `$TANGO_HOME/events.jsonl`. `tango watch` tails this log; the Pi extension uses it to send persisted, deduped, batched notifications to parent sessions when child agents finish, block, or error. `tango children`, `tango wait`, and `tango doctor events` support parent/child coordination and event-delivery smoke tests.
 
 Recursive Claude roles receive CLI orchestration instructions and should delegate with `tango ... --json` commands. Loom integration remains outside Tango: Loom can pass context through environment variables and task prompts when it launches Tango agents.
 

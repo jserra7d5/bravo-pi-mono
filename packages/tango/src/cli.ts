@@ -2,16 +2,17 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { startAgent } from "./start.js";
+import { projectSlug } from "./paths.js";
 import { fail, printJson } from "./json.js";
 import { findRunDir, listMetadata, readMetadata, removeRunDir, transitionStatus, updateStatus } from "./metadata.js";
-import { eventMatchesCwd, initialEventOffset, readEvents, type TangoEvent } from "./events.js";
+import { appendEvent, eventMatchesCwd, initialEventOffset, readEvents, type TangoEvent } from "./events.js";
 import { listRoles, loadRole, assembleSystemPrompt } from "./roles.js";
 import { attachTmux, captureTmux, sendTmux, stopTmux, tmuxAlive } from "./runtime/tmux.js";
-import type { AgentStatus, ThinkingLevel } from "./types.js";
+import type { AgentMetadata, AgentStatus, ThinkingLevel } from "./types.js";
 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
-const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive", "from-start"]);
+const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive", "from-start", "tree"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 function parse(argv: string[]): Parsed {
@@ -59,6 +60,9 @@ async function main() {
       case "delete": return cmdDelete(parsed, cwd, json);
       case "status": return cmdStatus(parsed, json);
       case "watch": return await cmdWatch(parsed, cwd, json);
+      case "children": return await cmdChildren(parsed, cwd, json);
+      case "wait": return await cmdWait(parsed, cwd, json);
+      case "doctor": return cmdDoctor(parsed, cwd, json);
       case "result": return cmdResult(parsed, cwd, json);
       case "roles": return cmdRoles(parsed, json);
       default: return fail(`Unknown command: ${cmd}`, json);
@@ -155,8 +159,9 @@ function cmdStatus(parsed: Parsed, json: boolean) {
   const runDir = flagString(parsed.flags, "run-dir") ?? process.env.TANGO_RUN_DIR;
   if (!runDir) throw new Error("No run dir. Set TANGO_RUN_DIR or pass --run-dir.");
   if (!isAgentStatus(state)) throw new Error(`Invalid status: ${state}`);
-  const meta = updateStatus(runDir, state, msg.join(" "));
-  if (state === "done" && msg.length) writeFileSync(join(runDir, "result.md"), `${msg.join(" ")}\n`, { flag: "a" });
+  const summary = msg.join(" ");
+  const meta = updateStatus(runDir, state, summary, { needs: flagString(parsed.flags, "needs") });
+  if (state === "done" && msg.length) writeFileSync(join(runDir, "result.md"), `${summary}\n`, { flag: "a" });
   if (json) printJson({ ok: true, agent: meta }); else console.log(`${meta.name}: ${meta.status}`);
 }
 
@@ -178,6 +183,85 @@ async function cmdWatch(parsed: Parsed, cwd: string, json: boolean) {
 function printEvent(event: TangoEvent, json: boolean) {
   if (json) console.log(JSON.stringify(event));
   else console.log(`${event.time} ${event.agent} ${event.previousStatus ?? "?"} -> ${event.status}${event.summary ? `: ${event.summary}` : ""}`);
+}
+
+async function cmdChildren(parsed: Parsed, cwd: string, json: boolean) {
+  const [name] = parsed.positionals;
+  const parentRunDir = name ? loadByName(name, cwd).runDir : process.env.TANGO_RUN_DIR;
+  if (!parentRunDir) throw new Error("Usage: tango children [parent-name] (or run inside a Tango agent)");
+  const agents = listMetadata(undefined).map(refreshStatus).filter((a) => a.parentRunDir === parentRunDir);
+  if (json) return printJson({ ok: true, parentRunDir, agents, tree: childTree(agents, parentRunDir) });
+  if (flagBool(parsed.flags, "tree")) return console.log(renderChildTree(agents, parentRunDir));
+  if (!agents.length) return console.log("No child agents.");
+  for (const a of agents) console.log(`${a.name.padEnd(18)} ${a.status.padEnd(8)} ${a.role ?? "-"} ${a.mode}/${a.harness} ${a.task}`);
+}
+
+async function cmdWait(parsed: Parsed, cwd: string, json: boolean) {
+  const names = parsed.positionals;
+  if (!names.length) throw new Error("Usage: tango wait <name...>");
+  const timeoutMs = Number(flagString(parsed.flags, "timeout") ?? "0") * 1000;
+  const start = Date.now();
+  while (true) {
+    const agents = names.map((name) => loadByName(name, cwd));
+    if (agents.every((a) => isTerminal(a.status))) {
+      if (json) return printJson({ ok: true, agents });
+      for (const a of agents) console.log(`${a.name}: ${a.status}${a.summary ? ` - ${a.summary}` : ""}`);
+      return;
+    }
+    if (timeoutMs > 0 && Date.now() - start > timeoutMs) {
+      if (json) return printJson({ ok: false, timeout: true, agents });
+      throw new Error(`Timed out waiting for ${names.join(", ")}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
+function cmdDoctor(parsed: Parsed, cwd: string, json: boolean) {
+  const [sub] = parsed.positionals;
+  if (sub !== "events") throw new Error("Usage: tango doctor events");
+  const event: TangoEvent = {
+    schemaVersion: 1,
+    eventId: `te_doctor_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    type: "agent.status",
+    time: new Date().toISOString(),
+    agent: "doctor-events",
+    role: "doctor",
+    status: "done",
+    previousStatus: "running",
+    summary: "Synthetic Tango event notification test",
+    needs: "inspection",
+    cwd,
+    projectSlug: projectSlug(cwd),
+    runDir: flagString(parsed.flags, "run-dir") ?? process.env.TANGO_RUN_DIR ?? cwd,
+    parentRunDir: flagString(parsed.flags, "parent-run-dir") ?? process.env.TANGO_RUN_DIR,
+  };
+  appendEvent(event);
+  if (json) printJson({ ok: true, event }); else console.log(`emitted ${event.eventId}`);
+}
+
+function childTree(agents: AgentMetadata[], parentRunDir: string): any[] {
+  const byParent = new Map<string, AgentMetadata[]>();
+  for (const a of listMetadata(undefined).map(refreshStatus)) if (a.parentRunDir) byParent.set(a.parentRunDir, [...(byParent.get(a.parentRunDir) ?? []), a]);
+  const rec = (runDir: string): any[] => (byParent.get(runDir) ?? []).map((a) => ({ agent: a, children: rec(a.runDir) }));
+  return rec(parentRunDir);
+}
+
+function renderChildTree(agents: AgentMetadata[], parentRunDir: string): string {
+  const tree = childTree(agents, parentRunDir);
+  const lines: string[] = [];
+  const rec = (nodes: any[], depth = 0) => {
+    for (const n of nodes) {
+      const a = n.agent as AgentMetadata;
+      lines.push(`${"  ".repeat(depth)}${a.name} [${a.status}] ${a.role ?? "-"} ${a.summary ? `- ${a.summary}` : ""}`.trimEnd());
+      rec(n.children, depth + 1);
+    }
+  };
+  rec(tree);
+  return lines.join("\n") || "No child agents.";
+}
+
+function isTerminal(status: AgentStatus): boolean {
+  return status === "done" || status === "error" || status === "blocked" || status === "stopped";
 }
 
 function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
@@ -223,7 +307,7 @@ function refreshStatus(meta: any) {
 }
 
 function help() {
-  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--lines N] [--json]\n  tango attach <name>\n  tango message <name> <message>\n  tango stop <name>\n  tango delete <name>\n  tango status <state> [message]\n  tango watch [--json] [--all] [--from-start]\n  tango result <name>\n  tango roles list|show <name>\n`);
+  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--lines N] [--json]\n  tango attach <name>\n  tango message <name> <message>\n  tango stop <name>\n  tango delete <name>\n  tango status <state> [message] [--needs kind]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--tree] [--json]\n  tango wait <name...> [--timeout seconds] [--json]\n  tango doctor events [--json]\n  tango result <name>\n  tango roles list|show <name>\n`);
 }
 
 main();

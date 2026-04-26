@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -17,7 +18,9 @@ type ExecResult = { code: number; stdout: string; stderr: string; json?: any };
 type NotifyLevel = "info" | "error" | "warning" | "success";
 
 let watchProcess: ChildProcessWithoutNullStreams | undefined;
-const deliveredEvents = new Set<string>();
+let pendingEvents: any[] = [];
+let flushTimer: ReturnType<typeof setTimeout> | undefined;
+const deliveredEvents = loadDeliveredEvents();
 
 async function runTango(args: string[], signal?: AbortSignal): Promise<ExecResult> {
   const candidates: Array<{ command: string; args: string[] }> = [
@@ -200,9 +203,32 @@ function addCwd(args: string[], cwd?: string): string[] {
   return cwd ? [...args, "--cwd", cwd] : args;
 }
 
+function deliveryStatePath(): string {
+  const root = process.env.TANGO_HOME || join(process.env.HOME || process.cwd(), ".tango");
+  const key = process.env.TANGO_RUN_DIR || process.cwd();
+  const hash = createHash("sha1").update(key).digest("hex").slice(0, 12);
+  return join(root, "deliveries", `pi-${hash}.json`);
+}
+
+function loadDeliveredEvents(): Set<string> {
+  try {
+    const path = deliveryStatePath();
+    if (!existsSync(path)) return new Set();
+    const data = JSON.parse(readFileSync(path, "utf8"));
+    return new Set(Array.isArray(data.eventIds) ? data.eventIds : []);
+  } catch { return new Set(); }
+}
+
+function persistDeliveredEvents() {
+  const path = deliveryStatePath();
+  mkdirSync(dirname(path), { recursive: true });
+  const eventIds = [...deliveredEvents].slice(-1000);
+  writeFileSync(path, JSON.stringify({ updatedAt: new Date().toISOString(), eventIds }, null, 2) + "\n", "utf8");
+}
+
 function startEventWatcher(pi: ExtensionAPI, ctx: any) {
   if (watchProcess) return;
-  const args = [distCli, "watch", "--json"];
+  const args = [distCli, "watch", "--json", "--from-start"];
   if (process.env.TANGO_RUN_DIR) args.push("--all");
   watchProcess = spawn(process.execPath, args, { cwd: process.cwd(), env: process.env as Record<string, string>, stdio: ["ignore", "pipe", "pipe"] });
   let buffer = "";
@@ -225,14 +251,35 @@ function handleTangoEventLine(pi: ExtensionAPI, ctx: any, line: string) {
   const parentRunDir = process.env.TANGO_RUN_DIR;
   if (parentRunDir && event.parentRunDir !== parentRunDir) return;
   deliveredEvents.add(event.eventId);
-  const level: NotifyLevel = event.status === "error" ? "error" : event.status === "blocked" ? "warning" : "success";
-  const text = `Tango agent ${event.agent} is ${event.status}${event.summary ? `: ${event.summary}` : ""}`;
-  if (ctx?.hasUI) ctx.ui.notify(text, level);
+  persistDeliveredEvents();
+  pendingEvents.push(event);
+  if (!flushTimer) flushTimer = setTimeout(() => flushTangoEvents(pi, ctx), 500);
+}
+
+function suggestedAction(event: any): string {
+  if (event.status === "done") return `tango_result ${event.agent}`;
+  return `tango_look ${event.agent} --lines 120`;
+}
+
+function eventText(event: any): string {
+  const needs = event.needs ? ` [needs: ${event.needs}]` : "";
+  return `${event.agent} (${event.role ?? "agent"}) is ${event.status}${needs}${event.summary ? `: ${event.summary}` : ""}`;
+}
+
+function flushTangoEvents(pi: ExtensionAPI, ctx: any) {
+  const events = pendingEvents;
+  pendingEvents = [];
+  flushTimer = undefined;
+  if (!events.length) return;
+  const worst = events.some((e) => e.status === "error") ? "error" : events.some((e) => e.status === "blocked") ? "warning" : "success";
+  const title = events.length === 1 ? `Tango agent ${eventText(events[0])}` : `${events.length} Tango agents updated: ${events.map((e) => `${e.agent}=${e.status}`).join(", ")}`;
+  if (ctx?.hasUI) ctx.ui.notify(title, worst as NotifyLevel);
+  const lines = events.map((event) => `- ${eventText(event)}\n  Suggested: ${suggestedAction(event)}`);
   pi.sendMessage({
     customType: "tango-agent-status",
-    content: `${text}\n\nInspect with tango_result/tango_look or \`tango result ${event.agent}\`.`,
+    content: `Tango status update${events.length > 1 ? "s" : ""}:\n\n${lines.join("\n")}\n\nTreat this as a wake-up only; inspect child output/result before summarizing or taking action.`,
     display: true,
-    details: event,
+    details: { events },
   }, { deliverAs: "followUp", triggerTurn: true });
 }
 
@@ -365,11 +412,13 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       state: StringEnum(["running", "blocked", "done", "error", "stopped"] as const),
       message: Type.Optional(Type.String()),
+      needs: Type.Optional(Type.String({ description: "Needed parent action for blocked/error statuses, e.g. decision, input, credentials, review, intervention." })),
       runDir: Type.Optional(Type.String({ description: "Optional run directory; defaults to TANGO_RUN_DIR." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const args = ["status", params.state];
       if (params.message) args.push(params.message);
+      if (params.needs) args.push("--needs", params.needs);
       if (params.runDir) args.push("--run-dir", params.runDir);
       args.push("--json");
       const out = toolResult(await runTango(args, signal));
@@ -408,7 +457,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({ args: Type.Array(Type.String({ description: "Argument passed to tango, excluding the tango binary." })) }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const command = params.args[0];
-      const allowed = new Set(["start", "list", "look", "message", "stop", "delete", "status", "result", "roles"]);
+      const allowed = new Set(["start", "list", "look", "message", "stop", "delete", "status", "result", "roles", "children", "wait", "doctor"]);
       if (!command || !allowed.has(command)) {
         return { content: [{ type: "text" as const, text: `Unsupported tango command: ${command ?? "<empty>"}` }], details: { ok: false, command }, isError: true };
       }

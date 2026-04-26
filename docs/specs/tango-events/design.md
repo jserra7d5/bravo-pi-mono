@@ -9,7 +9,7 @@ Tango child agents can finish, block, or error without the parent coordinator se
 
 ## Goals
 
-- Emit durable Tango-owned status events on real status transitions.
+- Emit durable Tango-owned status events on status transitions and meaningful same-status message/need updates.
 - Let non-Pi runtimes observe events through a CLI watcher.
 - Let Pi coordinator sessions receive terminal child-agent updates as follow-up messages and UI notifications.
 - Avoid coupling Tango core to Pi or tmux-specific delivery.
@@ -26,7 +26,8 @@ Responsibilities:
 - read current metadata;
 - compare previous status to next status;
 - update metadata;
-- emit an event only when the status actually changed;
+- emit an event when the status changed;
+- also emit an event when a repeated status call changes the status message or `--needs` value;
 - treat terminal process-close updates as idempotent if the agent already reported `done`, `blocked`, `error`, or `stopped`.
 
 Terminal/actionable statuses for delivery:
@@ -56,6 +57,7 @@ Event schema:
   "status": "done",
   "previousStatus": "running",
   "summary": "Review complete",
+  "needs": "review",
   "cwd": "/path/to/workspace",
   "projectSlug": "workspace-1234abcd",
   "runDir": "/home/user/.tango/runs/.../reviewer-a",
@@ -75,6 +77,12 @@ Flags:
 - `--all`: do not filter by current project.
 - `--from-start`: replay existing events before tailing.
 
+Related coordination commands:
+
+- `tango children [parent-name] [--tree]`: show child agents by `parentRunDir`.
+- `tango wait <name...> [--timeout seconds]`: block until named agents reach a terminal state.
+- `tango doctor events`: emit a synthetic status event for smoke-testing watch/delivery plumbing.
+
 Default scope is current project, filtered by `projectSlug`.
 
 Implementation notes:
@@ -93,7 +101,8 @@ Routing rules:
 - If running inside a Tango parent agent (`TANGO_RUN_DIR` is set), watch all events but deliver only events with `event.parentRunDir === TANGO_RUN_DIR`.
 - If running as a root/non-Tango Pi session, watch only current-project events.
 - Deliver only `done`, `blocked`, and `error`.
-- Dedupe by `eventId` per session.
+- Persist delivered event IDs under `$TANGO_HOME/deliveries/` so extension restarts do not redeliver old replayed events.
+- Batch events that arrive close together into one follow-up message.
 
 Delivery behavior:
 
@@ -103,9 +112,14 @@ Delivery behavior:
 Example message:
 
 ```text
-Tango agent reviewer-a is done: Review complete
+Tango status update:
 
-Inspect with tango_result/tango_look or `tango result reviewer-a`.
+- reviewer-a (reviewer) is done: Review complete
+  Suggested: tango_result reviewer-a
+- implementer-b (worker) is blocked [needs: review]: API choice unclear
+  Suggested: tango_look implementer-b --lines 120
+
+Treat this as a wake-up only; inspect child output/result before summarizing or taking action.
 ```
 
 ### 5. Non-Pi runtime behavior
@@ -127,7 +141,7 @@ independently from any `HOME` isolation. This lets status/event routing continue
 ## Future work
 
 - `tango watch --terminal-only`.
-- Persistent delivered cursors for replay-after-restart.
-- Loom inbox/subscription adapter.
+- Cursor compaction beyond the recent delivered-event ID window.
+- Loom subscription adapter.
 - tmux status/pane delivery adapter.
 - Workstream-level routing across multiple project slugs.

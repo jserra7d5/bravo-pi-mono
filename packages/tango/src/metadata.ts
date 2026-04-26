@@ -23,16 +23,20 @@ function renameSyncSafe(tmp: string, dest: string) {
   renameSync(tmp, dest);
 }
 
-export function updateStatus(runDir: string, status: AgentStatus, summary?: string): AgentMetadata {
-  return transitionStatus(runDir, status, summary);
+export function updateStatus(runDir: string, status: AgentStatus, summary?: string, options: { needs?: string } = {}): AgentMetadata {
+  return transitionStatus(runDir, status, summary, options);
 }
 
-export function transitionStatus(runDir: string, status: AgentStatus, summary?: string): AgentMetadata {
+export function transitionStatus(runDir: string, status: AgentStatus, summary?: string, options: { needs?: string } = {}): AgentMetadata {
   const meta = readMetadata(runDir);
   const previousStatus = meta.status;
+  const previousSummary = meta.summary;
+  const previousNeeds = meta.needs;
   if (summary) meta.summary = summary;
+  if (options.needs !== undefined) meta.needs = options.needs;
   if (previousStatus === status) {
     writeMetadata(meta);
+    if ((summary && summary !== previousSummary) || (options.needs !== undefined && options.needs !== previousNeeds)) appendStatusEvent(meta, previousStatus);
     return meta;
   }
   meta.status = status;

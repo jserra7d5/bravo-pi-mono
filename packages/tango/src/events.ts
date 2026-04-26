@@ -13,6 +13,7 @@ export type TangoEvent = {
   status: AgentStatus;
   previousStatus?: AgentStatus;
   summary?: string;
+  needs?: string;
   cwd: string;
   projectSlug: string;
   runDir: string;
@@ -36,6 +37,7 @@ export function appendStatusEvent(meta: AgentMetadata, previousStatus?: AgentSta
     status: meta.status,
     previousStatus,
     summary: meta.summary,
+    needs: meta.needs,
     cwd: meta.cwd,
     projectSlug: projectSlug(meta.cwd),
     runDir: meta.runDir,
