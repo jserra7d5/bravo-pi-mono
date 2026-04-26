@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,9 @@ const includeRoot = join(packageRoot, "includes");
 
 type ExecResult = { code: number; stdout: string; stderr: string; json?: any };
 type NotifyLevel = "info" | "error" | "warning" | "success";
+
+let watchProcess: ChildProcessWithoutNullStreams | undefined;
+const deliveredEvents = new Set<string>();
 
 async function runTango(args: string[], signal?: AbortSignal): Promise<ExecResult> {
   const candidates: Array<{ command: string; args: string[] }> = [
@@ -197,9 +200,51 @@ function addCwd(args: string[], cwd?: string): string[] {
   return cwd ? [...args, "--cwd", cwd] : args;
 }
 
+function startEventWatcher(pi: ExtensionAPI, ctx: any) {
+  if (watchProcess) return;
+  const args = [distCli, "watch", "--json"];
+  if (process.env.TANGO_RUN_DIR) args.push("--all");
+  watchProcess = spawn(process.execPath, args, { cwd: process.cwd(), env: process.env as Record<string, string>, stdio: ["ignore", "pipe", "pipe"] });
+  let buffer = "";
+  watchProcess.stdout.on("data", (chunk) => {
+    buffer += chunk.toString();
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) handleTangoEventLine(pi, ctx, line);
+  });
+  watchProcess.on("close", () => { watchProcess = undefined; });
+}
+
+function handleTangoEventLine(pi: ExtensionAPI, ctx: any, line: string) {
+  if (!line.trim()) return;
+  let event: any;
+  try { event = JSON.parse(line); } catch { return; }
+  if (event.type !== "agent.status") return;
+  if (!event.eventId || deliveredEvents.has(event.eventId)) return;
+  if (!["done", "blocked", "error"].includes(event.status)) return;
+  const parentRunDir = process.env.TANGO_RUN_DIR;
+  if (parentRunDir && event.parentRunDir !== parentRunDir) return;
+  deliveredEvents.add(event.eventId);
+  const level: NotifyLevel = event.status === "error" ? "error" : event.status === "blocked" ? "warning" : "success";
+  const text = `Tango agent ${event.agent} is ${event.status}${event.summary ? `: ${event.summary}` : ""}`;
+  if (ctx?.hasUI) ctx.ui.notify(text, level);
+  pi.sendMessage({
+    customType: "tango-agent-status",
+    content: `${text}\n\nInspect with tango_result/tango_look or \`tango result ${event.agent}\`.`,
+    display: true,
+    details: event,
+  }, { deliverAs: "followUp", triggerTurn: true });
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI) ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", "Tango: ready"));
+    startEventWatcher(pi, ctx);
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (watchProcess) watchProcess.kill("SIGTERM");
+    watchProcess = undefined;
   });
 
   pi.on("before_agent_start", async (event) => {

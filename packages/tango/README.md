@@ -17,6 +17,7 @@ tango start repo-scout --role scout "Summarize this repo"
 tango list
 tango look repo-scout
 tango result repo-scout
+tango watch --json
 ```
 
 ## Claude Code harness
@@ -40,7 +41,10 @@ Supported controls:
 Claude harness behavior:
 
 - uses `--system-prompt-file <runDir>/system.md`;
-- sets `HOME=<runDir>/home` and preserves `TANGO_HOME` for recursive Tango CLI calls;
+- keeps Claude runtime state isolated with `HOME=<runDir>/home`;
+- sets `TANGO_REAL_HOME=<operator-home>` and `TANGO_AGENT_HOME=<runDir>/home`;
+- routes Claude Bash tool commands through `CLAUDE_CODE_SHELL_PREFIX=<runDir>/bin/tango-bash`, so Bash commands see the operator's real `HOME` for Git/SSH/GitHub CLI/npm config;
+- preserves `TANGO_HOME` for recursive Tango CLI calls;
 - seeds minimal Claude auth/config;
 - disables ambient MCP servers with `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`;
 - disables Claude-native subagents with `--disallowed-tools Task` so delegation stays observable through Tango;
@@ -48,6 +52,10 @@ Claude harness behavior:
 - rejects role `extensions` because Pi extensions are not available in Claude Code;
 - copies role `skills` directories into `<runDir>/home/.claude/skills/`.
 
+Pi harness behavior similarly keeps Pi runtime state isolated while loading a Tango Pi extension that makes the Pi `bash` tool run with `HOME=$TANGO_REAL_HOME` when `bash` is enabled for the role.
+
+Status changes are written to a durable event log at `$TANGO_HOME/events.jsonl`. `tango watch` tails this log; the Pi extension uses it to notify parent sessions when child agents finish, block, or error.
+
 Recursive Claude roles receive CLI orchestration instructions and should delegate with `tango ... --json` commands. Loom integration remains outside Tango: Loom can pass context through environment variables and task prompts when it launches Tango agents.
 
-See `../../docs/specs/tango-v1/design.md` and `../../docs/specs/tango-claude-code-runtime/design.md` for design details.
+See `../../docs/specs/tango-v1/design.md`, `../../docs/specs/tango-events/design.md`, `../../docs/specs/tango-home-tooling/design.md`, and `../../docs/specs/tango-claude-code-runtime/design.md` for design details.

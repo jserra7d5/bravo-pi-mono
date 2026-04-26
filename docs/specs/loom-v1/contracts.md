@@ -342,7 +342,7 @@ Environment variables:
 
 ```txt
 LOOM_AGENT_ID=<agent-id>
-LOOM_DEFAULT=<loom-id-or-alias>
+LOOM_DEFAULT=<absolute-loom-path-or-id-or-alias>
 LOOM_CONTEXT=<path-to-context-json>
 ```
 

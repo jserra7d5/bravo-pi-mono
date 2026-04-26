@@ -3,14 +3,15 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { startAgent } from "./start.js";
 import { fail, printJson } from "./json.js";
-import { findRunDir, listMetadata, readMetadata, removeRunDir, updateStatus, writeMetadata } from "./metadata.js";
+import { findRunDir, listMetadata, readMetadata, removeRunDir, transitionStatus, updateStatus } from "./metadata.js";
+import { eventMatchesCwd, initialEventOffset, readEvents, type TangoEvent } from "./events.js";
 import { listRoles, loadRole, assembleSystemPrompt } from "./roles.js";
 import { attachTmux, captureTmux, sendTmux, stopTmux, tmuxAlive } from "./runtime/tmux.js";
-import type { ThinkingLevel } from "./types.js";
+import type { AgentStatus, ThinkingLevel } from "./types.js";
 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
-const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive"]);
+const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive", "from-start"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 function parse(argv: string[]): Parsed {
@@ -57,6 +58,7 @@ async function main() {
       case "stop": return cmdStop(parsed, cwd, json);
       case "delete": return cmdDelete(parsed, cwd, json);
       case "status": return cmdStatus(parsed, json);
+      case "watch": return await cmdWatch(parsed, cwd, json);
       case "result": return cmdResult(parsed, cwd, json);
       case "roles": return cmdRoles(parsed, json);
       default: return fail(`Unknown command: ${cmd}`, json);
@@ -133,8 +135,9 @@ function cmdStop(parsed: Parsed, cwd: string, json: boolean) {
   if (!name) throw new Error("Usage: tango stop <name>");
   const meta = loadByName(name, cwd);
   stopTmux(meta.tmuxSocket, meta.tmuxSession);
-  meta.status = "stopped"; writeMetadata(meta);
-  if (json) printJson({ ok: true, agent: meta }); else console.log(`${name}: stopped`);
+  transitionStatus(meta.runDir, "stopped");
+  const stopped = readMetadata(meta.runDir);
+  if (json) printJson({ ok: true, agent: stopped }); else console.log(`${name}: stopped`);
 }
 
 function cmdDelete(parsed: Parsed, cwd: string, json: boolean) {
@@ -151,9 +154,30 @@ function cmdStatus(parsed: Parsed, json: boolean) {
   if (!state) throw new Error("Usage: tango status <running|blocked|done|error|stopped> [message]");
   const runDir = flagString(parsed.flags, "run-dir") ?? process.env.TANGO_RUN_DIR;
   if (!runDir) throw new Error("No run dir. Set TANGO_RUN_DIR or pass --run-dir.");
-  const meta = updateStatus(runDir, state as any, msg.join(" "));
+  if (!isAgentStatus(state)) throw new Error(`Invalid status: ${state}`);
+  const meta = updateStatus(runDir, state, msg.join(" "));
   if (state === "done" && msg.length) writeFileSync(join(runDir, "result.md"), `${msg.join(" ")}\n`, { flag: "a" });
   if (json) printJson({ ok: true, agent: meta }); else console.log(`${meta.name}: ${meta.status}`);
+}
+
+async function cmdWatch(parsed: Parsed, cwd: string, json: boolean) {
+  const all = flagBool(parsed.flags, "all");
+  let state = { offset: initialEventOffset(flagBool(parsed.flags, "from-start")), carry: "" };
+  while (true) {
+    const next = readEvents(state);
+    state = next.state;
+    for (const error of next.errors) if (!json) console.error(`tango watch: skipped malformed event: ${error}`);
+    for (const event of next.events) {
+      if (!all && !eventMatchesCwd(event, cwd)) continue;
+      printEvent(event, json);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
+function printEvent(event: TangoEvent, json: boolean) {
+  if (json) console.log(JSON.stringify(event));
+  else console.log(`${event.time} ${event.agent} ${event.previousStatus ?? "?"} -> ${event.status}${event.summary ? `: ${event.summary}` : ""}`);
 }
 
 function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
@@ -181,6 +205,10 @@ function cmdRoles(parsed: Parsed, json: boolean) {
   throw new Error("Usage: tango roles list|show <name>");
 }
 
+function isAgentStatus(status: string): status is AgentStatus {
+  return status === "created" || status === "running" || status === "done" || status === "error" || status === "blocked" || status === "stopped" || status === "unknown";
+}
+
 function loadByName(name: string, cwd: string) {
   const runDir = findRunDir(name, cwd);
   if (!runDir) throw new Error(`Agent not found: ${name}`);
@@ -189,14 +217,13 @@ function loadByName(name: string, cwd: string) {
 
 function refreshStatus(meta: any) {
   if (meta.mode === "interactive" && meta.status === "running" && !tmuxAlive(meta.tmuxSocket, meta.tmuxSession)) {
-    meta.status = "stopped";
-    writeMetadata(meta);
+    return transitionStatus(meta.runDir, "stopped");
   }
   return meta;
 }
 
 function help() {
-  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--lines N] [--json]\n  tango attach <name>\n  tango message <name> <message>\n  tango stop <name>\n  tango delete <name>\n  tango status <state> [message]\n  tango result <name>\n  tango roles list|show <name>\n`);
+  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--lines N] [--json]\n  tango attach <name>\n  tango message <name> <message>\n  tango stop <name>\n  tango delete <name>\n  tango status <state> [message]\n  tango watch [--json] [--all] [--from-start]\n  tango result <name>\n  tango roles list|show <name>\n`);
 }
 
 main();

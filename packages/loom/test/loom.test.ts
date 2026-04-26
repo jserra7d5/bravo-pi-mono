@@ -42,8 +42,11 @@ test('vertical slice works from inside and outside loom root', () => {
   assert.equal(r.ok, true);
   assert.equal(r.data.loom.name, 'feature-x');
 
-  r = jsonRun(['-L', 'feature-x', 'create', 'Top-level proposal', '--kind', 'proposal'], { cwd: w.outside, home: w.home });
+  r = jsonRun(['-L', 'feature-x', 'create', 'Top-level proposal', '--kind', 'proposal', '--tag', 'review', '--tag', 'integration'], { cwd: w.outside, home: w.home });
   assert.equal(r.data.node.id, 'N-0001');
+
+  r = jsonRun(['-L', 'feature-x', 'show', 'N-0001'], { cwd: w.outside, home: w.home });
+  assert.deepEqual(r.data.frontmatter.tags, ['review', 'integration']);
 
   r = jsonRun(['-L', 'feature-x', 'decompose', 'N-0001', 'Storage', 'Search', 'Agents'], { cwd: w.outside, home: w.home });
   assert.deepEqual(r.data.children, ['N-0002', 'N-0003', 'N-0004']);
@@ -57,6 +60,14 @@ test('vertical slice works from inside and outside loom root', () => {
   r = jsonRun(['-L', 'feature-x', 'reference', 'add', 'N-0007', '--workspace', 'repo', 'packages/tango/src/start.ts', '--label', 'Tango start'], { cwd: w.outside, home: w.home });
   assert.equal(r.data.references[0].workspace, 'repo');
   assert.equal(r.data.references[0].path, 'packages/tango/src/start.ts');
+
+  const note = spawnSync(process.execPath, [cli, '-L', 'feature-x', 'note', 'N-0007', '--stdin', '--json'], {
+    cwd: w.outside,
+    env: { ...process.env, HOME: w.home, LOOM_HOME: join(w.home, '.loom') },
+    input: 'Safe note with `backticks` and $HOME preserved.',
+    encoding: 'utf8'
+  });
+  assert.equal(note.status, 0, note.stderr);
 
   r = jsonRun(['-L', 'feature-x', 'index', 'rebuild'], { cwd: w.outside, home: w.home });
   assert.equal(r.data.rebuilt, true);

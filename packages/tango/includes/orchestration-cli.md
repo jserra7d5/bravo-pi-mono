@@ -11,5 +11,6 @@ Useful commands:
 - `tango status blocked "reason"` marks yourself blocked.
 - `tango status done "summary"` marks yourself complete.
 - `tango result <name>` reads a completed agent's result.
+- `tango watch --json` streams Tango status events for the current project; use `--all` only when you intentionally need all projects under the same `TANGO_HOME`.
 
-Prefer `--json` when you need to parse results. Use `tango attach <name>` only in a human terminal, not from inside an agent tool call.
+Prefer `--json` when you need to parse results. Parent Pi sessions may receive proactive Tango completion notifications, but still inspect child output with `tango result` or `tango look` before relying on it. Use `tango attach <name>` only in a human terminal, not from inside an agent tool call.

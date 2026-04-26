@@ -15,6 +15,7 @@ export function buildPiCommand(meta: AgentMetadata, role: RoleConfig | undefined
   args.push("--no-skills", "--no-prompt-templates");
   args.push("--no-extensions");
   const explicitExtensions = [...(role?.extensions ?? [])];
+  if (role?.tools?.includes("bash")) explicitExtensions.unshift(join(packageRoot(), "extensions", "pi", "tool-home.ts"));
   if (wantsToolOrchestration(role)) explicitExtensions.unshift(join(packageRoot(), "extensions", "pi", "index.ts"));
   for (const ext of explicitExtensions) args.push("-e", resolveResource(ext, "extension"));
   const model = meta.model ?? role?.model;
@@ -36,12 +37,15 @@ export function buildPiCommand(meta: AgentMetadata, role: RoleConfig | undefined
 }
 
 export function baseEnv(meta: AgentMetadata): Record<string, string> {
+  const realHome = process.env.HOME ?? homedir();
   const piAgentDir = join(meta.homeDir, ".pi", "agent");
   seedPiAuth(piAgentDir);
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
     HOME: meta.homeDir,
-    TANGO_HOME: process.env.TANGO_HOME ?? join(process.env.HOME ?? homedir(), ".tango"),
+    TANGO_REAL_HOME: realHome,
+    TANGO_AGENT_HOME: meta.homeDir,
+    TANGO_HOME: process.env.TANGO_HOME ?? join(realHome, ".tango"),
     PI_CODING_AGENT_DIR: piAgentDir,
     TANGO_AGENT_NAME: meta.name,
     TANGO_RUN_DIR: meta.runDir,

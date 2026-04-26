@@ -18,6 +18,7 @@ Status: implemented and hand-tested
   - `claude-worker`
   - `claude-team-lead`
 - Added `TANGO_HOME` to child environments so recursive agents with run-local `HOME` still use the parent Tango run registry.
+- Added `TANGO_REAL_HOME` / `TANGO_AGENT_HOME` split so runtime config stays isolated while shell tooling can use the operator home.
 - Changed `tango message` to use tmux paste buffers plus `C-m`, which works reliably for Claude Code interactive prompts.
 - Updated Tango docs and top-level README.
 
@@ -26,6 +27,9 @@ Status: implemented and hand-tested
 Claude agents launch with:
 
 - `HOME=<runDir>/home`
+- `TANGO_AGENT_HOME=<runDir>/home`
+- `TANGO_REAL_HOME=<operator-home>`
+- `CLAUDE_CODE_SHELL_PREFIX=<runDir>/bin/tango-bash`, where the wrapper sets Bash-tool `HOME=$TANGO_REAL_HOME`
 - minimal seeded Claude auth/config
 - `--system-prompt-file <runDir>/system.md`
 - `--permission-mode bypassPermissions`
@@ -46,6 +50,7 @@ Loom changes:
 - `loom spawn` / `loom dispatch` now include the Loom agent guide in the task prompt.
 - Loom creates a run-local `loom` shim on `PATH` for spawned agents.
 - Loom preserves `LOOM_HOME`, `LOOM_AGENT_ID`, `LOOM_DEFAULT`, and `LOOM_CONTEXT` for spawned agents.
+- `LOOM_DEFAULT` now prefers the absolute Loom path for spawned/dispatched agents so isolated runtime homes do not break alias resolution.
 
 ## Verified Claude Code behavior
 
@@ -60,7 +65,8 @@ Verified:
 - `--append-system-prompt-file` works.
 - `--print --output-format stream-json` requires `--verbose`.
 - Stream JSON final answer is available on final `type: "result"` event as `result`.
-- Isolated `HOME` works with copied `~/.claude/.credentials.json` and trimmed `~/.claude.json`.
+- Isolated Claude runtime `HOME` works with copied `~/.claude/.credentials.json` and trimmed `~/.claude.json`.
+- Claude Bash commands can use real-home developer tooling via `CLAUDE_CODE_SHELL_PREFIX` / `tango-bash`.
 - `--bare` breaks OAuth auth on this host.
 - Skills are discovered at `<HOME>/.claude/skills/<skill-name>/SKILL.md`.
 - `--disallowed-tools Task` removes Claude Code's native subagent tool.

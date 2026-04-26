@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, w
 import { dirname, join } from "node:path";
 import type { AgentMetadata, AgentStatus } from "./types.js";
 import { dataRoot, projectRunRoot } from "./paths.js";
+import { appendStatusEvent } from "./events.js";
 
 export function metadataPath(runDir: string): string { return join(runDir, "metadata.json"); }
 
@@ -23,10 +24,20 @@ function renameSyncSafe(tmp: string, dest: string) {
 }
 
 export function updateStatus(runDir: string, status: AgentStatus, summary?: string): AgentMetadata {
+  return transitionStatus(runDir, status, summary);
+}
+
+export function transitionStatus(runDir: string, status: AgentStatus, summary?: string): AgentMetadata {
   const meta = readMetadata(runDir);
-  meta.status = status;
+  const previousStatus = meta.status;
   if (summary) meta.summary = summary;
+  if (previousStatus === status) {
+    writeMetadata(meta);
+    return meta;
+  }
+  meta.status = status;
   writeMetadata(meta);
+  appendStatusEvent(meta, previousStatus);
   return meta;
 }
 

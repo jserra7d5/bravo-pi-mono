@@ -1,4 +1,4 @@
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentMetadata, CommandSpec, RoleConfig } from "../types.js";
@@ -34,12 +34,17 @@ export function buildClaudeCommand(meta: AgentMetadata, role: RoleConfig | undef
 
 function claudeEnv(meta: AgentMetadata): Record<string, string> {
   const realHome = process.env.HOME ?? homedir();
+  const binDir = join(meta.runDir, "bin");
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
     HOME: meta.homeDir,
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    TANGO_REAL_HOME: realHome,
+    TANGO_AGENT_HOME: meta.homeDir,
     TANGO_HOME: process.env.TANGO_HOME ?? join(realHome, ".tango"),
     TANGO_AGENT_NAME: meta.name,
     TANGO_RUN_DIR: meta.runDir,
+    CLAUDE_CODE_SHELL_PREFIX: join(binDir, "tango-bash"),
   };
   if (meta.parentRunDir) env.TANGO_PARENT_RUN_DIR = meta.parentRunDir;
   return env;
@@ -49,7 +54,22 @@ function prepareClaudeHome(meta: AgentMetadata, role: RoleConfig | undefined): v
   const claudeDir = join(meta.homeDir, ".claude");
   mkdirSync(claudeDir, { recursive: true });
   seedClaudeAuthAndSettings(meta);
+  writeToolHomeWrapper(meta);
   for (const skill of role?.skills ?? []) copyClaudeSkill(skill, join(claudeDir, "skills"), meta.cwd);
+}
+
+function writeToolHomeWrapper(meta: AgentMetadata): void {
+  const binDir = join(meta.runDir, "bin");
+  mkdirSync(binDir, { recursive: true });
+  const wrapper = join(binDir, "tango-bash");
+  writeFileSync(wrapper, `#!/usr/bin/env bash
+set -e
+if [ -n "\${TANGO_REAL_HOME:-}" ]; then
+  export HOME="$TANGO_REAL_HOME"
+fi
+exec /usr/bin/bash "$@"
+`, "utf8");
+  chmodSync(wrapper, 0o755);
 }
 
 function seedClaudeAuthAndSettings(meta: AgentMetadata): void {

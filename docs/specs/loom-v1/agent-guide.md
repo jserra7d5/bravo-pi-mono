@@ -59,12 +59,13 @@ loom inbox accept M-0001
 loom context N-0001
 loom show N-0001
 loom search "query terms"
-loom note N-0001 "Finding or result..."
+loom note N-0001 "Short finding or result..."
+printf '%s\n' 'Long Markdown note with `backticks` and $variables' | loom note N-0001 --stdin
 loom resolve N-0001 --resolution answered --summary "Short outcome"
 loom inbox done M-0001 --summary "What you did"
 ```
 
-Prefer `loom context <node>` over manually reading many files. Prefer `loom note`/`loom resolve` over raw Markdown edits unless explicitly asked.
+Prefer `loom context <node>` over manually reading many files. Prefer `loom note`/`loom resolve` over raw Markdown edits unless explicitly asked. For Markdown notes containing backticks, `$`, quotes, or code fences, use `loom note <node> --stdin` with a quoted heredoc or pipe; do not pass complex Markdown through shell-quoted arguments.
 
 ## Coordinator / Lead Protocol
 
@@ -101,7 +102,7 @@ Loom-spawned agents may receive:
 
 ```txt
 LOOM_AGENT_ID=<agent-id>
-LOOM_DEFAULT=<loom-id-or-alias>
+LOOM_DEFAULT=<absolute-loom-path-or-id>
 LOOM_CONTEXT=<path-to-context-json>
 ```
 
@@ -173,7 +174,10 @@ loom inbox done M-0001 --summary "..."
 loom show N-0001
 loom context N-0001
 loom search "..."
-loom note N-0001 "..."
+loom note N-0001 "short note"
+loom note N-0001 --stdin <<'EOF'
+Long Markdown note with `backticks`, $variables, and code fences.
+EOF
 loom resolve N-0001 --resolution answered --summary "..."
 ```
 

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AgentMetadata, CommandSpec, RoleConfig, StartOptions } from "./types.js";
 import { runDirFor } from "./paths.js";
 import { assembleSystemPrompt, loadRole } from "./roles.js";
-import { writeMetadata } from "./metadata.js";
+import { readMetadata, transitionStatus, writeMetadata } from "./metadata.js";
 import { buildPiCommand } from "./harnesses/pi.js";
 import { buildGenericCommand } from "./harnesses/generic.js";
 import { buildClaudeCommand } from "./harnesses/claude.js";
@@ -60,20 +60,23 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
 
   if (options.dryRun) return { meta, command: redactCommand(command), role };
 
-  meta.status = "running";
-  writeMetadata(meta);
-  if (mode === "oneshot") await runOneshot(meta, command);
+  transitionStatus(meta.runDir, "running");
+  if (mode === "oneshot") await runOneshot(readMetadata(meta.runDir), command);
   else startTmux(meta.tmuxSocket, meta.tmuxSession, command);
   return { meta, command: redactCommand(command), role };
 }
 
 function redactCommand(command: CommandSpec): CommandSpec {
-  const keep = new Set(["HOME", "PATH", "PI_CODING_AGENT_DIR", "TANGO_HOME", "TANGO_AGENT_NAME", "TANGO_RUN_DIR", "TANGO_PARENT_RUN_DIR"]);
+  const keep = new Set(["HOME", "PATH", "PI_CODING_AGENT_DIR", "TANGO_HOME", "TANGO_REAL_HOME", "TANGO_AGENT_HOME", "TANGO_AGENT_NAME", "TANGO_RUN_DIR", "TANGO_PARENT_RUN_DIR", "CLAUDE_CODE_SHELL_PREFIX"]);
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(command.env)) {
     if (keep.has(key)) env[key] = /TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH/i.test(key) ? "<redacted>" : value;
   }
   return { ...command, env };
+}
+
+function isTerminalStatus(status: AgentMetadata["status"]): boolean {
+  return status === "done" || status === "error" || status === "blocked" || status === "stopped";
 }
 
 function extractResultText(parser: CommandSpec["resultParser"], event: any, current: string): string {
@@ -118,17 +121,16 @@ async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promise<void>
     proc.stderr.on("data", (chunk: Buffer) => writeFileSync(errFile, chunk.toString(), { flag: "a" }));
     proc.on("close", (code: number | null) => {
       if (buffer.trim()) processJsonLine(buffer);
-      meta.exitCode = code ?? 0;
-      meta.status = meta.exitCode === 0 ? "done" : "error";
-      meta.resultFile = resultFile;
+      const current = readMetadata(meta.runDir);
+      current.exitCode = code ?? 0;
+      current.resultFile = resultFile;
       writeFileSync(resultFile, finalText || plainOutput || "", "utf8");
-      writeMetadata(meta);
+      writeMetadata(current);
+      if (!isTerminalStatus(current.status)) transitionStatus(meta.runDir, current.exitCode === 0 ? "done" : "error");
       resolve();
     });
     proc.on("error", (error: Error) => {
-      meta.status = "error";
-      meta.summary = error.message;
-      writeMetadata(meta);
+      transitionStatus(meta.runDir, "error", error.message);
       resolve();
     });
     function processJsonLine(line: string) {

@@ -231,7 +231,7 @@ Default isolation is:
 isolation mode: home
 ```
 
-The harness must set `HOME=<runDir>/home`, seed only the needed Claude auth/config files, and then launch Claude Code with `--system-prompt-file`. A future strict mode can add `--bare`, but it must be opt-in because it disables OAuth/keychain auth paths.
+The harness must set `HOME=<runDir>/home`, seed only the needed Claude auth/config files, and then launch Claude Code with `--system-prompt-file`. It also sets `TANGO_REAL_HOME=<operator-home>` and routes Claude Bash tool commands through `CLAUDE_CODE_SHELL_PREFIX=<runDir>/bin/tango-bash`, so shell tooling can use the operator home while Claude runtime config remains isolated. A future strict mode can add `--bare`, but it must be opt-in because it disables OAuth/keychain auth paths.
 
 ## Command Construction
 
@@ -438,7 +438,7 @@ Claude Code help indicates:
 - `--disable-slash-commands` disables all skills.
 - In `--bare`, skills still resolve via `/skill-name`.
 
-This fits the copy-into-home model: because Tango sets `HOME=<runDir>/home`, Claude Code should discover only the copied skills in `<runDir>/home/.claude/skills` plus any project-local skill mechanisms that remain enabled by the chosen isolation mode.
+This fits the copy-into-home model: because Tango sets Claude Code's runtime `HOME=<runDir>/home`, Claude Code should discover only the copied skills in `<runDir>/home/.claude/skills` plus any project-local skill mechanisms that remain enabled by the chosen isolation mode. Bash/tool subprocesses may still receive `HOME=$TANGO_REAL_HOME` through the Tango shell wrapper; that is intentionally separate from Claude Code skill discovery.
 
 ### Skill source resolution
 
