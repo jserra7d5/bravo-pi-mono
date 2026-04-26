@@ -15,6 +15,7 @@ export function buildPiCommand(meta: AgentMetadata, role: RoleConfig | undefined
   args.push("--no-skills", "--no-prompt-templates");
   args.push("--no-extensions");
   const explicitExtensions = [...(role?.extensions ?? [])];
+  explicitExtensions.unshift(join(packageRoot(), "extensions", "pi", "metrics.ts"));
   if (role?.tools?.includes("bash")) explicitExtensions.unshift(join(packageRoot(), "extensions", "pi", "tool-home.ts"));
   if (wantsToolOrchestration(role)) explicitExtensions.unshift(join(packageRoot(), "extensions", "pi", "index.ts"));
   for (const ext of explicitExtensions) args.push("-e", resolveResource(ext, "extension"));

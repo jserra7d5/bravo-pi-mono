@@ -59,6 +59,8 @@ Pi harness behavior similarly keeps Pi runtime state isolated while loading a Ta
 
 Status changes are written to a durable event log at `$TANGO_HOME/events.jsonl`. `tango watch` tails this log; the Pi extension uses it to send persisted, deduped, batched notifications to parent sessions when child agents finish, block, or error. `tango children`, `tango wait`, and `tango doctor events` support parent/child coordination and event-delivery smoke tests.
 
+Pi-harness Tango children also write best-effort metrics snapshots to `<runDir>/metrics.json` for tool counts, token/context usage, and runtime-oriented TUI summaries. `tango list --json` and `tango children --json` include these snapshots when available; `tango metrics update --run-dir <dir> --payload <json>` is the internal update surface used by the Pi metrics extension.
+
 Recursive Claude roles receive CLI orchestration instructions and should delegate with `tango ... --json` commands. Loom integration remains outside Tango: Loom can pass context through environment variables and task prompts when it launches Tango agents.
 
 See `../../docs/specs/tango-v1/design.md`, `../../docs/specs/tango-events/design.md`, `../../docs/specs/tango-home-tooling/design.md`, and `../../docs/specs/tango-claude-code-runtime/design.md` for design details.

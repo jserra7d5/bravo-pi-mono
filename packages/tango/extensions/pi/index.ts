@@ -120,8 +120,47 @@ function errorText(result: any, theme: any) {
   return new Text(theme.fg("error", `✗ ${msg}`), 0, 0);
 }
 
+function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h${minutes % 60 ? `${minutes % 60}m` : ""}`;
+}
+
+function formatTokens(total: unknown): string | undefined {
+  if (typeof total !== "number" || !Number.isFinite(total)) return undefined;
+  if (total >= 1_000_000) return `${(total / 1_000_000).toFixed(1)}m tok`;
+  if (total >= 1_000) return `${Math.round(total / 1_000)}k tok`;
+  return `${total} tok`;
+}
+
+function agentRuntime(agent: any): string | undefined {
+  const start = Date.parse(agent?.createdAt ?? agent?.metrics?.startedAt ?? "");
+  if (!Number.isFinite(start)) return undefined;
+  const end = ["done", "blocked", "error", "stopped"].includes(agent.status) ? Date.parse(agent?.updatedAt ?? "") : Date.now();
+  return formatDuration((Number.isFinite(end) ? end : Date.now()) - start);
+}
+
+function metricsSummary(agent: any): string {
+  const m = agent?.metrics;
+  const parts: string[] = [];
+  if (m) {
+    parts.push(`${m.toolCalls ?? 0} tools`);
+    if (agent.status === "running" && m.activeToolCalls > 0) parts.push(`${m.activeToolCalls} active`);
+    if (m.lastTool) parts.push(String(m.lastTool));
+    const tokens = formatTokens(m.tokens?.total);
+    if (tokens) parts.push(tokens);
+    if (typeof m.context?.percent === "number") parts.push(`ctx ${Math.round(m.context.percent)}%`);
+  }
+  const runtime = agentRuntime(agent);
+  if (runtime) parts.push(runtime);
+  return parts.join(" · ");
+}
+
 function agentSummary(agent: any): string {
-  return `${agent?.role ?? "agent"} · ${agent?.mode ?? "?"}/${agent?.harness ?? "?"} · ${agent?.status ?? "unknown"}`;
+  const metrics = metricsSummary(agent);
+  return `${agent?.role ?? "agent"} · ${agent?.mode ?? "?"}/${agent?.harness ?? "?"} · ${agent?.status ?? "unknown"}${metrics ? ` · ${metrics}` : ""}`;
 }
 
 function renderAgentResult(result: any, { expanded }: { expanded: boolean }, theme: any, title: string) {
@@ -137,6 +176,7 @@ function renderAgentResult(result: any, { expanded }: { expanded: boolean }, the
     `  ${theme.fg("muted", "Harness:")} ${agent.harness}`,
     `  ${theme.fg("muted", "Mode:")} ${agent.mode}`,
     `  ${theme.fg("muted", "Status:")} ${agent.status}`,
+    agent.metrics ? `  ${theme.fg("muted", "Metrics:")} ${metricsSummary(agent)}` : "",
     `  ${theme.fg("muted", "Run dir:")} ${theme.fg("dim", agent.runDir ?? "")}`,
     agent.task ? `  ${theme.fg("muted", "Task:")} ${preview(agent.task, 180)}` : "",
   ].filter(Boolean));
@@ -154,7 +194,8 @@ function renderListResult(result: any, { expanded }: { expanded: boolean }, them
   const lines = [theme.fg("toolTitle", summary), ""];
   for (const a of agents) {
     const icon = theme.fg(statusColor(a.status), statusIcon(a.status));
-    lines.push(`${icon} ${theme.fg("accent", String(a.name).padEnd(18))} ${String(a.role ?? "-").padEnd(10)} ${a.mode}/${a.harness} ${theme.fg("muted", a.status ?? "unknown")}`);
+    const metrics = metricsSummary(a);
+    lines.push(`${icon} ${theme.fg("accent", String(a.name).padEnd(18))} ${String(a.role ?? "-").padEnd(10)} ${a.mode}/${a.harness} ${theme.fg("muted", a.status ?? "unknown")}${metrics ? ` ${theme.fg("dim", metrics)}` : ""}`);
   }
   if (!agents.length) lines.push(theme.fg("dim", "No Tango agents."));
   return new Text(lines.join("\n"), 0, 0);
@@ -190,12 +231,15 @@ async function updateFooterStatus(ctx: any, signal?: AbortSignal) {
   const agents = result.json?.agents ?? [];
   const running = agents.filter((a: any) => a.status === "running").length;
   const done = agents.filter((a: any) => a.status === "done").length;
-  ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", `Tango: ${running} running · ${done} done`));
+  const tools = agents.reduce((sum: number, a: any) => sum + (typeof a.metrics?.toolCalls === "number" ? a.metrics.toolCalls : 0), 0);
+  const tokens = agents.reduce((sum: number, a: any) => sum + (typeof a.metrics?.tokens?.total === "number" ? a.metrics.tokens.total : 0), 0);
+  const suffix = [`${running} running`, `${done} done`, tools ? `${tools} tools` : "", tokens ? formatTokens(tokens) : ""].filter(Boolean).join(" · ");
+  ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", `Tango: ${suffix}`));
 }
 
 function withJson(args: string[]): string[] {
   if (args.includes("--json")) return args;
-  const jsonCommands = new Set(["start", "list", "look", "message", "stop", "delete", "status", "result", "roles"]);
+  const jsonCommands = new Set(["start", "list", "look", "message", "stop", "delete", "status", "result", "roles", "children", "wait", "doctor", "metrics"]);
   return args[0] && jsonCommands.has(args[0]) ? [...args, "--json"] : args;
 }
 
@@ -457,7 +501,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({ args: Type.Array(Type.String({ description: "Argument passed to tango, excluding the tango binary." })) }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const command = params.args[0];
-      const allowed = new Set(["start", "list", "look", "message", "stop", "delete", "status", "result", "roles", "children", "wait", "doctor"]);
+      const allowed = new Set(["start", "list", "look", "message", "stop", "delete", "status", "result", "roles", "children", "wait", "doctor", "metrics"]);
       if (!command || !allowed.has(command)) {
         return { content: [{ type: "text" as const, text: `Unsupported tango command: ${command ?? "<empty>"}` }], details: { ok: false, command }, isError: true };
       }

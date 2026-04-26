@@ -24,6 +24,38 @@ export interface RoleConfig {
   filePath: string;
 }
 
+export interface AgentMetricsSnapshot {
+  schemaVersion: 1;
+  runDir: string;
+  agent: string;
+  startedAt: string;
+  updatedAt: string;
+  toolCalls: number;
+  toolResults: number;
+  activeToolCalls: number;
+  toolErrors?: number;
+  lastTool?: string;
+  tokens?: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+  context?: {
+    tokens: number | null;
+    contextWindow: number | null;
+    percent: number | null;
+  };
+  cost?: {
+    total: number;
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
+}
+
 export interface AgentMetadata {
   name: string;
   role?: string;
@@ -47,6 +79,7 @@ export interface AgentMetadata {
   needs?: string;
   parentRunDir?: string;
   resultFile?: string;
+  metrics?: AgentMetricsSnapshot;
 }
 
 export interface StartOptions {

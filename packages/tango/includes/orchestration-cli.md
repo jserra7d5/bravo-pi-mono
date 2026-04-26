@@ -15,5 +15,6 @@ Useful commands:
 - `tango wait <name...> --json` waits until named children are terminal.
 - `tango watch --json` streams Tango status events for the current project; use `--all` only when you intentionally need all projects under the same `TANGO_HOME`.
 - `tango doctor events` emits a synthetic event to smoke-test event/watch delivery.
+- `tango metrics update --run-dir <dir> --payload <json>` updates internal best-effort metrics snapshots; agents normally should not call this manually unless implementing runtime integration plumbing.
 
 Prefer `--json` when you need to parse results. Parent Pi sessions may receive proactive Tango completion notifications, but still inspect child output with `tango result` or `tango look` before relying on it. Use `tango attach <name>` only in a human terminal, not from inside an agent tool call.
