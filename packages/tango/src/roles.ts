@@ -149,6 +149,7 @@ export function orchestrationIncludes(role: RoleConfig): string[] {
 
 export function assembleSystemPrompt(role: RoleConfig): string {
   const includeNames = [...orchestrationIncludes(role), ...(role.includes ?? [])];
+  if ((role.skills?.length ?? 0) > 0 && !includeNames.includes("skill-protocol")) includeNames.push("skill-protocol");
   if (role.recursive && !includeNames.includes("status-protocol")) includeNames.push("status-protocol");
   const uniqueIncludeNames = [...new Set(includeNames)];
   const parts = uniqueIncludeNames.map(loadInclude);
