@@ -1,8 +1,8 @@
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { AgentMetadata, CommandSpec, RoleConfig } from "../types.js";
-import { packageSkillsDir, userSkillsDir } from "../paths.js";
+import { resolveSkillDir } from "../skillResolver.js";
 
 export function buildClaudeCommand(meta: AgentMetadata, role: RoleConfig | undefined, systemFile: string, task: string): CommandSpec {
   if (role?.extensions?.length) throw new Error(`Role ${role.name} uses harness=claude but declares extensions. Pi extensions are only supported by harness=pi.`);
@@ -49,7 +49,7 @@ function prepareClaudeHome(meta: AgentMetadata, role: RoleConfig | undefined): v
   const claudeDir = join(meta.homeDir, ".claude");
   mkdirSync(claudeDir, { recursive: true });
   seedClaudeAuthAndSettings(meta);
-  for (const skill of role?.skills ?? []) copyClaudeSkill(skill, join(claudeDir, "skills"));
+  for (const skill of role?.skills ?? []) copyClaudeSkill(skill, join(claudeDir, "skills"), meta.cwd);
 }
 
 function seedClaudeAuthAndSettings(meta: AgentMetadata): void {
@@ -106,24 +106,10 @@ function readJsonFile(path: string): Record<string, any> | undefined {
   }
 }
 
-function copyClaudeSkill(skill: string, targetSkillsDir: string): void {
-  const source = resolveSkillDir(skill);
+function copyClaudeSkill(skill: string, targetSkillsDir: string, cwd = process.cwd()): void {
+  const source = resolveSkillDir(skill, cwd);
   const name = skill.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "skill";
   const target = join(targetSkillsDir, name);
   mkdirSync(targetSkillsDir, { recursive: true });
   cpSync(source, target, { recursive: true, force: true });
-}
-
-function resolveSkillDir(skill: string): string {
-  const candidates = [
-    skill,
-    join(userSkillsDir(), skill, "claude"),
-    join(userSkillsDir(), skill),
-    join(packageSkillsDir(), skill, "claude"),
-    join(packageSkillsDir(), skill),
-  ].map((p) => resolve(p));
-  const found = candidates.find((p) => existsSync(p));
-  if (!found) throw new Error(`Skill not found: ${skill}`);
-  if (!statSync(found).isDirectory()) throw new Error(`Claude skill must be a directory: ${skill}`);
-  return found;
 }

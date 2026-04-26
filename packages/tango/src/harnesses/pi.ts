@@ -2,8 +2,9 @@ import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AgentMetadata, CommandSpec, RoleConfig } from "../types.js";
-import { packageRoot, packageSkillsDir, userSkillsDir } from "../paths.js";
+import { packageRoot } from "../paths.js";
 import { wantsToolOrchestration } from "../roles.js";
+import { resolveSkillFile } from "../skillResolver.js";
 
 export function buildPiCommand(meta: AgentMetadata, role: RoleConfig | undefined, systemFile: string, task: string): CommandSpec {
   const mode = meta.mode;
@@ -22,7 +23,7 @@ export function buildPiCommand(meta: AgentMetadata, role: RoleConfig | undefined
   if (thinking) args.push("--thinking", thinking);
   if (role?.tools?.length) args.push("--tools", role.tools.join(","));
   args.push("--append-system-prompt", systemFile);
-  for (const skill of role?.skills ?? []) args.push("--skill", resolveSkill(skill));
+  for (const skill of role?.skills ?? []) args.push("--skill", resolveSkillFile(skill, meta.cwd));
   args.push(`Task: ${task}`);
 
   return {
@@ -57,19 +58,6 @@ function seedPiAuth(targetPiAgentDir: string): void {
     const target = join(targetPiAgentDir, file);
     if (existsSync(source) && !existsSync(target)) copyFileSync(source, target);
   }
-}
-
-function resolveSkill(skill: string): string {
-  const candidates = [
-    skill,
-    join(userSkillsDir(), skill, "SKILL.md"),
-    join(userSkillsDir(), `${skill}.md`),
-    join(packageSkillsDir(), skill, "SKILL.md"),
-    join(packageSkillsDir(), `${skill}.md`),
-  ].map((p) => resolve(p));
-  const found = candidates.find((p) => existsSync(p));
-  if (!found) throw new Error(`Skill not found: ${skill}`);
-  return found;
 }
 
 function resolveResource(value: string, _type: string): string {

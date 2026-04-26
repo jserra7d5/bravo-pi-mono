@@ -11,6 +11,10 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js"
   },
+  "pi": {
+    "skills": ["./skills"],
+    "prompts": ["./prompts/loom.*.md"]
+  },
   "dependencies": {},
   "devDependencies": { "@types/node": "latest", "typescript": "latest" }
 }
