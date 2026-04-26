@@ -9,6 +9,7 @@ import { buildPiCommand } from "./harnesses/pi.js";
 import { buildGenericCommand } from "./harnesses/generic.js";
 import { buildClaudeCommand } from "./harnesses/claude.js";
 import { startTmux } from "./runtime/tmux.js";
+import { isTerminalStatus } from "./lifecycle.js";
 
 export async function startAgent(options: StartOptions): Promise<{ meta: AgentMetadata; command: CommandSpec; role?: RoleConfig }> {
   let role: RoleConfig | undefined;
@@ -73,10 +74,6 @@ function redactCommand(command: CommandSpec): CommandSpec {
     if (keep.has(key)) env[key] = /TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH/i.test(key) ? "<redacted>" : value;
   }
   return { ...command, env };
-}
-
-function isTerminalStatus(status: AgentMetadata["status"]): boolean {
-  return status === "done" || status === "error" || status === "blocked" || status === "stopped";
 }
 
 function extractResultText(parser: CommandSpec["resultParser"], event: any, current: string): string {

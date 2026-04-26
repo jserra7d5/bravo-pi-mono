@@ -57,7 +57,7 @@ Claude harness behavior:
 
 Pi harness behavior similarly keeps Pi runtime state isolated while loading a Tango Pi extension that makes the Pi `bash` tool run with `HOME=$TANGO_REAL_HOME` when `bash` is enabled for the role.
 
-Status changes are written to a durable event log at `$TANGO_HOME/events.jsonl`. `tango watch` tails this log; the Pi extension uses it to send persisted, deduped, batched notifications to parent sessions when child agents finish, block, or error. `tango children`, `tango wait`, and `tango doctor events` support parent/child coordination and event-delivery smoke tests.
+Status changes are written to a durable event log at `$TANGO_HOME/events.jsonl`. `tango watch` tails this log; the Pi extension uses it to send persisted, deduped, batched notifications to parent sessions when child agents finish, block, or error. `tango children`, `tango wait`, `tango reconcile`, and `tango doctor events` support parent/child coordination, stale lifecycle repair, and event-delivery smoke tests.
 
 Pi-harness Tango children also write best-effort metrics snapshots to `<runDir>/metrics.json` for tool counts, token/context usage, and runtime-oriented TUI summaries. `tango list --json` and `tango children --json` include these snapshots when available; `tango metrics update --run-dir <dir> --payload <json>` is the internal update surface used by the Pi metrics extension.
 

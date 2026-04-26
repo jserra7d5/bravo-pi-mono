@@ -18,6 +18,7 @@ type ExecResult = { code: number; stdout: string; stderr: string; json?: any };
 type NotifyLevel = "info" | "error" | "warning" | "success";
 
 let watchProcess: ChildProcessWithoutNullStreams | undefined;
+let reconcileTimer: ReturnType<typeof setInterval> | undefined;
 let pendingEvents: any[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
 const deliveredEvents = loadDeliveredEvents();
@@ -239,7 +240,7 @@ async function updateFooterStatus(ctx: any, signal?: AbortSignal) {
 
 function withJson(args: string[]): string[] {
   if (args.includes("--json")) return args;
-  const jsonCommands = new Set(["start", "list", "look", "message", "stop", "delete", "status", "result", "roles", "children", "wait", "doctor", "metrics"]);
+  const jsonCommands = new Set(["start", "list", "look", "message", "stop", "delete", "status", "result", "roles", "children", "wait", "doctor", "metrics", "reconcile"]);
   return args[0] && jsonCommands.has(args[0]) ? [...args, "--json"] : args;
 }
 
@@ -268,6 +269,13 @@ function persistDeliveredEvents() {
   mkdirSync(dirname(path), { recursive: true });
   const eventIds = [...deliveredEvents].slice(-1000);
   writeFileSync(path, JSON.stringify({ updatedAt: new Date().toISOString(), eventIds }, null, 2) + "\n", "utf8");
+}
+
+function startParentReconciler(ctx: any) {
+  if (reconcileTimer || !process.env.TANGO_RUN_DIR) return;
+  reconcileTimer = setInterval(() => {
+    void runTango(["reconcile", "--children", "--json"], ctx?.signal).then(() => updateFooterStatus(ctx, ctx?.signal)).catch(() => {});
+  }, 15_000);
 }
 
 function startEventWatcher(pi: ExtensionAPI, ctx: any) {
@@ -331,11 +339,14 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI) ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", "Tango: ready"));
     startEventWatcher(pi, ctx);
+    startParentReconciler(ctx);
   });
 
   pi.on("session_shutdown", async () => {
     if (watchProcess) watchProcess.kill("SIGTERM");
     watchProcess = undefined;
+    if (reconcileTimer) clearInterval(reconcileTimer);
+    reconcileTimer = undefined;
   });
 
   pi.on("before_agent_start", async (event) => {
@@ -501,7 +512,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({ args: Type.Array(Type.String({ description: "Argument passed to tango, excluding the tango binary." })) }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const command = params.args[0];
-      const allowed = new Set(["start", "list", "look", "message", "stop", "delete", "status", "result", "roles", "children", "wait", "doctor", "metrics"]);
+      const allowed = new Set(["start", "list", "look", "message", "stop", "delete", "status", "result", "roles", "children", "wait", "doctor", "metrics", "reconcile"]);
       if (!command || !allowed.has(command)) {
         return { content: [{ type: "text" as const, text: `Unsupported tango command: ${command ?? "<empty>"}` }], details: { ok: false, command }, isError: true };
       }
