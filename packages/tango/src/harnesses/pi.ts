@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AgentMetadata, CommandSpec, RoleConfig } from "../types.js";
@@ -18,7 +18,7 @@ export function buildPiCommand(meta: AgentMetadata, role: RoleConfig | undefined
   if (wantsToolOrchestration(role)) explicitExtensions.unshift(join(packageRoot(), "extensions", "pi", "index.ts"));
   for (const ext of explicitExtensions) args.push("-e", resolveResource(ext, "extension"));
   const model = meta.model ?? role?.model;
-  if (model) args.push("--model", model);
+  if (model) args.push("--model", resolvePiModelPattern(model));
   const thinking = meta.thinking ?? role?.thinking;
   if (thinking) args.push("--thinking", thinking);
   if (role?.tools?.length) args.push("--tools", role.tools.join(","));
@@ -53,10 +53,36 @@ export function baseEnv(meta: AgentMetadata): Record<string, string> {
 function seedPiAuth(targetPiAgentDir: string): void {
   const sourcePiAgentDir = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? homedir(), ".pi", "agent");
   mkdirSync(targetPiAgentDir, { recursive: true });
-  for (const file of ["auth.json", "settings.json"]) {
+  for (const file of ["auth.json", "settings.json", "models.json"]) {
     const source = join(sourcePiAgentDir, file);
     const target = join(targetPiAgentDir, file);
     if (existsSync(source) && !existsSync(target)) copyFileSync(source, target);
+  }
+}
+
+function resolvePiModelPattern(model: string): string {
+  if (model.includes("/")) return model;
+
+  const settings = readPiSettings();
+  const defaultProvider = typeof settings?.defaultProvider === "string" ? settings.defaultProvider : undefined;
+  const defaultModel = typeof settings?.defaultModel === "string" ? settings.defaultModel : undefined;
+  if (defaultProvider && defaultModel === model) return `${defaultProvider}/${model}`;
+
+  const enabledModels = Array.isArray(settings?.enabledModels) ? settings.enabledModels.filter((entry): entry is string => typeof entry === "string") : [];
+  const exactSuffixMatches = enabledModels.filter((entry) => !entry.includes("*") && entry.endsWith(`/${model}`));
+  if (exactSuffixMatches.length === 1) return exactSuffixMatches[0];
+
+  return model;
+}
+
+function readPiSettings(): Record<string, unknown> | undefined {
+  const sourcePiAgentDir = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? homedir(), ".pi", "agent");
+  const source = join(sourcePiAgentDir, "settings.json");
+  if (!existsSync(source)) return undefined;
+  try {
+    return JSON.parse(readFileSync(source, "utf8")) as Record<string, unknown>;
+  } catch {
+    return undefined;
   }
 }
 
