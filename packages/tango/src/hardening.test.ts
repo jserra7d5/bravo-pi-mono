@@ -371,6 +371,30 @@ describe("Tango CLI/runtime hardening", () => {
     }
   });
 
+  it("list --json emits bounded summaries and scopes to the active root session", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const current = writeMeta(home, cwd, "current", { rootSessionId: "root-current", workstreamId: "ws-current", task: "x".repeat(10_000) });
+      writeMeta(home, cwd, "old", { rootSessionId: "root-old", workstreamId: "ws-old", task: "old task" });
+      writeMeta(home, cwd, "other-workstream", { rootSessionId: "root-current", workstreamId: "ws-other", task: "other task" });
+
+      const result = runCli(["list", "--json"], { TANGO_HOME: home, TANGO_ROOT_SESSION_ID: "root-current", TANGO_WORKSTREAM_ID: "ws-current" }, cwd);
+
+      assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+      const body = JSON.parse(result.stdout);
+      assert.deepStrictEqual(body.agents.map((a: any) => a.name), ["current"]);
+      assert.strictEqual(body.agents[0].runId, current.runId);
+      assert.ok(body.agents[0].task.length < 300);
+      assert.strictEqual(body.agents[0].taskTruncated, true);
+      assert.strictEqual(body.agents[0].tmuxSocket, undefined);
+      assert.strictEqual(body.agents[0].homeDir, undefined);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("rejects invalid harness, mode, flags, and numeric ranges", () => {
     const cwd = tempDir();
     const home = tempDir();

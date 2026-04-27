@@ -475,7 +475,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "tango_list",
     label: "Tango List",
-    description: "List Tango agents for the current project. Wraps `tango list --json`.",
+    description: "List Tango agents for the current project/session. Wraps `tango list --json`.",
     parameters: Type.Object({
       all: Type.Optional(Type.Boolean({ default: false })),
       cwd: Type.Optional(Type.String({ description: "Project working directory to list agents for. Defaults to the current Pi process cwd." })),

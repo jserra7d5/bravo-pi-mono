@@ -204,9 +204,59 @@ async function cmdStart(parsed: Parsed, cwd: string, json: boolean) {
   if (flagBool(parsed.flags, "attach") && result.meta.mode === "interactive") attachTmux(result.meta.tmuxSocket, result.meta.tmuxSession);
 }
 
-function cmdList(cwd: string, json: boolean, all: boolean) {
+function listAgentSummary(a: AgentMetadata) {
+  const task = a.task.replace(/\s+/g, " ").trim();
+  return {
+    name: a.name,
+    role: a.role,
+    status: a.status,
+    mode: a.mode,
+    harness: a.harness,
+    runId: a.runId,
+    parentRunId: a.parentRunId,
+    rootSessionId: a.rootSessionId,
+    workstreamId: a.workstreamId,
+    cwd: a.cwd,
+    runDir: a.runDir,
+    createdAt: a.createdAt,
+    updatedAt: a.updatedAt,
+    summary: a.summary,
+    needs: a.needs,
+    resultRequired: a.resultRequired,
+    resultIssue: a.resultIssue,
+    task: task.length > 240 ? `${task.slice(0, 239)}…` : task,
+    taskTruncated: task.length > 240 || task !== a.task,
+    metrics: a.metrics ? {
+      toolCalls: a.metrics.toolCalls,
+      activeToolCalls: a.metrics.activeToolCalls,
+      lastTool: a.metrics.lastTool,
+      tokens: a.metrics.tokens?.total,
+      contextPercent: a.metrics.context?.percent,
+      cost: a.metrics.cost?.total,
+    } : undefined,
+  };
+}
+
+function scopedListAgents(cwd: string, all: boolean): AgentMetadata[] {
   const agents = listMetadata(all ? undefined : cwd).map(refreshStatus).map(withMetrics);
-  if (json) return printJson({ ok: true, agents });
+  if (all) return agents;
+
+  const rootSessionId = process.env.TANGO_ROOT_SESSION_ID;
+  const workstreamId = process.env.TANGO_WORKSTREAM_ID;
+  if (!rootSessionId && !workstreamId) return agents;
+
+  const scoped = agents.filter((a) => {
+    if (rootSessionId && workstreamId) return a.rootSessionId === rootSessionId && a.workstreamId === workstreamId;
+    if (rootSessionId) return a.rootSessionId === rootSessionId;
+    if (workstreamId) return a.workstreamId === workstreamId;
+    return true;
+  });
+  return scoped;
+}
+
+function cmdList(cwd: string, json: boolean, all: boolean) {
+  const agents = scopedListAgents(cwd, all);
+  if (json) return printJson({ ok: true, agents: agents.map(listAgentSummary) });
   if (!agents.length) return console.log("No agents.");
   for (const a of agents) console.log(`${a.name.padEnd(18)} ${a.status.padEnd(8)} ${a.role ?? "-"} ${a.mode}/${a.harness} ${a.task}`);
 }
