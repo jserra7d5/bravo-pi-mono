@@ -59,6 +59,20 @@ export type AttentionSpec = {
   throttle_ms?: number;
 };
 
+export type AttentionDelivery = {
+  message: string;
+  severity: "info" | "warning" | "error";
+  notify_attempted: boolean;
+  notify_delivered: boolean;
+  notify_error?: string;
+  wake_attempted: boolean;
+  wake_delivered: boolean;
+  wake_error?: string;
+  target_session_id?: string;
+  target_root_session_id?: string;
+  delivered_at?: string;
+};
+
 export type RetentionSpec = {
   max_results?: number;
   max_events?: number;
@@ -104,6 +118,7 @@ export type MonitorResult = {
   created_at: string;
   acked_at?: string;
   error_message?: string;
+  attention_delivery?: AttentionDelivery;
 };
 
 export type MonitorEventType =

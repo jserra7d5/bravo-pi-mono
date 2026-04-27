@@ -287,6 +287,18 @@ export class JsonlMonitorStore {
     return arr;
   }
 
+  async updateResult(monitorId: string, resultId: string, patch: Partial<MonitorResult>): Promise<MonitorResult | undefined> {
+    await this.init();
+    const arr = this.results.get(monitorId) ?? [];
+    const idx = arr.findIndex((r) => r.result_id === resultId);
+    if (idx < 0) return undefined;
+    const updated = { ...arr[idx]!, ...patch };
+    arr[idx] = updated;
+    this.results.set(monitorId, arr);
+    this.saveResults();
+    return updated;
+  }
+
   async appendEvent(event: MonitorEvent): Promise<void> {
     await this.init();
     this.events.push(event);

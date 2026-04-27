@@ -22,9 +22,7 @@ export function validateCheck(check: CheckSpec): void {
 
 export function validateSchedule(schedule: ScheduleSpec): void {
   if (!schedule || typeof schedule !== "object") throw new ValidationError("Schedule must be an object");
-  const hasTiming = typeof schedule.delay_ms === "number" || typeof schedule.interval_ms === "number" || typeof schedule.start_at === "string";
-  if (!hasTiming) throw new ValidationError("Schedule requires delay_ms, interval_ms, or start_at");
-
+  // Empty schedules are valid and mean "run immediately once, then use the default interval if not terminal".
   if (typeof schedule.delay_ms === "number") {
     if (!Number.isFinite(schedule.delay_ms) || schedule.delay_ms < 1000) {
       throw new ValidationError("delay_ms must be at least 1000ms");

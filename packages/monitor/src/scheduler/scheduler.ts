@@ -133,8 +133,10 @@ export class MonitorScheduler {
     }
 
     if (result.triggered || result.status === "error") {
-      await this.statusService?.notify(monitor, result, this.ctx);
+      const attention_delivery = await this.statusService?.deliverAttention(monitor, result, this.ctx);
+      if (attention_delivery) await this.store.updateResult(monitor.monitor_id, result.result_id, { attention_delivery });
     }
+
     await this.statusService?.refresh(this.ctx);
 
     await this.store.releaseLease(monitor.monitor_id, monitor.lease_id ?? "", nextRunAt);

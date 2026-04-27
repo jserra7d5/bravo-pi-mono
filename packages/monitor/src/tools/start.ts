@@ -72,8 +72,20 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
       validateRetention(params.retention ?? DEFAULT_RETENTION);
       validateLabels(params.labels ?? {});
 
+      if (params.idempotency_key) {
+        const existing = (await store.list({ include_archived: false })).find((m) => m.metadata?.idempotency_key === params.idempotency_key);
+        if (existing) {
+          return {
+            content: [{ type: "text" as const, text: `Monitor ${existing.monitor_id} already exists` }],
+            details: { monitor_id: existing.monitor_id, state: existing.state, next_run_at: existing.next_run_at, idempotent: true },
+          };
+        }
+      }
+
       const monitorId = generateMonitorId();
-      const sessionId = ctx?.sessionManager?.getSessionFile?.() ?? "";
+      const sessionId = ctx?.sessionManager?.getSessionFile?.() ?? process.env.PI_SESSION_ID ?? "";
+      const rootSessionId = process.env.TANGO_ROOT_SESSION_ID ?? process.env.PI_ROOT_SESSION_ID;
+      const workspaceId = process.env.TANGO_WORKSTREAM_ID ?? process.cwd();
       const now = nowISO();
 
       let nextRunAt: string | undefined;
@@ -83,6 +95,8 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
         nextRunAt = new Date(Date.now() + params.schedule.delay_ms).toISOString();
       } else if (typeof params.schedule.interval_ms === "number") {
         nextRunAt = new Date(Date.now() + params.schedule.interval_ms).toISOString();
+      } else {
+        nextRunAt = now;
       }
 
       const record: MonitorRecord = {
@@ -92,6 +106,8 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
           actor_id: ctx?.actor_id ?? "system",
           actor_type: "system",
           session_id: sessionId,
+          root_session_id: rootSessionId,
+          workspace_id: workspaceId,
         },
         scope: params.scope ?? "session",
         name: params.name,
@@ -103,7 +119,7 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
         attention: { ...DEFAULT_ATTENTION, ...(params.attention ?? {}) },
         retention: { ...DEFAULT_RETENTION, ...(params.retention ?? {}) },
         labels: params.labels ?? {},
-        metadata: params.metadata ?? {},
+        metadata: { ...(params.metadata ?? {}), ...(params.idempotency_key ? { idempotency_key: params.idempotency_key } : {}) },
         created_at: now,
         updated_at: now,
         next_run_at: nextRunAt,

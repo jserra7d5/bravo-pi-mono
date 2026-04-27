@@ -11,22 +11,30 @@ import {
   buildStopTool,
   buildResultTool,
   buildAckTool,
+  buildAttentionTool,
+  buildStreamStartTool,
+  buildStreamStopTool,
+  buildStreamListTool,
+  buildStreamOutputTool,
 } from "./tools/index.js";
 import { MonitorStatusService } from "./runtime/status.js";
+import { StreamMonitorManager } from "./stream/stream-manager.js";
 import { formatMonitorRow } from "./tui/format.js";
 
 export type MonitorRuntime = {
   store: JsonlMonitorStore;
   scheduler: MonitorScheduler;
   statusService: MonitorStatusService;
+  streams: StreamMonitorManager;
 };
 
-export function createMonitorRuntime(_pi: ExtensionAPI, stateRoot?: string): MonitorRuntime {
+export function createMonitorRuntime(pi: ExtensionAPI, stateRoot?: string): MonitorRuntime {
   const store = new JsonlMonitorStore(stateRoot);
-  const statusService = new MonitorStatusService(store);
+  const statusService = new MonitorStatusService(store, pi);
   const scheduler = new MonitorScheduler(store, undefined, statusService);
+  const streams = new StreamMonitorManager(pi, stateRoot);
 
-  return { store, scheduler, statusService };
+  return { store, scheduler, statusService, streams };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -35,11 +43,13 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     await runtime.store.init();
     runtime.scheduler.start(ctx);
+    await runtime.statusService.backfillPending(ctx);
     await runtime.statusService.refresh(ctx);
   });
 
   pi.on("session_shutdown", async () => {
     await runtime.scheduler.stop();
+    await runtime.streams.stopAll();
   });
 
   const tools = [
@@ -52,6 +62,11 @@ export default function (pi: ExtensionAPI) {
     buildStopTool(pi, runtime.store, runtime.statusService),
     buildResultTool(pi, runtime.store),
     buildAckTool(pi, runtime.store, runtime.statusService),
+    buildAttentionTool(pi, runtime.store),
+    buildStreamStartTool(pi, runtime.streams),
+    buildStreamStopTool(pi, runtime.streams),
+    buildStreamListTool(pi, runtime.streams),
+    buildStreamOutputTool(pi, runtime.streams),
   ];
 
   for (const tool of tools) {

@@ -24,8 +24,8 @@ test('validateCheck rejects unknown check type', () => {
   assert.throws(() => validateCheck({ type: 'http' } as any), ValidationError);
 });
 
-test('validateSchedule requires one timing field', () => {
-  assert.throws(() => validateSchedule({}), ValidationError);
+test('validateSchedule accepts empty schedule as immediate', () => {
+  validateSchedule({});
 });
 
 test('validateSchedule accepts delay_ms', () => {

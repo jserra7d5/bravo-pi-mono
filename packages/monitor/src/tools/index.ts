@@ -7,3 +7,5 @@ export { buildResumeTool } from "./resume.js";
 export { buildStopTool } from "./stop.js";
 export { buildResultTool } from "./result.js";
 export { buildAckTool } from "./ack.js";
+export { buildAttentionTool } from "./attention.js";
+export { buildStreamStartTool, buildStreamStopTool, buildStreamListTool, buildStreamOutputTool } from "./stream.js";
