@@ -454,14 +454,19 @@ function handleTangoEvent(pi: ExtensionAPI, ctx: any, event: any) {
 }
 
 function backfillRecentTangoEvents(pi: ExtensionAPI, ctx: any) {
-  const cutoffMs = Date.now() - 30 * 60 * 1000;
-  let recent: any[] = [];
-  try { recent = readRecentEvents(1000, 1024 * 1024).events ?? []; } catch { return; }
-  for (const event of recent) {
-    const time = Date.parse(event.time ?? "");
-    if (!Number.isFinite(time) || time < cutoffMs) continue;
-    handleTangoEvent(pi, ctx, event);
-  }
+  // Backfill is only a short startup safety net, not historical replay. A broad
+  // replay can flood the parent with old done agents and mark stale events seen.
+  const startedAt = Date.now();
+  setTimeout(() => {
+    const cutoffMs = startedAt - 15 * 1000;
+    let recent: any[] = [];
+    try { recent = readRecentEvents(200, 256 * 1024).events ?? []; } catch { return; }
+    for (const event of recent) {
+      const time = Date.parse(event.time ?? "");
+      if (!Number.isFinite(time) || time < cutoffMs) continue;
+      handleTangoEvent(pi, ctx, event);
+    }
+  }, 1000);
 }
 
 function suggestedAction(event: any): string {
