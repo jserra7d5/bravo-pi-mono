@@ -118,7 +118,13 @@ export function listRoles(): RoleConfig[] {
 
 export function findIncludeFile(name: string): string | undefined {
   const file = name.endsWith(".md") ? name : `${name}.md`;
-  const candidates = [join(userIncludesDir(), file), join(packageIncludesDir(), file), resolve(name)];
+  // Safety-critical runtime protocols must not be silently shadowed by stale
+  // user copies; several result-finalization regressions came from an old
+  // ~/.tango/includes/status-protocol.md overriding the fixed package include.
+  const packageFirst = file === "status-protocol.md";
+  const candidates = packageFirst
+    ? [join(packageIncludesDir(), file), join(userIncludesDir(), file), resolve(name)]
+    : [join(userIncludesDir(), file), join(packageIncludesDir(), file), resolve(name)];
   return candidates.find((p) => existsSync(p));
 }
 

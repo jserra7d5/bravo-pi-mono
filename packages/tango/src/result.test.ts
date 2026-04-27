@@ -167,6 +167,74 @@ describe("result readiness", () => {
     assert.strictEqual(updated.exitCode, 0);
   });
 
+  it("persists captured oneshot final text even when status done was set before process exit", async () => {
+    const meta = makeMeta({ mode: "oneshot", status: "running", harness: "generic", task: "write an audit report" });
+    writeMetadata(meta);
+    const cli = join(dirname(fileURLToPath(import.meta.url)), "cli.js");
+    const event = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Full audit report\n\nEvidence and recommendations that must survive status finalization. This report includes concrete findings, risks, remediation steps, and validation notes so it is not mistaken for a terse status summary or placeholder result." }] } };
+    const script = `const { spawnSync } = require('node:child_process');\nspawnSync(process.execPath, [${JSON.stringify(cli)}, 'status', 'done', 'premature status'], { env: process.env, stdio: 'inherit' });\nconsole.log(${JSON.stringify(JSON.stringify(event))});\n`;
+    const spec: CommandSpec = {
+      command: process.execPath,
+      args: ["-e", script],
+      cwd: tempHome,
+      env: { ...process.env, TANGO_HOME: tempHome, TANGO_RUN_DIR: meta.runDir } as Record<string, string>,
+      resultParser: "pi-json",
+    };
+
+    await runOneshot(meta, spec);
+
+    const updated = readMetadata(meta.runDir);
+    assert.strictEqual(updated.status, "done");
+    assert.strictEqual(updated.summary, "premature status");
+    assert.ok(updated.resultFinalizedAt);
+    assert.strictEqual(readFileSync(join(meta.runDir, "result.md"), "utf8"), "Full audit report\n\nEvidence and recommendations that must survive status finalization. This report includes concrete findings, risks, remediation steps, and validation notes so it is not mistaken for a terse status summary or placeholder result.");
+    assert.strictEqual(updated.resultIssue, undefined);
+  });
+
+  it("marks one-shot report-like placeholder results as error instead of done", async () => {
+    const meta = makeMeta({ mode: "oneshot", status: "running", harness: "generic", task: "deliver audit findings" });
+    writeMetadata(meta);
+    const event = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Read-only investigation complete; deliverable provided in final response." }] } };
+    const spec: CommandSpec = {
+      command: process.execPath,
+      args: ["-e", `console.log(${JSON.stringify(JSON.stringify(event))})`],
+      cwd: tempHome,
+      env: { ...process.env, TANGO_HOME: tempHome } as Record<string, string>,
+      resultParser: "pi-json",
+    };
+
+    await runOneshot(meta, spec);
+
+    const updated = readMetadata(meta.runDir);
+    assert.strictEqual(updated.status, "error");
+    assert.match(updated.resultIssue ?? "", /placeholder/);
+    assert.strictEqual(readFileSync(join(meta.runDir, "result.md"), "utf8"), "Read-only investigation complete; deliverable provided in final response.");
+    const assessment = assessResultDeliverable(updated);
+    assert.strictEqual(assessment.resultReady, false);
+  });
+
+  it("marks premature one-shot done as error if captured final text is only a placeholder", async () => {
+    const meta = makeMeta({ mode: "oneshot", status: "running", harness: "generic", task: "deliver audit findings" });
+    writeMetadata(meta);
+    const cli = join(dirname(fileURLToPath(import.meta.url)), "cli.js");
+    const event = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Completed retrospective; final answer contains root causes and recommended changes." }] } };
+    const script = `const { spawnSync } = require('node:child_process');\nspawnSync(process.execPath, [${JSON.stringify(cli)}, 'status', 'done', 'premature status'], { env: process.env, stdio: 'inherit' });\nconsole.log(${JSON.stringify(JSON.stringify(event))});\n`;
+    const spec: CommandSpec = {
+      command: process.execPath,
+      args: ["-e", script],
+      cwd: tempHome,
+      env: { ...process.env, TANGO_HOME: tempHome, TANGO_RUN_DIR: meta.runDir } as Record<string, string>,
+      resultParser: "pi-json",
+    };
+
+    await runOneshot(meta, spec);
+
+    const updated = readMetadata(meta.runDir);
+    assert.strictEqual(updated.status, "error");
+    assert.match(updated.resultIssue ?? "", /placeholder/);
+    assert.strictEqual(readFileSync(join(meta.runDir, "result.md"), "utf8"), "Completed retrospective; final answer contains root causes and recommended changes.");
+  });
+
   it("extracts Pi turn_end and agent_end final message fixtures", async () => {
     for (const [name, event, expected] of [
       ["turn", { type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "turn final" }] } }, "turn final"],

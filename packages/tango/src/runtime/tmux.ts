@@ -5,7 +5,7 @@ export function hasTmux(): boolean {
   return spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 }
 
-export function startTmux(socket: string, session: string, spec: CommandSpec): void {
+export function startTmux(socket: string, session: string, spec: CommandSpec, transcriptPath?: string): void {
   if (!hasTmux()) throw new Error("tmux is not available on PATH");
   const shellCommand = shellJoin([spec.command, ...spec.args]);
   const envArgs = Object.entries(spec.env).map(([k, v]) => `${k}=${shellQuote(v)}`).join(" ");
@@ -15,6 +15,10 @@ export function startTmux(socket: string, session: string, spec: CommandSpec): v
     encoding: "utf8",
   });
   if (result.status !== 0) throw new Error(result.stderr || "failed to start tmux session");
+  if (transcriptPath) {
+    const pipe = spawnSync("tmux", ["-S", socket, "pipe-pane", "-o", "-t", session, `cat >> ${shellQuote(transcriptPath)}`], { encoding: "utf8" });
+    if (pipe.status !== 0) throw new Error(pipe.stderr || "failed to start tmux transcript capture");
+  }
 }
 
 export function captureTmux(socket: string, session: string, lines = 200): string {

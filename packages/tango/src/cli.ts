@@ -10,9 +10,9 @@ import { appendEvent, eventMatchesLineage, initialEventOffset, readEvents, type 
 import { resolveTarget, isChildOf } from "./targetResolver.js";
 import { getRecipientContext, markLatestDoneHandled, markResultHandled } from "./attention.js";
 import { listRoles, loadRole, assembleSystemPrompt } from "./roles.js";
-import { attachTmux, captureTmux, sendTmux, stopTmux } from "./runtime/tmux.js";
+import { attachTmux, captureTmux, sendTmux, stopTmux, tmuxAlive } from "./runtime/tmux.js";
 import { isTerminalStatus, reconcileAgentLifecycle } from "./lifecycle.js";
-import { assessResultDeliverable } from "./result.js";
+import { assessResultDeliverable, validateResultContent } from "./result.js";
 import type { AgentMetadata, AgentStatus, ThinkingLevel } from "./types.js";
 import { listArtifacts, publishArtifact, readServerDiscovery, revokeArtifact, startTangoServer } from "./server.js";
 
@@ -219,7 +219,9 @@ function cmdLook(parsed: Parsed, cwd: string, json: boolean) {
   const lines = flagPositiveInt(parsed.flags, "lines", 200, 5000);
   const meta = withMetrics(resolveTarget({ name, cwd, runId, runDir, env: process.env as any }));
   let text = "";
-  if (meta.mode === "interactive" && meta.status === "running") text = captureTmux(meta.tmuxSocket, meta.tmuxSession, lines);
+  if (meta.mode === "interactive" && tmuxAlive(meta.tmuxSocket, meta.tmuxSession)) text = captureTmux(meta.tmuxSocket, meta.tmuxSession, lines);
+  else if (meta.mode === "interactive" && existsSync(join(meta.runDir, "final-pane.log"))) text = tailFileByLines(join(meta.runDir, "final-pane.log"), lines);
+  else if (meta.mode === "interactive" && existsSync(join(meta.runDir, "tmux.log"))) text = tailFileByLines(join(meta.runDir, "tmux.log"), lines);
   else if (existsSync(join(meta.runDir, "output.log"))) text = tailFileByLines(join(meta.runDir, "output.log"), lines);
   else if (existsSync(join(meta.runDir, "result.md"))) text = readFileSync(join(meta.runDir, "result.md"), "utf8");
   if (json) printJson({ ok: true, agent: meta, output: text }); else process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
@@ -304,6 +306,7 @@ function cmdStatus(parsed: Parsed, json: boolean) {
   if (state === "done") enforceDoneResultPolicy(runDir, { resultFile: resultFileFlag, summaryOnly });
   if (resultFileFlag) finalizeResultFileBeforeDone(runDir, resultFileFlag);
   else if (state === "done" && summaryOnly) markSummaryOnlyResult(runDir);
+  if (state === "done") captureInteractiveTranscript(runDir);
   const meta = updateStatus(runDir, state, summary, { needs: flagString(parsed.flags, "needs") });
   if (json) printJson({ ok: true, agent: meta }); else console.log(`${meta.name}: ${meta.status}`);
 }
@@ -336,14 +339,26 @@ function markSummaryOnlyResult(runDir: string): void {
 function finalizeResultFileBeforeDone(runDir: string, resultFileFlag: string): void {
   const source = resolve(resultFileFlag);
   if (!existsSync(source)) throw new Error(`Result file not found: ${resultFileFlag}`);
-  const resultFile = join(runDir, "result.md");
-  writeFileSync(resultFile, readFileSync(source, "utf8"), "utf8");
+  const resultText = readFileSync(source, "utf8");
   const meta = readMetadata(runDir);
+  const validation = validateResultContent(meta, resultText, { enforceRequired: true });
+  if (!validation.ok) throw new Error(validation.issue ?? "Invalid result deliverable.");
+  const resultFile = join(runDir, "result.md");
+  writeFileSync(resultFile, resultText, "utf8");
   meta.resultFile = resultFile;
   meta.resultFinalizedAt = new Date().toISOString();
   delete meta.resultIssue;
   // Keep metadata.summary operational; result.md is the durable deliverable.
   writeMetadata(meta);
+}
+
+function captureInteractiveTranscript(runDir: string): void {
+  const meta = readMetadata(runDir);
+  if (meta.mode !== "interactive") return;
+  if (!tmuxAlive(meta.tmuxSocket, meta.tmuxSession)) return;
+  try {
+    writeFileSync(join(runDir, "final-pane.log"), captureTmux(meta.tmuxSocket, meta.tmuxSession, 5000), "utf8");
+  } catch {}
 }
 
 async function cmdWatch(parsed: Parsed, cwd: string, json: boolean) {

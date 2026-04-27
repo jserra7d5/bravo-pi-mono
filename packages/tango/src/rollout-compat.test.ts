@@ -70,6 +70,23 @@ describe("rollout compatibility", () => {
     }
   });
 
+  it("uses package status-protocol even when a stale user include exists", () => {
+    const home = tempHome();
+    try {
+      mkdirSync(join(home, "includes"), { recursive: true });
+      mkdirSync(join(home, "roles"), { recursive: true });
+      writeFileSync(join(home, "includes", "status-protocol.md"), "STALE STATUS: tango status done \"summary\"\n");
+      writeFileSync(join(home, "roles", "stale-check.md"), "---\nname: stale-check\nincludes: [status-protocol]\n---\nRole body\n");
+      const result = runCli(["roles", "show", "stale-check", "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" });
+      assert.strictEqual(result.status, 0, result.stderr);
+      const body = JSON.parse(result.stdout);
+      assert.match(body.system, /--result-file <path>/);
+      assert.doesNotMatch(body.system, /STALE STATUS/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("does not auto-start a server from tango start", () => {
     const home = tempHome();
     const cwd = tempHome();
@@ -156,6 +173,44 @@ describe("rollout compatibility", () => {
       assert.strictEqual(fetchedBody.result, "");
       assert.strictEqual(fetchedBody.resultReady, false);
       assert.match(fetchedBody.resultIssue, /summary-only/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects placeholder result files for required deliverables", () => {
+    const home = tempHome();
+    const cwd = tempHome();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "interactive-placeholder");
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "interactive-placeholder", runDir, cwd, mode: "interactive", task: "deliver audit findings", resultRequired: true })));
+      const source = join(cwd, "placeholder.md");
+      writeFileSync(source, "Read-only investigation complete; deliverable provided in final response.\n");
+      const result = runCli(["status", "done", "Short summary", "--result-file", source, "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.notStrictEqual(result.status, 0);
+      assert.match(JSON.parse(result.stdout).error, /placeholder/);
+      assert.strictEqual(existsSync(join(runDir, "result.md")), false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects suspiciously short report-like result files when a deliverable is required", () => {
+    const home = tempHome();
+    const cwd = tempHome();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "interactive-short-report");
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "interactive-short-report", runDir, cwd, mode: "interactive", task: "write a retrospective report", resultRequired: true })));
+      const source = join(cwd, "short.md");
+      writeFileSync(source, "Done.\n");
+      const result = runCli(["status", "done", "Short summary", "--result-file", source, "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.notStrictEqual(result.status, 0);
+      assert.match(JSON.parse(result.stdout).error, /suspiciously short/);
+      assert.strictEqual(existsSync(join(runDir, "result.md")), false);
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });

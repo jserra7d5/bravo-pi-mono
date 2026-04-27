@@ -13,6 +13,7 @@ import { buildClaudeCommand } from "./harnesses/claude.js";
 import { buildGeminiCommand } from "./harnesses/gemini.js";
 import { startTmux } from "./runtime/tmux.js";
 import { isTerminalStatus } from "./lifecycle.js";
+import { validateResultContent } from "./result.js";
 
 const HARNESSES = new Set(["pi", "claude", "gemini", "generic"]);
 const MODES = new Set(["oneshot", "interactive"]);
@@ -93,7 +94,7 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
   const running = transitionStatus(meta.runDir, "running");
   if (mode === "oneshot") startOneshotSupervisor(running, command);
   else {
-    try { startTmux(meta.tmuxSocket, meta.tmuxSession, command); }
+    try { startTmux(meta.tmuxSocket, meta.tmuxSession, command, join(meta.runDir, "tmux.log")); }
     catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       transitionStatus(meta.runDir, "error", `Interactive startup failed: ${message}`);
@@ -263,23 +264,29 @@ export async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promis
       if (buffer.trim()) processJsonLine(buffer);
       const current = readMetadata(meta.runDir);
       current.exitCode = code ?? (signal ? 128 : 0);
+      const resultText = (spec.resultParser ?? "pi-json") === "plain" ? plainOutput : finalText;
       if (isTerminalStatus(current.status)) {
-        writeMetadata(current);
-        appendStatusEvent({ ...current, status: current.status }, current.status);
+        if (current.status === "done" && !current.resultFinalizedAt) {
+          finalizeOneshotCapturedResult(current, resultFile, resultText, spec, errFile);
+          const finalized = readMetadata(meta.runDir);
+          if (finalized.resultIssue) {
+            finalized.status = "error";
+            finalized.summary = finalized.resultIssue;
+            writeMetadata(finalized);
+            appendStatusEvent(finalized, "done");
+          } else {
+            appendStatusEvent(finalized, finalized.status);
+          }
+        } else {
+          writeMetadata(current);
+          appendStatusEvent({ ...readMetadata(meta.runDir), status: current.status }, current.status);
+        }
         resolve();
         return;
       }
-      const resultText = (spec.resultParser ?? "pi-json") === "plain" ? plainOutput : finalText;
-      current.resultFile = resultFile;
-      writeFileSync(resultFile, resultText, "utf8");
-      current.resultFinalizedAt = new Date().toISOString();
-      if (resultText.trim() && current.exitCode === 0) delete current.resultIssue;
-      else if (current.exitCode !== 0) current.resultIssue = `Oneshot process exited with code ${current.exitCode}; raw output is preserved in output.log${existsSync(errFile) ? " and stderr.log" : ""}.`;
-      else current.resultIssue = (spec.resultParser ?? "pi-json") === "plain"
-        ? "Plain oneshot output was empty; raw output is preserved in output.log."
-        : "No final assistant text was extracted from the oneshot JSON stream; raw output is preserved in output.log.";
-      writeMetadata(current);
-      transitionStatus(meta.runDir, current.exitCode === 0 ? "done" : "error");
+      finalizeOneshotCapturedResult(current, resultFile, resultText, spec, errFile);
+      const finalized = readMetadata(meta.runDir);
+      transitionStatus(meta.runDir, current.exitCode === 0 && !finalized.resultIssue ? "done" : "error", finalized.resultIssue);
       resolve();
     });
     proc.on("error", (error: Error) => {
@@ -305,4 +312,18 @@ export async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promis
       } catch {}
     }
   });
+}
+
+function finalizeOneshotCapturedResult(current: AgentMetadata, resultFile: string, resultText: string, spec: CommandSpec, errFile: string): void {
+  current.resultFile = resultFile;
+  writeFileSync(resultFile, resultText, "utf8");
+  current.resultFinalizedAt = new Date().toISOString();
+  const validation = resultText.trim() ? validateResultContent(current, resultText, { enforceRequired: true, enforceReportLike: true }) : { ok: false, issue: undefined };
+  if (resultText.trim() && validation.ok && current.exitCode === 0) delete current.resultIssue;
+  else if (current.exitCode !== 0) current.resultIssue = `Oneshot process exited with code ${current.exitCode}; raw output is preserved in output.log${existsSync(errFile) ? " and stderr.log" : ""}.`;
+  else if (resultText.trim() && !validation.ok) current.resultIssue = validation.issue;
+  else current.resultIssue = (spec.resultParser ?? "pi-json") === "plain"
+    ? "Plain oneshot output was empty; raw output is preserved in output.log."
+    : "No final assistant text was extracted from the oneshot JSON stream; raw output is preserved in output.log.";
+  writeMetadata(current);
 }
