@@ -468,21 +468,20 @@ function flushTangoEvents(pi: ExtensionAPI, ctx: any) {
 
   if (!deliverable.length) return;
 
-  // Only mark seen for events that are actually being delivered.
-  for (const event of deliverable) {
-    markAttentionState(rec, event.runDir, event.eventId, "seen");
-  }
-
   const worst = deliverable.some((e) => e.status === "error") ? "error" : deliverable.some((e) => e.status === "blocked") ? "warning" : "success";
   const title = deliverable.length === 1 ? `Tango agent ${eventText(deliverable[0])}` : `${deliverable.length} Tango agents updated: ${deliverable.map((e) => `${e.agent}=${e.status}`).join(", ")}`;
   if (ctx?.hasUI) ctx.ui.notify(title, worst as NotifyLevel);
   const lines = deliverable.map((event) => `- ${eventText(event)}\n  Next step: ${suggestedAction(event)}`);
-  pi.sendMessage({
-    customType: "tango-agent-status",
-    content: `Tango internal wake-up${deliverable.length > 1 ? "s" : ""} (not a user request):\n\n${lines.join("\n")}\n\nInstructions for the parent agent:\n- Do not summarize this notification to the user.\n- Continue the active user task/autonomous workstream.\n- For done agents, inspect the result if it is relevant and integrate it into the ongoing work.\n- For blocked/error agents, inspect output and either resolve the blocker or report only if user input/intervention is actually needed.\n- Respond to the user only when the original task is complete, blocked, or requires a decision.`,
-    display: true,
-    details: { events: deliverable },
-  }, { deliverAs: "followUp", triggerTurn: true });
+  const wakeup = `Tango internal wake-up${deliverable.length > 1 ? "s" : ""} (not a user request):\n\n${lines.join("\n")}\n\nInstructions for the parent agent:\n- Do not summarize this notification to the user.\n- Continue the active user task/autonomous workstream.\n- For done agents, inspect the result if it is relevant and integrate it into the ongoing work.\n- For blocked/error agents, inspect output and either resolve the blocker or report only if user input/intervention is actually needed.\n- Respond to the user only when the original task is complete, blocked, or requires a decision.`;
+  try {
+    // Use a user-message wake-up rather than a custom-message prompt. In practice
+    // custom messages were recorded as delivered/seen but did not reliably start
+    // a new root-agent turn from this background watcher path.
+    pi.sendUserMessage(wakeup, { deliverAs: "followUp" });
+    for (const event of deliverable) markAttentionState(rec, event.runDir, event.eventId, "seen");
+  } catch (error) {
+    if (ctx?.hasUI) ctx.ui.notify(`Tango wake-up delivery failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+  }
 }
 
 export default function (pi: ExtensionAPI) {
