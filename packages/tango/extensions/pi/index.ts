@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -369,10 +369,36 @@ function stopEventWatcher() {
   flushTimer = undefined;
 }
 
+function reapDuplicateEventWatchers() {
+  const rootSessionId = process.env.TANGO_ROOT_SESSION_ID;
+  const workstreamId = process.env.TANGO_WORKSTREAM_ID;
+  if (!rootSessionId || !workstreamId) return;
+  let entries: string[] = [];
+  try { entries = readdirSync("/proc"); } catch { return; }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const pid = Number(entry);
+    if (!Number.isFinite(pid) || pid === process.pid || pid === watchProcess?.pid) continue;
+    try {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ");
+      if (!cmdline.includes(distCli) || !cmdline.includes(" watch ") || !cmdline.includes(" --json")) continue;
+      const cwd = readlinkSync(`/proc/${pid}/cwd`);
+      if (resolve(cwd) !== resolve(process.cwd())) continue;
+      const envText = readFileSync(`/proc/${pid}/environ`, "utf8");
+      if (!envText.includes(`TANGO_ROOT_SESSION_ID=${rootSessionId}\0`)) continue;
+      if (!envText.includes(`TANGO_WORKSTREAM_ID=${workstreamId}\0`)) continue;
+      try { process.kill(pid, "SIGTERM"); } catch {}
+    } catch {
+      // Process may have exited or belong to another user; ignore.
+    }
+  }
+}
+
 function startEventWatcher(pi: ExtensionAPI, ctx: any) {
   const key = currentWatcherKey();
   if (watchProcess && watcherKey !== key) stopEventWatcher();
   if (watchProcess) return;
+  reapDuplicateEventWatchers();
   watcherKey = key;
   const args = [distCli, "watch", "--json"];
   watchProcess = spawn(process.execPath, args, { cwd: process.cwd(), env: process.env as Record<string, string>, stdio: ["ignore", "pipe", "pipe"] });
