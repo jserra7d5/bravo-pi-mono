@@ -12,6 +12,10 @@ export function buildGenericCommand(meta: AgentMetadata, task: string): CommandS
       TANGO_HOME: process.env.TANGO_HOME ?? join(process.env.HOME ?? homedir(), ".tango"),
       TANGO_AGENT_NAME: meta.name,
       TANGO_RUN_DIR: meta.runDir,
+      ...(meta.runId ? { TANGO_RUN_ID: meta.runId } : {}),
+      ...(meta.parentRunDir ? { TANGO_PARENT_RUN_DIR: meta.parentRunDir } : {}),
+      ...(meta.rootSessionId ? { TANGO_ROOT_SESSION_ID: meta.rootSessionId } : {}),
+      ...(meta.workstreamId ? { TANGO_WORKSTREAM_ID: meta.workstreamId } : {}),
     },
     resultParser: "plain",
   };

@@ -65,4 +65,17 @@ Pi-harness Tango children also write best-effort metrics snapshots to `<runDir>/
 
 Recursive Claude roles receive CLI orchestration instructions and should delegate with `tango ... --json` commands. Loom integration remains outside Tango: Loom can pass context through environment variables and task prompts when it launches Tango agents.
 
+## Server/dashboard rollout checks
+
+Tango's CLI is designed to remain usable without the optional dashboard server running. Roll out the server/dashboard path with these compatibility checks:
+
+- `tango list --json`, `tango roles list`, and other read-only CLI commands should work with no `TANGO_SERVER_URL`, no `TANGO_SERVER_TOKEN`, and no discovery file.
+- `tango start ...` launches only the requested agent; it must not auto-start `tango server`. Start the dashboard explicitly with `tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]`.
+- Server discovery is read from `TANGO_SERVER_URL` + `TANGO_SERVER_TOKEN` when both are set; otherwise Tango falls back to `$TANGO_HOME/server/server.json` written by `tango server`.
+- `tango artifact publish` stores artifacts regardless of server availability. It prints/returns a URL only when server discovery is available; otherwise it returns the artifact id for later listing/serving.
+- Validate package rollout with:
+  - `npm test --workspace @bravo/tango`
+  - `npm run check --workspace @bravo/tango`
+  - `npm run build --workspace @bravo/tango`
+
 See `../../docs/specs/tango-v1/design.md`, `../../docs/specs/tango-events/design.md`, `../../docs/specs/tango-home-tooling/design.md`, and `../../docs/specs/tango-claude-code-runtime/design.md` for design details.

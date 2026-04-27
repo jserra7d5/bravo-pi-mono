@@ -4,17 +4,20 @@ import { join, resolve } from "node:path";
 import { runOneshotFromRuntime, startAgent } from "./start.js";
 import { projectSlug } from "./paths.js";
 import { fail, printJson } from "./json.js";
-import { findRunDir, listMetadata, readMetadata, removeRunDir, transitionStatus, updateStatus } from "./metadata.js";
+import { listMetadata, readMetadata, removeRunDir, transitionStatus, updateStatus } from "./metadata.js";
 import { readMetrics, writeMetrics } from "./metrics.js";
-import { appendEvent, eventMatchesCwd, initialEventOffset, readEvents, type TangoEvent } from "./events.js";
+import { appendEvent, eventMatchesLineage, initialEventOffset, readEvents, type TangoEvent } from "./events.js";
+import { resolveTarget, isChildOf } from "./targetResolver.js";
+import { getRecipientContext, markLatestDoneHandled, markSeen, shouldDeliverEvent, upsertAttentionFromEvent } from "./attention.js";
 import { listRoles, loadRole, assembleSystemPrompt } from "./roles.js";
 import { attachTmux, captureTmux, sendTmux, stopTmux } from "./runtime/tmux.js";
 import { isTerminalStatus, reconcileAgentLifecycle } from "./lifecycle.js";
 import type { AgentMetadata, AgentStatus, ThinkingLevel } from "./types.js";
+import { listArtifacts, publishArtifact, revokeArtifact, startTangoServer } from "./server.js";
 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
-const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive", "from-start", "tree", "children"]);
+const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 function parse(argv: string[]): Parsed {
@@ -53,6 +56,7 @@ async function main() {
   try {
     switch (cmd) {
       case "help": case "--help": case "-h": return help();
+      case "server": return await cmdServer(parsed);
       case "start": return await cmdStart(parsed, cwd, json);
       case "list": return cmdList(cwd, json, flagBool(parsed.flags, "all"));
       case "look": return cmdLook(parsed, cwd, json);
@@ -66,6 +70,7 @@ async function main() {
       case "wait": return await cmdWait(parsed, cwd, json);
       case "doctor": return cmdDoctor(parsed, cwd, json);
       case "metrics": return cmdMetrics(parsed, json);
+      case "artifact": return await cmdArtifact(parsed, cwd, json);
       case "reconcile": return cmdReconcile(parsed, cwd, json);
       case "runner": return await cmdRunner(parsed);
       case "result": return cmdResult(parsed, cwd, json);
@@ -75,6 +80,15 @@ async function main() {
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error), json);
   }
+}
+
+async function cmdServer(parsed: Parsed) {
+  await startTangoServer({
+    host: flagString(parsed.flags, "host"),
+    port: flagString(parsed.flags, "port") ? Number(flagString(parsed.flags, "port")) : undefined,
+    token: flagString(parsed.flags, "token"),
+    allowPrivateBind: flagBool(parsed.flags, "allow-private-bind"),
+  });
 }
 
 async function cmdStart(parsed: Parsed, cwd: string, json: boolean) {
@@ -115,7 +129,7 @@ function cmdList(cwd: string, json: boolean, all: boolean) {
 function cmdLook(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
   if (!name) throw new Error("Usage: tango look <name>");
-  const meta = withMetrics(loadByName(name, cwd));
+  const meta = withMetrics(resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any }));
   const lines = Number(flagString(parsed.flags, "lines") ?? "200");
   let text = "";
   if (meta.mode === "interactive" && meta.status === "running") text = captureTmux(meta.tmuxSocket, meta.tmuxSession, lines);
@@ -127,14 +141,16 @@ function cmdLook(parsed: Parsed, cwd: string, json: boolean) {
 function cmdAttach(parsed: Parsed, cwd: string) {
   const [name] = parsed.positionals;
   if (!name) throw new Error("Usage: tango attach <name>");
-  const meta = loadByName(name, cwd);
+  const meta = resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any });
+  if (meta.mode !== "interactive") throw new Error(`Agent ${meta.name} is not interactive (mode=${meta.mode}). Attach only works with interactive agents.`);
   attachTmux(meta.tmuxSocket, meta.tmuxSession);
 }
 
 function cmdMessage(parsed: Parsed, cwd: string, json: boolean) {
   const [name, ...msg] = parsed.positionals;
   if (!name || msg.length === 0) throw new Error("Usage: tango message <name> <message>");
-  const meta = loadByName(name, cwd);
+  const meta = resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any });
+  if (meta.mode !== "interactive") throw new Error(`Agent ${meta.name} is not interactive (mode=${meta.mode}). Message only works with interactive agents.`);
   sendTmux(meta.tmuxSocket, meta.tmuxSession, msg.join(" "));
   if (json) printJson({ ok: true }); else console.log("sent");
 }
@@ -142,7 +158,7 @@ function cmdMessage(parsed: Parsed, cwd: string, json: boolean) {
 function cmdStop(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
   if (!name) throw new Error("Usage: tango stop <name>");
-  const meta = loadByName(name, cwd);
+  const meta = resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any });
   stopTmux(meta.tmuxSocket, meta.tmuxSession);
   transitionStatus(meta.runDir, "stopped");
   const stopped = readMetadata(meta.runDir);
@@ -152,7 +168,7 @@ function cmdStop(parsed: Parsed, cwd: string, json: boolean) {
 function cmdDelete(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
   if (!name) throw new Error("Usage: tango delete <name>");
-  const meta = loadByName(name, cwd);
+  const meta = resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any });
   stopTmux(meta.tmuxSocket, meta.tmuxSession);
   removeRunDir(meta.runDir);
   if (json) printJson({ ok: true }); else console.log(`${name}: deleted`);
@@ -178,7 +194,10 @@ async function cmdWatch(parsed: Parsed, cwd: string, json: boolean) {
     state = next.state;
     for (const error of next.errors) if (!json) console.error(`tango watch: skipped malformed event: ${error}`);
     for (const event of next.events) {
-      if (!all && !eventMatchesCwd(event, cwd)) continue;
+      if (!all && !eventMatchesLineage(event, cwd)) continue;
+      const rec = getRecipientContext();
+      upsertAttentionFromEvent(event, rec);
+      markSeen(rec, event.runDir, event.eventId);
       printEvent(event, json);
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -192,11 +211,20 @@ function printEvent(event: TangoEvent, json: boolean) {
 
 async function cmdChildren(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
-  const parentRunDir = name ? loadByName(name, cwd).runDir : process.env.TANGO_RUN_DIR;
-  if (!parentRunDir) throw new Error("Usage: tango children [parent-name] (or run inside a Tango agent)");
-  const agents = listMetadata(undefined).map(refreshStatus).map(withMetrics).filter((a) => a.parentRunDir === parentRunDir);
-  if (json) return printJson({ ok: true, parentRunDir, agents, tree: childTree(agents, parentRunDir) });
-  if (flagBool(parsed.flags, "tree")) return console.log(renderChildTree(agents, parentRunDir));
+  let parentMeta: AgentMetadata | undefined;
+  if (name) {
+    parentMeta = resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any });
+  } else {
+    const runDir = flagString(parsed.flags, "run-dir") ?? process.env.TANGO_RUN_DIR;
+    if (runDir) {
+      try { parentMeta = readMetadata(runDir); } catch {}
+    }
+  }
+  if (!parentMeta) throw new Error("Usage: tango children [parent-name] (or run inside a Tango agent, or pass --run-dir)");
+  const agents = listMetadata(undefined).map(refreshStatus).map(withMetrics).filter((a) => isChildOf(a, parentMeta!));
+  const tree = childTree(parentMeta);
+  if (json) return printJson({ ok: true, parentRunDir: parentMeta.runDir, agents, tree });
+  if (flagBool(parsed.flags, "tree")) return console.log(renderChildTree(tree));
   if (!agents.length) return console.log("No child agents.");
   for (const a of agents) console.log(`${a.name.padEnd(18)} ${a.status.padEnd(8)} ${a.role ?? "-"} ${a.mode}/${a.harness} ${a.task}`);
 }
@@ -206,9 +234,17 @@ async function cmdWait(parsed: Parsed, cwd: string, json: boolean) {
   if (!names.length) throw new Error("Usage: tango wait <name...>");
   const timeoutMs = Number(flagString(parsed.flags, "timeout") ?? "0") * 1000;
   const start = Date.now();
+  // Resolve targets once so they cannot change mid-loop
+  const targets = names.map((name) =>
+    resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any })
+  );
   while (true) {
-    const agents = names.map((name) => withMetrics(loadByName(name, cwd)));
+    const agents = targets.map((meta) => withMetrics(refreshStatus(readMetadata(meta.runDir))));
     if (agents.every((a) => isTerminalStatus(a.status))) {
+      const rec = getRecipientContext();
+      for (const a of agents) {
+        if (a.status === "done") markLatestDoneHandled(rec, a.runDir);
+      }
       if (json) return printJson({ ok: true, agents });
       for (const a of agents) console.log(`${a.name}: ${a.status}${a.summary ? ` - ${a.summary}` : ""}`);
       return;
@@ -244,15 +280,13 @@ function cmdDoctor(parsed: Parsed, cwd: string, json: boolean) {
   if (json) printJson({ ok: true, event }); else console.log(`emitted ${event.eventId}`);
 }
 
-function childTree(agents: AgentMetadata[], parentRunDir: string): any[] {
-  const byParent = new Map<string, AgentMetadata[]>();
-  for (const a of listMetadata(undefined).map(refreshStatus).map(withMetrics)) if (a.parentRunDir) byParent.set(a.parentRunDir, [...(byParent.get(a.parentRunDir) ?? []), a]);
-  const rec = (runDir: string): any[] => (byParent.get(runDir) ?? []).map((a) => ({ agent: a, children: rec(a.runDir) }));
-  return rec(parentRunDir);
+function childTree(parent: AgentMetadata): any[] {
+  const all = listMetadata(undefined).map(refreshStatus).map(withMetrics);
+  const rec = (p: AgentMetadata): any[] => all.filter((a) => isChildOf(a, p)).map((a) => ({ agent: a, children: rec(a) }));
+  return rec(parent);
 }
 
-function renderChildTree(agents: AgentMetadata[], parentRunDir: string): string {
-  const tree = childTree(agents, parentRunDir);
+function renderChildTree(tree: any[]): string {
   const lines: string[] = [];
   const rec = (nodes: any[], depth = 0) => {
     for (const n of nodes) {
@@ -268,9 +302,10 @@ function renderChildTree(agents: AgentMetadata[], parentRunDir: string): string 
 function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
   if (!name) throw new Error("Usage: tango result <name>");
-  const meta = loadByName(name, cwd);
+  const meta = resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any });
   const file = join(meta.runDir, "result.md");
   const result = existsSync(file) ? readFileSync(file, "utf8") : (meta.summary ?? "");
+  markLatestDoneHandled(getRecipientContext(), meta.runDir);
   if (json) printJson({ ok: true, agent: meta, result }); else process.stdout.write(result.endsWith("\n") ? result : `${result}\n`);
 }
 
@@ -310,9 +345,48 @@ function selectReconcileAgents(parsed: Parsed, cwd: string): AgentMetadata[] {
   if (flagBool(parsed.flags, "children")) {
     const parentRunDir = flagString(parsed.flags, "parent-run-dir") ?? process.env.TANGO_RUN_DIR;
     if (!parentRunDir) throw new Error("No parent run dir. Set TANGO_RUN_DIR or pass --parent-run-dir.");
-    return listMetadata(undefined).filter((a) => a.parentRunDir === parentRunDir);
+    let parentMeta: AgentMetadata | undefined;
+    try { parentMeta = readMetadata(parentRunDir); } catch {}
+    if (parentMeta) {
+      return listMetadata(undefined).filter((a) => isChildOf(a, parentMeta!));
+    }
+    const norm = resolve(parentRunDir);
+    return listMetadata(undefined).filter((a) => a.parentRunDir && resolve(a.parentRunDir) === norm);
   }
   return listMetadata(flagBool(parsed.flags, "all") ? undefined : cwd);
+}
+
+async function cmdArtifact(parsed: Parsed, cwd: string, json: boolean) {
+  const [sub, artifactPath] = parsed.positionals;
+  if (sub === "publish") {
+    if (!artifactPath) throw new Error("Usage: tango artifact publish <path> [--title title] [--entry file] [--mime type]");
+    const artifact = await publishArtifact(artifactPath, {
+      title: flagString(parsed.flags, "title"),
+      entry: flagString(parsed.flags, "entry"),
+      mime: flagString(parsed.flags, "mime"),
+      ownerRunDir: flagString(parsed.flags, "run-dir") ?? process.env.TANGO_RUN_DIR,
+      cwd,
+    });
+    if (json) return printJson({ ok: true, artifact });
+    console.log(artifact.url ?? artifact.artifactId);
+    return;
+  }
+  if (sub === "list") {
+    const artifacts = listArtifacts();
+    if (json) return printJson({ ok: true, artifacts });
+    if (!artifacts.length) return console.log("No artifacts.");
+    for (const a of artifacts) console.log(`${a.artifactId.padEnd(18)} ${a.revokedAt ? "revoked" : "active"} ${a.title ?? a.entry}`);
+    return;
+  }
+  if (sub === "revoke") {
+    const artifactId = artifactPath;
+    if (!artifactId) throw new Error("Usage: tango artifact revoke <artifact-id>");
+    const artifact = revokeArtifact(artifactId);
+    if (json) return printJson({ ok: true, artifact });
+    console.log(`${artifactId}: revoked`);
+    return;
+  }
+  throw new Error("Usage: tango artifact publish|list|revoke ...");
 }
 
 function cmdMetrics(parsed: Parsed, json: boolean) {
@@ -338,18 +412,12 @@ function isAgentStatus(status: string): status is AgentStatus {
   return status === "created" || status === "running" || status === "done" || status === "error" || status === "blocked" || status === "stopped" || status === "unknown";
 }
 
-function loadByName(name: string, cwd: string) {
-  const runDir = findRunDir(name, cwd);
-  if (!runDir) throw new Error(`Agent not found: ${name}`);
-  return refreshStatus(readMetadata(runDir));
-}
-
 function refreshStatus(meta: AgentMetadata): AgentMetadata {
   return reconcileAgentLifecycle(meta);
 }
 
 function help() {
-  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--lines N] [--json]\n  tango attach <name>\n  tango message <name> <message>\n  tango stop <name>\n  tango delete <name>\n  tango status <state> [message] [--needs kind]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--tree] [--json]\n  tango wait <name...> [--timeout seconds] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <name>\n  tango roles list|show <name>\n`);
+  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--run-id <id>] [--run-dir <dir>] [--lines N] [--json]\n  tango attach <name> [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango status <state> [message] [--needs kind]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango wait <name...> [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <name> [--run-id <id>] [--run-dir <dir>]\n  tango roles list|show <name>\n`);
 }
 
 main();

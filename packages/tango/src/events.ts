@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { AgentMetadata, AgentStatus } from "./types.js";
 import { dataRoot, projectSlug } from "./paths.js";
@@ -17,7 +17,11 @@ export type TangoEvent = {
   cwd: string;
   projectSlug: string;
   runDir: string;
+  runId?: string;
+  parentRunId?: string;
   parentRunDir?: string;
+  rootSessionId?: string;
+  workstreamId?: string;
 };
 
 export type EventReadState = { offset: number; carry: string };
@@ -41,7 +45,11 @@ export function appendStatusEvent(meta: AgentMetadata, previousStatus?: AgentSta
     cwd: meta.cwd,
     projectSlug: projectSlug(meta.cwd),
     runDir: meta.runDir,
+    runId: meta.runId,
+    parentRunId: meta.parentRunId,
     parentRunDir: meta.parentRunDir,
+    rootSessionId: meta.rootSessionId,
+    workstreamId: meta.workstreamId,
   };
   appendEvent(event);
   return event;
@@ -89,4 +97,81 @@ export function readEvents(state: EventReadState): { events: TangoEvent[]; state
 
 export function eventMatchesCwd(event: TangoEvent, cwd: string): boolean {
   return event.projectSlug === projectSlug(resolve(cwd));
+}
+
+export function eventMatchesLineage(event: TangoEvent, cwd: string): boolean {
+  const envRunId = process.env.TANGO_RUN_ID;
+  const envRunDir = process.env.TANGO_RUN_DIR;
+  const envRoot = process.env.TANGO_ROOT_SESSION_ID;
+  const envWs = process.env.TANGO_WORKSTREAM_ID;
+
+  const currentHasLineage = !!(envRunId || envRunDir || envRoot || envWs);
+  if (currentHasLineage) {
+    // High-confidence: direct run lineage (self or child)
+    if (envRunId) {
+      if (event.runId === envRunId || event.parentRunId === envRunId) return true;
+    }
+    if (envRunDir) {
+      const normEnvRunDir = resolve(envRunDir);
+      if (resolve(event.runDir) === normEnvRunDir || (event.parentRunDir && resolve(event.parentRunDir) === normEnvRunDir)) return true;
+    }
+    if (eventIsDescendantOfCurrentRun(event, envRunId, envRunDir)) return true;
+
+    // Lower-confidence root/workstream (conjunctive if both present)
+    if (envRoot || envWs) {
+      const rootMatch = envRoot ? event.rootSessionId === envRoot : true;
+      const wsMatch = envWs ? event.workstreamId === envWs : true;
+      if (rootMatch && wsMatch) return true;
+    }
+
+    // Explicit lineage exists but event does not match: do NOT fall back to cwd
+    return false;
+  }
+
+  // No usable lineage on current side: fallback to cwd
+  return eventMatchesCwd(event, cwd);
+}
+
+function eventIsDescendantOfCurrentRun(event: TangoEvent, envRunId?: string, envRunDir?: string): boolean {
+  if (!envRunId && !envRunDir) return false;
+  const all = listEventMetadata();
+  const byRunId = new Map<string, AgentMetadata>();
+  const byRunDir = new Map<string, AgentMetadata>();
+  for (const meta of all) {
+    if (meta.runId) byRunId.set(meta.runId, meta);
+    byRunDir.set(resolve(meta.runDir), meta);
+  }
+  let current = event.runId ? byRunId.get(event.runId) : undefined;
+  if (!current && event.runDir) current = byRunDir.get(resolve(event.runDir));
+  const targetRunDir = envRunDir ? resolve(envRunDir) : undefined;
+  const visited = new Set<string>();
+  while (current) {
+    const key = current.runId ?? resolve(current.runDir);
+    if (visited.has(key)) return false;
+    visited.add(key);
+    const parentRunId = current.parentRunId;
+    const parentRunDir = current.parentRunDir;
+    if (envRunId && parentRunId === envRunId) return true;
+    if (targetRunDir && parentRunDir && resolve(parentRunDir) === targetRunDir) return true;
+    current = parentRunId ? byRunId.get(parentRunId) : undefined;
+    if (!current && parentRunDir) current = byRunDir.get(resolve(parentRunDir));
+  }
+  return false;
+}
+
+function listEventMetadata(): AgentMetadata[] {
+  const runs = join(dataRoot(), "runs");
+  if (!existsSync(runs)) return [];
+  const metas: AgentMetadata[] = [];
+  for (const project of readdirSync(runs)) {
+    const root = join(runs, project);
+    if (!existsSync(root)) continue;
+    for (const name of readdirSync(root)) {
+      const runDir = join(root, name);
+      const metadataFile = join(runDir, "metadata.json");
+      if (!existsSync(metadataFile)) continue;
+      try { metas.push(JSON.parse(readFileSync(metadataFile, "utf8")) as AgentMetadata); } catch {}
+    }
+  }
+  return metas;
 }

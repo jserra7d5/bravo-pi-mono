@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { StringEnum } from "@mariozechner/pi-ai";
@@ -21,7 +21,7 @@ let watchProcess: ChildProcessWithoutNullStreams | undefined;
 let reconcileTimer: ReturnType<typeof setInterval> | undefined;
 let pendingEvents: any[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
-const deliveredEvents = loadDeliveredEvents();
+
 
 async function runTango(args: string[], signal?: AbortSignal): Promise<ExecResult> {
   const candidates: Array<{ command: string; args: string[] }> = [
@@ -248,28 +248,19 @@ function addCwd(args: string[], cwd?: string): string[] {
   return cwd ? [...args, "--cwd", cwd] : args;
 }
 
-function deliveryStatePath(): string {
-  const root = process.env.TANGO_HOME || join(process.env.HOME || process.cwd(), ".tango");
-  const key = process.env.TANGO_RUN_DIR || process.cwd();
-  const hash = createHash("sha1").update(key).digest("hex").slice(0, 12);
-  return join(root, "deliveries", `pi-${hash}.json`);
-}
-
-function loadDeliveredEvents(): Set<string> {
-  try {
-    const path = deliveryStatePath();
-    if (!existsSync(path)) return new Set();
-    const data = JSON.parse(readFileSync(path, "utf8"));
-    return new Set(Array.isArray(data.eventIds) ? data.eventIds : []);
-  } catch { return new Set(); }
-}
-
-function persistDeliveredEvents() {
-  const path = deliveryStatePath();
-  mkdirSync(dirname(path), { recursive: true });
-  const eventIds = [...deliveredEvents].slice(-1000);
-  writeFileSync(path, JSON.stringify({ updatedAt: new Date().toISOString(), eventIds }, null, 2) + "\n", "utf8");
-}
+// Import durable attention store from compiled dist to avoid duplicating logic.
+// The extension already depends on dist/cli.js at runtime; this is consistent.
+// @ts-ignore: dist has no declarations, but the module exists at runtime.
+import {
+  attentionStorePath,
+  upsertAttentionFromEvent,
+  shouldDeliverEvent,
+  markAttentionState,
+  getRecipientContext,
+  type AttentionRecord,
+  type RecipientContext,
+  type AttentionState,
+} from "../../dist/attention.js";
 
 function startParentReconciler(ctx: any) {
   if (reconcileTimer || !process.env.TANGO_RUN_DIR) return;
@@ -298,12 +289,22 @@ function handleTangoEventLine(pi: ExtensionAPI, ctx: any, line: string) {
   let event: any;
   try { event = JSON.parse(line); } catch { return; }
   if (event.type !== "agent.status") return;
-  if (!event.eventId || deliveredEvents.has(event.eventId)) return;
   if (!["done", "blocked", "error"].includes(event.status)) return;
+  // Pi delivery uses direct-child filtering (stricter than eventMatchesLineage).
+  // We intentionally only notify about immediate children, not all lineage matches.
   const parentRunDir = process.env.TANGO_RUN_DIR;
-  if (parentRunDir && event.parentRunDir !== parentRunDir) return;
-  deliveredEvents.add(event.eventId);
-  persistDeliveredEvents();
+  const parentRunId = process.env.TANGO_RUN_ID;
+  const hasLineage = !!(parentRunDir || parentRunId);
+  let isDirectChild = false;
+  if (parentRunId && event.parentRunId === parentRunId) isDirectChild = true;
+  if (parentRunDir && event.parentRunDir) {
+    if (resolve(event.parentRunDir) === resolve(parentRunDir)) isDirectChild = true;
+  }
+  if (hasLineage && !isDirectChild) return;
+  const rec = getRecipientContext();
+  upsertAttentionFromEvent(event, rec);
+  if (!shouldDeliverEvent(event, rec)) return;
+  markAttentionState(rec, event.runDir, event.eventId, "delivered");
   pendingEvents.push(event);
   if (!flushTimer) flushTimer = setTimeout(() => flushTangoEvents(pi, ctx), 500);
 }
@@ -323,15 +324,36 @@ function flushTangoEvents(pi: ExtensionAPI, ctx: any) {
   pendingEvents = [];
   flushTimer = undefined;
   if (!events.length) return;
-  const worst = events.some((e) => e.status === "error") ? "error" : events.some((e) => e.status === "blocked") ? "warning" : "success";
-  const title = events.length === 1 ? `Tango agent ${eventText(events[0])}` : `${events.length} Tango agents updated: ${events.map((e) => `${e.agent}=${e.status}`).join(", ")}`;
+  const rec = getRecipientContext();
+
+  // Re-filter stale/superseded events against current shouldDeliverEvent and
+  // coalesce by target runDir to the latest unresolved event per target.
+  const seenRunDirs = new Set<string>();
+  const deliverable: typeof events = [];
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (!shouldDeliverEvent(event, rec)) continue;
+    if (seenRunDirs.has(event.runDir)) continue;
+    seenRunDirs.add(event.runDir);
+    deliverable.unshift(event);
+  }
+
+  if (!deliverable.length) return;
+
+  // Only mark seen for events that are actually being delivered.
+  for (const event of deliverable) {
+    markAttentionState(rec, event.runDir, event.eventId, "seen");
+  }
+
+  const worst = deliverable.some((e) => e.status === "error") ? "error" : deliverable.some((e) => e.status === "blocked") ? "warning" : "success";
+  const title = deliverable.length === 1 ? `Tango agent ${eventText(deliverable[0])}` : `${deliverable.length} Tango agents updated: ${deliverable.map((e) => `${e.agent}=${e.status}`).join(", ")}`;
   if (ctx?.hasUI) ctx.ui.notify(title, worst as NotifyLevel);
-  const lines = events.map((event) => `- ${eventText(event)}\n  Suggested: ${suggestedAction(event)}`);
+  const lines = deliverable.map((event) => `- ${eventText(event)}\n  Suggested: ${suggestedAction(event)}`);
   pi.sendMessage({
     customType: "tango-agent-status",
-    content: `Tango status update${events.length > 1 ? "s" : ""}:\n\n${lines.join("\n")}\n\nTreat this as a wake-up only; inspect child output/result before summarizing or taking action.`,
+    content: `Tango status update${deliverable.length > 1 ? "s" : ""}:\n\n${lines.join("\n")}\n\nTreat this as a wake-up only; inspect child output/result before summarizing or taking action.`,
     display: true,
-    details: { events },
+    details: { events: deliverable },
   }, { deliverAs: "followUp", triggerTurn: true });
 }
 
