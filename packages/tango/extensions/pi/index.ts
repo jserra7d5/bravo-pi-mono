@@ -401,7 +401,10 @@ function startEventWatcher(pi: ExtensionAPI, ctx: any) {
   if (watchProcess) return;
   reapDuplicateEventWatchers();
   watcherKey = key;
-  const args = [distCli, "watch", "--json"];
+  // Use --all here and let the extension apply its own delivery filter. The CLI
+  // watch command's lineage filter uses the watcher's env, which can diverge
+  // from agents started via long-lived server/tool processes during reloads.
+  const args = [distCli, "watch", "--json", "--all"];
   watchProcess = spawn(process.execPath, args, { cwd: process.cwd(), env: process.env as Record<string, string>, stdio: ["ignore", "pipe", "pipe"] });
   let buffer = "";
   watchProcess.stdout.on("data", (chunk) => {
