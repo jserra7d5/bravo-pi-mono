@@ -127,15 +127,18 @@ test('multiple looms under one container resolve by current and local name', () 
   const w = workspace();
   mkdirSync(w.outside, { recursive: true });
 
-  let r = jsonRun(['init', '--name', 'main', '--title', 'Main Loom'], { cwd: w.cwd, home: w.home });
+  let r = jsonRun(['create', 'main', '--title', 'Main Loom'], { cwd: w.cwd, home: w.home });
   assert.equal(r.data.path, join(w.cwd, '.loom/looms/main'));
 
-  r = jsonRun(['create-loom', '--name', 'feature-a', '--title', 'Feature A'], { cwd: w.cwd, home: w.home });
+  r = jsonRun(['create', 'feature-a', '--title', 'Feature A'], { cwd: w.cwd, home: w.home });
   assert.equal(r.data.path, join(w.cwd, '.loom/looms/feature-a'));
 
   r = jsonRun(['list'], { cwd: w.cwd, home: w.home });
-  assert.equal(r.data.current, 'main');
+  assert.equal(r.data.current, 'feature-a');
   assert.deepEqual(r.data.looms.map((l: any) => l.name).sort(), ['feature-a', 'main']);
+
+  r = jsonRun(['switch', 'main'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.current, 'main');
 
   r = jsonRun(['node', 'create', '--title', 'Main node'], { cwd: w.cwd, home: w.home });
   assert.equal(r.data.node.id, 'N-0001');
@@ -153,6 +156,23 @@ test('multiple looms under one container resolve by current and local name', () 
   r = jsonRun(['node', 'list'], { cwd: w.cwd, home: w.home });
   assert.match(JSON.stringify(r.data.nodes), /Feature node/);
   assert.doesNotMatch(JSON.stringify(r.data.nodes), /Main node/);
+});
+
+test('top-level create initializes or creates a Loom workstream', () => {
+  const w = workspace();
+  let r = jsonRun(['create', 'implementation-plan', '--title', 'Implementation Plan'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.loom.name, 'implementation-plan');
+  assert.equal(r.data.current, undefined);
+  assert.ok(existsSync(join(w.cwd, '.loom/config.json')));
+
+  r = jsonRun(['create', 'follow-up-plan'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.loom.name, 'follow-up-plan');
+  assert.equal(r.data.loom.title, 'Follow Up Plan');
+  assert.equal(r.data.current, 'follow-up-plan');
+
+  r = jsonRun(['list'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.current, 'follow-up-plan');
+  assert.deepEqual(r.data.looms.map((l: any) => l.name).sort(), ['follow-up-plan', 'implementation-plan']);
 });
 
 test('json error envelope has stable code', () => {

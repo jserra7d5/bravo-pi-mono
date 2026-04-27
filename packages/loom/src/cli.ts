@@ -51,6 +51,7 @@ function run(argv0: string[]) {
     case 'init': return cmdInit(rest, globals);
     case 'list': return cmdList(rest, globals);
     case 'switch': return cmdSwitch(rest, globals);
+    case 'create': return cmdCreateTopLevel(rest, globals);
     case 'create-loom': return cmdCreateLoom(rest, globals);
     case 'node': return withCtx(globals, rest, c=>cmdNode(c, rest));
     case 'edge': return withCtx(globals, rest, c=>cmdEdge(c, rest));
@@ -86,10 +87,11 @@ function out(s:string){ console.log(s); }
 function outData(data:unknown){ console.log(globalJson ? json({ok:true,status:'ok',data,warnings:[],next_steps:[]}) : human(data)); }
 function human(v:any): string { if(typeof v==='string') return v; if(Array.isArray(v)) return v.map(human).join('\n'); return JSON.stringify(v,null,2); }
 
-function help(){ out(`loom ${VERSION}\n\nUsage: loom [-L loom] <command> [args]\n\nCommands: init, list, switch, create-loom, node, edge, note, index rebuild, search, context, graph, patch, draft, lock, schema, artifact, reference, registry, agent, inbox, notify, spawn, dispatch\n\nAgents: run 'loom agent guide' for a compact Loom operating guide.\nHelp: run 'loom <command> --help' for command-specific usage.`); }
+function help(){ out(`loom ${VERSION}\n\nUsage: loom [-L loom] <command> [args]\n\nCommands: init, create, list, switch, create-loom, node, edge, note, index rebuild, search, context, graph, patch, draft, lock, schema, artifact, reference, registry, agent, inbox, notify, spawn, dispatch\n\nAgents: run 'loom agent guide' for a compact Loom operating guide.\nHelp: run 'loom <command> --help' for command-specific usage.`); }
 function commandHelp(cmd:string, rest:string[]){
   const topic = [cmd, ...rest].join(' ').trim();
   const docs:Record<string,string>={
+    create:`Usage: loom create <name> [--title <title>] [--workspace id=path]\n\nCreate a fresh Loom workstream. If the current directory has no .loom container, this initializes one. If a .loom container already exists, this creates a new Loom inside it. For graph nodes, use: loom node create --title \"Node title\".`,
     'create-loom':`Usage: loom create-loom --name <name> --title <title> [--workspace id=path]\n\nCreate a new Loom inside an existing .loom container. Use this for a fresh workstream when the repo already has Loom initialized. If no .loom container exists yet, use: loom init --name <name> --title <title>.`,
     node:`Usage: loom [-L loom] node <create|show|update|list> ...\n\ncreate [--title text|title words] [--kind kind] [--parent N-0001] [--summary text] [--tag tag]\nshow <node>\nupdate <node> [--title text] [--kind kind] [--state state] [--parent N-0001|none] [--summary text] [--tag tag]\nlist [--kind kind] [--state state] [--parent N-0001|none]`,
     edge:`Usage: loom [-L loom] edge <add|list|types> ...\n\nadd <from-node> --to <to-node> [--type relationship]\nlist [node]\ntypes`,
@@ -102,11 +104,11 @@ function commandHelp(cmd:string, rest:string[]){
     reference:`Usage: loom [-L loom] reference <add|list> <node> [path] [--workspace id] [--label text] [--kind kind]\n\nAdd/list file references. Duplicate references are treated as successful no-ops.`,
     note:`Usage: loom [-L loom] note <node> [message | --stdin]\n       loom [-L loom] note add <node> [message | --stdin]\n       loom [-L loom] note list <node>\n       loom [-L loom] note retract <node:note:n> --reason text\n\nAppend/list/retract durable notes. Use --stdin for nontrivial note bodies.`,
   };
-  if(cmd==='create') return out(`Removed command: loom create\n\nUse one of:\n  loom node create --title \"Node title\" [--kind task] [--parent N-0001]\n  loom create-loom --name <name> --title \"Loom title\"\n`);
   out(docs[topic] || docs[cmd] || `No command-specific help for ${topic}. Run 'loom --help'.`);
 }
 
 function cmdInit(args:string[], globals:Obj){ const cwd=resolve(globals.cwd||process.cwd()); const container=join(cwd,'.loom'); if(existsSync(container)) throw new LoomError('REGISTRY_CONFLICT','Loom container already exists here'); mkdirSync(join(container,'looms'),{recursive:true}); writeAtomic(join(container,'config.json'), JSON.stringify({schemaVersion:1,kind:'loom-container',root:'.'},null,2)+'\n'); const result=createLoomInContainer(container,cwd,args); writeAtomic(join(container,'current'), result.config.name+'\n'); outData({loom:result.config, path:result.loom, container}); }
+function cmdCreateTopLevel(args:string[], globals:Obj){ const positional=args.find(a=>!a.startsWith('-') && a!==flag(args,'--title') && a!==flag(args,'--workspace') && a!==flag(args,'--name')); const name=flag(args,'--name')||positional; if(!name) throw new LoomError('INVALID_ARGUMENT','loom name required',undefined,2,{fix:'Use: loom create <name> --title "Title"',transient:false}); const title=flag(args,'--title')||name.split(/[-_]+/).filter(Boolean).map(s=>s[0]?.toUpperCase()+s.slice(1)).join(' ')||name; const nextArgs=[...args.filter(a=>a!==positional),'--name',name,'--title',title]; const root=resolve(globals.cwd||process.cwd()); const container=findContainer(root); if(container){ const result=createLoomInContainer(container,dirname(container),nextArgs); writeAtomic(join(container,'current'), result.config.name+'\n'); return outData({loom:result.config,path:result.loom,container,current:result.config.name}); } return cmdInit(nextArgs,globals); }
 function cmdCreateLoom(args:string[], globals:Obj){ const root=resolve(globals.cwd||process.cwd()); const container=findContainer(root); if(!container) throw new LoomError('LOOM_NOT_FOUND','could not find Loom container; run loom init first'); const result=createLoomInContainer(container,dirname(container),args); outData({loom:result.config,path:result.loom,container}); }
 function cmdList(args:string[], globals:Obj){ const container=findContainer(globals.cwd||process.cwd()); if(!container) throw new LoomError('LOOM_NOT_FOUND','could not find Loom container'); const current=readCurrent(container); const looms=listLocalLooms(container); outData({container,current,looms}); }
 function cmdSwitch(args:string[], globals:Obj){ const name=args[0]; if(!name) throw new LoomError('INVALID_ARGUMENT','loom name required',undefined,2); const container=findContainer(globals.cwd||process.cwd()); if(!container) throw new LoomError('LOOM_NOT_FOUND','could not find Loom container'); const loom=localLoomPath(container,name); if(!loom) throw new LoomError('LOOM_NOT_FOUND',`unknown local Loom ${name}`); writeAtomic(join(container,'current'), basename(loom)+'\n'); outData({current:basename(loom), loomPath:loom}); }
