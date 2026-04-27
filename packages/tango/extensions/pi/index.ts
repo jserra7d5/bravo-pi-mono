@@ -20,6 +20,8 @@ type NotifyLevel = "info" | "error" | "warning" | "success";
 let watchProcess: ChildProcessWithoutNullStreams | undefined;
 let watcherKey: string | undefined;
 let reconcileTimer: ReturnType<typeof setInterval> | undefined;
+let eventPollTimer: ReturnType<typeof setInterval> | undefined;
+let eventPollStartedAt = 0;
 let pendingEvents: any[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -456,20 +458,31 @@ function handleTangoEvent(pi: ExtensionAPI, ctx: any, event: any) {
   if (!flushTimer) flushTimer = setTimeout(() => flushTangoEvents(pi, ctx), 500);
 }
 
+function processRecentTangoEvents(pi: ExtensionAPI, ctx: any, cutoffMs: number) {
+  let recent: any[] = [];
+  try { recent = readRecentEvents(200, 256 * 1024).events ?? []; } catch { return; }
+  for (const event of recent) {
+    const time = Date.parse(event.time ?? "");
+    if (!Number.isFinite(time) || time < cutoffMs) continue;
+    handleTangoEvent(pi, ctx, event);
+  }
+}
+
 function backfillRecentTangoEvents(pi: ExtensionAPI, ctx: any) {
   // Backfill is only a short startup safety net, not historical replay. A broad
   // replay can flood the parent with old done agents and mark stale events seen.
   const startedAt = Date.now();
-  setTimeout(() => {
-    const cutoffMs = startedAt - 15 * 1000;
-    let recent: any[] = [];
-    try { recent = readRecentEvents(200, 256 * 1024).events ?? []; } catch { return; }
-    for (const event of recent) {
-      const time = Date.parse(event.time ?? "");
-      if (!Number.isFinite(time) || time < cutoffMs) continue;
-      handleTangoEvent(pi, ctx, event);
-    }
-  }, 1000);
+  setTimeout(() => processRecentTangoEvents(pi, ctx, startedAt - 15 * 1000), 1000);
+}
+
+function startEventPoller(pi: ExtensionAPI, ctx: any) {
+  if (eventPollTimer) return;
+  eventPollStartedAt = Date.now();
+  eventPollTimer = setInterval(() => {
+    // Safety net for missed watch output during reloads or stale CLI lineage
+    // filtering. Delivery remains de-duplicated by the attention store.
+    processRecentTangoEvents(pi, ctx, eventPollStartedAt - 15 * 1000);
+  }, 2000);
 }
 
 function suggestedAction(event: any): string {
@@ -529,6 +542,7 @@ export default function (pi: ExtensionAPI) {
     if (ctx.hasUI) ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", "Tango: ready"));
     startEventWatcher(pi, ctx);
     backfillRecentTangoEvents(pi, ctx);
+    startEventPoller(pi, ctx);
     startParentReconciler(ctx);
   });
 
@@ -536,6 +550,8 @@ export default function (pi: ExtensionAPI) {
     stopEventWatcher();
     if (reconcileTimer) clearInterval(reconcileTimer);
     reconcileTimer = undefined;
+    if (eventPollTimer) clearInterval(eventPollTimer);
+    eventPollTimer = undefined;
   });
 
   pi.on("before_agent_start", async (event) => {
