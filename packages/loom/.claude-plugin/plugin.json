@@ -1,0 +1,9 @@
+{
+  "name": "loom",
+  "version": "0.1.0",
+  "description": "Loom durable work-graph slash commands and skills for Claude Code.",
+  "author": {
+    "name": "Bravo Pi Mono"
+  },
+  "keywords": ["loom", "planning", "agents", "work-graph", "durable-context"]
+}

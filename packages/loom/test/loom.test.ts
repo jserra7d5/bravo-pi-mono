@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import { spawnSync, execFileSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = resolve(here, '../src/cli.js');
+const packageRoot = resolve(here, '../..');
 
 function run(args: string[], opts: { cwd: string; home: string; ok?: boolean } ) {
   const res = spawnSync(process.execPath, [cli, ...args], {
@@ -226,6 +227,30 @@ test('agent-friendly CLI helpers are handoff-safe', () => {
 
   r = jsonRun(['lock', 'status'], { cwd: w.cwd, home: w.home });
   assert.equal(r.data.locked, false);
+});
+
+test('Claude plugin exposes Loom commands and skills', () => {
+  const manifest = JSON.parse(readFileSync(join(packageRoot, '.claude-plugin/plugin.json'), 'utf8'));
+  assert.equal(manifest.name, 'loom');
+
+  const commands = readdirSync(join(packageRoot, 'commands')).filter(f => f.endsWith('.md')).sort();
+  assert.deepEqual(commands, [
+    'loom-analyze.md',
+    'loom-branch-design.md',
+    'loom-breakdown.md',
+    'loom-clarify.md',
+    'loom-decide.md',
+    'loom-design.md',
+    'loom-implement.md',
+    'loom-plan.md',
+    'loom-ready.md',
+    'loom-spec.md'
+  ]);
+
+  const skills = readdirSync(join(packageRoot, 'skills')).filter(name => existsSync(join(packageRoot, 'skills', name, 'SKILL.md'))).sort();
+  assert.ok(skills.includes('loom-plan'));
+  assert.ok(skills.includes('loom-design'));
+  assert.ok(skills.includes('loom-implement'));
 });
 
 test('v2 noun-first commands, schema, and patch workflow work', () => {
