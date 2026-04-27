@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -22,6 +22,42 @@ let reconcileTimer: ReturnType<typeof setInterval> | undefined;
 let pendingEvents: any[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
 
+function tangoHome(): string {
+  return process.env.TANGO_HOME || join(process.env.TANGO_REAL_HOME || process.env.HOME || process.cwd(), ".tango");
+}
+
+function safeId(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.-]/g, "_");
+}
+
+function ensureRootSessionRecord() {
+  const now = new Date().toISOString();
+  const cwd = process.cwd();
+  const rootSessionId = process.env.TANGO_ROOT_SESSION_ID || `sess_${randomBytes(8).toString("base64url")}`;
+  const workstreamId = process.env.TANGO_WORKSTREAM_ID || `ws_${createHash("sha1").update(`${cwd}:${rootSessionId}`).digest("hex").slice(0, 12)}`;
+  process.env.TANGO_ROOT_SESSION_ID = rootSessionId;
+  process.env.TANGO_WORKSTREAM_ID = workstreamId;
+
+  const dir = join(tangoHome(), "server", "root-sessions");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${safeId(rootSessionId)}.json`);
+  let existing: any = {};
+  if (existsSync(path)) {
+    try { existing = JSON.parse(readFileSync(path, "utf8")); } catch {}
+  }
+  const record = {
+    schemaVersion: 1,
+    rootSessionId,
+    workstreamId,
+    kind: "pi",
+    cwd,
+    title: existing.title || cwd,
+    createdAt: existing.createdAt || now,
+    updatedAt: now,
+    lastSeenAt: now,
+  };
+  writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+}
 
 async function runTango(args: string[], signal?: AbortSignal): Promise<ExecResult> {
   const candidates: Array<{ command: string; args: string[] }> = [
@@ -271,7 +307,7 @@ function startParentReconciler(ctx: any) {
 
 function startEventWatcher(pi: ExtensionAPI, ctx: any) {
   if (watchProcess) return;
-  const args = [distCli, "watch", "--json", "--from-start"];
+  const args = [distCli, "watch", "--json"];
   if (process.env.TANGO_RUN_DIR) args.push("--all");
   watchProcess = spawn(process.execPath, args, { cwd: process.cwd(), env: process.env as Record<string, string>, stdio: ["ignore", "pipe", "pipe"] });
   let buffer = "";
@@ -301,6 +337,12 @@ function handleTangoEventLine(pi: ExtensionAPI, ctx: any, line: string) {
     if (resolve(event.parentRunDir) === resolve(parentRunDir)) isDirectChild = true;
   }
   if (hasLineage && !isDirectChild) return;
+  if (!hasLineage) {
+    const rootSessionId = process.env.TANGO_ROOT_SESSION_ID;
+    const workstreamId = process.env.TANGO_WORKSTREAM_ID;
+    if (rootSessionId && event.rootSessionId !== rootSessionId) return;
+    if (workstreamId && event.workstreamId !== workstreamId) return;
+  }
   const rec = getRecipientContext();
   upsertAttentionFromEvent(event, rec);
   if (!shouldDeliverEvent(event, rec)) return;
@@ -359,6 +401,7 @@ function flushTangoEvents(pi: ExtensionAPI, ctx: any) {
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
+    try { ensureRootSessionRecord(); } catch {}
     if (ctx.hasUI) ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", "Tango: ready"));
     startEventWatcher(pi, ctx);
     startParentReconciler(ctx);

@@ -68,6 +68,29 @@ export interface TimelineEvent {
   workstreamId?: string;
 }
 
+const UNSCOPED_ROOT_SESSION_ID = "unscoped";
+const UNSCOPED_WORKSTREAM_ID = "unscoped";
+
+function unscopedAgents(agents: AgentMetadata[]): AgentMetadata[] {
+  return agents.filter((a) => !a.rootSessionId && !a.workstreamId);
+}
+
+function unscopedRecord(agents: AgentMetadata[]): RootSessionRecord {
+  const timestamps = agents.flatMap((a) => [a.createdAt, a.updatedAt]).filter(Boolean).sort();
+  const first = timestamps[0] ?? new Date(0).toISOString();
+  const last = timestamps[timestamps.length - 1] ?? first;
+  return {
+    schemaVersion: 1,
+    rootSessionId: UNSCOPED_ROOT_SESSION_ID,
+    workstreamId: UNSCOPED_WORKSTREAM_ID,
+    kind: "restored",
+    title: "Unscoped / legacy agents",
+    createdAt: first,
+    updatedAt: last,
+    lastSeenAt: last,
+  };
+}
+
 export function buildDashboard(now = Date.now()): DashboardViewModel {
   const agents = listMetadata(undefined);
   const rootSessions = listRootSessions();
@@ -84,6 +107,16 @@ export function buildDashboard(now = Date.now()): DashboardViewModel {
       attentionCount: gatherAttentionItems(rsAgents).length,
     };
   });
+
+  const legacyAgents = unscopedAgents(agents);
+  if (legacyAgents.length > 0 && !rootSessions.some((rs) => rs.rootSessionId === UNSCOPED_ROOT_SESSION_ID)) {
+    const rs = unscopedRecord(legacyAgents);
+    cards.push({
+      ...rs,
+      counts: computeSessionCounts(legacyAgents, now),
+      attentionCount: gatherAttentionItems(legacyAgents).length,
+    });
+  }
 
   // Sort: attention first, then by lastSeenAt desc
   cards.sort((a, b) => {
@@ -105,9 +138,15 @@ export function buildWorkstreams(now = Date.now()): { schemaVersion: 1; workstre
 }
 
 function getWorkstreamAgents(rootSessionId: string): { rs: RootSessionRecord; agents: AgentMetadata[] } | undefined {
+  const allAgents = listMetadata(undefined);
+  if (rootSessionId === UNSCOPED_ROOT_SESSION_ID) {
+    const agents = unscopedAgents(allAgents);
+    if (!agents.length) return undefined;
+    return { rs: unscopedRecord(agents), agents };
+  }
   const rs = listRootSessions().find((r) => r.rootSessionId === rootSessionId);
   if (!rs) return undefined;
-  const agents = listMetadata(undefined).filter(
+  const agents = allAgents.filter(
     (a) => a.rootSessionId === rs.rootSessionId || a.workstreamId === rs.workstreamId
   );
   return { rs, agents };
