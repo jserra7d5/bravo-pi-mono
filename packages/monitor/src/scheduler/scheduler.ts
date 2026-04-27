@@ -5,7 +5,7 @@ import { runTimerCheck, runFileCheck } from "../checks/index.js";
 import { evaluateCondition } from "../conditions/evaluator.js";
 import { generateEventId, generateLeaseId } from "../ids.js";
 import { nowISO, addMs } from "../time.js";
-import { validateRecord } from "../validation.js";
+import { monitorBelongsToRuntime, getRuntimeIdentity } from "../runtime/identity.js";
 
 export type SchedulerOptions = {
   maxConcurrentRuns?: number;
@@ -60,7 +60,12 @@ export class MonitorScheduler {
     if (!this.running) return;
     try {
       const now = new Date();
-      const due = await this.store.claimDue(now, { lease_id: generateLeaseId(), ttl_ms: this.opts.leaseTtlMs });
+      const identity = getRuntimeIdentity(this.ctx);
+      const due = await this.store.claimDue(
+        now,
+        { lease_id: generateLeaseId(), ttl_ms: this.opts.leaseTtlMs },
+        (monitor) => monitorBelongsToRuntime(monitor, identity)
+      );
       for (const m of due) {
         if (this.activeRuns.size >= this.opts.maxConcurrentRuns) break;
         if (this.activeRuns.has(m.monitor_id)) continue;

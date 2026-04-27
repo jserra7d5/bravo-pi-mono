@@ -20,6 +20,7 @@ import {
 import { MonitorStatusService } from "./runtime/status.js";
 import { StreamMonitorManager } from "./stream/stream-manager.js";
 import { formatMonitorRow } from "./tui/format.js";
+import { getRuntimeIdentity, monitorBelongsToRuntime } from "./runtime/identity.js";
 
 export type MonitorRuntime = {
   store: JsonlMonitorStore;
@@ -80,7 +81,8 @@ export default function (pi: ExtensionAPI) {
       const sub = parts[0] || "";
 
       if (!sub || sub === "list") {
-        const items = await runtime.store.list({ include_archived: false });
+        const identity = getRuntimeIdentity(ctx);
+        const items = (await runtime.store.list({ include_archived: false })).filter((m) => monitorBelongsToRuntime(m, identity));
         if (ctx.ui?.notify) {
           const lines = [
             "Monitors",

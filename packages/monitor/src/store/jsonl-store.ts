@@ -323,11 +323,12 @@ export class JsonlMonitorStore {
     return arr;
   }
 
-  async claimDue(now: Date, _lease: LeaseSpec): Promise<MonitorRecord[]> {
+  async claimDue(now: Date, _lease: LeaseSpec, filter?: (monitor: MonitorRecord) => boolean): Promise<MonitorRecord[]> {
     await this.init();
     const due: MonitorRecord[] = [];
     for (const m of this.monitors.values()) {
       if (m.state !== "running") continue;
+      if (filter && !filter(m)) continue;
       if (m.next_run_at && Date.parse(m.next_run_at) <= now.getTime()) {
         if (m.lease_expires_at && Date.parse(m.lease_expires_at) > now.getTime()) continue;
         due.push(m);

@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { JsonlMonitorStore } from "../store/jsonl-store.js";
+import { getRuntimeIdentity, monitorBelongsToRuntime } from "../runtime/identity.js";
 
 export function buildAttentionTool(_pi: ExtensionAPI, store: JsonlMonitorStore) {
   return {
@@ -10,10 +11,13 @@ export function buildAttentionTool(_pi: ExtensionAPI, store: JsonlMonitorStore) 
     description: "List triggered or failed monitor results that have not been acknowledged.",
     parameters: Type.Object({
       scope: Type.Optional(StringEnum(["session", "root_session", "workspace"] as const)),
+      include_all_sessions: Type.Optional(Type.Boolean({ default: false, description: "Include attention owned by other Pi sessions." })),
       limit: Type.Optional(Type.Number({ default: 20 })),
     }),
-    async execute(_toolCallId: string, params: any) {
-      const monitors = await store.list({ scope: params.scope, include_archived: false, limit: 500 });
+    async execute(_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: any, ctx: any) {
+      const identity = getRuntimeIdentity(ctx);
+      const monitors = (await store.list({ scope: params.scope, include_archived: false, limit: 500 }))
+        .filter((m) => params.include_all_sessions || monitorBelongsToRuntime(m, identity));
       const items: any[] = [];
       for (const m of monitors) {
         const results = await store.listResults(m.monitor_id, { acked: false, limit: params.limit ?? 20 });

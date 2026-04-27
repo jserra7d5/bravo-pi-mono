@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { JsonlMonitorStore } from "../store/jsonl-store.js";
 import type { AttentionDelivery, MonitorRecord, MonitorResult } from "../schema/types.js";
 import { computeStatusSummary, renderMonitorStatus } from "../tui/status.js";
+import { getRuntimeIdentity, monitorBelongsToRuntime } from "./identity.js";
 
 export class MonitorStatusService {
   private store: JsonlMonitorStore;
@@ -15,7 +16,8 @@ export class MonitorStatusService {
 
   async refresh(ctx?: any): Promise<void> {
     if (!ctx?.ui?.setStatus) return;
-    const items = await this.store.list({ include_archived: false });
+    const identity = getRuntimeIdentity(ctx);
+    const items = (await this.store.list({ include_archived: false })).filter((m) => monitorBelongsToRuntime(m, identity));
     const summary = computeStatusSummary(items);
     const text = renderMonitorStatus(summary);
     if (text) ctx.ui.setStatus("monitors", text);
@@ -56,7 +58,10 @@ export class MonitorStatusService {
     }
 
     if (delivery.wake_attempted) {
-      if (!this.pi?.sendMessage) {
+      const identity = getRuntimeIdentity(ctx);
+      if (!monitorBelongsToRuntime(monitor, identity)) {
+        delivery.wake_error = `owner session mismatch: target=${monitor.owner.session_id ?? ""} current=${identity.session_id ?? ""}`;
+      } else if (!this.pi?.sendMessage) {
         delivery.wake_error = "pi.sendMessage unavailable";
       } else {
         try {
@@ -78,7 +83,8 @@ export class MonitorStatusService {
   }
 
   async backfillPending(ctx?: any): Promise<number> {
-    const monitors = await this.store.list({ include_archived: false, limit: 1000 });
+    const identity = getRuntimeIdentity(ctx);
+    const monitors = (await this.store.list({ include_archived: false, limit: 1000 })).filter((m) => monitorBelongsToRuntime(m, identity));
     let delivered = 0;
     for (const monitor of monitors) {
       const results = await this.store.listResults(monitor.monitor_id, { acked: false, limit: 100 });

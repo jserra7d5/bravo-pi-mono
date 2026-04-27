@@ -7,6 +7,7 @@ import type { MonitorRecord } from "../schema/types.js";
 import { generateMonitorId } from "../ids.js";
 import { nowISO } from "../time.js";
 import { validateCheck, validateSchedule, validateCondition, validateAttention, validateRetention, validateLabels, validateStateTransition } from "../validation.js";
+import { getRuntimeIdentity, monitorBelongsToRuntime } from "../runtime/identity.js";
 
 const DEFAULT_ATTENTION = { notify: true, wake_agent: false, throttle_ms: 30000 };
 const DEFAULT_RETENTION = { max_results: 100, max_events: 500 };
@@ -72,8 +73,10 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
       validateRetention(params.retention ?? DEFAULT_RETENTION);
       validateLabels(params.labels ?? {});
 
+      const identity = getRuntimeIdentity(ctx);
+
       if (params.idempotency_key) {
-        const existing = (await store.list({ include_archived: false })).find((m) => m.metadata?.idempotency_key === params.idempotency_key);
+        const existing = (await store.list({ include_archived: false })).find((m) => m.metadata?.idempotency_key === params.idempotency_key && monitorBelongsToRuntime(m, identity));
         if (existing) {
           return {
             content: [{ type: "text" as const, text: `Monitor ${existing.monitor_id} already exists` }],
@@ -83,9 +86,9 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
       }
 
       const monitorId = generateMonitorId();
-      const sessionId = ctx?.sessionManager?.getSessionFile?.() ?? process.env.PI_SESSION_ID ?? "";
-      const rootSessionId = process.env.TANGO_ROOT_SESSION_ID ?? process.env.PI_ROOT_SESSION_ID;
-      const workspaceId = process.env.TANGO_WORKSTREAM_ID ?? process.cwd();
+      const sessionId = identity.session_id ?? "";
+      const rootSessionId = identity.root_session_id;
+      const workspaceId = identity.workspace_id;
       const now = nowISO();
 
       let nextRunAt: string | undefined;

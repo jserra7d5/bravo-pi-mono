@@ -14,8 +14,8 @@ function tmpStore() {
   return { dir, store };
 }
 
-function fakeCtx() {
-  return { sessionManager: { getSessionFile: () => '' }, actor_id: 'test' };
+function fakeCtx(session = '/tmp/pi-session-a.json') {
+  return { sessionManager: { getSessionFile: () => session }, actor_id: 'test' };
 }
 
 test('scheduler tick triggers timer monitor', async () => {
@@ -29,7 +29,7 @@ test('scheduler tick triggers timer monitor', async () => {
     }, undefined, undefined, fakeCtx());
 
     const scheduler = new MonitorScheduler(store, { tickIntervalMs: 200, leaseTtlMs: 5000 });
-    scheduler.start();
+    scheduler.start(fakeCtx());
 
     // Wait for tick
     await new Promise((r) => setTimeout(r, 800));
@@ -60,7 +60,7 @@ test('scheduler file monitor triggers when file exists', async () => {
     }, undefined, undefined, fakeCtx());
 
     const scheduler = new MonitorScheduler(store, { tickIntervalMs: 200, leaseTtlMs: 5000 });
-    scheduler.start();
+    scheduler.start(fakeCtx());
     await new Promise((r) => setTimeout(r, 800));
     await scheduler.tick('timer');
     await new Promise((r) => setTimeout(r, 400));
@@ -93,7 +93,7 @@ test('scheduler persists wake delivery state for triggered monitors', async () =
 
     const status = new MonitorStatusService(store, pi);
     const scheduler = new MonitorScheduler(store, { tickIntervalMs: 50, leaseTtlMs: 5000 }, status);
-    scheduler.start({ ui: { notify: () => {}, setStatus: () => {} } });
+    scheduler.start({ ...fakeCtx(), ui: { notify: () => {}, setStatus: () => {} } });
     await new Promise((r) => setTimeout(r, 150));
     await scheduler.stop();
 
@@ -132,11 +132,73 @@ test('status service backfills undelivered wake attention', async () => {
     });
 
     const status = new MonitorStatusService(store, pi);
-    const count = await status.backfillPending({});
+    const count = await status.backfillPending(fakeCtx());
     assert.equal(count, 1);
     assert.equal(sent.length, 1);
     const results = await store.listResults(started.details.monitor_id, { limit: 1 });
     assert.equal(results[0]!.attention_delivery?.wake_delivered, true);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test('scheduler does not claim or wake monitors owned by a different session', async () => {
+  const { dir, store } = tmpStore();
+  const sent: any[] = [];
+  const pi = { sendMessage: (message: any, options: any) => sent.push({ message, options }) } as any;
+  try {
+    const startTool = buildStartTool(pi, store);
+    const started = await (startTool as any).execute('tc1', {
+      name: 'foreign-session',
+      check: { type: 'timer' },
+      schedule: {},
+      attention: { wake_agent: true, notify: false, message: 'do not wake wrong session' },
+    }, undefined, undefined, fakeCtx('/tmp/pi-session-a.json'));
+
+    const status = new MonitorStatusService(store, pi);
+    const scheduler = new MonitorScheduler(store, { tickIntervalMs: 50, leaseTtlMs: 5000 }, status);
+    scheduler.start(fakeCtx('/tmp/pi-session-b.json'));
+    await new Promise((r) => setTimeout(r, 150));
+    await scheduler.stop();
+
+    const m = await store.get(started.details.monitor_id);
+    assert.equal(m!.run_count, 0);
+    assert.equal(sent.length, 0);
+    const results = await store.listResults(started.details.monitor_id, { limit: 10 });
+    assert.equal(results.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test('status service does not backfill wake attention owned by a different session', async () => {
+  const { dir, store } = tmpStore();
+  const sent: any[] = [];
+  const pi = { sendMessage: (message: any, options: any) => sent.push({ message, options }) } as any;
+  try {
+    const startTool = buildStartTool(pi, store);
+    const started = await (startTool as any).execute('tc1', {
+      name: 'foreign-backfill',
+      check: { type: 'timer' },
+      schedule: { delay_ms: 1000 },
+      attention: { wake_agent: true, notify: false, message: 'do not backfill wrong session' },
+    }, undefined, undefined, fakeCtx('/tmp/pi-session-a.json'));
+    await store.appendResult({
+      result_id: 'r-foreign-backfill',
+      monitor_id: started.details.monitor_id,
+      status: 'matched',
+      condition_matched: true,
+      triggered: true,
+      created_at: new Date().toISOString(),
+      attention_delivery: { message: 'do not backfill wrong session', severity: 'warning', notify_attempted: false, notify_delivered: false, wake_attempted: true, wake_delivered: false },
+    });
+
+    const status = new MonitorStatusService(store, pi);
+    const count = await status.backfillPending(fakeCtx('/tmp/pi-session-b.json'));
+    assert.equal(count, 0);
+    assert.equal(sent.length, 0);
+    const results = await store.listResults(started.details.monitor_id, { limit: 1 });
+    assert.equal(results[0]!.attention_delivery?.wake_delivered, false);
   } finally {
     rmSync(dir, { recursive: true });
   }
@@ -155,7 +217,7 @@ test('paused monitor does not run', async () => {
     await store.update(started.details.monitor_id, undefined, { state: 'paused' });
 
     const scheduler = new MonitorScheduler(store, { tickIntervalMs: 200, leaseTtlMs: 5000 });
-    scheduler.start();
+    scheduler.start(fakeCtx());
     await new Promise((r) => setTimeout(r, 800));
     await scheduler.tick('timer');
     await new Promise((r) => setTimeout(r, 400));

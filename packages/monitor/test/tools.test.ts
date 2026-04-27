@@ -13,10 +13,9 @@ function tmpStore() {
   return { dir, store };
 }
 
-function fakeCtx() {
-  return { sessionManager: { getSessionFile: () => '' }, actor_id: 'test' };
+function fakeCtx(session = '/tmp/pi-session-a.json') {
+  return { sessionManager: { getSessionFile: () => session }, actor_id: 'test' };
 }
-
 test('monitor_start creates a timer monitor', async () => {
   const { dir, store } = tmpStore();
   try {
@@ -76,10 +75,33 @@ test('monitor_attention lists unacked triggered results', async () => {
     const started = await (startTool as any).execute('tc1', { name: 'attention', check: { type: 'timer' }, schedule: { delay_ms: 5000 } }, undefined, undefined, fakeCtx());
     await store.appendResult({ result_id: 'r1', monitor_id: started.details.monitor_id, status: 'matched', condition_matched: true, triggered: true, created_at: new Date().toISOString(), attention_delivery: { message: 'pay attention', severity: 'warning', notify_attempted: true, notify_delivered: false, wake_attempted: true, wake_delivered: false, wake_error: 'offline' } });
     const tool = buildAttentionTool({} as any, store);
-    const res = await (tool as any).execute('tc2', {});
+    const res = await (tool as any).execute('tc2', {}, undefined, undefined, fakeCtx());
     assert.equal(res.details.attention.length, 1);
     assert.equal(res.details.attention[0].message, 'pay attention');
     assert.equal(res.details.attention[0].wake_error, 'offline');
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test('monitor_list and monitor_attention default to current session only', async () => {
+  const { dir, store } = tmpStore();
+  try {
+    const startTool = buildStartTool({} as any, store);
+    const mine = await (startTool as any).execute('tc1', { name: 'mine', check: { type: 'timer' }, schedule: { delay_ms: 5000 } }, undefined, undefined, fakeCtx('/tmp/session-a.json'));
+    const other = await (startTool as any).execute('tc2', { name: 'other', check: { type: 'timer' }, schedule: { delay_ms: 5000 } }, undefined, undefined, fakeCtx('/tmp/session-b.json'));
+    await store.appendResult({ result_id: 'r-mine', monitor_id: mine.details.monitor_id, status: 'matched', condition_matched: true, triggered: true, created_at: new Date().toISOString() });
+    await store.appendResult({ result_id: 'r-other', monitor_id: other.details.monitor_id, status: 'matched', condition_matched: true, triggered: true, created_at: new Date().toISOString() });
+
+    const listTool = buildListTool({} as any, store);
+    const listed = await (listTool as any).execute('tc3', {}, undefined, undefined, fakeCtx('/tmp/session-a.json'));
+    assert.deepEqual(listed.details.monitors.map((m: any) => m.name), ['mine']);
+    const listedAll = await (listTool as any).execute('tc4', { include_all_sessions: true }, undefined, undefined, fakeCtx('/tmp/session-a.json'));
+    assert.equal(listedAll.details.monitors.length, 2);
+
+    const attentionTool = buildAttentionTool({} as any, store);
+    const attention = await (attentionTool as any).execute('tc5', {}, undefined, undefined, fakeCtx('/tmp/session-a.json'));
+    assert.deepEqual(attention.details.attention.map((m: any) => m.name), ['mine']);
   } finally {
     rmSync(dir, { recursive: true });
   }
@@ -131,7 +153,7 @@ test('monitor_list returns monitors', async () => {
     await (startTool as any).execute('tc1', { name: 'a', check: { type: 'timer' }, schedule: { delay_ms: 5000 } }, undefined, undefined, fakeCtx());
     await (startTool as any).execute('tc2', { name: 'b', check: { type: 'timer' }, schedule: { delay_ms: 5000 } }, undefined, undefined, fakeCtx());
     const listTool = buildListTool({} as any, store);
-    const listed = await (listTool as any).execute('tc3', {});
+    const listed = await (listTool as any).execute('tc3', {}, undefined, undefined, fakeCtx());
     assert.equal(listed.details.monitors.length, 2);
   } finally {
     rmSync(dir, { recursive: true });
