@@ -18,6 +18,7 @@ type ExecResult = { code: number; stdout: string; stderr: string; json?: any };
 type NotifyLevel = "info" | "error" | "warning" | "success";
 
 let watchProcess: ChildProcessWithoutNullStreams | undefined;
+let watcherKey: string | undefined;
 let reconcileTimer: ReturnType<typeof setInterval> | undefined;
 let pendingEvents: any[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -103,6 +104,22 @@ function toolResult(result: ExecResult) {
     content: [{ type: "text" as const, text: result.json ? JSON.stringify(result.json, null, 2) : result.stdout }],
     details: result.json ?? { ok: true, stdout: result.stdout },
   };
+}
+
+function compactPsResult(result: ExecResult, maxAgents = 50): ExecResult {
+  if (result.code !== 0 || !result.json?.agents || !Array.isArray(result.json.agents)) return result;
+  const total = typeof result.json.total === "number" ? result.json.total : result.json.agents.length;
+  const agents = result.json.agents.slice(0, maxAgents);
+  const compact = {
+    ...result.json,
+    agents,
+    returned: agents.length,
+    truncated: result.json.truncated || agents.length < total,
+    hint: result.json.hint || (agents.length < total ? "Tango ps output was compacted for model safety. Narrow with active/problems/health/state/limit." : undefined),
+  };
+  result.json = compact;
+  result.stdout = JSON.stringify(compact, null, 2);
+  return result;
 }
 
 function readInclude(name: string): string {
@@ -297,6 +314,19 @@ function addCwd(args: string[], cwd?: string): string[] {
   return cwd ? [...args, "--cwd", cwd] : args;
 }
 
+function addTarget(args: string[], params: { name?: string; runId?: string; runDir?: string }): string[] {
+  const out = [...args];
+  if (params.name) out.push(params.name);
+  if (params.runId) out.push("--run-id", params.runId);
+  if (params.runDir) out.push("--run-dir", params.runDir);
+  return out;
+}
+
+function requireNameOrTarget(params: { name?: string; runId?: string; runDir?: string }): string | undefined {
+  if (params.name || params.runId || params.runDir) return undefined;
+  return "Provide name, runId, or runDir.";
+}
+
 // Import durable attention store from compiled dist to avoid duplicating logic.
 // The extension already depends on dist/cli.js at runtime; this is consistent.
 // @ts-ignore: dist has no declarations, but the module exists at runtime.
@@ -319,8 +349,29 @@ function startParentReconciler(ctx: any) {
   }, 15_000);
 }
 
+function currentWatcherKey(): string {
+  return [
+    process.env.TANGO_ROOT_SESSION_ID ?? "",
+    process.env.TANGO_WORKSTREAM_ID ?? "",
+    process.env.TANGO_RUN_ID ?? "",
+    process.env.TANGO_RUN_DIR ? resolve(process.env.TANGO_RUN_DIR) : "",
+  ].join("|");
+}
+
+function stopEventWatcher() {
+  if (watchProcess) watchProcess.kill("SIGTERM");
+  watchProcess = undefined;
+  watcherKey = undefined;
+  pendingEvents = [];
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = undefined;
+}
+
 function startEventWatcher(pi: ExtensionAPI, ctx: any) {
+  const key = currentWatcherKey();
+  if (watchProcess && watcherKey !== key) stopEventWatcher();
   if (watchProcess) return;
+  watcherKey = key;
   const args = [distCli, "watch", "--json"];
   watchProcess = spawn(process.execPath, args, { cwd: process.cwd(), env: process.env as Record<string, string>, stdio: ["ignore", "pipe", "pipe"] });
   let buffer = "";
@@ -330,7 +381,7 @@ function startEventWatcher(pi: ExtensionAPI, ctx: any) {
     buffer = lines.pop() ?? "";
     for (const line of lines) handleTangoEventLine(pi, ctx, line);
   });
-  watchProcess.on("close", () => { watchProcess = undefined; });
+  watchProcess.on("close", () => { watchProcess = undefined; watcherKey = undefined; });
 }
 
 function handleTangoEventLine(pi: ExtensionAPI, ctx: any, line: string) {
@@ -425,13 +476,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    if (watchProcess) watchProcess.kill("SIGTERM");
-    watchProcess = undefined;
+    stopEventWatcher();
     if (reconcileTimer) clearInterval(reconcileTimer);
     reconcileTimer = undefined;
-    if (flushTimer) clearTimeout(flushTimer);
-    flushTimer = undefined;
-    pendingEvents = [];
   });
 
   pi.on("before_agent_start", async (event) => {
@@ -446,7 +493,7 @@ export default function (pi: ExtensionAPI) {
     description: "Start a Tango child agent. Wraps `tango start ... --json`; prefer this tool in Pi sessions.",
     parameters: Type.Object({
       name: Type.String({ description: "Agent instance name" }),
-      role: Type.String({ description: "Role name, e.g. scout, planner, worker, team-lead" }),
+      role: Type.String({ description: "Role name, e.g. scout, planner, reviewer, worker, fast-worker, lead, generalist" }),
       task: Type.String({ description: "Task for the child agent" }),
       mode: Type.Optional(StringEnum(["oneshot", "interactive"] as const)),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const)),
@@ -478,12 +525,22 @@ export default function (pi: ExtensionAPI) {
     description: "List Tango agents for the current project/session. Wraps `tango ps --json`.",
     parameters: Type.Object({
       all: Type.Optional(Type.Boolean({ default: false })),
+      active: Type.Optional(Type.Boolean({ description: "Show active agents (running/created)." })),
+      problems: Type.Optional(Type.Boolean({ description: "Show blocked/error agents." })),
+      health: Type.Optional(Type.Boolean({ description: "Compact health view of active/problem agents." })),
+      state: Type.Optional(Type.Array(Type.String({ description: "Filter by one or more states." }))),
+      limit: Type.Optional(Type.Number({ description: "Maximum agents to return; defaults are model-safe." })),
       cwd: Type.Optional(Type.String({ description: "Project working directory to list agents for. Defaults to the current Pi process cwd." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const args = addCwd(["ps", "--json"], params.cwd);
       if (params.all) args.push("--all");
-      const out = toolResult(await runTango(args, signal));
+      if (params.active) args.push("--active");
+      if (params.problems) args.push("--problems");
+      if (params.health) args.push("--health");
+      for (const state of params.state ?? []) args.push("--state", state);
+      if (params.limit !== undefined) args.push("--limit", String(params.limit));
+      const out = toolResult(compactPsResult(await runTango(args, signal)));
       await updateFooterStatus(ctx, signal);
       return out;
     },
@@ -496,11 +553,15 @@ export default function (pi: ExtensionAPI) {
     label: "Tango Inspect",
     description: "Inspect canonical Tango RunState for an agent. Wraps `tango inspect ... --json`.",
     parameters: Type.Object({
-      name: Type.String(),
+      name: Type.Optional(Type.String()),
+      runId: Type.Optional(Type.String({ description: "Stable Tango run ID. Preferred when known." })),
+      runDir: Type.Optional(Type.String({ description: "Stable Tango run directory. Preferred when known." })),
       cwd: Type.Optional(Type.String({ description: "Project working directory used to resolve the agent name. Defaults to the current Pi process cwd." })),
     }),
     async execute(_id, params, signal) {
-      return toolResult(await runTango(addCwd(["inspect", params.name, "--json"], params.cwd), signal));
+      const error = requireNameOrTarget(params);
+      if (error) return { content: [{ type: "text" as const, text: error }], details: { ok: false, error }, isError: true };
+      return toolResult(await runTango(addCwd(addTarget(["inspect"], params).concat("--json"), params.cwd), signal));
     },
     renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango inspect")} ${theme.fg("accent", args.name)}`, 0, 0); },
     renderResult(result, options, theme) { return renderAgentResult(result, options, theme, "Inspect"); },
@@ -511,12 +572,16 @@ export default function (pi: ExtensionAPI) {
     label: "Tango Activity",
     description: "Inspect recent activity from a Tango agent. Wraps `tango activity ... --json`.",
     parameters: Type.Object({
-      name: Type.String(),
+      name: Type.Optional(Type.String()),
+      runId: Type.Optional(Type.String({ description: "Stable Tango run ID. Preferred when known." })),
+      runDir: Type.Optional(Type.String({ description: "Stable Tango run directory. Preferred when known." })),
       lines: Type.Optional(Type.Number({ default: 200 })),
       cwd: Type.Optional(Type.String({ description: "Project working directory used to resolve the agent name. Defaults to the current Pi process cwd." })),
     }),
     async execute(_id, params, signal) {
-      const result = await runTango(addCwd(["activity", params.name, "--lines", String(params.lines ?? 200), "--json"], params.cwd), signal);
+      const error = requireNameOrTarget(params);
+      if (error) return { content: [{ type: "text" as const, text: error }], details: { ok: false, error }, isError: true };
+      const result = await runTango(addCwd(addTarget(["activity"], params).concat(["--lines", String(params.lines ?? 200), "--json"]), params.cwd), signal);
       if (result.json?.output) {
         const truncated = truncateTail(String(result.json.output), { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
         result.json.output = truncated.content + (truncated.truncated ? "\n\n[Output truncated]" : "");
@@ -533,13 +598,17 @@ export default function (pi: ExtensionAPI) {
     label: "Tango Follow",
     description: "Follow a Tango agent until an explicit condition. Wraps `tango follow ... --json`.",
     parameters: Type.Object({
-      name: Type.String(),
+      name: Type.Optional(Type.String()),
+      runId: Type.Optional(Type.String({ description: "Stable Tango run ID. Preferred when known." })),
+      runDir: Type.Optional(Type.String({ description: "Stable Tango run directory. Preferred when known." })),
       until: StringEnum(["terminal", "result-resolved", "attention"] as const),
       timeout: Type.Optional(Type.Number({ description: "Timeout in seconds." })),
       cwd: Type.Optional(Type.String({ description: "Project working directory used to resolve the agent name. Defaults to the current Pi process cwd." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const args = ["follow", params.name, "--until", params.until, "--json"];
+      const error = requireNameOrTarget(params);
+      if (error) return { content: [{ type: "text" as const, text: error }], details: { ok: false, error }, isError: true };
+      const args = addTarget(["follow"], params).concat(["--until", params.until, "--json"]);
       if (params.timeout !== undefined) args.push("--timeout", String(params.timeout));
       const out = toolResult(await runTango(addCwd(args, params.cwd), signal));
       await updateFooterStatus(ctx, signal);
@@ -554,11 +623,18 @@ export default function (pi: ExtensionAPI) {
     label: "Tango Message",
     description: "Send a follow-up message to an interactive Tango agent. Wraps `tango message ... --json`.",
     parameters: Type.Object({
-      name: Type.String(),
+      name: Type.Optional(Type.String()),
+      runId: Type.Optional(Type.String({ description: "Stable Tango run ID. Preferred when known." })),
+      runDir: Type.Optional(Type.String({ description: "Stable Tango run directory. Preferred when known." })),
       message: Type.String(),
       cwd: Type.Optional(Type.String({ description: "Project working directory used to resolve the agent name. Defaults to the current Pi process cwd." })),
     }),
-    async execute(_id, params, signal) { return toolResult(await runTango(addCwd(["message", params.name, params.message, "--json"], params.cwd), signal)); },
+    async execute(_id, params, signal) {
+      const error = requireNameOrTarget(params);
+      if (error) return { content: [{ type: "text" as const, text: error }], details: { ok: false, error }, isError: true };
+      const args = addTarget(["message"], params).concat([params.message, "--json"]);
+      return toolResult(await runTango(addCwd(args, params.cwd), signal));
+    },
     renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango message")} ${theme.fg("accent", args.name)} ${theme.fg("dim", preview(args.message))}`, 0, 0); },
     renderResult(result, _options, theme) {
       if ((result as any).isError) return errorText(result, theme);
@@ -571,11 +647,15 @@ export default function (pi: ExtensionAPI) {
     label: "Tango Stop",
     description: "Stop a Tango agent. Wraps `tango stop ... --json`.",
     parameters: Type.Object({
-      name: Type.String(),
+      name: Type.Optional(Type.String()),
+      runId: Type.Optional(Type.String({ description: "Stable Tango run ID. Preferred when known." })),
+      runDir: Type.Optional(Type.String({ description: "Stable Tango run directory. Preferred when known." })),
       cwd: Type.Optional(Type.String({ description: "Project working directory used to resolve the agent name. Defaults to the current Pi process cwd." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const out = toolResult(await runTango(addCwd(["stop", params.name, "--json"], params.cwd), signal));
+      const error = requireNameOrTarget(params);
+      if (error) return { content: [{ type: "text" as const, text: error }], details: { ok: false, error }, isError: true };
+      const out = toolResult(await runTango(addCwd(addTarget(["stop"], params).concat("--json"), params.cwd), signal));
       await updateFooterStatus(ctx, signal);
       return out;
     },
@@ -616,11 +696,15 @@ export default function (pi: ExtensionAPI) {
     label: "Tango Result",
     description: "Read a completed Tango agent result. Wraps `tango result ... --json`.",
     parameters: Type.Object({
-      name: Type.String(),
+      name: Type.Optional(Type.String()),
+      runId: Type.Optional(Type.String({ description: "Stable Tango run ID. Preferred when known." })),
+      runDir: Type.Optional(Type.String({ description: "Stable Tango run directory. Preferred when known." })),
       cwd: Type.Optional(Type.String({ description: "Project working directory used to resolve the agent name. Defaults to the current Pi process cwd." })),
     }),
     async execute(_id, params, signal) {
-      const result = await runTango(addCwd(["result", params.name, "--json"], params.cwd), signal);
+      const error = requireNameOrTarget(params);
+      if (error) return { content: [{ type: "text" as const, text: error }], details: { ok: false, error }, isError: true };
+      const result = await runTango(addCwd(addTarget(["result"], params).concat("--json"), params.cwd), signal);
       if (result.json?.result) {
         const truncated = truncateTail(String(result.json.result), { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
         result.json.result = truncated.content + (truncated.truncated ? "\n\n[Result truncated]" : "");
@@ -630,6 +714,26 @@ export default function (pi: ExtensionAPI) {
     },
     renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango result")} ${theme.fg("accent", args.name)}`, 0, 0); },
     renderResult(result, options, theme) { return renderResultResult(result, options, theme); },
+  });
+
+  pi.registerTool({
+    name: "tango_children",
+    label: "Tango Children",
+    description: "List child agents by Tango lineage. Wraps `tango children --json`.",
+    parameters: Type.Object({
+      name: Type.Optional(Type.String({ description: "Parent agent name. Optional inside a Tango agent when runDir/env identifies the parent." })),
+      runId: Type.Optional(Type.String({ description: "Stable parent run ID." })),
+      runDir: Type.Optional(Type.String({ description: "Stable parent run directory." })),
+      tree: Type.Optional(Type.Boolean({ default: false })),
+      cwd: Type.Optional(Type.String({ description: "Project working directory used to resolve the parent name. Defaults to the current Pi process cwd." })),
+    }),
+    async execute(_id, params, signal) {
+      const args = addTarget(["children"], params).concat("--json");
+      if (params.tree) args.push("--tree");
+      return toolResult(await runTango(addCwd(args, params.cwd), signal));
+    },
+    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango children")} ${theme.fg("accent", args.name ?? args.runId ?? args.runDir ?? "current")}`, 0, 0); },
+    renderResult(result, options, theme) { return renderListResult(result, options, theme); },
   });
 
   pi.registerTool({
@@ -643,7 +747,8 @@ export default function (pi: ExtensionAPI) {
       if (!command || !allowed.has(command)) {
         return { content: [{ type: "text" as const, text: `Unsupported tango command: ${command ?? "<empty>"}` }], details: { ok: false, command }, isError: true };
       }
-      const out = toolResult(await runTango(withJson(params.args), signal));
+      const result = await runTango(withJson(params.args), signal);
+      const out = toolResult(command === "ps" ? compactPsResult(result) : result);
       await updateFooterStatus(ctx, signal);
       return out;
     },

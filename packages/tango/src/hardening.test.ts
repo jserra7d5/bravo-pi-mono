@@ -414,6 +414,43 @@ describe("Tango CLI/runtime hardening", () => {
     }
   });
 
+  it("ps --all --json is bounded by default and reports counts", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      for (let i = 0; i < 125; i++) writeMeta(home, cwd, `agent-${String(i).padStart(3, "0")}`, { status: i % 10 === 0 ? "created" : "done", updatedAt: `2024-01-01T00:00:${String(i % 60).padStart(2, "0")}Z` });
+
+      const result = runCli(["ps", "--all", "--json"], { TANGO_HOME: home }, cwd);
+
+      assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+      const body = JSON.parse(result.stdout);
+      assert.strictEqual(body.total, 125);
+      assert.strictEqual(body.returned, 100);
+      assert.strictEqual(body.truncated, true);
+      assert.strictEqual(body.counts.created, 13);
+      assert.strictEqual(body.counts.done, 112);
+      assert.strictEqual(body.agents.length, 100);
+      assert.match(body.hint, /Narrow/);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("message accepts stable run-id targeting without a positional name", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      writeMeta(home, cwd, "interactive", { mode: "interactive", status: "running" });
+      const result = runCli(["message", "--run-id", "run_interactive", "hello", "--json"], { TANGO_HOME: home }, cwd);
+      assert.notStrictEqual(result.status, 0);
+      assert.match(`${result.stdout}${result.stderr}`, /tmux|not found|no server|failed|Target|Agent/i);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("rejects invalid harness, mode, flags, and numeric ranges", () => {
     const cwd = tempDir();
     const home = tempDir();

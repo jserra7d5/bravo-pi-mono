@@ -61,7 +61,7 @@ describe("rollout compatibility", () => {
     try {
       const result = runCli(["ps", "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" });
       assert.strictEqual(result.status, 0, result.stderr);
-      assert.deepStrictEqual(JSON.parse(result.stdout), { ok: true, agents: [] });
+      assert.deepStrictEqual(JSON.parse(result.stdout), { ok: true, total: 0, returned: 0, truncated: false, counts: {}, agents: [] });
       assert.ok(existsSync(join(home, "server", "server.json")), "ps should create server discovery state for the server-first active protocol");
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -144,7 +144,7 @@ describe("rollout compatibility", () => {
 
       const result = runCli(["ps", "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
       assert.strictEqual(result.status, 0, result.stderr);
-      assert.deepStrictEqual(JSON.parse(result.stdout), { ok: true, agents: [] });
+      assert.deepStrictEqual(JSON.parse(result.stdout), { ok: true, total: 0, returned: 0, truncated: false, counts: {}, agents: [] });
       const discovery = JSON.parse(readFileSync(join(home, "server", "server.json"), "utf8"));
       assert.notStrictEqual(discovery.url, `http://127.0.0.1:${stalePort}`);
     } finally {

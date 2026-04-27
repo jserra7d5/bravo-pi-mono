@@ -71,7 +71,7 @@ function isTerminalStatusLocal(status: AgentStatus): boolean {
 
 export function listMetadata(cwd?: string): AgentMetadata[] {
   const roots: string[] = [];
-  if (cwd) roots.push(projectRunRoot(cwd));
+  if (cwd) roots.push(projectRunRoot(cwd, { create: false }));
   else {
     const runs = join(dataRoot(), "runs");
     if (existsSync(runs)) for (const p of readdirSync(runs)) roots.push(join(runs, p));

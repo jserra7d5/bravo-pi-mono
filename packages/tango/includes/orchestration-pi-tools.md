@@ -6,18 +6,21 @@ Tool to CLI mapping:
 
 - `tango_start` wraps `tango start`.
 - `tango_ps` wraps `tango ps`.
+- `tango_inspect` wraps `tango inspect`.
 - `tango_activity` wraps `tango activity`.
+- `tango_follow` wraps `tango follow`.
 - `tango_message` wraps `tango message`.
 - `tango_stop` wraps `tango stop`.
 - `tango_report` wraps `tango report`.
 - `tango_result` wraps `tango result`.
-- `tango_cli` is the generic CLI escape hatch for safe Tango commands and flags not yet exposed by a dedicated tool, including `children`, `follow`, and `doctor events`. Long-running commands such as `tango watch` and `tango server` are intentionally not exposed through `tango_cli`.
+- `tango_children` wraps `tango children`.
+- `tango_cli` is the generic CLI escape hatch for safe Tango commands and flags not yet exposed by a dedicated tool, including `doctor events`. Long-running commands such as `tango watch` and `tango server` are intentionally not exposed through `tango_cli`.
 
 Use dedicated tools for common operations. Use `tango_cli` for newer or uncommon CLI features. Use raw shell CLI only when tools are unavailable or for debugging.
 
 ### Lineage-aware targeting
 
-Dedicated Pi tools accept an agent name and optional `cwd`, but they do not yet expose `--run-id` or `--run-dir` parameters. For stable targeting with run IDs or run directories, use `tango_cli` or the raw `tango` CLI directly. You do not need to change your working directory to target a child agent.
+Dedicated Pi tools accept an agent name and optional `cwd`. Targeting tools also accept stable `runId` and `runDir` parameters; prefer those when known. You do not need to change your working directory to target a child agent.
 
 ### Server and dashboard
 

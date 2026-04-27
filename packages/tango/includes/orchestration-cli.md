@@ -9,7 +9,7 @@ Many commands accept `--run-id <id>` or `--run-dir <path>` for lineage-aware tar
 ### Useful commands
 
 - `tango start <name> --role <role> "task"` starts a child agent.
-- `tango ps --json [--all]` lists agents. Without `--all`, this scopes to the current project; with `--all`, it spans the entire `TANGO_HOME`.
+- `tango ps --json [--all] [--active|--problems|--health] [--limit N]` lists agents with model-safe bounded output. Without `--all`, this scopes to the current project/root session; with `--all`, it spans `TANGO_HOME` but still returns a capped summary unless `--full` is explicitly passed.
 - `tango activity <name> [--run-id <id>] [--run-dir <dir>] --lines 200 --json` inspects an agent's current output.
 - `tango message <name> [--run-id <id>] [--run-dir <dir>] "message"` sends follow-up instructions to an interactive agent.
 - `tango result <name> [--run-id <id>] [--run-dir <dir>]` reads a completed agent's result.

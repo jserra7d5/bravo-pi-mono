@@ -22,7 +22,7 @@ import { buildRunState as cpBuildRunState, messageRun, readActivity, reportRun, 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
 const cliPath = fileURLToPath(import.meta.url);
-const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required", "raw", "events"]);
+const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "active", "problems", "health", "full", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required", "raw", "events"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 class ServerRequestError extends Error {
@@ -54,7 +54,7 @@ const GLOBAL_FLAGS = new Set(["json", "cwd"]);
 const COMMAND_FLAGS: Record<string, Set<string>> = {
   server: new Set(["host", "port", "token", "allow-private-bind"]),
   start: new Set(["role", "harness", "mode", "model", "thinking", "effort", "clean", "attach", "dry-run", "recursive", "no-recursive", "result-required", "no-result-required"]),
-  ps: new Set(["all"]),
+  ps: new Set(["all", "active", "problems", "health", "full", "limit", "state"]),
   inspect: new Set(["run-id", "run-dir"]),
   activity: new Set(["run-id", "run-dir", "lines", "raw", "events"]),
   list: new Set(["all"]),
@@ -90,6 +90,12 @@ function validateParsed(cmd: string, parsed: Parsed): void {
 function flagString(flags: Parsed["flags"], name: string): string | undefined {
   const v = flags[name];
   return typeof v === "string" ? v : undefined;
+}
+function flagStrings(flags: Parsed["flags"], name: string): string[] {
+  const v = flags[name];
+  if (typeof v === "string") return [v];
+  if (Array.isArray(v)) return v;
+  return [];
 }
 function flagBool(flags: Parsed["flags"], name: string): boolean { return flags[name] === true || flags[name] === "true"; }
 function flagPositiveInt(flags: Parsed["flags"], name: string, fallback: number, max: number): number {
@@ -150,7 +156,7 @@ async function main() {
       case "help": case "--help": case "-h": return help();
       case "server": return await cmdServer(parsed);
       case "start": return await cmdStart(parsed, cwd, json);
-      case "ps": return await cmdList(cwd, json, flagBool(parsed.flags, "all"));
+      case "ps": return await cmdList(parsed, cwd, json);
       case "inspect": return await cmdInspect(parsed, cwd, json);
       case "activity": return await cmdActivity(parsed, cwd, json);
       case "list": return legacyCommand("list", "ps", json);
@@ -355,10 +361,11 @@ function legacyCommand(oldName: string, replacement: string, json: boolean) {
   throw new Error(message);
 }
 
-async function cmdList(cwd: string, json: boolean, all: boolean) {
+async function cmdList(parsed: Parsed, cwd: string, json: boolean) {
+  const all = flagBool(parsed.flags, "all");
   const path = all ? "/api/v1/runs" : `/api/v1/runs?${new URLSearchParams({ cwd }).toString()}`;
   const payload = await serverRequest("GET", path);
-  const states = all ? payload.runs : payload.runs.filter((state: any) => {
+  let states = all ? payload.runs : payload.runs.filter((state: any) => {
     const rootSessionId = process.env.TANGO_ROOT_SESSION_ID;
     const workstreamId = process.env.TANGO_WORKSTREAM_ID;
     if (rootSessionId && workstreamId) return state.identity.rootSessionId === rootSessionId && state.identity.workstreamId === workstreamId;
@@ -366,12 +373,48 @@ async function cmdList(cwd: string, json: boolean, all: boolean) {
     if (workstreamId) return state.identity.workstreamId === workstreamId;
     return true;
   });
-  if (json) return printJson({ ok: true, agents: states.map((s: any) => {
-    const task = String(s.identity.task ?? "").replace(/\s+/g, " ").trim();
-    return { ...s.identity, task: task.length > 240 ? `${task.slice(0, 239)}…` : task, taskTruncated: task.length > 240 || task !== s.identity.task, status: s.agent.state, summary: s.agent.summary, needs: s.agent.needs, result: s.result, metrics: s.metrics };
-  }) });
+  const requestedStates = new Set(flagStrings(parsed.flags, "state"));
+  if (flagBool(parsed.flags, "active")) for (const s of ["running", "created"]) requestedStates.add(s);
+  if (flagBool(parsed.flags, "problems") || flagBool(parsed.flags, "health")) for (const s of ["blocked", "error"]) requestedStates.add(s);
+  if (flagBool(parsed.flags, "health")) for (const s of ["running", "created"]) requestedStates.add(s);
+  if (requestedStates.size) states = states.filter((s: any) => requestedStates.has(s.agent.state));
+  const counts = countStates(states);
+  const total = states.length;
+  states = sortRunStatesForList(states);
+  const full = flagBool(parsed.flags, "full");
+  const limit = full ? total : flagPositiveInt(parsed.flags, "limit", flagBool(parsed.flags, "health") ? 50 : 100, 1000);
+  const returnedStates = states.slice(0, limit);
+  const truncated = returnedStates.length < total;
+  const agents = returnedStates.map((s: any) => summarizeRunStateForList(s));
+  if (json) return printJson({ ok: true, total, returned: agents.length, truncated, counts, agents, ...(truncated ? { hint: "Narrow with --state/--active/--problems/--health or pass --limit/--full for more." } : {}) });
   if (!states.length) return console.log("No agents.");
-  for (const s of states) console.log(`${s.identity.name.padEnd(18)} ${s.agent.state.padEnd(8)} ${s.identity.role ?? "-"} ${s.identity.mode}/${s.identity.harness} ${s.identity.task}`);
+  if (truncated) console.log(`Showing ${agents.length}/${total} agents. Narrow with --state/--active/--problems/--health or pass --limit/--full.`);
+  for (const a of agents) console.log(`${a.name.padEnd(18)} ${a.status.padEnd(8)} ${a.role ?? "-"} ${a.mode}/${a.harness} ${a.task}`);
+}
+
+function countStates(states: any[]): Record<string, number> {
+  return states.reduce((acc: Record<string, number>, state: any) => {
+    const key = state.agent?.state ?? "unknown";
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {});
+}
+
+function sortRunStatesForList(states: any[]): any[] {
+  const rank: Record<string, number> = { error: 0, blocked: 1, running: 2, created: 3, stopped: 4, done: 5 };
+  return [...states].sort((a, b) => {
+    const ar = rank[a.agent?.state] ?? 9;
+    const br = rank[b.agent?.state] ?? 9;
+    if (ar !== br) return ar - br;
+    const at = Date.parse(a.agent?.updatedAt ?? a.identity?.updatedAt ?? a.identity?.createdAt ?? "") || 0;
+    const bt = Date.parse(b.agent?.updatedAt ?? b.identity?.updatedAt ?? b.identity?.createdAt ?? "") || 0;
+    return bt - at;
+  });
+}
+
+function summarizeRunStateForList(s: any) {
+  const task = String(s.identity.task ?? "").replace(/\s+/g, " ").trim();
+  return { ...s.identity, task: task.length > 240 ? `${task.slice(0, 239)}…` : task, taskTruncated: task.length > 240 || task !== s.identity.task, status: s.agent.state, summary: s.agent.summary, needs: s.agent.needs, result: s.result, metrics: s.metrics };
 }
 
 function buildRunState(meta: AgentMetadata) {
@@ -492,9 +535,13 @@ function cmdAttach(parsed: Parsed, cwd: string) {
 }
 
 async function cmdMessage(parsed: Parsed, cwd: string, json: boolean) {
-  const [name, ...msg] = parsed.positionals;
-  if (!name || msg.length === 0) throw new Error("Usage: tango message <name> <message>");
-  const payload = await serverRequest("POST", "/api/v1/runs/message", { name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), message: msg.join(" ") });
+  const runId = flagString(parsed.flags, "run-id");
+  const runDir = flagString(parsed.flags, "run-dir");
+  const [first, ...rest] = parsed.positionals;
+  const name = (runId || runDir) && rest.length === 0 ? undefined : first;
+  const msg = (runId || runDir) && rest.length === 0 ? parsed.positionals : rest;
+  if ((!name && !runId && !runDir) || msg.length === 0) throw new Error("Usage: tango message [name] <message> [--run-id <id>|--run-dir <dir>]");
+  const payload = await serverRequest("POST", "/api/v1/runs/message", { name, cwd, runId, runDir, message: msg.join(" ") });
   if (json) printJson(payload); else console.log("sent");
 }
 
