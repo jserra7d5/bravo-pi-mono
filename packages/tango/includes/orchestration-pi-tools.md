@@ -26,6 +26,6 @@ Dedicated Pi tools accept an agent name and optional `cwd`. Targeting tools also
 
 The Tango server may provide dashboard visibility and artifact hosting for artifacts published through the raw `tango artifact` CLI. Dedicated Pi tools and `tango_cli` do not currently expose artifact or server commands.
 
-### Attention and delivery
+### Async child wake-ups
 
-Parent Pi sessions may receive proactive, batched notifications when child agents finish, block, or error. Treat notifications as prompts to inspect the child; always inspect child output with `tango_activity` or `tango_result` before summarizing a child agent's work.
+`tango_start` returns immediately and records an explicit parent subscription for the started child run. Parent Pi sessions may receive a proactive wake-up only for subscribed child `runId` / `runDir` targets when they finish, block, or error. Treat wake-ups as prompts to inspect the child; always inspect child output with `tango_activity` or `tango_result` before summarizing a child agent's work.

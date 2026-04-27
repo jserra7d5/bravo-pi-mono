@@ -1,5 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -17,13 +17,7 @@ const includeRoot = join(packageRoot, "includes");
 type ExecResult = { code: number; stdout: string; stderr: string; json?: any };
 type NotifyLevel = "info" | "error" | "warning" | "success";
 
-let watchProcess: ChildProcessWithoutNullStreams | undefined;
-let watcherKey: string | undefined;
 let reconcileTimer: ReturnType<typeof setInterval> | undefined;
-let eventPollTimer: ReturnType<typeof setInterval> | undefined;
-let eventPollStartedAt = 0;
-let pendingEvents: any[] = [];
-let flushTimer: ReturnType<typeof setTimeout> | undefined;
 
 function tangoHome(): string {
   return process.env.TANGO_HOME || join(process.env.TANGO_REAL_HOME || process.env.HOME || process.cwd(), ".tango");
@@ -329,22 +323,152 @@ function requireNameOrTarget(params: { name?: string; runId?: string; runDir?: s
   return "Provide name, runId, or runDir.";
 }
 
-// Import durable attention store from compiled dist to avoid duplicating logic.
-// The extension already depends on dist/cli.js at runtime; this is consistent.
-// @ts-ignore: dist has no declarations, but the module exists at runtime.
+// Import durable subscription/lease stores from compiled dist to keep the Pi
+// extension aligned with the CLI runtime modules it already executes.
+// @ts-ignore: dist has no declarations, but the module exists after build.
 import {
-  attentionStorePath,
-  upsertAttentionFromEvent,
-  shouldDeliverEvent,
-  shouldFlushClaimedEvent,
-  markAttentionState,
-  getRecipientContext,
-  type AttentionRecord,
-  type RecipientContext,
-  type AttentionState,
-} from "../../dist/attention.js";
-// @ts-ignore: dist has no declarations, but the module exists at runtime.
-import { readRecentEvents } from "../../dist/events.js";
+  createSubscription,
+  deliveryKeyForRunState,
+  listSubscriptionsForRecipient,
+  markSubscriptionDeliveryError,
+  markSubscriptionHandled,
+  markSubscriptionNotified,
+  type ParentSubscription,
+  type SubscriptionRecipient,
+} from "../../dist/subscriptions.js";
+// @ts-ignore: dist has no declarations, but the module exists after build.
+import { acquireRootOwnerLease, heartbeatRootOwnerLease, ownsRootLease, type RootOwnerLease } from "../../dist/leases.js";
+
+let ownerId = `pi_${process.pid}_${randomBytes(4).toString("hex")}`;
+let ownerLease: RootOwnerLease | undefined;
+let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+let subscriptionPollTimer: ReturnType<typeof setInterval> | undefined;
+
+function currentRecipient(cwd = process.cwd()): SubscriptionRecipient {
+  return {
+    rootSessionId: process.env.TANGO_ROOT_SESSION_ID,
+    workstreamId: process.env.TANGO_WORKSTREAM_ID,
+    cwd: resolve(cwd),
+  };
+}
+
+function acquireCurrentLease() {
+  const recipient = currentRecipient();
+  ownerLease = acquireRootOwnerLease({ ...recipient, ownerId, ttlMs: 10_000 });
+}
+
+function startLeaseHeartbeat() {
+  if (leaseHeartbeatTimer) return;
+  leaseHeartbeatTimer = setInterval(() => {
+    try {
+      const recipient = currentRecipient();
+      ownerLease = heartbeatRootOwnerLease({ ...recipient, ownerId, ttlMs: 10_000 });
+    } catch {}
+  }, 3_000);
+}
+
+function stopLeaseHeartbeat() {
+  if (leaseHeartbeatTimer) clearInterval(leaseHeartbeatTimer);
+  leaseHeartbeatTimer = undefined;
+}
+
+function ownsCurrentLease(recipient = currentRecipient()): boolean {
+  try { return ownsRootLease({ ...recipient, ownerId }); } catch { return false; }
+}
+
+function runStateFromInspect(json: any): any | undefined {
+  if (!json) return undefined;
+  if (json.state?.schemaVersion === 1) return json.state;
+  if (json.runState?.schemaVersion === 1) return json.runState;
+  if (json.identity && json.agent && json.result) return json;
+  return undefined;
+}
+
+async function inspectSubscriptionTarget(sub: ParentSubscription, signal?: AbortSignal): Promise<any | undefined> {
+  const args = ["inspect"];
+  if (sub.target.runId) args.push("--run-id", sub.target.runId);
+  else args.push("--run-dir", sub.target.runDir);
+  args.push("--json");
+  const result = await runTango(args, signal);
+  if (result.code !== 0) return undefined;
+  return runStateFromInspect(result.json);
+}
+
+function subscriptionAction(sub: ParentSubscription, state: any): string {
+  const runId = state.identity?.runId ?? sub.target.runId;
+  if (state.agent?.state === "done") return runId ? `tango_result(runId: ${runId})` : `tango_result(runDir: ${sub.target.runDir})`;
+  return runId ? `tango_activity(runId: ${runId}, lines: 120)` : `tango_activity(runDir: ${sub.target.runDir}, lines: 120)`;
+}
+
+function subscriptionWakeText(sub: ParentSubscription, state: any): string {
+  const name = state.identity?.name ?? sub.target.name ?? sub.target.runId ?? sub.target.runDir;
+  const role = state.identity?.role ?? sub.target.role ?? "agent";
+  const status = state.agent?.state ?? "unknown";
+  const needs = state.agent?.needs ? ` [needs: ${state.agent.needs}]` : "";
+  const summary = state.agent?.summary ? `: ${state.agent.summary}` : "";
+  return `Tango internal wake-up (not a user request):\n\n- ${name} (${role}) is ${status}${needs}${summary}\n  Next step: ${subscriptionAction(sub, state)}\n\nInstructions for the parent agent:\n- Do not summarize this notification to the user.\n- Continue the active user task/autonomous workstream.\n- For done agents, inspect the result if it is relevant and integrate it into the ongoing work.\n- For blocked/error agents, inspect output and either resolve the blocker or report only if user input/intervention is actually needed.\n- Respond to the user only when the original task is complete, blocked, or requires a decision.`;
+}
+
+async function checkSubscriptionsOnce(pi: ExtensionAPI, ctx: any, signal?: AbortSignal) {
+  const recipient = currentRecipient();
+  if (!ownsCurrentLease(recipient)) return;
+  const subscriptions = listSubscriptionsForRecipient(recipient, ["active", "notified"]);
+  for (const sub of subscriptions) {
+    if (!ownsCurrentLease(recipient)) return;
+    let state: any | undefined;
+    try { state = await inspectSubscriptionTarget(sub, signal); } catch { continue; }
+    if (!state) continue;
+    const agentState = state.agent?.state;
+    if (!sub.notifyOn.includes(agentState)) continue;
+    const deliveryKey = deliveryKeyForRunState(state);
+    if (!deliveryKey) continue;
+    if (sub.state === "notified" && sub.lastDeliveredKey === deliveryKey) continue;
+    try {
+      const level: NotifyLevel = agentState === "error" ? "error" : agentState === "blocked" ? "warning" : "success";
+      if (ctx?.hasUI) ctx.ui.notify(`${state.identity?.name ?? sub.target.name ?? "Tango agent"} is ${agentState}`, level);
+      pi.sendUserMessage(subscriptionWakeText(sub, state), { deliverAs: "followUp" });
+      markSubscriptionNotified(sub.subscriptionId, deliveryKey, ownerId);
+    } catch (error) {
+      markSubscriptionDeliveryError(sub.subscriptionId, error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+
+function startSubscriptionPoller(pi: ExtensionAPI, ctx: any) {
+  if (subscriptionPollTimer) return;
+  void checkSubscriptionsOnce(pi, ctx, ctx?.signal);
+  subscriptionPollTimer = setInterval(() => {
+    void checkSubscriptionsOnce(pi, ctx, ctx?.signal).catch(() => {});
+  }, 2_000);
+}
+
+function stopSubscriptionPoller() {
+  if (subscriptionPollTimer) clearInterval(subscriptionPollTimer);
+  subscriptionPollTimer = undefined;
+}
+
+function maybeCreateStartSubscription(result: ExecResult, cwd?: string) {
+  const meta = result.json?.agent ?? result.json?.metadata ?? result.json?.meta;
+  const runId = meta?.runId ?? result.json?.runId ?? result.json?.identity?.runId;
+  const runDir = meta?.runDir ?? result.json?.runDir ?? result.json?.identity?.runDir;
+  if (!runDir) return undefined;
+  return createSubscription({
+    recipient: currentRecipient(cwd ?? process.cwd()),
+    target: {
+      runId,
+      runDir,
+      name: meta?.name ?? result.json?.name ?? result.json?.identity?.name,
+      role: meta?.role ?? result.json?.role ?? result.json?.identity?.role,
+    },
+  });
+}
+
+function markToolTargetHandled(params: { runId?: string; runDir?: string; name?: string }, result?: ExecResult) {
+  const runId = params.runId ?? result?.json?.runId ?? result?.json?.identity?.runId ?? result?.json?.agent?.runId;
+  const runDir = params.runDir ?? result?.json?.runDir ?? result?.json?.identity?.runDir ?? result?.json?.agent?.runDir;
+  if (!runId && !runDir) return;
+  try { markSubscriptionHandled({ runId, runDir }, currentRecipient(), "pi-tool"); } catch {}
+}
 
 function startParentReconciler(ctx: any) {
   if (reconcileTimer || !process.env.TANGO_RUN_DIR) return;
@@ -353,205 +477,21 @@ function startParentReconciler(ctx: any) {
   }, 15_000);
 }
 
-function currentWatcherKey(): string {
-  return [
-    process.env.TANGO_ROOT_SESSION_ID ?? "",
-    process.env.TANGO_WORKSTREAM_ID ?? "",
-    process.env.TANGO_RUN_ID ?? "",
-    process.env.TANGO_RUN_DIR ? resolve(process.env.TANGO_RUN_DIR) : "",
-  ].join("|");
-}
-
-function stopEventWatcher() {
-  if (watchProcess) watchProcess.kill("SIGTERM");
-  watchProcess = undefined;
-  watcherKey = undefined;
-  pendingEvents = [];
-  if (flushTimer) clearTimeout(flushTimer);
-  flushTimer = undefined;
-}
-
-function reapDuplicateEventWatchers() {
-  const rootSessionId = process.env.TANGO_ROOT_SESSION_ID;
-  const workstreamId = process.env.TANGO_WORKSTREAM_ID;
-  if (!rootSessionId || !workstreamId) return;
-  let entries: string[] = [];
-  try { entries = readdirSync("/proc"); } catch { return; }
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry)) continue;
-    const pid = Number(entry);
-    if (!Number.isFinite(pid) || pid === process.pid || pid === watchProcess?.pid) continue;
-    try {
-      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ");
-      if (!cmdline.includes(distCli) || !cmdline.includes(" watch ") || !cmdline.includes(" --json")) continue;
-      const cwd = readlinkSync(`/proc/${pid}/cwd`);
-      if (resolve(cwd) !== resolve(process.cwd())) continue;
-      // A stale watcher from an older root/workstream can claim same-cwd child
-      // completions before the current session sees them. Reap all same-cwd
-      // Tango watchers on reload/startup; the active extension will start one
-      // fresh watcher for this session immediately after this scan.
-      try { process.kill(pid, "SIGTERM"); } catch {}
-    } catch {
-      // Process may have exited or belong to another user; ignore.
-    }
-  }
-}
-
-function startEventWatcher(pi: ExtensionAPI, ctx: any) {
-  const key = currentWatcherKey();
-  if (watchProcess && watcherKey !== key) stopEventWatcher();
-  if (watchProcess) return;
-  reapDuplicateEventWatchers();
-  watcherKey = key;
-  // Use --all here and let the extension apply its own delivery filter. The CLI
-  // watch command's lineage filter uses the watcher's env, which can diverge
-  // from agents started via long-lived server/tool processes during reloads.
-  const args = [distCli, "watch", "--json", "--all"];
-  watchProcess = spawn(process.execPath, args, { cwd: process.cwd(), env: process.env as Record<string, string>, stdio: ["ignore", "pipe", "pipe"] });
-  let buffer = "";
-  watchProcess.stdout.on("data", (chunk) => {
-    buffer += chunk.toString();
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
-    for (const line of lines) handleTangoEventLine(pi, ctx, line);
-  });
-  watchProcess.on("close", () => { watchProcess = undefined; watcherKey = undefined; });
-}
-
-function handleTangoEventLine(pi: ExtensionAPI, ctx: any, line: string) {
-  if (!line.trim()) return;
-  let event: any;
-  try { event = JSON.parse(line); } catch { return; }
-  handleTangoEvent(pi, ctx, event);
-}
-
-function handleTangoEvent(pi: ExtensionAPI, ctx: any, event: any) {
-  if (event.type !== "agent.status") return;
-  if (!["done", "blocked", "error"].includes(event.status)) return;
-  // Pi delivery uses direct-child filtering when the recipient is itself a Tango run.
-  // Root Pi sessions do not have a run identity, so they receive same root/workstream
-  // child completions even though those children have no parentRunId edge.
-  const parentRunDir = process.env.TANGO_RUN_DIR;
-  const parentRunId = process.env.TANGO_RUN_ID;
-  const hasRunLineage = !!(parentRunDir || parentRunId);
-  let isDirectChild = false;
-  if (parentRunId && event.parentRunId === parentRunId) isDirectChild = true;
-  if (parentRunDir && event.parentRunDir) {
-    if (resolve(event.parentRunDir) === resolve(parentRunDir)) isDirectChild = true;
-  }
-  if (hasRunLineage && !isDirectChild) return;
-  if (!hasRunLineage) {
-    const rootSessionId = process.env.TANGO_ROOT_SESSION_ID;
-    const workstreamId = process.env.TANGO_WORKSTREAM_ID;
-    const rootMatches = (!rootSessionId || event.rootSessionId === rootSessionId) && (!workstreamId || event.workstreamId === workstreamId);
-    const sameCwd = typeof event.cwd === "string" && resolve(event.cwd) === resolve(process.cwd());
-    // Prefer root/workstream identity, but tolerate same-cwd events because
-    // starts may be proxied through a long-lived Tango server or stale Pi tool
-    // process whose env no longer matches the visible root session.
-    if (!rootMatches && !sameCwd) return;
-  }
-  const rec = getRecipientContext();
-  upsertAttentionFromEvent(event, rec);
-  if (!shouldDeliverEvent(event, rec)) return;
-  markAttentionState(rec, event.runDir, event.eventId, "delivered");
-  pendingEvents.push(event);
-  if (!flushTimer) flushTimer = setTimeout(() => flushTangoEvents(pi, ctx), 500);
-}
-
-function processRecentTangoEvents(pi: ExtensionAPI, ctx: any, cutoffMs: number) {
-  let recent: any[] = [];
-  try { recent = readRecentEvents(200, 256 * 1024).events ?? []; } catch { return; }
-  for (const event of recent) {
-    const time = Date.parse(event.time ?? "");
-    if (!Number.isFinite(time) || time < cutoffMs) continue;
-    handleTangoEvent(pi, ctx, event);
-  }
-}
-
-function backfillRecentTangoEvents(pi: ExtensionAPI, ctx: any) {
-  // Backfill is only a short startup safety net, not historical replay. A broad
-  // replay can flood the parent with old done agents and mark stale events seen.
-  const startedAt = Date.now();
-  setTimeout(() => processRecentTangoEvents(pi, ctx, startedAt - 15 * 1000), 1000);
-}
-
-function startEventPoller(pi: ExtensionAPI, ctx: any) {
-  if (eventPollTimer) return;
-  eventPollStartedAt = Date.now();
-  eventPollTimer = setInterval(() => {
-    // Safety net for missed watch output during reloads or stale CLI lineage
-    // filtering. Delivery remains de-duplicated by the attention store.
-    processRecentTangoEvents(pi, ctx, eventPollStartedAt - 15 * 1000);
-  }, 2000);
-}
-
-function suggestedAction(event: any): string {
-  if (event.runId) {
-    if (event.status === "done") return `tango result --run-id ${event.runId}`;
-    return `tango activity --run-id ${event.runId} --lines 120`;
-  }
-  if (event.status === "done") return `tango_result ${event.agent}`;
-  return `tango_activity ${event.agent} --lines 120`;
-}
-
-function eventText(event: any): string {
-  const needs = event.needs ? ` [needs: ${event.needs}]` : "";
-  return `${event.agent} (${event.role ?? "agent"}) is ${event.status}${needs}${event.summary ? `: ${event.summary}` : ""}`;
-}
-
-function flushTangoEvents(pi: ExtensionAPI, ctx: any) {
-  const events = pendingEvents;
-  pendingEvents = [];
-  flushTimer = undefined;
-  if (!events.length) return;
-  const rec = getRecipientContext();
-
-  // Re-filter stale/superseded events against current claimed delivery state and
-  // coalesce by target runDir to the latest unresolved event per target.
-  const seenRunDirs = new Set<string>();
-  const deliverable: typeof events = [];
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i];
-    if (!shouldFlushClaimedEvent(event, rec)) continue;
-    if (seenRunDirs.has(event.runDir)) continue;
-    seenRunDirs.add(event.runDir);
-    deliverable.unshift(event);
-  }
-
-  if (!deliverable.length) return;
-
-  const worst = deliverable.some((e) => e.status === "error") ? "error" : deliverable.some((e) => e.status === "blocked") ? "warning" : "success";
-  const title = deliverable.length === 1 ? `Tango agent ${eventText(deliverable[0])}` : `${deliverable.length} Tango agents updated: ${deliverable.map((e) => `${e.agent}=${e.status}`).join(", ")}`;
-  if (ctx?.hasUI) ctx.ui.notify(title, worst as NotifyLevel);
-  const lines = deliverable.map((event) => `- ${eventText(event)}\n  Next step: ${suggestedAction(event)}`);
-  const wakeup = `Tango internal wake-up${deliverable.length > 1 ? "s" : ""} (not a user request):\n\n${lines.join("\n")}\n\nInstructions for the parent agent:\n- Do not summarize this notification to the user.\n- Continue the active user task/autonomous workstream.\n- For done agents, inspect the result if it is relevant and integrate it into the ongoing work.\n- For blocked/error agents, inspect output and either resolve the blocker or report only if user input/intervention is actually needed.\n- Respond to the user only when the original task is complete, blocked, or requires a decision.`;
-  try {
-    // Use a user-message wake-up rather than a custom-message prompt. In practice
-    // custom messages were recorded as delivered/seen but did not reliably start
-    // a new root-agent turn from this background watcher path.
-    pi.sendUserMessage(wakeup, { deliverAs: "followUp" });
-    for (const event of deliverable) markAttentionState(rec, event.runDir, event.eventId, "seen");
-  } catch (error) {
-    if (ctx?.hasUI) ctx.ui.notify(`Tango wake-up delivery failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-  }
-}
-
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     try { ensureRootSessionRecord(); } catch {}
     if (ctx.hasUI) ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", "Tango: ready"));
-    startEventWatcher(pi, ctx);
-    backfillRecentTangoEvents(pi, ctx);
-    startEventPoller(pi, ctx);
+    try { acquireCurrentLease(); } catch {}
+    startLeaseHeartbeat();
+    startSubscriptionPoller(pi, ctx);
     startParentReconciler(ctx);
   });
 
   pi.on("session_shutdown", async () => {
-    stopEventWatcher();
+    stopSubscriptionPoller();
+    stopLeaseHeartbeat();
     if (reconcileTimer) clearInterval(reconcileTimer);
     reconcileTimer = undefined;
-    if (eventPollTimer) clearInterval(eventPollTimer);
-    eventPollTimer = undefined;
   });
 
   pi.on("before_agent_start", async (event) => {
@@ -581,7 +521,13 @@ export default function (pi: ExtensionAPI) {
       if (params.clean) args.push("--clean");
       if (params.noResultRequired) args.push("--no-result-required");
       args.push(params.task);
-      const out = toolResult(await runTango(args, signal));
+      const result = await runTango(args, signal);
+      let subscription: any;
+      if (result.code === 0) {
+        try { subscription = maybeCreateStartSubscription(result, params.cwd); } catch {}
+      }
+      const out = toolResult(result);
+      if (subscription && out.details && typeof out.details === "object") (out.details as any).subscription = { subscriptionId: subscription.subscriptionId, state: subscription.state };
       await updateFooterStatus(ctx, signal);
       return out;
     },
@@ -660,7 +606,9 @@ export default function (pi: ExtensionAPI) {
         result.json.output = truncated.content + (truncated.truncated ? "\n\n[Output truncated]" : "");
         result.stdout = JSON.stringify(result.json, null, 2);
       }
-      return toolResult(result);
+      const out = toolResult(result);
+      if (result.code === 0) markToolTargetHandled(params, result);
+      return out;
     },
     renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango activity")} ${theme.fg("accent", args.name)} ${theme.fg("dim", `--lines ${args.lines ?? 200}`)}`, 0, 0); },
     renderResult(result, options, theme) { return renderLookResult(result, options, theme); },
@@ -783,7 +731,9 @@ export default function (pi: ExtensionAPI) {
         result.json.result = truncated.content + (truncated.truncated ? "\n\n[Result truncated]" : "");
         result.stdout = JSON.stringify(result.json, null, 2);
       }
-      return toolResult(result);
+      const out = toolResult(result);
+      if (result.code === 0) markToolTargetHandled(params, result);
+      return out;
     },
     renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango result")} ${theme.fg("accent", args.name)}`, 0, 0); },
     renderResult(result, options, theme) { return renderResultResult(result, options, theme); },
@@ -821,7 +771,12 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text" as const, text: `Unsupported tango command: ${command ?? "<empty>"}` }], details: { ok: false, command }, isError: true };
       }
       const result = await runTango(withJson(params.args), signal);
+      let subscription: any;
+      if (command === "start" && result.code === 0) {
+        try { subscription = maybeCreateStartSubscription(result); } catch {}
+      }
       const out = toolResult(command === "ps" ? compactPsResult(result) : result);
+      if (subscription && out.details && typeof out.details === "object") (out.details as any).subscription = { subscriptionId: subscription.subscriptionId, state: subscription.state };
       await updateFooterStatus(ctx, signal);
       return out;
     },

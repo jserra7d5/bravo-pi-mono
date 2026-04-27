@@ -24,7 +24,7 @@ Many commands accept `--run-id <id>` or `--run-dir <path>` for lineage-aware tar
 - `tango artifact publish <path> [--title title] [--entry file]` registers/copies an artifact. When the server is running and discoverable, the result includes a tokenized URL; otherwise it returns an artifact ID/manifest for later serving.
 - `tango artifact list` and `tango artifact revoke <artifact-id>` manage artifacts.
 
-Prefer `--json` when you need to parse results. Parent sessions may receive proactive Tango completion notifications, but still inspect child output with `tango result` or `tango activity` before relying on it. Use `tango attach` only in a human terminal, not from inside an agent tool call.
+Prefer `--json` when you need to parse results. Pi parent sessions may receive proactive completion wake-ups for exact runs they started through `tango_start`; still inspect child output with `tango result` or `tango activity` before relying on it. Use `tango attach` only in a human terminal, not from inside an agent tool call.
 
 ### Non-Pi harness guidance
 
