@@ -6,11 +6,13 @@ Delegate only when it reduces complexity or enables useful parallelism. Prefer s
 
 Common roles:
 
-- `scout`: inspect code/docs and report findings without making changes.
-- `planner`: propose an implementation plan or decomposition.
-- `worker`: implement a bounded change.
-- `reviewer`: review diffs, risks, and tests.
-- `team-lead`: coordinate other roles and integrate results.
+- `scout`: GPT-backed read-only discovery and evidence gathering.
+- `planner`: implementation/design/sequencing plans.
+- `reviewer`: read-only review, audit, and readiness checks.
+- `worker`: nontrivial implementation work.
+- `fast-worker`: small tactical implementation work.
+- `lead`: bounded workstream coordination and result synthesis.
+- `generalist`: mixed research/planning/review/small implementation for ambiguous bounded tasks.
 
 ### Runtime identity and lineage
 

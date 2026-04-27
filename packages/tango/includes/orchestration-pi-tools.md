@@ -11,7 +11,7 @@ Tool to CLI mapping:
 - `tango_stop` wraps `tango stop`.
 - `tango_report` wraps `tango report`.
 - `tango_result` wraps `tango result`.
-- `tango_cli` is the generic CLI escape hatch for safe Tango commands and flags not yet exposed by a dedicated tool, including `children`, `wait`, and `doctor events`. Long-running commands such as `tango watch` and `tango server` are intentionally not exposed through `tango_cli`.
+- `tango_cli` is the generic CLI escape hatch for safe Tango commands and flags not yet exposed by a dedicated tool, including `children`, `follow`, and `doctor events`. Long-running commands such as `tango watch` and `tango server` are intentionally not exposed through `tango_cli`.
 
 Use dedicated tools for common operations. Use `tango_cli` for newer or uncommon CLI features. Use raw shell CLI only when tools are unavailable or for debugging.
 
