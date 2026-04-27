@@ -323,6 +323,10 @@ function requireNameOrTarget(params: { name?: string; runId?: string; runDir?: s
   return "Provide name, runId, or runDir.";
 }
 
+function targetLabel(args: { name?: string; runId?: string; runDir?: string }): string {
+  return args.name ?? args.runId ?? args.runDir ?? "<target>";
+}
+
 // Import durable subscription/lease stores from compiled dist to keep the Pi
 // extension aligned with the CLI runtime modules it already executes.
 // @ts-ignore: dist has no declarations, but the module exists after build.
@@ -533,7 +537,7 @@ export default function (pi: ExtensionAPI) {
     },
     renderCall(args, theme) {
       const suffix = args.thinking ? `as ${args.role}, thinking ${args.thinking}` : `as ${args.role}`;
-      return textBlock([`${theme.fg("toolTitle", "tango start")} ${theme.fg("accent", args.name)} ${theme.fg("muted", suffix)}`, `  ${theme.fg("dim", preview(args.task))}`]);
+      return textBlock([`${theme.fg("toolTitle", "tango start")} ${theme.fg("accent", targetLabel(args))} ${theme.fg("muted", suffix)}`, `  ${theme.fg("dim", preview(args.task))}`]);
     },
     renderResult(result, options, theme) { return renderAgentResult(result, options, theme, "Started"); },
   });
@@ -582,7 +586,7 @@ export default function (pi: ExtensionAPI) {
       if (error) return { content: [{ type: "text" as const, text: error }], details: { ok: false, error }, isError: true };
       return toolResult(await runTango(addCwd(addTarget(["inspect"], params).concat("--json"), params.cwd), signal));
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango inspect")} ${theme.fg("accent", args.name)}`, 0, 0); },
+    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango inspect")} ${theme.fg("accent", targetLabel(args))}`, 0, 0); },
     renderResult(result, options, theme) { return renderAgentResult(result, options, theme, "Inspect"); },
   });
 
@@ -610,7 +614,7 @@ export default function (pi: ExtensionAPI) {
       if (result.code === 0) markToolTargetHandled(params, result);
       return out;
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango activity")} ${theme.fg("accent", args.name)} ${theme.fg("dim", `--lines ${args.lines ?? 200}`)}`, 0, 0); },
+    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango activity")} ${theme.fg("accent", targetLabel(args))} ${theme.fg("dim", `--lines ${args.lines ?? 200}`)}`, 0, 0); },
     renderResult(result, options, theme) { return renderLookResult(result, options, theme); },
   });
 
@@ -635,7 +639,7 @@ export default function (pi: ExtensionAPI) {
       await updateFooterStatus(ctx, signal);
       return out;
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango follow")} ${theme.fg("accent", args.name)} ${theme.fg("dim", `--until ${args.until}`)}`, 0, 0); },
+    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango follow")} ${theme.fg("accent", targetLabel(args))} ${theme.fg("dim", `--until ${args.until}`)}`, 0, 0); },
     renderResult(result, options, theme) { return renderAgentResult(result, options, theme, "Follow"); },
   });
 
@@ -656,7 +660,7 @@ export default function (pi: ExtensionAPI) {
       const args = addTarget(["message"], params).concat([params.message, "--json"]);
       return toolResult(await runTango(addCwd(args, params.cwd), signal));
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango message")} ${theme.fg("accent", args.name)} ${theme.fg("dim", preview(args.message))}`, 0, 0); },
+    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango message")} ${theme.fg("accent", targetLabel(args))} ${theme.fg("dim", preview(args.message))}`, 0, 0); },
     renderResult(result, _options, theme) {
       if ((result as any).isError) return errorText(result, theme);
       return new Text(`${theme.fg("success", "→ Sent message")}`, 0, 0);
@@ -680,7 +684,7 @@ export default function (pi: ExtensionAPI) {
       await updateFooterStatus(ctx, signal);
       return out;
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango stop")} ${theme.fg("accent", args.name)}`, 0, 0); },
+    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango stop")} ${theme.fg("accent", targetLabel(args))}`, 0, 0); },
     renderResult(result, options, theme) { return renderAgentResult(result, options, theme, "Stopped"); },
   });
 
@@ -735,7 +739,7 @@ export default function (pi: ExtensionAPI) {
       if (result.code === 0) markToolTargetHandled(params, result);
       return out;
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango result")} ${theme.fg("accent", args.name)}`, 0, 0); },
+    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango result")} ${theme.fg("accent", targetLabel(args))}`, 0, 0); },
     renderResult(result, options, theme) { return renderResultResult(result, options, theme); },
   });
 
