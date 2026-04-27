@@ -103,6 +103,7 @@ export async function startTangoServer(options: TangoServerOptions = {}): Promis
   const discovery: ServerDiscovery = { schemaVersion: 1, url: `http://${host}:${actualPort}`, token, pid: process.pid, startedAt: new Date().toISOString() };
   writeFileSync(serverDiscoveryPath(), `${JSON.stringify(discovery, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   console.log(`tango server listening on ${discovery.url}`);
+  console.log(`dashboard: ${discovery.url}/?token=${encodeURIComponent(token)}`);
   console.log(`discovery: ${serverDiscoveryPath()}`);
 
   let eventState: EventReadState = { offset: initialEventOffset(false), carry: "" };
