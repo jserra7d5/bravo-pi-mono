@@ -235,9 +235,16 @@ export function shouldDeliverEvent(
   if (event.status === "done" && event.mode === "oneshot" && !event.resultFinalizedAt) return false;
   const record = findAttentionRecord(recipient, event.runDir, event.eventId);
   if (!record) return true;
-  if (record.state === "dismissed" || record.state === "superseded") return false;
-  if (event.status === "done" && record.state === "handled") return false;
-  return true;
+  return record.state === "new";
+}
+
+export function shouldFlushClaimedEvent(
+  event: TangoEvent,
+  recipient: RecipientContext
+): boolean {
+  if (event.status === "done" && event.mode === "oneshot" && !event.resultFinalizedAt) return false;
+  const record = findAttentionRecord(recipient, event.runDir, event.eventId);
+  return record?.state === "delivered" && record.status === event.status;
 }
 
 export function isHandledForRecipient(

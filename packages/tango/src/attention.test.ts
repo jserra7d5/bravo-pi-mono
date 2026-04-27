@@ -16,6 +16,7 @@ import {
   markSeen,
   readAllAttentionRecords,
   shouldDeliverEvent,
+  shouldFlushClaimedEvent,
   upsertAttentionFromEvent,
 } from "./attention.js";
 import type { TangoEvent } from "./events.js";
@@ -119,13 +120,57 @@ describe("attention records", () => {
     assert.strictEqual(shouldDeliverEvent(finalized, recipient), true);
   });
 
-  it("blocked/error remains deliverable after seen", () => {
+  it("delivered events are not deliverable again", () => {
+    const event = makeEvent("blocked");
+    const recipient = { runId: "parent_1" };
+    upsertAttentionFromEvent(event, recipient);
+    markDelivered(recipient, event.runDir, event.eventId);
+    assert.strictEqual(shouldDeliverEvent(event, recipient), false);
+    assert.strictEqual(isHandledForRecipient(event, recipient), false);
+  });
+
+  it("seen events are not deliverable again", () => {
     const event = makeEvent("blocked");
     const recipient = { runId: "parent_1" };
     upsertAttentionFromEvent(event, recipient);
     markSeen(recipient, event.runDir, event.eventId);
-    assert.strictEqual(shouldDeliverEvent(event, recipient), true);
+    assert.strictEqual(shouldDeliverEvent(event, recipient), false);
     assert.strictEqual(isHandledForRecipient(event, recipient), false);
+  });
+
+  it("handled blocked/error events are not deliverable again", () => {
+    const event = makeEvent("error");
+    const recipient = { runId: "parent_1" };
+    upsertAttentionFromEvent(event, recipient);
+    markHandled(recipient, event.runDir, event.eventId);
+    assert.strictEqual(shouldDeliverEvent(event, recipient), false);
+    assert.strictEqual(isHandledForRecipient(event, recipient), true);
+  });
+
+  it("new event ID for same blocked status is deliverable once", () => {
+    const recipient = { runId: "parent_1" };
+    const first = makeEvent("blocked", { runDir: "/tmp/run-same-status" });
+    const second = makeEvent("blocked", { runDir: "/tmp/run-same-status" });
+    upsertAttentionFromEvent(first, recipient);
+    markDelivered(recipient, first.runDir, first.eventId);
+    assert.strictEqual(shouldDeliverEvent(first, recipient), false);
+    upsertAttentionFromEvent(second, recipient);
+    assert.strictEqual(shouldDeliverEvent(second, recipient), true);
+    markDelivered(recipient, second.runDir, second.eventId);
+    assert.strictEqual(shouldDeliverEvent(second, recipient), false);
+  });
+
+  it("new event ID for same error status is deliverable once", () => {
+    const recipient = { runId: "parent_1" };
+    const first = makeEvent("error", { runDir: "/tmp/run-same-error" });
+    const second = makeEvent("error", { runDir: "/tmp/run-same-error" });
+    upsertAttentionFromEvent(first, recipient);
+    markSeen(recipient, first.runDir, first.eventId);
+    assert.strictEqual(shouldDeliverEvent(first, recipient), false);
+    upsertAttentionFromEvent(second, recipient);
+    assert.strictEqual(shouldDeliverEvent(second, recipient), true);
+    markSeen(recipient, second.runDir, second.eventId);
+    assert.strictEqual(shouldDeliverEvent(second, recipient), false);
   });
 
   it("markLatestDoneHandled finds and handles the latest done record", async () => {
@@ -196,6 +241,29 @@ describe("attention records", () => {
     upsertAttentionFromEvent(event, recipient);
     markAttentionState(recipient, event.runDir, event.eventId, "superseded");
     assert.strictEqual(shouldDeliverEvent(event, recipient), false);
+  });
+
+  it("shouldFlushClaimedEvent only flushes claimed delivered events", () => {
+    const recipient = { runId: "parent_1" };
+    const event = makeEvent("blocked");
+    assert.strictEqual(shouldFlushClaimedEvent(event, recipient), false);
+    upsertAttentionFromEvent(event, recipient);
+    assert.strictEqual(shouldFlushClaimedEvent(event, recipient), false);
+    markDelivered(recipient, event.runDir, event.eventId);
+    assert.strictEqual(shouldFlushClaimedEvent(event, recipient), true);
+    assert.strictEqual(shouldFlushClaimedEvent({ ...event, status: "error" }, recipient), false);
+    markSeen(recipient, event.runDir, event.eventId);
+    assert.strictEqual(shouldFlushClaimedEvent(event, recipient), false);
+  });
+
+  it("shouldFlushClaimedEvent is recipient-specific", () => {
+    const event = makeEvent("error");
+    const recipientA = { runId: "parent_a" };
+    const recipientB = { runId: "parent_b" };
+    upsertAttentionFromEvent(event, recipientA);
+    markDelivered(recipientA, event.runDir, event.eventId);
+    assert.strictEqual(shouldFlushClaimedEvent(event, recipientA), true);
+    assert.strictEqual(shouldFlushClaimedEvent(event, recipientB), false);
   });
 
   it("getRecipientContext reads env vars", () => {

@@ -304,6 +304,7 @@ import {
   attentionStorePath,
   upsertAttentionFromEvent,
   shouldDeliverEvent,
+  shouldFlushClaimedEvent,
   markAttentionState,
   getRecipientContext,
   type AttentionRecord,
@@ -321,7 +322,6 @@ function startParentReconciler(ctx: any) {
 function startEventWatcher(pi: ExtensionAPI, ctx: any) {
   if (watchProcess) return;
   const args = [distCli, "watch", "--json"];
-  if (process.env.TANGO_RUN_DIR) args.push("--all");
   watchProcess = spawn(process.execPath, args, { cwd: process.cwd(), env: process.env as Record<string, string>, stdio: ["ignore", "pipe", "pipe"] });
   let buffer = "";
   watchProcess.stdout.on("data", (chunk) => {
@@ -385,13 +385,13 @@ function flushTangoEvents(pi: ExtensionAPI, ctx: any) {
   if (!events.length) return;
   const rec = getRecipientContext();
 
-  // Re-filter stale/superseded events against current shouldDeliverEvent and
+  // Re-filter stale/superseded events against current claimed delivery state and
   // coalesce by target runDir to the latest unresolved event per target.
   const seenRunDirs = new Set<string>();
   const deliverable: typeof events = [];
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i];
-    if (!shouldDeliverEvent(event, rec)) continue;
+    if (!shouldFlushClaimedEvent(event, rec)) continue;
     if (seenRunDirs.has(event.runDir)) continue;
     seenRunDirs.add(event.runDir);
     deliverable.unshift(event);
@@ -429,6 +429,9 @@ export default function (pi: ExtensionAPI) {
     watchProcess = undefined;
     if (reconcileTimer) clearInterval(reconcileTimer);
     reconcileTimer = undefined;
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = undefined;
+    pendingEvents = [];
   });
 
   pi.on("before_agent_start", async (event) => {

@@ -8,7 +8,7 @@ import { listMetadata, readMetadata, removeRunDir, transitionStatus, updateStatu
 import { readMetrics, writeMetrics } from "./metrics.js";
 import { appendEvent, eventMatchesLineage, initialEventOffset, readEvents, type TangoEvent } from "./events.js";
 import { resolveTarget, isChildOf } from "./targetResolver.js";
-import { getRecipientContext, markLatestDoneHandled, markSeen, shouldDeliverEvent, upsertAttentionFromEvent } from "./attention.js";
+import { getRecipientContext, markLatestDoneHandled } from "./attention.js";
 import { listRoles, loadRole, assembleSystemPrompt } from "./roles.js";
 import { attachTmux, captureTmux, sendTmux, stopTmux } from "./runtime/tmux.js";
 import { isTerminalStatus, reconcileAgentLifecycle } from "./lifecycle.js";
@@ -305,9 +305,6 @@ async function cmdWatch(parsed: Parsed, cwd: string, json: boolean) {
     for (const error of next.errors) if (!json) console.error(`tango watch: skipped malformed event: ${error}`);
     for (const event of next.events) {
       if (!all && !eventMatchesLineage(event, cwd)) continue;
-      const rec = getRecipientContext();
-      upsertAttentionFromEvent(event, rec);
-      markSeen(rec, event.runDir, event.eventId);
       printEvent(event, json);
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
