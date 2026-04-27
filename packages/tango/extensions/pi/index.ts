@@ -404,9 +404,9 @@ function subscriptionWakeText(sub: ParentSubscription, state: any): string {
   const name = state.identity?.name ?? sub.target.name ?? sub.target.runId ?? sub.target.runDir;
   const role = state.identity?.role ?? sub.target.role ?? "agent";
   const status = state.agent?.state ?? "unknown";
-  const needs = state.agent?.needs ? ` [needs: ${state.agent.needs}]` : "";
-  const summary = state.agent?.summary ? `: ${state.agent.summary}` : "";
-  return `Tango internal wake-up (not a user request):\n\n- ${name} (${role}) is ${status}${needs}${summary}\n  Next step: ${subscriptionAction(sub, state)}\n\nInstructions for the parent agent:\n- Do not summarize this notification to the user.\n- Continue the active user task/autonomous workstream.\n- For done agents, inspect the result if it is relevant and integrate it into the ongoing work.\n- For blocked/error agents, inspect output and either resolve the blocker or report only if user input/intervention is actually needed.\n- Respond to the user only when the original task is complete, blocked, or requires a decision.`;
+  const needs = state.agent?.needs ? `\nNeeds: ${state.agent.needs}` : "";
+  const summary = state.agent?.summary ? `\nSummary: ${state.agent.summary}` : "";
+  return `[SYSTEM: Tango child update]\nAgent: ${name}\nRole: ${role}\nStatus: ${status}${needs}${summary}\nNext: ${subscriptionAction(sub, state)}`;
 }
 
 async function checkSubscriptionsOnce(pi: ExtensionAPI, ctx: any, signal?: AbortSignal) {
