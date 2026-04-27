@@ -37,6 +37,10 @@ export function sendTmux(socket: string, session: string, message: string): void
   const paste = spawnSync("tmux", ["-S", socket, "paste-buffer", "-b", bufferName, "-t", session], { encoding: "utf8" });
   spawnSync("tmux", ["-S", socket, "delete-buffer", "-b", bufferName], { stdio: "ignore" });
   if (paste.status !== 0) throw new Error(paste.stderr || "failed to paste message");
+  // Some full-screen TUIs (notably Gemini CLI) acknowledge bracketed paste just
+  // after tmux returns. A tiny pause keeps the submit key from being swallowed
+  // as part of paste handling while preserving Claude Code's paste-buffer path.
+  spawnSync("bash", ["-lc", "sleep 0.1"], { stdio: "ignore" });
   const enter = spawnSync("tmux", ["-S", socket, "send-keys", "-t", session, "C-m"], { encoding: "utf8" });
   if (enter.status !== 0) throw new Error(enter.stderr || "failed to send message");
 }

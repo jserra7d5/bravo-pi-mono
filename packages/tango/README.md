@@ -5,7 +5,7 @@
 It provides:
 
 - a `tango` CLI for starting, inspecting, messaging, and stopping agents;
-- harness adapters for Pi, Claude Code, and generic shell commands;
+- harness adapters for Pi, Claude Code, Gemini CLI, and generic shell commands;
 - reusable agent roles and shared prompt includes;
 - a Pi extension wrapper that exposes the CLI as Pi tools/commands.
 
@@ -23,7 +23,7 @@ tango watch --json
 tango doctor events
 ```
 
-## Claude Code harness
+## Claude Code and Gemini CLI harnesses
 
 Claude roles use `harness: claude` and launch Claude Code under Tango's run directory and tmux conventions.
 
@@ -54,6 +54,28 @@ Claude harness behavior:
 - ignores role `tools` because Pi tools and Claude Code tools are not portable;
 - rejects role `extensions` because Pi extensions are not available in Claude Code;
 - copies role `skills` directories into `<runDir>/home/.claude/skills/`.
+
+Gemini roles use `harness: gemini` and launch Gemini CLI under Tango's run directory and tmux conventions. By default, Gemini starts in `interactive` mode rather than one-shot/headless mode.
+
+Example:
+
+```bash
+tango start gemini-worker --role gemini-worker --model gemini-3.1-pro-preview "Implement the assigned task"
+tango result gemini-worker
+```
+
+Gemini harness behavior:
+
+- launches `gemini --prompt-interactive <task> --yolo --skip-trust` with a required Gemini model; only `gemini-3.1-pro-preview` and `gemini-3-flash-preview` are accepted;
+- injects the assembled Tango system prompt into the interactive prompt text;
+- keeps Gemini runtime state isolated with `HOME=<runDir>/home`;
+- sets `TANGO_REAL_HOME=<operator-home>` and `TANGO_AGENT_HOME=<runDir>/home`;
+- preserves `TANGO_HOME` for recursive Tango CLI calls;
+- seeds minimal Gemini OAuth/config files from `~/.gemini` (`oauth_creds.json`, `google_accounts.json`, settings/project/trust state, and related config files) when present;
+- maps role/CLI `thinking` to run-local Gemini `modelConfigs.overrides` using Gemini 3 `thinkingLevel` (`LOW`, `MEDIUM`, or `HIGH`) when set;
+- ignores role `tools` because Pi tools and Gemini CLI tools are not portable;
+- rejects role `extensions` because Pi extensions are not available in Gemini CLI;
+- copies role `skills` directories into `<runDir>/home/.gemini/skills/` on a best-effort basis for Gemini installations that support local skills.
 
 Pi harness behavior similarly keeps Pi runtime state isolated while loading a Tango Pi extension that makes the Pi `bash` tool run with `HOME=$TANGO_REAL_HOME` when `bash` is enabled for the role.
 

@@ -10,15 +10,16 @@ import { appendStatusEvent } from "./events.js";
 import { buildPiCommand } from "./harnesses/pi.js";
 import { buildGenericCommand } from "./harnesses/generic.js";
 import { buildClaudeCommand } from "./harnesses/claude.js";
+import { buildGeminiCommand } from "./harnesses/gemini.js";
 import { startTmux } from "./runtime/tmux.js";
 import { isTerminalStatus } from "./lifecycle.js";
 
-const HARNESSES = new Set(["pi", "claude", "generic"]);
+const HARNESSES = new Set(["pi", "claude", "gemini", "generic"]);
 const MODES = new Set(["oneshot", "interactive"]);
 
-function validateHarness(value: string): "pi" | "claude" | "generic" {
-  if (HARNESSES.has(value)) return value as "pi" | "claude" | "generic";
-  throw new Error(`Invalid harness: ${value}. Expected pi, claude, or generic.`);
+function validateHarness(value: string): "pi" | "claude" | "gemini" | "generic" {
+  if (HARNESSES.has(value)) return value as "pi" | "claude" | "gemini" | "generic";
+  throw new Error(`Invalid harness: ${value}. Expected pi, claude, gemini, or generic.`);
 }
 
 function validateMode(value: string): "oneshot" | "interactive" {
@@ -30,7 +31,7 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
   let role: RoleConfig | undefined;
   if (options.roleName) role = loadRole(options.roleName);
   const harness = validateHarness(options.harness ?? role?.harness ?? "pi");
-  const mode = validateMode(options.mode ?? role?.mode ?? (harness === "generic" ? "interactive" : "oneshot"));
+  const mode = validateMode(options.mode ?? role?.mode ?? (harness === "generic" || harness === "gemini" ? "interactive" : "oneshot"));
   const runDir = runDirFor(options.cwd, options.name, { createRoot: !options.dryRun });
   if (!options.dryRun) {
     if (existsSync(runDir) && options.clean) rmSync(runDir, { recursive: true, force: true });
@@ -79,7 +80,9 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
     ? buildGenericCommand(meta, options.task)
     : harness === "claude"
       ? buildClaudeCommand(meta, effectiveRole, systemFile, options.task, { prepareHome: !options.dryRun })
-      : buildPiCommand(meta, effectiveRole, systemFile, options.task, { prepareHome: !options.dryRun });
+      : harness === "gemini"
+        ? buildGeminiCommand(meta, effectiveRole, systemFile, options.task, { prepareHome: !options.dryRun })
+        : buildPiCommand(meta, effectiveRole, systemFile, options.task, { prepareHome: !options.dryRun });
   if (!options.dryRun) {
     writeFileSync(join(runDir, "command.json"), `${JSON.stringify(redactCommand(command), null, 2)}\n`, "utf8");
     writeMetadata(meta);

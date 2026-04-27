@@ -82,6 +82,58 @@ describe("Tango CLI/runtime hardening", () => {
     }
   });
 
+  it("builds Gemini dry-runs as interactive prompt sessions without side effects", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const result = runCli(["start", "gemini-preview", "--harness", "gemini", "--model", "gemini-3-flash-preview", "--thinking", "medium", "--dry-run", "--json", "inspect repo"], { TANGO_HOME: home }, cwd);
+      assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+      const body = JSON.parse(result.stdout);
+      assert.strictEqual(body.ok, true);
+      assert.strictEqual(body.agent.harness, "gemini");
+      assert.strictEqual(body.agent.mode, "interactive");
+      assert.strictEqual(body.command.command, "gemini");
+      assert.deepStrictEqual(body.command.args.slice(0, 5), ["--model", "gemini-3-flash-preview", "--yolo", "--skip-trust", "--prompt-interactive"]);
+      assert.match(body.command.args[5], /Task:\s*inspect repo/);
+      assert.strictEqual(body.command.env.HOME, body.agent.homeDir);
+      assert.strictEqual(body.command.env.TANGO_AGENT_HOME, body.agent.homeDir);
+      assert.strictEqual(existsSync(join(home, "runs")), false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsupported Gemini models", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const result = runCli(["start", "bad-gemini-model", "--harness", "gemini", "--model", "gemini-2.5-pro", "--dry-run", "--json", "task"], { TANGO_HOME: home }, cwd);
+      assert.notStrictEqual(result.status, 0);
+      assert.match(result.stdout, /Expected gemini-3\.1-pro-preview or gemini-3-flash-preview/);
+      assert.strictEqual(existsSync(join(home, "runs")), false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects Gemini roles that declare Pi extensions", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      mkdirSync(join(home, "roles"), { recursive: true });
+      writeFileSync(join(home, "roles", "bad-gemini.md"), `---\nname: bad-gemini\nharness: gemini\nextensions: [./x.ts]\n---\n\nBad role\n`);
+      const result = runCli(["start", "bad-gemini-run", "--role", "bad-gemini", "--dry-run", "--json", "task"], { TANGO_HOME: home }, cwd);
+      assert.notStrictEqual(result.status, 0);
+      assert.match(result.stdout, /Pi extensions are only supported by harness=pi/);
+      assert.strictEqual(existsSync(join(home, "runs")), false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("stops oneshot runs and finalizes an empty stopped result issue when no result exists", () => {
     const cwd = tempDir();
     const home = tempDir();
