@@ -242,7 +242,7 @@ function listAgents(cwd?: string): Array<AgentMetadata & { metrics?: unknown; at
       ...agent,
       ...(metrics ? { metrics } : {}),
       attachCommand: agent.mode === "interactive" ? `${prefix} tango attach ${shellQuote(agent.name)}` : undefined,
-      lookCommand: `${prefix} tango look ${shellQuote(agent.name)} --lines 200`,
+      lookCommand: `${prefix} tango activity ${shellQuote(agent.name)} --lines 200`,
       resultCommand: `${prefix} tango result ${shellQuote(agent.name)}`,
     };
   });

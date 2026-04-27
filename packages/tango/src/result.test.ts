@@ -80,7 +80,7 @@ describe("result readiness", () => {
     writeFileSync(source, "full deliverable\n", "utf8");
     const cli = join(dirname(fileURLToPath(import.meta.url)), "cli.js");
 
-    const proc = spawnSync(process.execPath, [cli, "status", "done", "--run-dir", meta.runDir, "--result-file", source, "finished", "--json"], {
+    const proc = spawnSync(process.execPath, [cli, "report", "done", "--run-dir", meta.runDir, "--result-file", source, "finished", "--json"], {
       cwd: tempHome,
       env: { ...process.env, TANGO_HOME: tempHome },
       encoding: "utf8",
@@ -167,12 +167,12 @@ describe("result readiness", () => {
     assert.strictEqual(updated.exitCode, 0);
   });
 
-  it("persists captured oneshot final text even when status done was set before process exit", async () => {
+  it("persists captured oneshot final text even when report done was set before process exit", async () => {
     const meta = makeMeta({ mode: "oneshot", status: "running", harness: "generic", task: "write an audit report" });
     writeMetadata(meta);
     const cli = join(dirname(fileURLToPath(import.meta.url)), "cli.js");
-    const event = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Full audit report\n\nEvidence and recommendations that must survive status finalization. This report includes concrete findings, risks, remediation steps, and validation notes so it is not mistaken for a terse status summary or placeholder result." }] } };
-    const script = `const { spawnSync } = require('node:child_process');\nspawnSync(process.execPath, [${JSON.stringify(cli)}, 'status', 'done', 'premature status'], { env: process.env, stdio: 'inherit' });\nconsole.log(${JSON.stringify(JSON.stringify(event))});\n`;
+    const event = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Full audit report\n\nEvidence and recommendations that must survive report finalization. This report includes concrete findings, risks, remediation steps, and validation notes so it is not mistaken for a terse report summary or placeholder result." }] } };
+    const script = `const { spawnSync } = require('node:child_process');\nspawnSync(process.execPath, [${JSON.stringify(cli)}, 'report', 'done', 'premature status'], { env: process.env, stdio: 'inherit' });\nconsole.log(${JSON.stringify(JSON.stringify(event))});\n`;
     const spec: CommandSpec = {
       command: process.execPath,
       args: ["-e", script],
@@ -187,7 +187,7 @@ describe("result readiness", () => {
     assert.strictEqual(updated.status, "done");
     assert.strictEqual(updated.summary, "premature status");
     assert.ok(updated.resultFinalizedAt);
-    assert.strictEqual(readFileSync(join(meta.runDir, "result.md"), "utf8"), "Full audit report\n\nEvidence and recommendations that must survive status finalization. This report includes concrete findings, risks, remediation steps, and validation notes so it is not mistaken for a terse status summary or placeholder result.");
+    assert.strictEqual(readFileSync(join(meta.runDir, "result.md"), "utf8"), "Full audit report\n\nEvidence and recommendations that must survive report finalization. This report includes concrete findings, risks, remediation steps, and validation notes so it is not mistaken for a terse report summary or placeholder result.");
     assert.strictEqual(updated.resultIssue, undefined);
   });
 

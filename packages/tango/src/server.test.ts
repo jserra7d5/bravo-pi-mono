@@ -131,7 +131,7 @@ describe("server routes", () => {
     assert.strictEqual((body as any).counts.total, 2);
     assert.strictEqual((body as any).workstreams.length, 1);
     assert.strictEqual((body as any).attention[0].name, "agent-b");
-    assert.match((body as any).attention[0].commands.look, /tango look --run-id run_b --lines 200/);
+    assert.match((body as any).attention[0].commands.look, /tango activity --run-id run_b --lines 200/);
     assert.strictEqual((body as any).activeAgents[0].name, "agent-a");
     assert.strictEqual((body as any).recentArtifacts[0].artifactId, "art_1");
     assert.strictEqual((body as any).suggestedRootSessionId, "r1");

@@ -18,7 +18,7 @@ import { listArtifacts, publishArtifact, readServerDiscovery, revokeArtifact, st
 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
-const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required"]);
+const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required", "raw", "events"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 function parse(argv: string[]): Parsed {
@@ -44,15 +44,20 @@ const GLOBAL_FLAGS = new Set(["json", "cwd"]);
 const COMMAND_FLAGS: Record<string, Set<string>> = {
   server: new Set(["host", "port", "token", "allow-private-bind"]),
   start: new Set(["role", "harness", "mode", "model", "thinking", "effort", "clean", "attach", "dry-run", "recursive", "no-recursive", "result-required", "no-result-required"]),
+  ps: new Set(["all"]),
+  inspect: new Set(["run-id", "run-dir"]),
+  activity: new Set(["run-id", "run-dir", "lines", "raw", "events"]),
   list: new Set(["all"]),
   look: new Set(["run-id", "run-dir", "lines"]),
   attach: new Set(["run-id", "run-dir"]),
   message: new Set(["run-id", "run-dir"]),
   stop: new Set(["run-id", "run-dir"]),
   delete: new Set(["run-id", "run-dir"]),
+  report: new Set(["run-dir", "needs", "result-file", "summary-only", "no-result", "checkpoint"]),
   status: new Set(["run-dir", "needs", "result-file", "summary-only", "no-result"]),
   watch: new Set(["all", "from-start"]),
   children: new Set(["run-id", "run-dir", "tree"]),
+  follow: new Set(["run-id", "run-dir", "timeout", "until"]),
   wait: new Set(["run-id", "run-dir", "timeout"]),
   doctor: new Set(["run-dir", "parent-run-dir"]),
   metrics: new Set(["run-dir", "payload"]),
@@ -60,6 +65,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   reconcile: new Set(["all", "children", "parent-run-dir"]),
   runner: new Set(["run-dir"]),
   result: new Set(["run-id", "run-dir", "watch", "timeout"]),
+  recover: new Set(["run-dir"]),
   roles: new Set(),
 };
 
@@ -124,22 +130,28 @@ async function main() {
       case "help": case "--help": case "-h": return help();
       case "server": return await cmdServer(parsed);
       case "start": return await cmdStart(parsed, cwd, json);
-      case "list": return cmdList(cwd, json, flagBool(parsed.flags, "all"));
-      case "look": return cmdLook(parsed, cwd, json);
+      case "ps": return cmdList(cwd, json, flagBool(parsed.flags, "all"));
+      case "inspect": return cmdInspect(parsed, cwd, json);
+      case "activity": return cmdActivity(parsed, cwd, json);
+      case "list": return legacyCommand("list", "ps", json);
+      case "look": return legacyCommand("look", "activity", json);
       case "attach": return cmdAttach(parsed, cwd);
       case "message": return cmdMessage(parsed, cwd, json);
       case "stop": return cmdStop(parsed, cwd, json);
       case "delete": return cmdDelete(parsed, cwd, json);
-      case "status": return cmdStatus(parsed, json);
+      case "report": return cmdReport(parsed, json);
+      case "status": return legacyCommand("status", "report", json);
       case "watch": return await cmdWatch(parsed, cwd, json);
       case "children": return await cmdChildren(parsed, cwd, json);
-      case "wait": return await cmdWait(parsed, cwd, json);
+      case "follow": return await cmdFollow(parsed, cwd, json);
+      case "wait": return legacyCommand("wait", "follow --until terminal", json);
       case "doctor": return cmdDoctor(parsed, cwd, json);
       case "metrics": return cmdMetrics(parsed, json);
       case "artifact": return await cmdArtifact(parsed, cwd, json);
       case "reconcile": return cmdReconcile(parsed, cwd, json);
       case "runner": return await cmdRunner(parsed);
       case "result": return await cmdResult(parsed, cwd, json);
+      case "recover": return cmdRecover(parsed, json);
       case "roles": return cmdRoles(parsed, json);
       default: return fail(`Unknown command: ${cmd}`, json);
     }
@@ -254,6 +266,15 @@ function scopedListAgents(cwd: string, all: boolean): AgentMetadata[] {
   return scoped;
 }
 
+function legacyCommand(oldName: string, replacement: string, json: boolean) {
+  const message = `tango ${oldName} has been removed. Use tango ${replacement}.`;
+  if (json) {
+    process.exitCode = 1;
+    return printJson({ ok: false, error: message, removed: oldName, replacement });
+  }
+  throw new Error(message);
+}
+
 function cmdList(cwd: string, json: boolean, all: boolean) {
   const agents = scopedListAgents(cwd, all);
   if (json) return printJson({ ok: true, agents: agents.map(listAgentSummary) });
@@ -261,11 +282,103 @@ function cmdList(cwd: string, json: boolean, all: boolean) {
   for (const a of agents) console.log(`${a.name.padEnd(18)} ${a.status.padEnd(8)} ${a.role ?? "-"} ${a.mode}/${a.harness} ${a.task}`);
 }
 
+function buildRunState(meta: AgentMetadata) {
+  const refreshed = withMetrics(refreshStatus(meta));
+  const assessment = assessResultDeliverable(refreshed);
+  const processState = isTerminalStatus(refreshed.status)
+    ? "exited"
+    : refreshed.mode === "interactive" && tmuxAlive(refreshed.tmuxSocket, refreshed.tmuxSession)
+      ? "running"
+      : refreshed.mode === "oneshot" && (refreshed.pid || refreshed.supervisorPid)
+        ? "running"
+        : "unknown";
+  return {
+    schemaVersion: 1,
+    identity: {
+      runId: refreshed.runId,
+      runDir: refreshed.runDir,
+      name: refreshed.name,
+      role: refreshed.role,
+      mode: refreshed.mode,
+      harness: refreshed.harness,
+      parentRunId: refreshed.parentRunId,
+      rootSessionId: refreshed.rootSessionId,
+      workstreamId: refreshed.workstreamId,
+      cwd: refreshed.cwd,
+      task: refreshed.task,
+    },
+    process: {
+      state: processState,
+      pid: refreshed.pid,
+      supervisorPid: refreshed.supervisorPid,
+      tmuxSocket: refreshed.tmuxSocket,
+      tmuxSession: refreshed.tmuxSession,
+      exitCode: refreshed.exitCode,
+      observedAt: new Date().toISOString(),
+    },
+    agent: {
+      state: refreshed.status,
+      terminal: isTerminalStatus(refreshed.status),
+      attentionRequired: refreshed.status === "blocked" || refreshed.status === "error",
+      summary: refreshed.summary,
+      needs: refreshed.needs,
+      updatedAt: refreshed.updatedAt,
+    },
+    result: {
+      state: assessment.resultState,
+      ready: assessment.resultReady,
+      safeToRead: assessment.safeToRead,
+      deliverable: assessment.deliverable,
+      path: assessment.hasResultFile ? assessment.resultFile : undefined,
+      finalizedAt: refreshed.resultFinalizedAt ?? refreshed.resultSummaryOnlyAt,
+      issue: assessment.resultIssue,
+      warning: assessment.resultWarning,
+    },
+    activity: {
+      available: true,
+      recommended: "tango activity",
+    },
+    attention: {
+      requested: refreshed.status === "blocked" || refreshed.status === "error",
+      needs: refreshed.needs,
+    },
+    metrics: refreshed.metrics,
+    next: nextAction(refreshed, assessment),
+  };
+}
+
+function nextAction(meta: AgentMetadata, assessment: ReturnType<typeof assessResultDeliverable>) {
+  if (meta.status === "blocked") return { recommended: "message", reason: meta.needs ?? "agent is blocked" };
+  if (!assessment.safeToRead) return { recommended: "follow", until: "result-resolved" };
+  if (assessment.safeToRead) return { recommended: "result" };
+  return { recommended: "inspect" };
+}
+
+function cmdInspect(parsed: Parsed, cwd: string, json: boolean) {
+  const [name] = parsed.positionals;
+  const runId = flagString(parsed.flags, "run-id");
+  const runDir = flagString(parsed.flags, "run-dir");
+  if (!name && !runId && !runDir) throw new Error("Usage: tango inspect [name] [--run-id <id>|--run-dir <dir>]");
+  const meta = resolveTarget({ name, cwd, runId, runDir, env: process.env as any });
+  const state = buildRunState(meta);
+  if (json) return printJson({ ok: true, state, agent: withMetrics(refreshStatus(meta)) });
+  console.log(`${state.identity.name}: ${state.agent.state} (${state.identity.mode}/${state.identity.harness})`);
+  console.log(`process: ${state.process.state}`);
+  console.log(`result: ${state.result.state} ready=${state.result.ready} safeToRead=${state.result.safeToRead} deliverable=${state.result.deliverable}`);
+  if (state.agent.summary) console.log(`summary: ${state.agent.summary}`);
+  if (state.agent.needs) console.log(`needs: ${state.agent.needs}`);
+  console.log(`runDir: ${state.identity.runDir}`);
+}
+
+function cmdActivity(parsed: Parsed, cwd: string, json: boolean) {
+  return cmdLook(parsed, cwd, json);
+}
+
 function cmdLook(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
   const runId = flagString(parsed.flags, "run-id");
   const runDir = flagString(parsed.flags, "run-dir");
-  if (!name && !runId && !runDir) throw new Error("Usage: tango look [name] [--run-id <id>|--run-dir <dir>]");
+  if (!name && !runId && !runDir) throw new Error("Usage: tango activity [name] [--run-id <id>|--run-dir <dir>]");
   const lines = flagPositiveInt(parsed.flags, "lines", 200, 5000);
   const meta = withMetrics(resolveTarget({ name, cwd, runId, runDir, env: process.env as any }));
   let text = "";
@@ -341,9 +454,9 @@ function cmdDelete(parsed: Parsed, cwd: string, json: boolean) {
   if (json) printJson({ ok: true }); else console.log(`${name}: deleted`);
 }
 
-function cmdStatus(parsed: Parsed, json: boolean) {
+function cmdReport(parsed: Parsed, json: boolean) {
   const [state, ...msg] = parsed.positionals;
-  if (!state) throw new Error("Usage: tango status <running|blocked|done|error|stopped> [--result-file <path>|--summary-only] [message]");
+  if (!state) throw new Error("Usage: tango report <running|blocked|done|error|stopped> [--result-file <path>|--summary-only] [message]");
   const runDir = flagString(parsed.flags, "run-dir") ?? process.env.TANGO_RUN_DIR;
   if (!runDir) throw new Error("No run dir. Set TANGO_RUN_DIR or pass --run-dir.");
   if (!isAgentStatus(state)) throw new Error(`Invalid status: ${state}`);
@@ -351,8 +464,8 @@ function cmdStatus(parsed: Parsed, json: boolean) {
   const resultFileFlag = flagString(parsed.flags, "result-file");
   const summaryOnly = flagBool(parsed.flags, "summary-only") || flagBool(parsed.flags, "no-result");
   if (resultFileFlag && summaryOnly) throw new Error("Use either --result-file or --summary-only/--no-result, not both.");
-  if (resultFileFlag && state !== "done") throw new Error("--result-file is only valid with `tango status done`.");
-  if (summaryOnly && state !== "done") throw new Error("--summary-only/--no-result is only valid with `tango status done`.");
+  if (resultFileFlag && state !== "done") throw new Error("--result-file is only valid with `tango report done`.");
+  if (summaryOnly && state !== "done") throw new Error("--summary-only/--no-result is only valid with `tango report done`.");
   if (state === "done") enforceDoneResultPolicy(runDir, { resultFile: resultFileFlag, summaryOnly });
   if (resultFileFlag) finalizeResultFileBeforeDone(runDir, resultFileFlag);
   else if (state === "done" && summaryOnly) markSummaryOnlyResult(runDir);
@@ -369,11 +482,11 @@ function enforceDoneResultPolicy(runDir: string, options: { resultFile?: string;
   }
   if (options.resultFile) return;
   if (options.summaryOnly) {
-    if (meta.resultRequired) throw new Error("This agent was started with a required deliverable. Finish with `tango status done --result-file <path> \"summary\"`; --summary-only is not allowed for this run.");
+    if (meta.resultRequired) throw new Error("This agent was started with a required deliverable. Finish with `tango report done --result-file <path> \"summary\"`; --summary-only is not allowed for this run.");
     return;
   }
   if (meta.mode === "interactive") {
-    throw new Error("Status summary is not a deliverable. Interactive agents must finish with `tango status done --result-file <path> \"summary\"`; use explicit --summary-only only when no deliverable is intended.");
+    throw new Error("Report summary is not a deliverable. Interactive agents must finish with `tango report done --result-file <path> \"summary\"`; use explicit --summary-only only when no deliverable is intended.");
   }
 }
 
@@ -451,31 +564,38 @@ async function cmdChildren(parsed: Parsed, cwd: string, json: boolean) {
   for (const a of agents) console.log(`${a.name.padEnd(18)} ${a.status.padEnd(8)} ${a.role ?? "-"} ${a.mode}/${a.harness} ${a.task}`);
 }
 
-async function cmdWait(parsed: Parsed, cwd: string, json: boolean) {
-  const names = parsed.positionals;
+async function cmdFollow(parsed: Parsed, cwd: string, json: boolean) {
+  const [name] = parsed.positionals;
   const runId = flagString(parsed.flags, "run-id");
   const runDir = flagString(parsed.flags, "run-dir");
-  if (!names.length && !runId && !runDir) throw new Error("Usage: tango wait <name...> [--run-id <id>|--run-dir <dir>]");
+  if (!name && !runId && !runDir) throw new Error("Usage: tango follow <name> --until <terminal|result-resolved|attention> [--run-id <id>|--run-dir <dir>] [--timeout seconds]");
+  const until = flagString(parsed.flags, "until");
+  if (!until) throw new Error("tango follow requires --until <terminal|result-resolved|attention>.");
+  if (!["terminal", "result-resolved", "attention"].includes(until)) throw new Error(`Invalid --until ${until}. Expected terminal, result-resolved, or attention.`);
   const timeoutMs = flagNonNegativeNumber(parsed.flags, "timeout", 0) * 1000;
   const start = Date.now();
-  // Resolve targets once so they cannot change mid-loop
-  const targets = names.length
-    ? names.map((name) => resolveTarget({ name, cwd, runId, runDir, env: process.env as any }))
-    : [resolveTarget({ cwd, runId, runDir, env: process.env as any })];
+  const target = resolveTarget({ name, cwd, runId, runDir, env: process.env as any });
   while (true) {
-    const agents = targets.map((meta) => withMetrics(refreshStatus(readMetadata(meta.runDir))));
-    if (agents.every((a) => isTerminalStatus(a.status))) {
-      const rec = getRecipientContext();
-      for (const a of agents) {
-        if (a.status === "done" && assessResultDeliverable(a).resultReady) markLatestDoneHandled(rec, a.runDir);
-      }
-      if (json) return printJson({ ok: true, agents: agents.map((agent) => ({ ...agent, resultAssessment: assessResultDeliverable(agent) })) });
-      for (const a of agents) console.log(`${a.name}: ${a.status}${a.summary ? ` - ${a.summary}` : ""}`);
+    const meta = withMetrics(refreshStatus(readMetadata(target.runDir)));
+    const assessment = assessResultDeliverable(meta);
+    const matched = until === "terminal"
+      ? isTerminalStatus(meta.status)
+      : until === "result-resolved"
+        ? assessment.safeToRead || !!assessment.resultIssue
+        : meta.status === "blocked" || meta.status === "error";
+    if (matched) {
+      if (until === "terminal" && meta.status === "done" && assessment.resultReady) markLatestDoneHandled(getRecipientContext(), meta.runDir);
+      if (until === "result-resolved" && assessment.resultReady && (meta.resultFinalizedAt || meta.resultSummaryOnlyAt)) markResultHandled(getRecipientContext(), meta.runDir, meta.resultFinalizedAt ?? meta.resultSummaryOnlyAt!);
+      const state = buildRunState(meta);
+      if (json) return printJson({ ok: true, condition: until, state, agent: meta, resultAssessment: assessment });
+      console.log(`${meta.name}: ${meta.status}${meta.summary ? ` - ${meta.summary}` : ""}`);
+      console.log(`result: ${assessment.resultState} ready=${assessment.resultReady} safeToRead=${assessment.safeToRead}`);
       return;
     }
     if (timeoutMs > 0 && Date.now() - start > timeoutMs) {
-      if (json) return printJson({ ok: false, timeout: true, agents });
-      throw new Error(`Timed out waiting for ${names.join(", ") || runId || runDir}`);
+      const state = buildRunState(meta);
+      if (json) return printJson({ ok: false, timeout: true, condition: until, state, agent: meta, resultAssessment: assessment });
+      throw new Error(`Timed out following ${name || runId || runDir} until ${until}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
@@ -534,7 +654,7 @@ async function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
   while (true) {
     const meta = refreshStatus(readMetadata(target.runDir));
     const assessment = assessResultDeliverable(meta);
-    if (assessment.resultReady && meta.resultFinalizedAt) markResultHandled(getRecipientContext(), meta.runDir, meta.resultFinalizedAt);
+    if (assessment.resultReady && (meta.resultFinalizedAt || meta.resultSummaryOnlyAt)) markResultHandled(getRecipientContext(), meta.runDir, meta.resultFinalizedAt ?? meta.resultSummaryOnlyAt!);
     if (!flagBool(parsed.flags, "watch") || assessment.resultReady || (isTerminalStatus(meta.status) && assessment.resultIssue)) return printResult(meta, assessment, json);
     if (timeoutMs > 0 && Date.now() - start > timeoutMs) return printResult(meta, assessment, json, true);
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -542,12 +662,26 @@ async function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
 }
 
 function printResult(meta: AgentMetadata, assessment: ReturnType<typeof assessResultDeliverable>, json: boolean, timeout = false) {
-  if (json) return printJson({ ok: !timeout, timeout: timeout || undefined, agent: meta, result: assessment.result, resultReady: assessment.resultReady, resultIssue: assessment.resultIssue, resultWarning: assessment.resultWarning, resultAssessment: assessment });
+  if (json) return printJson({ ok: !timeout, timeout: timeout || undefined, agent: meta, result: assessment.result || (assessment.resultState === "summary-only" ? meta.summary : ""), resultReady: assessment.resultReady, resultState: assessment.resultState, safeToRead: assessment.safeToRead, deliverable: assessment.deliverable, resultIssue: assessment.resultIssue, resultWarning: assessment.resultWarning, resultAssessment: assessment });
   if (timeout) process.stderr.write("tango result: timed out waiting for result readiness\n");
   if (assessment.resultIssue) process.stderr.write(`tango result: ${assessment.resultIssue}\n`);
   if (assessment.resultWarning) process.stderr.write(`tango result warning: ${assessment.resultWarning}\n`);
   if (assessment.result) process.stdout.write(assessment.result.endsWith("\n") ? assessment.result : `${assessment.result}\n`);
-  else if (meta.summary) process.stdout.write(`[status summary only] ${meta.summary}\n`);
+  else if (assessment.resultState === "summary-only" && meta.summary) process.stdout.write(`${meta.summary.endsWith("\n") ? meta.summary : `${meta.summary}\n`}`);
+  else if (meta.summary) process.stdout.write(`[summary] ${meta.summary}\n`);
+}
+
+function cmdRecover(parsed: Parsed, json: boolean) {
+  const runDir = flagString(parsed.flags, "run-dir") ?? parsed.positionals[0];
+  if (!runDir) throw new Error("Usage: tango recover --run-dir <dir>");
+  const meta = readMetadata(runDir);
+  const state = buildRunState(meta);
+  const payload = { ok: true, degraded: true, nonAckable: true, state, agent: meta, note: "Explicit recovery view from run directory; not active protocol state." };
+  if (json) return printJson(payload);
+  console.log(`${meta.name}: ${meta.status} [degraded recovery]`);
+  console.log(`runDir: ${meta.runDir}`);
+  console.log(`result: ${state.result.state} ready=${state.result.ready} safeToRead=${state.result.safeToRead}`);
+  if (meta.summary) console.log(`summary: ${meta.summary}`);
 }
 
 function cmdRoles(parsed: Parsed, json: boolean) {
@@ -663,7 +797,7 @@ function refreshStatus(meta: AgentMetadata): AgentMetadata {
 
 function help() {
   console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]
-  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango list [--json] [--all]\n  tango look [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango status <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango wait <name...> [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result [name] [--run-id <id>] [--run-dir <dir>] [--watch] [--timeout seconds]\n  tango roles list|show <name>\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized results handled so duplicate completion notifications are suppressed.\n`);
+  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango ps [--json] [--all]\n  tango inspect [name] [--run-id <id>] [--run-dir <dir>] [--json]\n  tango activity [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json] [--raw]\n  tango follow <name> --until terminal|result-resolved|attention [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango report <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result [name] [--run-id <id>] [--run-dir <dir>] [--watch] [--timeout seconds]\n  tango recover --run-dir <dir> [--json]\n  tango roles list|show <name>\n\nRemoved active protocol commands fail fast: tango status, tango look, tango list, bare tango wait.\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized and summary-only results handled so duplicate completion notifications are suppressed.\n`);
 }
 
 main();

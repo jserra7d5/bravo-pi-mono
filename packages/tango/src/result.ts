@@ -9,6 +9,9 @@ export interface ResultAssessment {
   result: string;
   finalized: boolean;
   resultReady: boolean;
+  safeToRead: boolean;
+  deliverable: boolean;
+  resultState: "none" | "available" | "invalid" | "failed" | "summary-only";
   resultIssue?: string;
   resultWarning?: string;
 }
@@ -26,12 +29,17 @@ export function assessResultDeliverable(meta: AgentMetadata): ResultAssessment {
   const finalized = !!meta.resultFinalizedAt;
   const hardIssue = resultIssue(meta, hasResultFile, finalized, result);
   const warning = !hardIssue ? resultWarning(meta, result) : undefined;
+  const summaryOnly = !!meta.resultSummaryOnlyAt;
+  const resultReady = summaryOnly || (hasResultFile && finalized && !hardIssue);
   return {
     resultFile,
     hasResultFile,
     result,
     finalized,
-    resultReady: hasResultFile && finalized && !hardIssue,
+    resultReady,
+    safeToRead: resultReady || !!result.trim(),
+    deliverable: hasResultFile && finalized && !hardIssue,
+    resultState: summaryOnly ? "summary-only" : resultReady ? "available" : hardIssue ? (isTerminalStatus(meta.status) ? "failed" : "none") : "none",
     resultIssue: hardIssue,
     resultWarning: warning,
   };
@@ -39,7 +47,7 @@ export function assessResultDeliverable(meta: AgentMetadata): ResultAssessment {
 
 export function resultIssue(meta: AgentMetadata, hasResultFile: boolean, finalized: boolean, result: string): string | undefined {
   if (meta.resultIssue) return meta.resultIssue;
-  if (meta.resultSummaryOnlyAt) return "Agent explicitly completed as summary-only; no deliverable result.md was intended for this run.";
+  if (meta.resultSummaryOnlyAt) return undefined;
   if (!finalized) {
     if (hasResultFile) return "Result deliverable exists but has not been finalized by Tango; inspect carefully and ask the agent to finish with --result-file if needed.";
     if (isTerminalStatus(meta.status)) return meta.summary ? "No finalized deliverable result.md found; only metadata.summary is available." : "No finalized deliverable result.md found.";

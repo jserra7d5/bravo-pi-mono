@@ -191,7 +191,7 @@ describe("buildOperations", () => {
     assert.strictEqual(vm.counts.total, 3);
     assert.strictEqual(vm.attention.length, 1);
     assert.strictEqual(vm.attention[0].name, "agent-b");
-    assert.match(vm.attention[0].commands.look, /tango look --run-id run_b --lines 200/);
+    assert.match(vm.attention[0].commands.look, /tango activity --run-id run_b --lines 200/);
     assert.ok(vm.activeAgents.some((a) => a.name === "agent-a" && a.commands.result.includes("run_a")));
     assert.strictEqual(vm.timelineTail.length, 2);
     assert.deepStrictEqual(vm.recentArtifacts.map((a) => a.artifactId).sort(), ["art_1", "art_2", "art_3", "art_4", "art_5"]);

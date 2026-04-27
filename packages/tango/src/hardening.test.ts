@@ -247,17 +247,17 @@ describe("Tango CLI/runtime hardening", () => {
     }
   });
 
-  it("allows blocked status to update and transition back to running", () => {
+  it("allows blocked report to update and transition back to running", () => {
     const cwd = tempDir();
     const home = tempDir();
     try {
       const meta = writeMeta(home, cwd, "blocked-agent", { status: "blocked", summary: "waiting", needs: "input", resultFile: undefined, resultFinalizedAt: undefined });
-      const update = runCli(["status", "blocked", "still waiting", "--needs", "review", "--run-dir", meta.runDir, "--json"], { TANGO_HOME: home }, cwd);
+      const update = runCli(["report", "blocked", "still waiting", "--needs", "review", "--run-dir", meta.runDir, "--json"], { TANGO_HOME: home }, cwd);
       assert.strictEqual(update.status, 0, update.stderr || update.stdout);
       assert.strictEqual(JSON.parse(update.stdout).agent.summary, "still waiting");
       assert.strictEqual(JSON.parse(update.stdout).agent.needs, "review");
 
-      const running = runCli(["status", "running", "resumed", "--run-dir", meta.runDir, "--json"], { TANGO_HOME: home }, cwd);
+      const running = runCli(["report", "running", "resumed", "--run-dir", meta.runDir, "--json"], { TANGO_HOME: home }, cwd);
       assert.strictEqual(running.status, 0, running.stderr || running.stdout);
       const body = JSON.parse(running.stdout);
       assert.strictEqual(body.agent.status, "running");
@@ -273,7 +273,7 @@ describe("Tango CLI/runtime hardening", () => {
     const home = tempDir();
     try {
       const meta = writeMeta(home, cwd, "sticky", { status: "done", summary: "finished" });
-      const result = runCli(["status", "running", "--run-dir", meta.runDir, "again", "--json"], { TANGO_HOME: home }, cwd);
+      const result = runCli(["report", "running", "--run-dir", meta.runDir, "again", "--json"], { TANGO_HOME: home }, cwd);
 
       assert.notStrictEqual(result.status, 0);
       assert.match(JSON.parse(result.stdout).error, /terminal agent status from done to running/i);
@@ -291,7 +291,7 @@ describe("Tango CLI/runtime hardening", () => {
       const meta = writeMeta(home, cwd, "done-again", { status: "done", summary: "finished" });
       const source = join(cwd, "new-result.md");
       writeFileSync(source, "new result\n");
-      const result = runCli(["status", "done", "--run-dir", meta.runDir, "--result-file", source, "changed", "--json"], { TANGO_HOME: home }, cwd);
+      const result = runCli(["report", "done", "--run-dir", meta.runDir, "--result-file", source, "changed", "--json"], { TANGO_HOME: home }, cwd);
 
       assert.notStrictEqual(result.status, 0);
       assert.match(JSON.parse(result.stdout).error, /already done|immutable/i);
@@ -302,12 +302,12 @@ describe("Tango CLI/runtime hardening", () => {
     }
   });
 
-  it("allows exact duplicate done status as a no-op", () => {
+  it("allows exact duplicate done report as a no-op", () => {
     const cwd = tempDir();
     const home = tempDir();
     try {
       const meta = writeMeta(home, cwd, "done-noop", { status: "done", summary: "finished" });
-      const result = runCli(["status", "done", "--run-dir", meta.runDir, "finished", "--json"], { TANGO_HOME: home }, cwd);
+      const result = runCli(["report", "done", "--run-dir", meta.runDir, "finished", "--json"], { TANGO_HOME: home }, cwd);
 
       assert.strictEqual(result.status, 0, result.stderr || result.stdout);
       const body = JSON.parse(result.stdout);
@@ -319,17 +319,17 @@ describe("Tango CLI/runtime hardening", () => {
     }
   });
 
-  it("wait --json includes per-agent result assessments", () => {
+  it("follow --json includes result assessment", () => {
     const cwd = tempDir();
     const home = tempDir();
     try {
       writeMeta(home, cwd, "waited");
-      const result = runCli(["wait", "--run-id", "run_waited", "--json"], { TANGO_HOME: home }, cwd);
+      const result = runCli(["follow", "--run-id", "run_waited", "--until", "terminal", "--json"], { TANGO_HOME: home }, cwd);
 
       assert.strictEqual(result.status, 0, result.stderr || result.stdout);
       const body = JSON.parse(result.stdout);
-      assert.strictEqual(body.agents[0].resultAssessment.resultReady, true);
-      assert.strictEqual(body.agents[0].resultAssessment.result, "result for waited\n");
+      assert.strictEqual(body.resultAssessment.resultReady, true);
+      assert.strictEqual(body.resultAssessment.result, "result for waited\n");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
@@ -359,7 +359,7 @@ describe("Tango CLI/runtime hardening", () => {
     try {
       writeMeta(home, cwd, "alpha");
       const env = { TANGO_HOME: home };
-      const look = runCli(["look", "--run-id", "run_alpha", "--json"], env, cwd);
+      const look = runCli(["activity", "--run-id", "run_alpha", "--json"], env, cwd);
       assert.strictEqual(look.status, 0, look.stderr || look.stdout);
       assert.strictEqual(JSON.parse(look.stdout).agent.name, "alpha");
       const result = runCli(["result", "--run-id", "run_alpha", "--json"], env, cwd);
@@ -371,7 +371,7 @@ describe("Tango CLI/runtime hardening", () => {
     }
   });
 
-  it("list --json emits bounded summaries and scopes to the active root session", () => {
+  it("ps --json emits bounded summaries and scopes to the active root session", () => {
     const cwd = tempDir();
     const home = tempDir();
     try {
@@ -379,7 +379,7 @@ describe("Tango CLI/runtime hardening", () => {
       writeMeta(home, cwd, "old", { rootSessionId: "root-old", workstreamId: "ws-old", task: "old task" });
       writeMeta(home, cwd, "other-workstream", { rootSessionId: "root-current", workstreamId: "ws-other", task: "other task" });
 
-      const result = runCli(["list", "--json"], { TANGO_HOME: home, TANGO_ROOT_SESSION_ID: "root-current", TANGO_WORKSTREAM_ID: "ws-current" }, cwd);
+      const result = runCli(["ps", "--json"], { TANGO_HOME: home, TANGO_ROOT_SESSION_ID: "root-current", TANGO_WORKSTREAM_ID: "ws-current" }, cwd);
 
       assert.strictEqual(result.status, 0, result.stderr || result.stdout);
       const body = JSON.parse(result.stdout);
@@ -403,10 +403,10 @@ describe("Tango CLI/runtime hardening", () => {
       for (const args of [
         ["start", "a", "--harness", "typo", "--dry-run"],
         ["start", "a", "--mode", "typo", "--dry-run"],
-        ["list", "--bogus"],
-        ["look", "--run-id", "missing", "--lines", "0"],
+        ["ps", "--bogus"],
+        ["activity", "--run-id", "missing", "--lines", "0"],
         ["server", "--port", "70000"],
-        ["wait", "a", "--timeout", "nope"],
+        ["follow", "a", "--until", "terminal", "--timeout", "nope"],
       ]) {
         const result = runCli(args, env, cwd);
         assert.notStrictEqual(result.status, 0, `${args.join(" ")} unexpectedly succeeded`);
@@ -424,7 +424,7 @@ describe("Tango CLI/runtime hardening", () => {
     try {
       const meta = writeMeta(home, cwd, "tailer");
       writeFileSync(join(meta.runDir, "output.log"), Array.from({ length: 20 }, (_, i) => `line-${i + 1}`).join("\n"));
-      const result = runCli(["look", "--run-id", "run_tailer", "--lines", "3", "--json"], { TANGO_HOME: home }, cwd);
+      const result = runCli(["activity", "--run-id", "run_tailer", "--lines", "3", "--json"], { TANGO_HOME: home }, cwd);
       assert.strictEqual(result.status, 0, result.stderr || result.stdout);
       assert.strictEqual(JSON.parse(result.stdout).output, "line-18\nline-19\nline-20");
     } finally {

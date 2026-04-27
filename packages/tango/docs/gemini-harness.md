@@ -2,13 +2,13 @@
 
 Tango supports Gemini CLI through `harness: gemini`.
 
-Use this harness when you want a Tango-managed Gemini CLI child agent running in tmux with normal Tango lifecycle, `tango look`, `tango message`, `tango stop`, and result/status protocols.
+Use this harness when you want a Tango-managed Gemini CLI child agent running in tmux with normal Tango lifecycle, `tango activity`, `tango message`, `tango stop`, and result/report protocols.
 
 ## Quick start
 
 ```bash
 tango start gemini-work --role gemini-worker "Implement the requested change"
-tango look gemini-work --lines 100
+tango activity gemini-work --lines 100
 tango message gemini-work "Run the focused check and report back"
 ```
 

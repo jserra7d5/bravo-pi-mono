@@ -32,7 +32,7 @@ Prefer stable targeting over name-only or cwd-dependent targeting:
 - Use `--run-dir <path>` when you know the run directory.
 - Name-only targeting resolves through lineage first: children, then descendants, then same root session/workstream. Cwd and global fallback occur only when no lineage context exists.
 
-Do **not** `cd` into a child agent's cwd to run `tango look`, `tango message`, `tango result`, `tango stop`, or `tango wait`. Tango resolves agents by lineage and stable IDs from any directory.
+Do **not** `cd` into a child agent's cwd to run `tango activity`, `tango message`, `tango result`, `tango stop`, or `tango follow --until terminal`. Tango resolves agents by lineage and stable IDs from any directory.
 
 ### Server, dashboard, and artifacts
 

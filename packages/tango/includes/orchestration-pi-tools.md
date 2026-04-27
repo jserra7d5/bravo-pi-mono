@@ -5,11 +5,11 @@ When Tango Pi tools are available, prefer them over raw shell commands. The tool
 Tool to CLI mapping:
 
 - `tango_start` wraps `tango start`.
-- `tango_list` wraps `tango list`.
-- `tango_look` wraps `tango look`.
+- `tango_ps` wraps `tango ps`.
+- `tango_activity` wraps `tango activity`.
 - `tango_message` wraps `tango message`.
 - `tango_stop` wraps `tango stop`.
-- `tango_status` wraps `tango status`.
+- `tango_report` wraps `tango report`.
 - `tango_result` wraps `tango result`.
 - `tango_cli` is the generic CLI escape hatch for safe Tango commands and flags not yet exposed by a dedicated tool, including `children`, `wait`, and `doctor events`. Long-running commands such as `tango watch` and `tango server` are intentionally not exposed through `tango_cli`.
 
@@ -25,4 +25,4 @@ The Tango server may provide dashboard visibility and artifact hosting for artif
 
 ### Attention and delivery
 
-Parent Pi sessions may receive proactive, batched notifications when child agents finish, block, or error. Treat notifications as prompts to inspect the child; always inspect child output with `tango_look` or `tango_result` before summarizing a child agent's work.
+Parent Pi sessions may receive proactive, batched notifications when child agents finish, block, or error. Treat notifications as prompts to inspect the child; always inspect child output with `tango_activity` or `tango_result` before summarizing a child agent's work.

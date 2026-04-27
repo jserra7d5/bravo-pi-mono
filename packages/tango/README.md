@@ -14,11 +14,11 @@ It provides:
 ```bash
 tango roles list
 tango start repo-scout --role scout "Summarize this repo"
-tango list
-tango look repo-scout
+tango ps
+tango activity repo-scout
 tango result repo-scout
 tango children --tree
-tango wait repo-scout --json
+tango follow --until terminal repo-scout --json
 tango watch --json
 tango doctor events
 ```
@@ -79,11 +79,11 @@ Gemini harness behavior:
 
 Pi harness behavior similarly keeps Pi runtime state isolated while loading a Tango Pi extension that makes the Pi `bash` tool run with `HOME=$TANGO_REAL_HOME` when `bash` is enabled for the role.
 
-`tango start` returns after an agent is launched. One-shot agents continue in a detached finite runner, so coordinators can observe them with `tango list`, `tango wait`, and proactive status events while they run.
+`tango start` returns after an agent is launched. One-shot agents continue in a detached finite runner, so coordinators can observe them with `tango ps`, `tango follow --until terminal`, and proactive status events while they run.
 
-Status changes are written to a durable event log at `$TANGO_HOME/events.jsonl`. `tango watch` tails this log; the Pi extension uses it to send persisted, deduped, batched notifications to parent sessions when child agents finish, block, or error. For interactive agents, `tango status done` requires `--result-file <path>` so `result.md` contains the full deliverable; use explicit `--summary-only` only when no deliverable is intended. `tango children`, `tango wait`, `tango reconcile`, and `tango doctor events` support parent/child coordination, stale lifecycle repair, and event-delivery smoke tests.
+Report changes are written to a durable event log at `$TANGO_HOME/events.jsonl`. `tango watch` tails this log; the Pi extension uses it to send persisted, deduped, batched notifications to parent sessions when child agents finish, block, or error. For interactive agents, `tango report done` requires `--result-file <path>` so `result.md` contains the full deliverable; use explicit `--summary-only` only when no deliverable is intended. `tango children`, `tango follow --until terminal`, `tango reconcile`, and `tango doctor events` support parent/child coordination, stale lifecycle repair, and event-delivery smoke tests.
 
-Pi-harness Tango children also write best-effort metrics snapshots to `<runDir>/metrics.json` for tool counts, token/context usage, and runtime-oriented TUI summaries. `tango list --json` and `tango children --json` include these snapshots when available; `tango metrics update --run-dir <dir> --payload <json>` is the internal update surface used by the Pi metrics extension.
+Pi-harness Tango children also write best-effort metrics snapshots to `<runDir>/metrics.json` for tool counts, token/context usage, and runtime-oriented TUI summaries. `tango ps --json` and `tango children --json` include these snapshots when available; `tango metrics update --run-dir <dir> --payload <json>` is the internal update surface used by the Pi metrics extension.
 
 Recursive Claude roles receive CLI orchestration instructions and should delegate with `tango ... --json` commands. Loom integration remains outside Tango: Loom can pass context through environment variables and task prompts when it launches Tango agents.
 
@@ -91,7 +91,7 @@ Recursive Claude roles receive CLI orchestration instructions and should delegat
 
 Tango's CLI is designed to remain usable without the optional dashboard server running. Roll out the server/dashboard path with these compatibility checks:
 
-- `tango list --json`, `tango roles list`, and other read-only CLI commands should work with no `TANGO_SERVER_URL`, no `TANGO_SERVER_TOKEN`, and no discovery file.
+- `tango ps --json`, `tango roles list`, and other read-only CLI commands should work with no `TANGO_SERVER_URL`, no `TANGO_SERVER_TOKEN`, and no discovery file.
 - `tango start ...` launches only the requested agent; it must not auto-start `tango server`. Start the dashboard explicitly with `tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]`.
 - Dashboard/API auth is disabled by default on the localhost server. Passing `--token TOKEN` explicitly enables token auth and prints the dashboard URL plus token separately.
 - Server discovery is read from `TANGO_SERVER_URL` (and optional `TANGO_SERVER_TOKEN`) when set; otherwise Tango falls back to `$TANGO_HOME/server/server.json` written by `tango server`.

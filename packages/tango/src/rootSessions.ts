@@ -136,13 +136,13 @@ export function buildAgentCommands(meta: AgentMetadata): AgentCommands {
   if (meta.runId) {
     return {
       attach: meta.mode === "interactive" ? `cd ${shellQuote(meta.cwd)} && tango attach --run-id ${shellQuote(meta.runId)}` : undefined,
-      look: `cd ${shellQuote(meta.cwd)} && tango look --run-id ${shellQuote(meta.runId)} --lines 200`,
+      look: `cd ${shellQuote(meta.cwd)} && tango activity --run-id ${shellQuote(meta.runId)} --lines 200`,
       result: `cd ${shellQuote(meta.cwd)} && tango result --run-id ${shellQuote(meta.runId)}`,
     };
   }
   return {
     attach: meta.mode === "interactive" ? `cd ${shellQuote(meta.cwd)} && tango attach ${shellQuote(meta.name)}` : undefined,
-    look: `cd ${shellQuote(meta.cwd)} && tango look ${shellQuote(meta.name)} --lines 200`,
+    look: `cd ${shellQuote(meta.cwd)} && tango activity ${shellQuote(meta.name)} --lines 200`,
     result: `cd ${shellQuote(meta.cwd)} && tango result ${shellQuote(meta.name)}`,
   };
 }

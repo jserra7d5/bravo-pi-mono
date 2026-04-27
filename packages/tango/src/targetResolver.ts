@@ -141,6 +141,6 @@ function ambiguityError(name: string, matches: AgentMetadata[]): Error {
     )
     .join("\n");
   return new Error(
-    `Ambiguous agent name "${name}". Multiple matches found:\n${choices}\nUse --run-id <id> or --run-dir <dir> to disambiguate.\nExamples:\n  tango look ${name} --run-id <id>\n  tango message ${name} --run-dir <dir> <msg>`
+    `Ambiguous agent name "${name}". Multiple matches found:\n${choices}\nUse --run-id <id> or --run-dir <dir> to disambiguate.\nExamples:\n  tango activity ${name} --run-id <id>\n  tango message ${name} --run-dir <dir> <msg>`
   );
 }
