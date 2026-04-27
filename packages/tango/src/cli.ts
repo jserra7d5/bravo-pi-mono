@@ -682,13 +682,40 @@ async function cmdChildren(parsed: Parsed, cwd: string, json: boolean) {
       try { parentMeta = readMetadata(runDir); } catch {}
     }
   }
-  if (!parentMeta) throw new Error("Usage: tango children [parent-name] (or run inside a Tango agent, or pass --run-dir)");
+  if (!parentMeta) {
+    const rootSessionId = process.env.TANGO_ROOT_SESSION_ID;
+    const workstreamId = process.env.TANGO_WORKSTREAM_ID;
+    if (!rootSessionId && !workstreamId) throw new Error("Usage: tango children [parent-name] (or run inside a Tango agent, pass --run-dir, or run inside a Tango root session)");
+    const agents = listMetadata(undefined).map(refreshStatus).map(withMetrics).filter((a) => {
+      const rootMatch = rootSessionId ? a.rootSessionId === rootSessionId : true;
+      const wsMatch = workstreamId ? a.workstreamId === workstreamId : true;
+      return rootMatch && wsMatch;
+    });
+    const tree = rootSessionForest(agents);
+    if (json) return printJson({ ok: true, rootSessionId, workstreamId, agents, tree });
+    if (flagBool(parsed.flags, "tree")) return console.log(renderChildTree(tree));
+    if (!agents.length) return console.log("No child agents.");
+    for (const a of agents) console.log(`${a.name.padEnd(18)} ${a.status.padEnd(8)} ${a.role ?? "-"} ${a.mode}/${a.harness} ${a.task}`);
+    return;
+  }
   const agents = listMetadata(undefined).map(refreshStatus).map(withMetrics).filter((a) => isChildOf(a, parentMeta!));
   const tree = childTree(parentMeta);
   if (json) return printJson({ ok: true, parentRunDir: parentMeta.runDir, agents, tree });
   if (flagBool(parsed.flags, "tree")) return console.log(renderChildTree(tree));
   if (!agents.length) return console.log("No child agents.");
   for (const a of agents) console.log(`${a.name.padEnd(18)} ${a.status.padEnd(8)} ${a.role ?? "-"} ${a.mode}/${a.harness} ${a.task}`);
+}
+
+function rootSessionForest(agents: AgentMetadata[]): any[] {
+  const byRunId = new Map(agents.filter((a) => a.runId).map((a) => [a.runId, a]));
+  const byRunDir = new Map(agents.map((a) => [resolve(a.runDir), a]));
+  const roots = agents.filter((a) => {
+    if (a.parentRunId && byRunId.has(a.parentRunId)) return false;
+    if (a.parentRunDir && byRunDir.has(resolve(a.parentRunDir))) return false;
+    return true;
+  });
+  const rec = (p: AgentMetadata): any => ({ agent: p, children: agents.filter((a) => isChildOf(a, p)).map(rec) });
+  return roots.map(rec);
 }
 
 async function cmdFollow(parsed: Parsed, cwd: string, json: boolean) {

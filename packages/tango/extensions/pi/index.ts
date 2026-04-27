@@ -341,6 +341,8 @@ import {
   type RecipientContext,
   type AttentionState,
 } from "../../dist/attention.js";
+// @ts-ignore: dist has no declarations, but the module exists at runtime.
+import { readRecentEvents } from "../../dist/events.js";
 
 function startParentReconciler(ctx: any) {
   if (reconcileTimer || !process.env.TANGO_RUN_DIR) return;
@@ -388,20 +390,25 @@ function handleTangoEventLine(pi: ExtensionAPI, ctx: any, line: string) {
   if (!line.trim()) return;
   let event: any;
   try { event = JSON.parse(line); } catch { return; }
+  handleTangoEvent(pi, ctx, event);
+}
+
+function handleTangoEvent(pi: ExtensionAPI, ctx: any, event: any) {
   if (event.type !== "agent.status") return;
   if (!["done", "blocked", "error"].includes(event.status)) return;
-  // Pi delivery uses direct-child filtering (stricter than eventMatchesLineage).
-  // We intentionally only notify about immediate children, not all lineage matches.
+  // Pi delivery uses direct-child filtering when the recipient is itself a Tango run.
+  // Root Pi sessions do not have a run identity, so they receive same root/workstream
+  // child completions even though those children have no parentRunId edge.
   const parentRunDir = process.env.TANGO_RUN_DIR;
   const parentRunId = process.env.TANGO_RUN_ID;
-  const hasLineage = !!(parentRunDir || parentRunId);
+  const hasRunLineage = !!(parentRunDir || parentRunId);
   let isDirectChild = false;
   if (parentRunId && event.parentRunId === parentRunId) isDirectChild = true;
   if (parentRunDir && event.parentRunDir) {
     if (resolve(event.parentRunDir) === resolve(parentRunDir)) isDirectChild = true;
   }
-  if (hasLineage && !isDirectChild) return;
-  if (!hasLineage) {
+  if (hasRunLineage && !isDirectChild) return;
+  if (!hasRunLineage) {
     const rootSessionId = process.env.TANGO_ROOT_SESSION_ID;
     const workstreamId = process.env.TANGO_WORKSTREAM_ID;
     if (rootSessionId && event.rootSessionId !== rootSessionId) return;
@@ -413,6 +420,17 @@ function handleTangoEventLine(pi: ExtensionAPI, ctx: any, line: string) {
   markAttentionState(rec, event.runDir, event.eventId, "delivered");
   pendingEvents.push(event);
   if (!flushTimer) flushTimer = setTimeout(() => flushTangoEvents(pi, ctx), 500);
+}
+
+function backfillRecentTangoEvents(pi: ExtensionAPI, ctx: any) {
+  const cutoffMs = Date.now() - 30 * 60 * 1000;
+  let recent: any[] = [];
+  try { recent = readRecentEvents(1000, 1024 * 1024).events ?? []; } catch { return; }
+  for (const event of recent) {
+    const time = Date.parse(event.time ?? "");
+    if (!Number.isFinite(time) || time < cutoffMs) continue;
+    handleTangoEvent(pi, ctx, event);
+  }
 }
 
 function suggestedAction(event: any): string {
@@ -472,6 +490,7 @@ export default function (pi: ExtensionAPI) {
     try { ensureRootSessionRecord(); } catch {}
     if (ctx.hasUI) ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", "Tango: ready"));
     startEventWatcher(pi, ctx);
+    backfillRecentTangoEvents(pi, ctx);
     startParentReconciler(ctx);
   });
 
