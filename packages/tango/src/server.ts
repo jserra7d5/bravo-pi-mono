@@ -30,7 +30,7 @@ export interface TangoServerOptions {
 export interface ServerDiscovery {
   schemaVersion: 1;
   url: string;
-  token: string;
+  token?: string;
   pid: number;
   startedAt: string;
 }
@@ -72,7 +72,7 @@ export function artifactsDir(): string { return join(dataRoot(), "artifacts"); }
 export function readServerDiscovery(): ServerDiscovery | undefined {
   const envUrl = process.env.TANGO_SERVER_URL;
   const envToken = process.env.TANGO_SERVER_TOKEN;
-  if (envUrl && envToken) return { schemaVersion: 1, url: envUrl, token: envToken, pid: 0, startedAt: "env" };
+  if (envUrl) return { schemaVersion: 1, url: envUrl, ...(envToken ? { token: envToken } : {}), pid: 0, startedAt: "env" };
   const p = serverDiscoveryPath();
   if (!existsSync(p)) return undefined;
   try { return JSON.parse(readFileSync(p, "utf8")) as ServerDiscovery; } catch { return undefined; }
@@ -82,7 +82,7 @@ export async function startTangoServer(options: TangoServerOptions = {}): Promis
   const host = options.host ?? "127.0.0.1";
   if (!isLocalHost(host) && !options.allowPrivateBind) throw new Error("Refusing non-local bind without --allow-private-bind");
   const port = options.port ?? 43117;
-  const token = options.token ?? randomToken(24);
+  const token = options.token;
   mkdirSync(serverDir(), { recursive: true });
   mkdirSync(rootSessionsDir(), { recursive: true });
   mkdirSync(artifactsDir(), { recursive: true });
@@ -100,10 +100,11 @@ export async function startTangoServer(options: TangoServerOptions = {}): Promis
 
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : port;
-  const discovery: ServerDiscovery = { schemaVersion: 1, url: `http://${host}:${actualPort}`, token, pid: process.pid, startedAt: new Date().toISOString() };
+  const discovery: ServerDiscovery = { schemaVersion: 1, url: `http://${host}:${actualPort}`, ...(token ? { token } : {}), pid: process.pid, startedAt: new Date().toISOString() };
   writeFileSync(serverDiscoveryPath(), `${JSON.stringify(discovery, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   console.log(`tango server listening on ${discovery.url}`);
-  console.log(`dashboard: ${discovery.url}/?token=${encodeURIComponent(token)}`);
+  console.log(`dashboard: ${token ? `${discovery.url}/?token=${encodeURIComponent(token)}` : discovery.url}`);
+  console.log(`auth: ${token ? "enabled" : "disabled (use --token TOKEN to enable)"}`);
   console.log(`discovery: ${serverDiscoveryPath()}`);
 
   let eventState: EventReadState = { offset: initialEventOffset(false), carry: "" };
@@ -128,7 +129,7 @@ export async function startTangoServer(options: TangoServerOptions = {}): Promis
   return { server, shutdown };
 }
 
-async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { host: string; port: number; token: string; clients: Set<ServerResponse> }) {
+async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { host: string; port: number; token?: string; clients: Set<ServerResponse> }) {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
   if (req.method === "GET" && url.pathname === "/api/v1/health") return sendJson(res, 200, { ok: true, schemaVersion: 1, pid: process.pid, time: new Date().toISOString() });
   if (req.method === "GET" && url.pathname === "/api/v1/events") return handleSse(req, res, ctx);
@@ -194,7 +195,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
   return sendJson(res, 404, { ok: false, error: "Not found" });
 }
 
-function handleSse(req: IncomingMessage, res: ServerResponse, ctx: { token: string; clients: Set<ServerResponse> }) {
+function handleSse(req: IncomingMessage, res: ServerResponse, ctx: { token?: string; clients: Set<ServerResponse> }) {
   if (!authorized(req, ctx.token)) return sendJson(res, 401, { ok: false, error: "Unauthorized" });
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -450,8 +451,8 @@ async function load() {
   ).join('') : '<p class="muted">No timeline events.</p>';
 }
 load();
-const es = token ? new EventSource('/api/v1/events' + auth) : null;
-if (es) es.addEventListener('event', () => load());
+const es = new EventSource('/api/v1/events' + auth);
+es.addEventListener('event', () => load());
 </script>
 </body>
 </html>`;
@@ -464,7 +465,8 @@ async function readJsonBody(req: IncomingMessage): Promise<any> {
   return text.trim() ? JSON.parse(text) : {};
 }
 
-function authorized(req: IncomingMessage, token: string): boolean {
+function authorized(req: IncomingMessage, token?: string): boolean {
+  if (!token) return true;
   const auth = req.headers.authorization;
   if (auth === `Bearer ${token}`) return true;
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);

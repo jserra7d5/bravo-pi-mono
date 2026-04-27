@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
-import { existsSync, mkdtempSync, mkdirSync, renameSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -215,6 +215,36 @@ describe("server routes", () => {
 
   it("rejects non-local bind unless explicitly allowed", async () => {
     await assert.rejects(() => startTangoServer({ host: "0.0.0.0", port: 0, token: "x" }), /Refusing non-local bind/);
+  });
+
+  it("does not require dashboard/API authorization unless a token is explicitly configured", async () => {
+    const previousHome = process.env.TANGO_HOME;
+    const openHome = mkdtempSync(join(tmpdir(), "tango-open-server-test-"));
+    let openShutdown: (() => void) | undefined;
+    try {
+      process.env.TANGO_HOME = openHome;
+      const started = await startTangoServer({ port: 0 });
+      openShutdown = started.shutdown;
+      const address = started.server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const openBase = `http://127.0.0.1:${port}`;
+
+      const dashboard = await fetch(`${openBase}/`);
+      assert.strictEqual(dashboard.status, 200);
+      assert.match(dashboard.headers.get("content-type") ?? "", /^text\/html/);
+
+      const api = await fetch(`${openBase}/api/v1/dashboard`);
+      const body = await api.json();
+      assert.strictEqual(api.status, 200);
+      assert.strictEqual((body as any).ok, true);
+
+      const discovery = JSON.parse(readFileSync(join(openHome, "server", "server.json"), "utf8"));
+      assert.strictEqual(discovery.token, undefined);
+    } finally {
+      openShutdown?.();
+      if (previousHome === undefined) delete process.env.TANGO_HOME; else process.env.TANGO_HOME = previousHome;
+      rmSync(openHome, { recursive: true, force: true });
+    }
   });
 
   it("does not serve token-bearing dashboard HTML without authorization", async () => {

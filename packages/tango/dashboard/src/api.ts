@@ -27,9 +27,8 @@ async function getJson<T>(path: string): Promise<T> {
 }
 
 export function subscribeEvents(onEvent: () => void): () => void {
-  const t = getToken();
-  if (!t) return () => {};
-  const es = new EventSource(`/api/v1/events?token=${encodeURIComponent(t)}`);
+  const auth = authParams();
+  const es = new EventSource(`/api/v1/events${auth}`);
   es.addEventListener("event", onEvent);
   return () => es.close();
 }
