@@ -7,8 +7,13 @@ import { fileURLToPath } from "node:url";
 import { dataRoot, projectSlug } from "./paths.js";
 import { listMetadata } from "./metadata.js";
 import { readMetrics } from "./metrics.js";
-import { initialEventOffset, readEvents, type EventReadState } from "./events.js";
-import type { AgentMetadata } from "./types.js";
+import { initialEventOffset, readEvents, readRecentEvents, type EventReadState } from "./events.js";
+import { resolveTarget } from "./targetResolver.js";
+import { startAgent } from "./start.js";
+import { assessResultDeliverable } from "./result.js";
+import { buildRunState, followRun, messageRun, readActivity, reportRun, stopRun } from "./controlPlane.js";
+import { markHandled, markSeen } from "./attention.js";
+import type { AgentMetadata, RootSessionIdentity } from "./types.js";
 import {
   buildDashboard,
   buildOperations,
@@ -40,12 +45,28 @@ export interface RootSessionRecord {
   schemaVersion: 1;
   rootSessionId: string;
   workstreamId: string;
-  kind: "pi" | "cli" | "dashboard" | "restored";
+  kind: RootSessionIdentity["origin"] | "restored";
   cwd?: string;
   title?: string;
   createdAt: string;
   updatedAt: string;
   lastSeenAt: string;
+}
+
+class HttpError extends Error {
+  constructor(public status: number, public code: string, message: string) {
+    super(message);
+  }
+}
+
+function toHttpError(error: unknown): HttpError {
+  if (error instanceof HttpError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  if (/timed out/i.test(message)) return new HttpError(504, "timeout", message);
+  if (/not found/i.test(message)) return new HttpError(404, "not_found", message);
+  if (/Cannot transition terminal|immutable|required deliverable|Invalid status|Invalid result|placeholder|suspiciously short|not allowed/i.test(message)) return new HttpError(409, "conflict", message);
+  if (/Missing|Invalid|Use either|Target required|Usage:/i.test(message)) return new HttpError(400, "bad_request", message);
+  return new HttpError(500, "internal_error", message);
 }
 
 export interface ArtifactManifest {
@@ -105,7 +126,10 @@ export async function startTangoServer(options: TangoServerOptions = {}): Promis
   const clients = new Set<ServerResponse>();
   const server = createServer(async (req, res) => {
     try { await handleRequest(req, res, { host, port, token, clients }); }
-    catch (error) { sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    catch (error) {
+      const mapped = toHttpError(error);
+      sendJson(res, mapped.status, { ok: false, error: mapped.message, code: mapped.code });
+    }
   });
 
   await new Promise<void>((resolveListen, reject) => {
@@ -151,6 +175,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
   if ((req.method === "POST" || req.method === "PUT" || req.method === "PATCH") && !bodyWithinLimit(req, 1024 * 1024)) return sendJson(res, 413, { ok: false, error: "Request body too large" });
   if (req.method === "GET" && url.pathname === "/api/v1/health") return sendJson(res, 200, { ok: true, schemaVersion: 1, pid: process.pid, time: new Date().toISOString() });
   if (req.method === "GET" && url.pathname === "/api/v1/events") return handleSse(req, res, ctx);
+  if (req.method === "GET" && url.pathname === "/api/v1/subscribe") return handleSse(req, res, ctx);
   if (url.pathname.startsWith("/a/")) return serveArtifact(url, res);
   if (req.method === "GET" && serveDashboardFile(url, res)) return;
   if (req.method === "GET" && (
@@ -169,8 +194,28 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
   }
   if (!authorized(req, ctx.token)) return sendJson(res, 401, { ok: false, error: "Unauthorized" });
   if (req.method === "GET" && url.pathname === "/api/v1/agents") return sendJson(res, 200, { ok: true, schemaVersion: 1, agents: listAgents(url.searchParams.get("cwd") ?? undefined) });
+  if (req.method === "GET" && url.pathname === "/api/v1/runs") return sendJson(res, 200, { ok: true, schemaVersion: 1, runs: listAgents(url.searchParams.get("cwd") ?? undefined).map((agent) => buildRunState(agent)) });
+  if (req.method === "GET" && url.pathname === "/api/v1/runs/events") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...serverEvents(url) });
+  if (req.method === "GET" && url.pathname === "/api/v1/runs/state") return sendJson(res, 200, { ok: true, schemaVersion: 1, state: buildRunState(resolveServerTarget(url)) });
+  if (req.method === "GET" && url.pathname === "/api/v1/runs/activity") {
+    const meta = resolveServerTarget(url);
+    const activity = readActivity(meta, { lines: limitParam(url), raw: url.searchParams.get("raw") === "true", events: url.searchParams.get("events") === "true" });
+    return sendJson(res, 200, { ok: true, schemaVersion: 1, agent: meta, output: activity.text, events: activity.events, activity: activity.summary });
+  }
+  if (req.method === "GET" && url.pathname === "/api/v1/runs/result") {
+    const meta = resolveServerTarget(url);
+    const assessment = assessResultDeliverable(meta);
+    return sendJson(res, 200, { ok: true, schemaVersion: 1, agent: meta, state: buildRunState(meta), result: assessment.result, assessment });
+  }
+  if (req.method === "POST" && url.pathname === "/api/v1/runs/start") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverStartRun(await readJsonBody(req))) });
+  if (req.method === "POST" && url.pathname === "/api/v1/runs/message") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverMessageRun(await readJsonBody(req), url)) });
+  if (req.method === "POST" && url.pathname === "/api/v1/runs/report") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverReportRun(await readJsonBody(req))) });
+  if (req.method === "POST" && url.pathname === "/api/v1/runs/stop") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverStopRun(await readJsonBody(req), url)) });
+  if (req.method === "POST" && url.pathname === "/api/v1/runs/follow") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverFollowRun(await readJsonBody(req), url)) });
+  if (req.method === "POST" && url.pathname === "/api/v1/runs/attention/ack") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverAckAttention(await readJsonBody(req), url)) });
   if (req.method === "GET" && url.pathname === "/api/v1/root-sessions") return sendJson(res, 200, { ok: true, schemaVersion: 1, rootSessions: listRootSessions() });
   if (req.method === "POST" && url.pathname === "/api/v1/root-sessions") return sendJson(res, 200, { ok: true, schemaVersion: 1, rootSession: await createOrResumeRootSession(await readJsonBody(req)) });
+  if (url.pathname.startsWith("/api/v1/root-sessions/")) return await handleRootSessionApi(req, res, url);
   if (req.method === "GET" && url.pathname === "/api/v1/artifacts") return sendJson(res, 200, { ok: true, schemaVersion: 1, artifacts: listArtifacts() });
   if (req.method === "GET" && url.pathname === "/api/v1/dashboard") return sendJson(res, 200, { ok: true, ...buildDashboard() });
   if (req.method === "GET" && url.pathname === "/api/v1/operations") return sendJson(res, 200, { ok: true, ...buildOperations() });
@@ -234,18 +279,148 @@ function broadcastSse(clients: Set<ServerResponse>, name: string, payload: unkno
   for (const client of clients) client.write(text);
 }
 
-function listAgents(cwd?: string): Array<AgentMetadata & { metrics?: unknown; attachCommand?: string; lookCommand: string; resultCommand: string }> {
+function listAgents(cwd?: string): Array<AgentMetadata & { metrics?: unknown; attachCommand?: string; activityCommand: string; resultCommand: string }> {
   return listMetadata(cwd).map((agent) => {
     const metrics = readMetrics(agent.runDir);
     const prefix = `cd ${shellQuote(agent.cwd)} &&`;
+    const activityCommand = `${prefix} tango activity ${shellQuote(agent.name)} --lines 200`;
     return {
       ...agent,
       ...(metrics ? { metrics } : {}),
       attachCommand: agent.mode === "interactive" ? `${prefix} tango attach ${shellQuote(agent.name)}` : undefined,
-      lookCommand: `${prefix} tango activity ${shellQuote(agent.name)} --lines 200`,
+      activityCommand,
       resultCommand: `${prefix} tango result ${shellQuote(agent.name)}`,
     };
   });
+}
+
+function resolveServerTarget(url: URL, body: any = {}): AgentMetadata {
+  const name = stringParam(body?.name) ?? url.searchParams.get("name") ?? undefined;
+  const runId = stringParam(body?.runId) ?? url.searchParams.get("runId") ?? url.searchParams.get("run-id") ?? undefined;
+  const runDir = stringParam(body?.runDir) ?? url.searchParams.get("runDir") ?? url.searchParams.get("run-dir") ?? undefined;
+  const cwd = resolve(stringParam(body?.cwd) ?? url.searchParams.get("cwd") ?? process.cwd());
+  if (!name && !runId && !runDir) throw new HttpError(400, "bad_request", "Target required: pass name, runId, or runDir.");
+  try {
+    return resolveTarget({ name, cwd, runId, runDir, env: process.env as any });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/not found/i.test(message)) throw new HttpError(404, "run_not_found", message);
+    if (/ambiguous/i.test(message)) throw new HttpError(409, "ambiguous_target", message);
+    throw new HttpError(400, "bad_target", message);
+  }
+}
+
+async function serverStartRun(input: any): Promise<{ agent: AgentMetadata; command: unknown; state?: unknown }> {
+  const result = await startAgent({
+    name: requiredString(input?.name, "name"),
+    roleName: stringParam(input?.roleName) ?? stringParam(input?.role),
+    harness: stringParam(input?.harness),
+    mode: stringParam(input?.mode) as any,
+    model: stringParam(input?.model),
+    thinking: stringParam(input?.thinking) as any,
+    effort: stringParam(input?.effort),
+    cwd: resolve(requiredString(input?.cwd, "cwd")),
+    task: stringParam(input?.task) ?? "",
+    clean: input?.clean === true,
+    attach: false,
+    dryRun: input?.dryRun === true,
+    recursive: typeof input?.recursive === "boolean" ? input.recursive : undefined,
+    resultRequired: typeof input?.resultRequired === "boolean" ? input.resultRequired : undefined,
+    json: true,
+  });
+  return { agent: result.meta, command: result.command, state: result.meta.runDir ? buildRunState(result.meta) : undefined };
+}
+
+async function serverMessageRun(input: any, url: URL): Promise<{ agent: AgentMetadata; state: unknown }> {
+  const meta = resolveServerTarget(url, input);
+  messageRun(meta, requiredString(input?.message, "message"));
+  return { agent: meta, state: buildRunState(meta) };
+}
+
+async function serverReportRun(input: any): Promise<{ agent: AgentMetadata; state: unknown }> {
+  const runDir = requiredString(input?.runDir ?? process.env.TANGO_RUN_DIR, "runDir");
+  const agent = reportRun(runDir, requiredString(input?.state, "state") as any, stringParam(input?.summary) ?? stringParam(input?.message) ?? "", {
+    needs: stringParam(input?.needs),
+    resultFile: stringParam(input?.resultFile),
+    summaryOnly: input?.summaryOnly === true,
+  });
+  return { agent, state: buildRunState(agent) };
+}
+
+async function serverStopRun(input: any, url: URL): Promise<{ agent: AgentMetadata; state: unknown }> {
+  const meta = resolveServerTarget(url, input);
+  const agent = stopRun(meta);
+  return { agent, state: buildRunState(agent) };
+}
+
+async function serverFollowRun(input: any, url: URL): Promise<{ agent: AgentMetadata; state: unknown; resultAssessment: unknown; condition: string }> {
+  const meta = resolveServerTarget(url, input);
+  const until = stringParam(input?.until) ?? url.searchParams.get("until") ?? "terminal";
+  if (!["terminal", "result-resolved", "attention"].includes(until)) throw new HttpError(400, "bad_follow_condition", "Invalid follow condition.");
+  const timeoutMs = Math.max(0, Number(input?.timeoutMs ?? input?.timeout ?? 0));
+  const result = await followRun(meta, until as any, timeoutMs);
+  return { ...result, condition: until };
+}
+
+function serverEvents(url: URL): { events: unknown[]; errors: string[]; truncated: boolean; cursor: string } {
+  const limit = limitParam(url);
+  const recent = readRecentEvents(limit, 1024 * 1024);
+  return { ...recent, cursor: String(Date.now()) };
+}
+
+async function serverAckAttention(input: any, url: URL): Promise<{ record?: unknown; state: "seen" | "handled" }> {
+  const meta = resolveServerTarget(url, input);
+  const eventId = requiredString(input?.eventId, "eventId");
+  const recipient = {
+    runId: stringParam(input?.recipientRunId),
+    runDir: stringParam(input?.recipientRunDir),
+    rootSessionId: stringParam(input?.recipientRootSessionId),
+  };
+  const state = input?.state === "handled" ? "handled" : "seen";
+  const record = state === "handled" ? markHandled(recipient, meta.runDir, eventId) : markSeen(recipient, meta.runDir, eventId);
+  return { record, state };
+}
+
+async function handleRootSessionApi(req: IncomingMessage, res: ServerResponse, url: URL) {
+  const parts = url.pathname.split("/");
+  const rootSessionId = decodeURIComponent(parts[4] ?? "");
+  if (!safeId(rootSessionId)) return sendJson(res, 400, { ok: false, error: "Invalid root session id" });
+  const record = listRootSessions().find((r) => r.rootSessionId === rootSessionId);
+  if (req.method === "GET" && parts.length === 5) {
+    if (!record) return sendJson(res, 404, { ok: false, error: "Root session not found" });
+    return sendJson(res, 200, { ok: true, schemaVersion: 1, rootSession: record });
+  }
+  if (req.method === "POST" && parts.length === 6 && parts[5] === "resume") {
+    const input = await readJsonBody(req);
+    return sendJson(res, 200, { ok: true, schemaVersion: 1, rootSession: await createOrResumeRootSession({ ...input, rootSessionId }) });
+  }
+  if (req.method === "GET" && parts.length === 6 && parts[5] === "runs") {
+    if (!record) return sendJson(res, 404, { ok: false, error: "Root session not found" });
+    const runs = listMetadata(undefined)
+      .filter((agent) => agent.rootSessionId === rootSessionId || agent.workstreamId === record.workstreamId)
+      .map((agent) => buildRunState(agent));
+    return sendJson(res, 200, { ok: true, schemaVersion: 1, runs });
+  }
+  if (req.method === "GET" && parts.length === 6 && parts[5] === "events") {
+    if (!record) return sendJson(res, 404, { ok: false, error: "Root session not found" });
+    const recent = readRecentEvents(limitParam(url), 1024 * 1024);
+    const events = recent.events.filter((event) => event.rootSessionId === rootSessionId || event.workstreamId === record.workstreamId);
+    return sendJson(res, 200, { ok: true, schemaVersion: 1, events, errors: recent.errors, truncated: recent.truncated, cursor: String(Date.now()) });
+  }
+  return sendJson(res, 404, { ok: false, error: "Not found" });
+}
+
+function stringParam(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function requiredString(value: unknown, name: string): string {
+  if (typeof value !== "string" || !value.length) throw new HttpError(400, "missing_field", `Missing required field: ${name}`);
+  return value;
+}
+
+function isRootSessionKind(value: unknown): value is RootSessionRecord["kind"] {
+  return typeof value === "string" && ["pi", "claude", "gemini", "generic", "cli", "dashboard", "sdk", "restored"].includes(value);
 }
 
 async function createOrResumeRootSession(input: any): Promise<RootSessionRecord> {
@@ -258,7 +433,7 @@ async function createOrResumeRootSession(input: any): Promise<RootSessionRecord>
     schemaVersion: 1,
     rootSessionId,
     workstreamId: safeId(input?.workstreamId) ?? existing?.workstreamId ?? `ws_${randomToken(8)}`,
-    kind: input?.kind === "pi" || input?.kind === "dashboard" || input?.kind === "restored" ? input.kind : "cli",
+    kind: isRootSessionKind(input?.kind) ? input.kind : (isRootSessionKind(input?.origin) ? input.origin : "cli"),
     cwd: typeof input?.cwd === "string" ? resolve(input.cwd) : existing?.cwd,
     title: typeof input?.title === "string" ? input.title : existing?.title,
     createdAt: existing?.createdAt ?? now,
@@ -454,7 +629,7 @@ async function load() {
       '<div class="muted">' + esc(a.cwd) + '</div>' +
       '<div>' + esc(a.summary || a.task || '') + '</div>' +
       (a.attachCommand ? '<div><code>' + esc(a.attachCommand) + '</code><button onclick="copy(this.previousElementSibling.textContent)">copy attach</button></div>' : '') +
-      '<div><code>' + esc(a.lookCommand) + '</code><button onclick="copy(this.previousElementSibling.textContent)">copy look</button></div>' +
+      '<div><code>' + esc(a.activityCommand) + '</code><button onclick="copy(this.previousElementSibling.textContent)">copy activity</button></div>' +
     '</div>').join('') : '<p class="muted">No agents.</p>';
   const attention = agents.filter(a => ['blocked','error'].includes(a.status) || a.needs);
   document.getElementById('attention').innerHTML = attention.length ? attention.map(a => '<div class="card"><b>' + esc(a.name) + '</b> ' + esc(a.status) + ' ' + esc(a.needs || '') + '<br>' + esc(a.summary || '') + '</div>').join('') : '<p class="muted">No attention items.</p>';

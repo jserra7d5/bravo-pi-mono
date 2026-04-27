@@ -1,17 +1,20 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentMetadata } from "./types.js";
+import type { AgentMetadata, ResultProvenance, ResultSource } from "./types.js";
 import { isTerminalStatus } from "./lifecycle.js";
 
 export interface ResultAssessment {
   resultFile: string;
   hasResultFile: boolean;
   result: string;
+  candidateResult?: string;
   finalized: boolean;
   resultReady: boolean;
   safeToRead: boolean;
   deliverable: boolean;
-  resultState: "none" | "available" | "invalid" | "failed" | "summary-only";
+  resultState: "none" | "candidate" | "available" | "invalid" | "failed" | "summary-only";
+  resultSource?: ResultSource;
+  provenance?: ResultProvenance;
   resultIssue?: string;
   resultWarning?: string;
 }
@@ -30,16 +33,21 @@ export function assessResultDeliverable(meta: AgentMetadata): ResultAssessment {
   const hardIssue = resultIssue(meta, hasResultFile, finalized, result);
   const warning = !hardIssue ? resultWarning(meta, result) : undefined;
   const summaryOnly = !!meta.resultSummaryOnlyAt;
+  const candidate = !!meta.resultCandidateFile && existsSync(meta.resultCandidateFile);
+  const candidateResult = candidate ? readFileSync(meta.resultCandidateFile!, "utf8") : "";
   const resultReady = summaryOnly || (hasResultFile && finalized && !hardIssue);
   return {
     resultFile,
     hasResultFile,
     result,
+    candidateResult: candidateResult || undefined,
     finalized,
     resultReady,
     safeToRead: resultReady || !!result.trim(),
     deliverable: hasResultFile && finalized && !hardIssue,
-    resultState: summaryOnly ? "summary-only" : resultReady ? "available" : hardIssue ? (isTerminalStatus(meta.status) ? "failed" : "none") : "none",
+    resultState: summaryOnly ? "summary-only" : resultReady ? "available" : candidate ? "candidate" : hardIssue ? (isTerminalStatus(meta.status) ? "failed" : "none") : "none",
+    resultSource: meta.resultSource ?? (summaryOnly ? "summary-only" : resultReady ? "result-file" : candidate ? "interactive-transcript" : undefined),
+    provenance: meta.resultProvenance,
     resultIssue: hardIssue,
     resultWarning: warning,
   };
@@ -49,6 +57,7 @@ export function resultIssue(meta: AgentMetadata, hasResultFile: boolean, finaliz
   if (meta.resultIssue) return meta.resultIssue;
   if (meta.resultSummaryOnlyAt) return undefined;
   if (!finalized) {
+    if (meta.resultCandidateFile && existsSync(meta.resultCandidateFile)) return meta.resultIssue ?? "Transcript-derived result candidate exists but has not been finalized as a deliverable.";
     if (hasResultFile) return "Result deliverable exists but has not been finalized by Tango; inspect carefully and ask the agent to finish with --result-file if needed.";
     if (isTerminalStatus(meta.status)) return meta.summary ? "No finalized deliverable result.md found; only metadata.summary is available." : "No finalized deliverable result.md found.";
     return "Agent is not terminal; result is not ready.";

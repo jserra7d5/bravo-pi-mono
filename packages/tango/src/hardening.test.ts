@@ -336,6 +336,25 @@ describe("Tango CLI/runtime hardening", () => {
     }
   });
 
+  it("follow --until result-resolved does not treat in-progress not-ready issue as resolved", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const meta = writeMeta(home, cwd, "still-running", { status: "created", resultFile: undefined, resultFinalizedAt: undefined });
+      rmSync(join(meta.runDir, "result.md"), { force: true });
+      const result = runCli(["follow", "--run-id", "run_still-running", "--until", "result-resolved", "--timeout", "0.01", "--json"], { TANGO_HOME: home }, cwd);
+
+      assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+      const body = JSON.parse(result.stdout);
+      assert.strictEqual(body.ok, false);
+      assert.strictEqual(body.timeout, true);
+      assert.strictEqual(body.resultAssessment.resultIssue, "Agent is not terminal; result is not ready.");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("starts interactive agents with deliverables required by default unless opted out", () => {
     const cwd = tempDir();
     const home = tempDir();

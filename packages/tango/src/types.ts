@@ -3,6 +3,124 @@ export type AgentStatus = "created" | "running" | "done" | "error" | "blocked" |
 export type OrchestrationPolicy = "none" | "cli" | "tools" | "auto";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type ResultParser = "pi-json" | "claude-stream-json" | "plain";
+export type ResultSource = "result-file" | "interactive-transcript" | "oneshot-final-event" | "recovered-log" | "summary-only";
+
+export interface RootSessionIdentity {
+  rootSessionId: string;
+  workstreamId?: string;
+  origin: "pi" | "claude" | "gemini" | "generic" | "cli" | "dashboard" | "sdk";
+  cwd?: string;
+  title?: string;
+  ownerProcess?: {
+    pid?: number;
+    command?: string;
+    harness?: string;
+  };
+}
+
+export interface ResultProvenance {
+  source: Exclude<ResultSource, "summary-only">;
+  sourceEventIds: string[];
+  transcriptWindow?: { fromEventId: string; toEventId: string };
+  confidence: "high" | "medium" | "low";
+  extractor: string;
+  validation: {
+    ok: boolean;
+    issue?: string;
+    warning?: string;
+  };
+}
+
+export interface ActivityEvent {
+  schemaVersion: 1;
+  eventId: string;
+  time?: string;
+  runId?: string;
+  runDir: string;
+  kind: "message" | "tool" | "error" | "harness";
+  text: string;
+}
+
+export interface ActivitySummary {
+  available: boolean;
+  sources?: string[];
+  latestSource?: string;
+  updatedAt?: string;
+  recommended: string;
+}
+
+export interface AttentionSummary {
+  requested: boolean;
+  needs?: string;
+  pending?: number;
+  records?: unknown[];
+}
+
+export interface NextAction {
+  recommended: string;
+  reason?: string;
+  until?: string;
+}
+
+export interface RunState {
+  schemaVersion: 1;
+  identity: {
+    runId?: string;
+    runDir: string;
+    name: string;
+    role?: string;
+    mode: AgentMode;
+    harness: string;
+    parentRunId?: string;
+    parentRunDir?: string;
+    rootSessionId?: string;
+    workstreamId?: string;
+    cwd: string;
+    task: string;
+  };
+  process: {
+    state: "starting" | "running" | "exited" | "lost" | "stopped" | "unknown";
+    pid?: number;
+    supervisorPid?: number;
+    tmuxSocket?: string;
+    tmuxSession?: string;
+    interactive?: {
+      attached: boolean;
+      lastPaneCaptureAt?: string;
+      inputMode?: "tmux" | "server-mediated";
+    };
+    exitCode?: number | null;
+    signal?: string | null;
+    observedAt: string;
+    issue?: string;
+  };
+  agent: {
+    state: AgentStatus;
+    terminal: boolean;
+    attentionRequired?: boolean;
+    summary?: string;
+    needs?: string;
+    lastReportAt?: string;
+    updatedAt: string;
+  };
+  result: {
+    state: "none" | "capturing" | "candidate" | "available" | "invalid" | "failed" | "summary-only";
+    ready: boolean;
+    safeToRead: boolean;
+    deliverable: boolean;
+    source?: ResultSource;
+    path?: string;
+    candidatePath?: string;
+    finalizedAt?: string;
+    issue?: string;
+    warning?: string;
+    provenance?: ResultProvenance;
+  };
+  activity: ActivitySummary;
+  attention: AttentionSummary;
+  metrics?: AgentMetricsSnapshot;
+  next: NextAction;
+}
 
 export interface RoleConfig {
   name: string;
@@ -86,8 +204,12 @@ export interface AgentMetadata {
   resultFile?: string;
   resultFinalizedAt?: string;
   resultSummaryOnlyAt?: string;
+  resultCandidateFile?: string;
+  resultSource?: ResultSource;
+  resultProvenance?: ResultProvenance;
   resultRequired?: boolean;
   resultIssue?: string;
+  lastReportAt?: string;
   metrics?: AgentMetricsSnapshot;
 }
 

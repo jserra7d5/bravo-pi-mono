@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runOneshotFromRuntime, startAgent } from "./start.js";
 import { projectSlug } from "./paths.js";
 import { fail, printJson } from "./json.js";
@@ -15,11 +17,19 @@ import { isTerminalStatus, reconcileAgentLifecycle } from "./lifecycle.js";
 import { assessResultDeliverable, validateResultContent } from "./result.js";
 import type { AgentMetadata, AgentStatus, ThinkingLevel } from "./types.js";
 import { listArtifacts, publishArtifact, readServerDiscovery, revokeArtifact, startTangoServer } from "./server.js";
+import { buildRunState as cpBuildRunState, messageRun, readActivity, reportRun, stopRun } from "./controlPlane.js";
 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
+const cliPath = fileURLToPath(import.meta.url);
 const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required", "raw", "events"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
+
+class ServerRequestError extends Error {
+  constructor(public status: number, message: string, public payload?: any) {
+    super(message);
+  }
+}
 
 function parse(argv: string[]): Parsed {
   const flags: Parsed["flags"] = {};
@@ -97,6 +107,14 @@ function flagNonNegativeNumber(flags: Parsed["flags"], name: string, fallback: n
   if (!Number.isFinite(value) || value < 0) throw new Error(`Invalid --${name}: expected a non-negative number.`);
   return value;
 }
+function parsePort(flags: Parsed["flags"]): number | undefined {
+  const raw = flagString(flags, "port");
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw)) throw new Error("Invalid --port: expected 0-65535.");
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0 || value > 65535) throw new Error("Invalid --port: expected 0-65535.");
+  return value;
+}
 function flagThinking(flags: Parsed["flags"], name: string): ThinkingLevel | undefined {
   const value = flagString(flags, name);
   if (value !== undefined && !THINKING_LEVELS.has(value as ThinkingLevel)) throw new Error(`Invalid --${name}: ${value}. Expected off, minimal, low, medium, high, or xhigh.`);
@@ -112,7 +130,9 @@ function tailFileByLines(path: string, lines: number, maxBytes = 512 * 1024): st
     const buffer = Buffer.alloc(length);
     const bytesRead = readSync(fd, buffer, 0, length, start);
     const prefix = start > 0 ? "[output truncated to tail]\n" : "";
-    return prefix + buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/).slice(-lines).join("\n");
+    const parts = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/);
+    if (parts[parts.length - 1] === "") parts.pop();
+    return prefix + parts.slice(-lines).join("\n");
   } finally {
     closeSync(fd);
   }
@@ -130,16 +150,16 @@ async function main() {
       case "help": case "--help": case "-h": return help();
       case "server": return await cmdServer(parsed);
       case "start": return await cmdStart(parsed, cwd, json);
-      case "ps": return cmdList(cwd, json, flagBool(parsed.flags, "all"));
-      case "inspect": return cmdInspect(parsed, cwd, json);
-      case "activity": return cmdActivity(parsed, cwd, json);
+      case "ps": return await cmdList(cwd, json, flagBool(parsed.flags, "all"));
+      case "inspect": return await cmdInspect(parsed, cwd, json);
+      case "activity": return await cmdActivity(parsed, cwd, json);
       case "list": return legacyCommand("list", "ps", json);
       case "look": return legacyCommand("look", "activity", json);
       case "attach": return cmdAttach(parsed, cwd);
-      case "message": return cmdMessage(parsed, cwd, json);
-      case "stop": return cmdStop(parsed, cwd, json);
+      case "message": return await cmdMessage(parsed, cwd, json);
+      case "stop": return await cmdStop(parsed, cwd, json);
       case "delete": return cmdDelete(parsed, cwd, json);
-      case "report": return cmdReport(parsed, json);
+      case "report": return await cmdReport(parsed, json);
       case "status": return legacyCommand("status", "report", json);
       case "watch": return await cmdWatch(parsed, cwd, json);
       case "children": return await cmdChildren(parsed, cwd, json);
@@ -156,6 +176,10 @@ async function main() {
       default: return fail(`Unknown command: ${cmd}`, json);
     }
   } catch (error) {
+    if (error instanceof ServerRequestError && json && error.payload) {
+      process.exitCode = 1;
+      return printJson({ ...error.payload, ok: false, status: error.status });
+    }
     return fail(error instanceof Error ? error.message : String(error), json);
   }
 }
@@ -176,7 +200,7 @@ async function cmdServer(parsed: Parsed) {
   if (subcommand) throw new Error("Usage: tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN] or tango server url");
   await startTangoServer({
     host: flagString(parsed.flags, "host"),
-    port: flagString(parsed.flags, "port") ? flagPositiveInt(parsed.flags, "port", 43117, 65535) : undefined,
+    port: parsePort(parsed.flags),
     token: flagString(parsed.flags, "token"),
     allowPrivateBind: flagBool(parsed.flags, "allow-private-bind"),
   });
@@ -187,9 +211,9 @@ async function cmdStart(parsed: Parsed, cwd: string, json: boolean) {
   if (!name) throw new Error("Usage: tango start <name> --role <role> [task...]");
   if (parsed.flags["result-required"] !== undefined && parsed.flags["no-result-required"] !== undefined) throw new Error("Use either --result-required or --no-result-required, not both.");
   const task = taskParts.join(" ").trim();
-  const result = await startAgent({
+  const result = await serverRequest("POST", "/api/v1/runs/start", {
     name,
-    roleName: flagString(parsed.flags, "role"),
+    role: flagString(parsed.flags, "role"),
     harness: flagString(parsed.flags, "harness"),
     mode: flagString(parsed.flags, "mode") as any,
     model: flagString(parsed.flags, "model"),
@@ -198,7 +222,6 @@ async function cmdStart(parsed: Parsed, cwd: string, json: boolean) {
     cwd,
     task,
     clean: flagBool(parsed.flags, "clean"),
-    attach: flagBool(parsed.flags, "attach"),
     dryRun: flagBool(parsed.flags, "dry-run"),
     recursive: parsed.flags.recursive === undefined ? undefined : flagBool(parsed.flags, "recursive"),
     resultRequired: parsed.flags["result-required"] !== undefined
@@ -206,14 +229,13 @@ async function cmdStart(parsed: Parsed, cwd: string, json: boolean) {
       : parsed.flags["no-result-required"] !== undefined
         ? false
         : undefined,
-    json,
   });
-  if (json) printJson({ ok: true, agent: result.meta, command: result.command });
+  if (json) printJson(result);
   else {
-    console.log(`${result.meta.name}: ${result.meta.status} (${result.meta.mode}/${result.meta.harness})`);
-    console.log(result.meta.runDir);
+    console.log(`${result.agent.name}: ${result.agent.status} (${result.agent.mode}/${result.agent.harness})`);
+    console.log(result.agent.runDir);
   }
-  if (flagBool(parsed.flags, "attach") && result.meta.mode === "interactive") attachTmux(result.meta.tmuxSocket, result.meta.tmuxSession);
+  if (flagBool(parsed.flags, "attach") && result.agent.mode === "interactive") attachTmux(result.agent.tmuxSocket, result.agent.tmuxSession);
 }
 
 function listAgentSummary(a: AgentMetadata) {
@@ -266,6 +288,48 @@ function scopedListAgents(cwd: string, all: boolean): AgentMetadata[] {
   return scoped;
 }
 
+async function ensureServer(): Promise<NonNullable<ReturnType<typeof readServerDiscovery>>> {
+  const existing = readServerDiscovery();
+  if (existing) return existing;
+  if (process.env.TANGO_SERVER_URL) throw new Error("Configured Tango server is not reachable.");
+  const child = spawn(process.execPath, [cliPath, "server", "--port", "0"], {
+    detached: true,
+    stdio: "ignore",
+    env: process.env,
+  });
+  child.unref();
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const discovery = readServerDiscovery();
+    if (discovery) return discovery;
+  }
+  throw new Error("Timed out starting Tango server for active command.");
+}
+
+async function serverRequest(method: "GET" | "POST", path: string, body?: unknown): Promise<any> {
+  const discovery = await ensureServer();
+  const url = new URL(path, discovery.url);
+  const headers: Record<string, string> = { "accept": "application/json" };
+  if (discovery.token) headers.authorization = `Bearer ${discovery.token}`;
+  if (body !== undefined) headers["content-type"] = "application/json";
+  const res = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const text = await res.text();
+  let payload: any;
+  try { payload = text ? JSON.parse(text) : {}; } catch { payload = { ok: false, error: text }; }
+  if (!res.ok) throw new ServerRequestError(res.status, payload?.error ?? `Tango server request failed (${res.status})`, payload);
+  return payload;
+}
+
+function targetQuery(cwd: string, name?: string, runId?: string, runDir?: string): string {
+  const params = new URLSearchParams();
+  params.set("cwd", cwd);
+  if (name) params.set("name", name);
+  if (runId) params.set("runId", runId);
+  if (runDir) params.set("runDir", runDir);
+  return params.toString();
+}
+
 function legacyCommand(oldName: string, replacement: string, json: boolean) {
   const message = `tango ${oldName} has been removed. Use tango ${replacement}.`;
   if (json) {
@@ -275,11 +339,23 @@ function legacyCommand(oldName: string, replacement: string, json: boolean) {
   throw new Error(message);
 }
 
-function cmdList(cwd: string, json: boolean, all: boolean) {
-  const agents = scopedListAgents(cwd, all);
-  if (json) return printJson({ ok: true, agents: agents.map(listAgentSummary) });
-  if (!agents.length) return console.log("No agents.");
-  for (const a of agents) console.log(`${a.name.padEnd(18)} ${a.status.padEnd(8)} ${a.role ?? "-"} ${a.mode}/${a.harness} ${a.task}`);
+async function cmdList(cwd: string, json: boolean, all: boolean) {
+  const path = all ? "/api/v1/runs" : `/api/v1/runs?${new URLSearchParams({ cwd }).toString()}`;
+  const payload = await serverRequest("GET", path);
+  const states = all ? payload.runs : payload.runs.filter((state: any) => {
+    const rootSessionId = process.env.TANGO_ROOT_SESSION_ID;
+    const workstreamId = process.env.TANGO_WORKSTREAM_ID;
+    if (rootSessionId && workstreamId) return state.identity.rootSessionId === rootSessionId && state.identity.workstreamId === workstreamId;
+    if (rootSessionId) return state.identity.rootSessionId === rootSessionId;
+    if (workstreamId) return state.identity.workstreamId === workstreamId;
+    return true;
+  });
+  if (json) return printJson({ ok: true, agents: states.map((s: any) => {
+    const task = String(s.identity.task ?? "").replace(/\s+/g, " ").trim();
+    return { ...s.identity, task: task.length > 240 ? `${task.slice(0, 239)}…` : task, taskTruncated: task.length > 240 || task !== s.identity.task, status: s.agent.state, summary: s.agent.summary, needs: s.agent.needs, result: s.result, metrics: s.metrics };
+  }) });
+  if (!states.length) return console.log("No agents.");
+  for (const s of states) console.log(`${s.identity.name.padEnd(18)} ${s.agent.state.padEnd(8)} ${s.identity.role ?? "-"} ${s.identity.mode}/${s.identity.harness} ${s.identity.task}`);
 }
 
 function buildRunState(meta: AgentMetadata) {
@@ -354,14 +430,14 @@ function nextAction(meta: AgentMetadata, assessment: ReturnType<typeof assessRes
   return { recommended: "inspect" };
 }
 
-function cmdInspect(parsed: Parsed, cwd: string, json: boolean) {
+async function cmdInspect(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
   const runId = flagString(parsed.flags, "run-id");
   const runDir = flagString(parsed.flags, "run-dir");
   if (!name && !runId && !runDir) throw new Error("Usage: tango inspect [name] [--run-id <id>|--run-dir <dir>]");
-  const meta = resolveTarget({ name, cwd, runId, runDir, env: process.env as any });
-  const state = buildRunState(meta);
-  if (json) return printJson({ ok: true, state, agent: withMetrics(refreshStatus(meta)) });
+  const payload = await serverRequest("GET", `/api/v1/runs/state?${targetQuery(cwd, name, runId, runDir)}`);
+  const state = payload.state;
+  if (json) return printJson(payload);
   console.log(`${state.identity.name}: ${state.agent.state} (${state.identity.mode}/${state.identity.harness})`);
   console.log(`process: ${state.process.state}`);
   console.log(`result: ${state.result.state} ready=${state.result.ready} safeToRead=${state.result.safeToRead} deliverable=${state.result.deliverable}`);
@@ -370,24 +446,23 @@ function cmdInspect(parsed: Parsed, cwd: string, json: boolean) {
   console.log(`runDir: ${state.identity.runDir}`);
 }
 
-function cmdActivity(parsed: Parsed, cwd: string, json: boolean) {
-  return cmdLook(parsed, cwd, json);
-}
-
-function cmdLook(parsed: Parsed, cwd: string, json: boolean) {
+async function cmdActivity(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
   const runId = flagString(parsed.flags, "run-id");
   const runDir = flagString(parsed.flags, "run-dir");
   if (!name && !runId && !runDir) throw new Error("Usage: tango activity [name] [--run-id <id>|--run-dir <dir>]");
   const lines = flagPositiveInt(parsed.flags, "lines", 200, 5000);
-  const meta = withMetrics(resolveTarget({ name, cwd, runId, runDir, env: process.env as any }));
-  let text = "";
-  if (meta.mode === "interactive" && tmuxAlive(meta.tmuxSocket, meta.tmuxSession)) text = captureTmux(meta.tmuxSocket, meta.tmuxSession, lines);
-  else if (meta.mode === "interactive" && existsSync(join(meta.runDir, "final-pane.log"))) text = tailFileByLines(join(meta.runDir, "final-pane.log"), lines);
-  else if (meta.mode === "interactive" && existsSync(join(meta.runDir, "tmux.log"))) text = tailFileByLines(join(meta.runDir, "tmux.log"), lines);
-  else if (existsSync(join(meta.runDir, "output.log"))) text = tailFileByLines(join(meta.runDir, "output.log"), lines);
-  else if (existsSync(join(meta.runDir, "result.md"))) text = readFileSync(join(meta.runDir, "result.md"), "utf8");
-  if (json) printJson({ ok: true, agent: meta, output: text }); else process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+  const params = new URLSearchParams(targetQuery(cwd, name, runId, runDir));
+  params.set("limit", String(lines));
+  if (flagBool(parsed.flags, "raw")) params.set("raw", "true");
+  if (flagBool(parsed.flags, "events")) params.set("events", "true");
+  const payload = await serverRequest("GET", `/api/v1/runs/activity?${params.toString()}`);
+  if (json) printJson(payload);
+  else process.stdout.write(payload.output.endsWith("\n") ? payload.output : `${payload.output}\n`);
+}
+
+function cmdLook(parsed: Parsed, cwd: string, json: boolean) {
+  return cmdActivity(parsed, cwd, json);
 }
 
 function cmdAttach(parsed: Parsed, cwd: string) {
@@ -400,26 +475,20 @@ function cmdAttach(parsed: Parsed, cwd: string) {
   attachTmux(meta.tmuxSocket, meta.tmuxSession);
 }
 
-function cmdMessage(parsed: Parsed, cwd: string, json: boolean) {
+async function cmdMessage(parsed: Parsed, cwd: string, json: boolean) {
   const [name, ...msg] = parsed.positionals;
   if (!name || msg.length === 0) throw new Error("Usage: tango message <name> <message>");
-  const meta = resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any });
-  if (meta.mode !== "interactive") throw new Error(`Agent ${meta.name} is not interactive (mode=${meta.mode}). Message only works with interactive agents.`);
-  sendTmux(meta.tmuxSocket, meta.tmuxSession, msg.join(" "));
-  if (json) printJson({ ok: true }); else console.log("sent");
+  const payload = await serverRequest("POST", "/api/v1/runs/message", { name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), message: msg.join(" ") });
+  if (json) printJson(payload); else console.log("sent");
 }
 
-function cmdStop(parsed: Parsed, cwd: string, json: boolean) {
+async function cmdStop(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
   const runId = flagString(parsed.flags, "run-id");
   const runDir = flagString(parsed.flags, "run-dir");
   if (!name && !runId && !runDir) throw new Error("Usage: tango stop <name> [--run-id <id>|--run-dir <dir>]");
-  const meta = resolveTarget({ name, cwd, runId, runDir, env: process.env as any });
-  if (meta.mode === "oneshot") stopOneshot(meta);
-  else stopTmux(meta.tmuxSocket, meta.tmuxSession);
-  transitionStatus(meta.runDir, "stopped");
-  const stopped = readMetadata(meta.runDir);
-  if (json) printJson({ ok: true, agent: stopped }); else console.log(`${meta.name}: stopped`);
+  const payload = await serverRequest("POST", "/api/v1/runs/stop", { name, cwd, runId, runDir });
+  if (json) printJson(payload); else console.log(`${payload.agent.name}: stopped`);
 }
 
 function stopOneshot(meta: AgentMetadata): void {
@@ -454,24 +523,19 @@ function cmdDelete(parsed: Parsed, cwd: string, json: boolean) {
   if (json) printJson({ ok: true }); else console.log(`${name}: deleted`);
 }
 
-function cmdReport(parsed: Parsed, json: boolean) {
+async function cmdReport(parsed: Parsed, json: boolean) {
   const [state, ...msg] = parsed.positionals;
   if (!state) throw new Error("Usage: tango report <running|blocked|done|error|stopped> [--result-file <path>|--summary-only] [message]");
   const runDir = flagString(parsed.flags, "run-dir") ?? process.env.TANGO_RUN_DIR;
   if (!runDir) throw new Error("No run dir. Set TANGO_RUN_DIR or pass --run-dir.");
   if (!isAgentStatus(state)) throw new Error(`Invalid status: ${state}`);
-  const summary = msg.join(" ");
   const resultFileFlag = flagString(parsed.flags, "result-file");
   const summaryOnly = flagBool(parsed.flags, "summary-only") || flagBool(parsed.flags, "no-result");
   if (resultFileFlag && summaryOnly) throw new Error("Use either --result-file or --summary-only/--no-result, not both.");
   if (resultFileFlag && state !== "done") throw new Error("--result-file is only valid with `tango report done`.");
   if (summaryOnly && state !== "done") throw new Error("--summary-only/--no-result is only valid with `tango report done`.");
-  if (state === "done") enforceDoneResultPolicy(runDir, { resultFile: resultFileFlag, summaryOnly });
-  if (resultFileFlag) finalizeResultFileBeforeDone(runDir, resultFileFlag);
-  else if (state === "done" && summaryOnly) markSummaryOnlyResult(runDir);
-  if (state === "done") captureInteractiveTranscript(runDir);
-  const meta = updateStatus(runDir, state, summary, { needs: flagString(parsed.flags, "needs") });
-  if (json) printJson({ ok: true, agent: meta }); else console.log(`${meta.name}: ${meta.status}`);
+  const payload = await serverRequest("POST", "/api/v1/runs/report", { runDir, state, summary: msg.join(" "), needs: flagString(parsed.flags, "needs"), resultFile: resultFileFlag, summaryOnly });
+  if (json) printJson(payload); else console.log(`${payload.agent.name}: ${payload.agent.status}`);
 }
 
 function enforceDoneResultPolicy(runDir: string, options: { resultFile?: string; summaryOnly: boolean }): void {
@@ -573,31 +637,19 @@ async function cmdFollow(parsed: Parsed, cwd: string, json: boolean) {
   if (!until) throw new Error("tango follow requires --until <terminal|result-resolved|attention>.");
   if (!["terminal", "result-resolved", "attention"].includes(until)) throw new Error(`Invalid --until ${until}. Expected terminal, result-resolved, or attention.`);
   const timeoutMs = flagNonNegativeNumber(parsed.flags, "timeout", 0) * 1000;
-  const start = Date.now();
-  const target = resolveTarget({ name, cwd, runId, runDir, env: process.env as any });
-  while (true) {
-    const meta = withMetrics(refreshStatus(readMetadata(target.runDir)));
-    const assessment = assessResultDeliverable(meta);
-    const matched = until === "terminal"
-      ? isTerminalStatus(meta.status)
-      : until === "result-resolved"
-        ? assessment.safeToRead || !!assessment.resultIssue
-        : meta.status === "blocked" || meta.status === "error";
-    if (matched) {
-      if (until === "terminal" && meta.status === "done" && assessment.resultReady) markLatestDoneHandled(getRecipientContext(), meta.runDir);
-      if (until === "result-resolved" && assessment.resultReady && (meta.resultFinalizedAt || meta.resultSummaryOnlyAt)) markResultHandled(getRecipientContext(), meta.runDir, meta.resultFinalizedAt ?? meta.resultSummaryOnlyAt!);
-      const state = buildRunState(meta);
-      if (json) return printJson({ ok: true, condition: until, state, agent: meta, resultAssessment: assessment });
-      console.log(`${meta.name}: ${meta.status}${meta.summary ? ` - ${meta.summary}` : ""}`);
-      console.log(`result: ${assessment.resultState} ready=${assessment.resultReady} safeToRead=${assessment.safeToRead}`);
-      return;
+  try {
+    const payload = await serverRequest("POST", "/api/v1/runs/follow", { name, cwd, runId, runDir, until, timeoutMs });
+    if (json) return printJson(payload);
+    console.log(`${payload.agent.name}: ${payload.agent.status}${payload.agent.summary ? ` - ${payload.agent.summary}` : ""}`);
+    console.log(`result: ${payload.resultAssessment.resultState} ready=${payload.resultAssessment.resultReady} safeToRead=${payload.resultAssessment.safeToRead}`);
+  } catch (error) {
+    if (json && error instanceof ServerRequestError && error.status === 504) {
+      const statePayload = await serverRequest("GET", `/api/v1/runs/state?${targetQuery(cwd, name, runId, runDir)}`);
+      const resultPayload = await serverRequest("GET", `/api/v1/runs/result?${targetQuery(cwd, name, runId, runDir)}`);
+      process.exitCode = 0;
+      return printJson({ ok: false, timeout: true, condition: until, state: statePayload.state, agent: resultPayload.agent, resultAssessment: resultPayload.assessment });
     }
-    if (timeoutMs > 0 && Date.now() - start > timeoutMs) {
-      const state = buildRunState(meta);
-      if (json) return printJson({ ok: false, timeout: true, condition: until, state, agent: meta, resultAssessment: assessment });
-      throw new Error(`Timed out following ${name || runId || runDir} until ${until}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    throw error;
   }
 }
 
@@ -648,17 +700,17 @@ async function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
   const runId = flagString(parsed.flags, "run-id");
   const runDir = flagString(parsed.flags, "run-dir");
   if (!name && !runId && !runDir) throw new Error("Usage: tango result [name] [--run-id <id>|--run-dir <dir>] [--watch] [--timeout seconds]");
-  const target = resolveTarget({ name, cwd, runId, runDir, env: process.env as any });
-  const timeoutMs = flagNonNegativeNumber(parsed.flags, "timeout", 0) * 1000;
-  const start = Date.now();
-  while (true) {
-    const meta = refreshStatus(readMetadata(target.runDir));
-    const assessment = assessResultDeliverable(meta);
-    if (assessment.resultReady && (meta.resultFinalizedAt || meta.resultSummaryOnlyAt)) markResultHandled(getRecipientContext(), meta.runDir, meta.resultFinalizedAt ?? meta.resultSummaryOnlyAt!);
-    if (!flagBool(parsed.flags, "watch") || assessment.resultReady || (isTerminalStatus(meta.status) && assessment.resultIssue)) return printResult(meta, assessment, json);
-    if (timeoutMs > 0 && Date.now() - start > timeoutMs) return printResult(meta, assessment, json, true);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+  let timedOut = false;
+  if (flagBool(parsed.flags, "watch")) {
+    const timeoutMs = flagNonNegativeNumber(parsed.flags, "timeout", 0) * 1000;
+    try { await serverRequest("POST", "/api/v1/runs/follow", { name, cwd, runId, runDir, until: "result-resolved", timeoutMs }); }
+    catch (error) {
+      if (!(error instanceof ServerRequestError && error.status === 504)) throw error;
+      timedOut = true;
+    }
   }
+  const payload = await serverRequest("GET", `/api/v1/runs/result?${targetQuery(cwd, name, runId, runDir)}`);
+  return printResult(payload.agent, payload.assessment, json, timedOut);
 }
 
 function printResult(meta: AgentMetadata, assessment: ReturnType<typeof assessResultDeliverable>, json: boolean, timeout = false) {

@@ -107,7 +107,20 @@ after(() => {
 });
 
 async function get(path: string): Promise<{ status: number; body: unknown }> {
-  const res = await fetch(`${baseUrl}${path}?token=${encodeURIComponent(token)}`);
+  const sep = path.includes("?") ? "&" : "?";
+  const res = await fetch(`${baseUrl}${path}${sep}token=${encodeURIComponent(token)}`);
+  const text = await res.text();
+  const body = text ? JSON.parse(text) : {};
+  return { status: res.status, body };
+}
+
+async function post(path: string, payload: unknown): Promise<{ status: number; body: unknown }> {
+  const sep = path.includes("?") ? "&" : "?";
+  const res = await fetch(`${baseUrl}${path}${sep}token=${encodeURIComponent(token)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
   const text = await res.text();
   const body = text ? JSON.parse(text) : {};
   return { status: res.status, body };
@@ -137,6 +150,43 @@ describe("server routes", () => {
     assert.strictEqual((body as any).suggestedRootSessionId, "r1");
   });
 
+  it("exposes canonical run state and activity through server control APIs", async () => {
+    writeFileSync(join(tempHome, "runs", "tmp-abc123", "agent-a", "output.log"), "hello\n{\"encrypted_content\":\"secret\"}\ndone\n");
+    const stateRes = await get("/api/v1/runs/state?runId=run_a&cwd=/tmp");
+    assert.strictEqual(stateRes.status, 200);
+    assert.strictEqual((stateRes.body as any).state.schemaVersion, 1);
+    assert.strictEqual((stateRes.body as any).state.identity.runId, "run_a");
+    assert.strictEqual((stateRes.body as any).state.result.state, "failed");
+
+    const activityRes = await get("/api/v1/runs/activity?runId=run_a&cwd=/tmp&lines=10");
+    assert.strictEqual(activityRes.status, 200);
+    assert.match((activityRes.body as any).output, /hello/);
+    assert.doesNotMatch((activityRes.body as any).output, /secret/);
+  });
+
+  it("mutates run state through server report and returns summary-only as resolved", async () => {
+    const runC = join(tempHome, "runs", "tmp-abc123", "agent-c");
+    mkdirSync(runC, { recursive: true });
+    writeFileSync(join(runC, "metadata.json"), JSON.stringify(baseMeta({ name: "agent-c", runDir: runC, runId: "run_c", rootSessionId: "r1", workstreamId: "w1", status: "created", resultRequired: false })));
+    const reportRes = await post("/api/v1/runs/report", { runDir: runC, state: "done", summary: "No deliverable intended", summaryOnly: true });
+    assert.strictEqual(reportRes.status, 200);
+    assert.strictEqual((reportRes.body as any).agent.status, "done");
+    assert.strictEqual((reportRes.body as any).state.result.state, "summary-only");
+    assert.strictEqual((reportRes.body as any).state.result.safeToRead, true);
+    assert.strictEqual((reportRes.body as any).state.result.deliverable, false);
+
+    const resultRes = await get("/api/v1/runs/result?runId=run_c&cwd=/tmp");
+    assert.strictEqual(resultRes.status, 200);
+    assert.strictEqual((resultRes.body as any).assessment.resultState, "summary-only");
+  });
+
+  it("registers runtime-agnostic root sessions", async () => {
+    const res = await post("/api/v1/root-sessions", { rootSessionId: "r-claude", workstreamId: "w-claude", origin: "claude", cwd: "/tmp", title: "Claude root" });
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual((res.body as any).rootSession.kind, "claude");
+    assert.strictEqual((res.body as any).rootSession.workstreamId, "w-claude");
+  });
+
   it("GET /api/v1/workstreams/:rootSessionId/attention returns scoped attention", async () => {
     const { status, body } = await get("/api/v1/workstreams/r1/attention");
     assert.strictEqual(status, 200);
@@ -157,8 +207,8 @@ describe("server routes", () => {
     const { status, body } = await get("/api/v1/workstreams/r1/timeline");
     assert.strictEqual(status, 200);
     assert.strictEqual((body as any).schemaVersion, 1);
-    assert.strictEqual((body as any).events.length, 1);
-    assert.strictEqual((body as any).events[0].agent, "agent-a");
+    assert.ok((body as any).events.length >= 1);
+    assert.ok((body as any).events.some((event: any) => event.agent === "agent-a"));
   });
 
   it("GET /api/v1/workstreams/:rootSessionId/attention returns 404 for unknown root session", async () => {

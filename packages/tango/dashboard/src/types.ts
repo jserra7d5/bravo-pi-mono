@@ -2,7 +2,7 @@ export interface RootSessionRecord {
   schemaVersion: 1;
   rootSessionId: string;
   workstreamId: string;
-  kind: "pi" | "cli" | "dashboard" | "restored";
+  kind: "pi" | "claude" | "gemini" | "generic" | "cli" | "dashboard" | "sdk" | "restored";
   cwd?: string;
   title?: string;
   createdAt: string;
