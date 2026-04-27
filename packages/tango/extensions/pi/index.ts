@@ -384,9 +384,10 @@ function reapDuplicateEventWatchers() {
       if (!cmdline.includes(distCli) || !cmdline.includes(" watch ") || !cmdline.includes(" --json")) continue;
       const cwd = readlinkSync(`/proc/${pid}/cwd`);
       if (resolve(cwd) !== resolve(process.cwd())) continue;
-      const envText = readFileSync(`/proc/${pid}/environ`, "utf8");
-      if (!envText.includes(`TANGO_ROOT_SESSION_ID=${rootSessionId}\0`)) continue;
-      if (!envText.includes(`TANGO_WORKSTREAM_ID=${workstreamId}\0`)) continue;
+      // A stale watcher from an older root/workstream can claim same-cwd child
+      // completions before the current session sees them. Reap all same-cwd
+      // Tango watchers on reload/startup; the active extension will start one
+      // fresh watcher for this session immediately after this scan.
       try { process.kill(pid, "SIGTERM"); } catch {}
     } catch {
       // Process may have exited or belong to another user; ignore.
@@ -437,8 +438,12 @@ function handleTangoEvent(pi: ExtensionAPI, ctx: any, event: any) {
   if (!hasRunLineage) {
     const rootSessionId = process.env.TANGO_ROOT_SESSION_ID;
     const workstreamId = process.env.TANGO_WORKSTREAM_ID;
-    if (rootSessionId && event.rootSessionId !== rootSessionId) return;
-    if (workstreamId && event.workstreamId !== workstreamId) return;
+    const rootMatches = (!rootSessionId || event.rootSessionId === rootSessionId) && (!workstreamId || event.workstreamId === workstreamId);
+    const sameCwd = typeof event.cwd === "string" && resolve(event.cwd) === resolve(process.cwd());
+    // Prefer root/workstream identity, but tolerate same-cwd events because
+    // starts may be proxied through a long-lived Tango server or stale Pi tool
+    // process whose env no longer matches the visible root session.
+    if (!rootMatches && !sameCwd) return;
   }
   const rec = getRecipientContext();
   upsertAttentionFromEvent(event, rec);
