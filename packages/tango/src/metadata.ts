@@ -65,14 +65,6 @@ export function listMetadata(cwd?: string): AgentMetadata[] {
   return metas.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
-export function findRunDir(name: string, cwd: string): string | undefined {
-  const root = projectRunRoot(cwd);
-  const direct = join(root, name);
-  if (existsSync(metadataPath(direct))) return direct;
-  const all = listMetadata(cwd).filter((m) => m.name === name);
-  return all[0]?.runDir;
-}
-
 export function removeRunDir(runDir: string): void {
   if (existsSync(runDir)) rmSync(runDir, { recursive: true, force: true });
 }

@@ -51,7 +51,10 @@ export function baseEnv(meta: AgentMetadata): Record<string, string> {
     TANGO_AGENT_NAME: meta.name,
     TANGO_RUN_DIR: meta.runDir,
   };
+  if (meta.runId) env.TANGO_RUN_ID = meta.runId;
   if (meta.parentRunDir) env.TANGO_PARENT_RUN_DIR = meta.parentRunDir;
+  if (meta.rootSessionId) env.TANGO_ROOT_SESSION_ID = meta.rootSessionId;
+  if (meta.workstreamId) env.TANGO_WORKSTREAM_ID = meta.workstreamId;
   return env;
 }
 

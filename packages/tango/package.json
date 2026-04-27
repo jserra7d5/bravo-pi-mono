@@ -11,13 +11,22 @@
     "tango": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -p tsconfig.json && npm run build:dashboard",
+    "build:dashboard": "cd dashboard && npx vite build",
+    "check": "tsc -p tsconfig.json --noEmit && npm run check:dashboard",
+    "check:dashboard": "cd dashboard && npx tsc --noEmit",
+    "test": "npm run build && node --test dist/*.test.js"
   },
   "dependencies": {},
   "devDependencies": {
     "@types/node": "latest",
-    "typescript": "latest"
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "@vitejs/plugin-react": "^4",
+    "react": "^18",
+    "react-dom": "^18",
+    "typescript": "latest",
+    "vite": "^5"
   },
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",

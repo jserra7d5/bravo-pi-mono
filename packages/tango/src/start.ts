@@ -39,7 +39,11 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
     tmuxSession: "tango",
     createdAt: now,
     updatedAt: now,
+    runId: `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    parentRunId: process.env.TANGO_RUN_ID,
     parentRunDir: process.env.TANGO_RUN_DIR,
+    rootSessionId: process.env.TANGO_ROOT_SESSION_ID,
+    workstreamId: process.env.TANGO_WORKSTREAM_ID,
     model: options.model ?? role?.model,
     thinking: options.thinking ?? role?.thinking,
     effort: options.effort ?? role?.effort,
@@ -69,7 +73,7 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
 }
 
 function redactCommand(command: CommandSpec): CommandSpec {
-  const keep = new Set(["HOME", "PATH", "PI_CODING_AGENT_DIR", "TANGO_HOME", "TANGO_REAL_HOME", "TANGO_AGENT_HOME", "TANGO_AGENT_NAME", "TANGO_RUN_DIR", "TANGO_PARENT_RUN_DIR", "CLAUDE_CODE_SHELL_PREFIX"]);
+  const keep = new Set(["HOME", "PATH", "PI_CODING_AGENT_DIR", "TANGO_HOME", "TANGO_REAL_HOME", "TANGO_AGENT_HOME", "TANGO_AGENT_NAME", "TANGO_RUN_ID", "TANGO_RUN_DIR", "TANGO_PARENT_RUN_DIR", "TANGO_ROOT_SESSION_ID", "TANGO_WORKSTREAM_ID", "CLAUDE_CODE_SHELL_PREFIX"]);
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(command.env)) {
     if (keep.has(key)) env[key] = /TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH/i.test(key) ? "<redacted>" : value;

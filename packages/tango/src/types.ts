@@ -77,7 +77,11 @@ export interface AgentMetadata {
   exitCode?: number | null;
   summary?: string;
   needs?: string;
+  runId?: string;
+  parentRunId?: string;
   parentRunDir?: string;
+  rootSessionId?: string;
+  workstreamId?: string;
   resultFile?: string;
   metrics?: AgentMetricsSnapshot;
 }
