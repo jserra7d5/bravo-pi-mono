@@ -74,6 +74,36 @@ describe("rollout compatibility", () => {
     }
   });
 
+  it("prints discovered dashboard URLs without starting another server", () => {
+    const home = tempHome();
+    try {
+      mkdirSync(join(home, "server"), { recursive: true });
+      writeFileSync(join(home, "server", "server.json"), JSON.stringify({ schemaVersion: 1, url: "http://127.0.0.1:43117", pid: 123, startedAt: "file" }));
+      const open = runCli(["server", "url"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" });
+      assert.strictEqual(open.status, 0, open.stderr);
+      assert.strictEqual(open.stdout.trim(), "http://127.0.0.1:43117");
+
+      writeFileSync(join(home, "server", "server.json"), JSON.stringify({ schemaVersion: 1, url: "http://127.0.0.1:43118", token: "dev token", pid: 123, startedAt: "file" }));
+      const authed = runCli(["server", "url"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" });
+      assert.strictEqual(authed.status, 0, authed.stderr);
+      assert.strictEqual(authed.stdout.trim(), "http://127.0.0.1:43118/?token=dev%20token");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unknown tango server positional arguments instead of starting another server", () => {
+    const home = tempHome();
+    try {
+      const result = runCli(["server", "wat"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" });
+      assert.notStrictEqual(result.status, 0);
+      assert.match(result.stderr, /Usage: tango server/);
+      assert.ok(!existsSync(join(home, "server", "server.json")), "invalid server command must not create discovery state");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("prefers TANGO_SERVER_URL/TANGO_SERVER_TOKEN over discovery file", () => {
     const previousHome = process.env.TANGO_HOME;
     const previousUrl = process.env.TANGO_SERVER_URL;

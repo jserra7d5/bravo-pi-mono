@@ -13,7 +13,7 @@ import { listRoles, loadRole, assembleSystemPrompt } from "./roles.js";
 import { attachTmux, captureTmux, sendTmux, stopTmux } from "./runtime/tmux.js";
 import { isTerminalStatus, reconcileAgentLifecycle } from "./lifecycle.js";
 import type { AgentMetadata, AgentStatus, ThinkingLevel } from "./types.js";
-import { listArtifacts, publishArtifact, revokeArtifact, startTangoServer } from "./server.js";
+import { listArtifacts, publishArtifact, readServerDiscovery, revokeArtifact, startTangoServer } from "./server.js";
 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
@@ -83,6 +83,15 @@ async function main() {
 }
 
 async function cmdServer(parsed: Parsed) {
+  const [subcommand, ...extra] = parsed.positionals;
+  if (subcommand === "url") {
+    if (extra.length > 0) throw new Error("Usage: tango server url");
+    const discovery = readServerDiscovery();
+    if (!discovery) throw new Error("No Tango server discovery found. Start one with `tango server`.");
+    console.log(discovery.token ? `${discovery.url}/?token=${encodeURIComponent(discovery.token)}` : discovery.url);
+    return;
+  }
+  if (subcommand) throw new Error("Usage: tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN] or tango server url");
   await startTangoServer({
     host: flagString(parsed.flags, "host"),
     port: flagString(parsed.flags, "port") ? Number(flagString(parsed.flags, "port")) : undefined,
@@ -417,7 +426,8 @@ function refreshStatus(meta: AgentMetadata): AgentMetadata {
 }
 
 function help() {
-  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--run-id <id>] [--run-dir <dir>] [--lines N] [--json]\n  tango attach <name> [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango status <state> [message] [--needs kind]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango wait <name...> [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <name> [--run-id <id>] [--run-dir <dir>]\n  tango roles list|show <name>\n`);
+  console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]
+  tango server url\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--run-id <id>] [--run-dir <dir>] [--lines N] [--json]\n  tango attach <name> [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango status <state> [message] [--needs kind]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango wait <name...> [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <name> [--run-id <id>] [--run-dir <dir>]\n  tango roles list|show <name>\n`);
 }
 
 main();
