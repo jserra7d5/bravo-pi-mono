@@ -10,6 +10,7 @@ This is the compact, runtime-agnostic guide for making an agent Loom-aware. Loom
 - Loom is durable graph context for research, design, planning, decisions, and work results.
 - A project `.loom/` is a container. Individual Loom instances live under `.loom/looms/<name>/`; plain `loom ...` uses the container's current Loom.
 - Tango or another runtime owns process/session execution.
+- Slash commands are root-session routing/orchestration entrypoints. Skills are the execution procedures for the selected executing agent.
 - Agents are participants, not tasks.
 - Nodes are generic work/thought artifacts, not necessarily implementation tasks.
 - Branches and alternatives are first-class and preserved.
@@ -58,33 +59,38 @@ loom list
 loom inbox next
 loom inbox show M-0001
 loom inbox accept M-0001
-loom context N-0001
-loom show N-0001
+loom context N-0001 --brief
+loom node show N-0001
 loom search "query terms"
-loom note N-0001 "Short finding or result..."
-printf '%s\n' 'Long Markdown note with `backticks` and $variables' | loom note N-0001 --stdin
-loom resolve N-0001 --resolution answered --summary "Short outcome"
+loom note add N-0001 "Short finding or result..."
+printf '%s\n' 'Long Markdown note with `backticks` and $variables' | loom note add N-0001 --stdin
+loom node update N-0001 --state done --summary "Short outcome"
 loom inbox done M-0001 --summary "What you did"
 ```
 
-Prefer `loom context <node>` over manually reading many files. Prefer `loom note`/`loom resolve` over raw Markdown edits unless explicitly asked. For Markdown notes containing backticks, `$`, quotes, or code fences, use `loom note <node> --stdin` with a quoted heredoc or pipe; do not pass complex Markdown through shell-quoted arguments.
+Prefer `loom context <node> --brief` over manually reading many files. Prefer `loom note add` / `loom node update` over raw Markdown edits unless explicitly asked. For Markdown notes containing backticks, `$`, quotes, or code fences, use `loom note add <node> --stdin` with a quoted heredoc or pipe; do not pass complex Markdown through shell-quoted arguments.
 
 ## Coordinator / Lead Protocol
+
+Prefer reusing a persistent `loom-coordinator` for the same Loom/workstream so routing decisions, mutation authority, integration state, and agent history stay centralized. Start or recruit a new coordinator only when no suitable reusable coordinator exists.
 
 Coordinator agents may also create structure and delegate work:
 
 ```bash
-loom create "Title" --kind design
-loom decompose N-0001 "Storage" "Search" "Agent inboxes"
-loom branch N-0002 "Option A" "Option B"
-loom link N-0003 --type critiques --to N-0004
-loom decide N-0002 --choose N-0005 --summary "Why this option wins"
+loom node create --title "Title" --kind design
+loom node create --title "Storage" --kind task --parent N-0001
+loom node create --title "Option A" --kind variant --parent N-0002
+loom edge add N-0003 --type critiques --to N-0004
+loom node create --title "Decision: Storage" --kind decision --parent N-0002 --summary "Why this option wins"
+loom edge add N-0006 --type chooses --to N-0005
 loom inbox send worker-a --type review_request --node N-0005 --message "Review this branch"
 loom spawn worker-a --role worker -L <loom>
 loom dispatch N-0005 --role scout -L <loom>
 ```
 
-Use delegation when it reduces complexity or enables useful parallelism. Keep child-agent tasks bounded and name the expected deliverable.
+Use delegation when it reduces complexity or enables useful parallelism. Keep child-agent tasks bounded and name the expected deliverable. Child agents should be told which Loom skill to use (for example `loom-plan` or `loom-implement`), not to invoke slash commands such as `/loom.plan`; slash commands belong to the parent/root routing layer.
+
+For scoped multi-writer work, assign each writer distinct nodes, branches, artifacts, worktrees, or file areas. Avoid overlapping mutations unless the coordinator serializes integration. Require a mutation summary from every writer: Loom nodes/notes/decisions/inbox items created or updated, files touched, branches/worktrees used, validation run, blockers, and handoff location.
 
 ## Runtime-Neutral Loom Awareness
 
@@ -174,23 +180,24 @@ loom inbox next
 loom inbox show M-0001
 loom inbox accept M-0001
 loom inbox done M-0001 --summary "..."
-loom show N-0001
-loom context N-0001
+loom node show N-0001
+loom context N-0001 --brief
 loom search "..."
-loom note N-0001 "short note"
-loom note N-0001 --stdin <<'EOF'
+loom note add N-0001 "short note"
+loom note add N-0001 --stdin <<'EOF'
 Long Markdown note with `backticks`, $variables, and code fences.
 EOF
-loom resolve N-0001 --resolution answered --summary "..."
+loom node update N-0001 --state done --summary "..."
 ```
 
 Lead-facing:
 
 ```bash
-loom create "..." --kind design
-loom decompose N-0001 "A" "B"
-loom branch N-0001 "Option A" "Option B"
-loom decide N-0001 --choose N-0002 --summary "..."
+loom node create --title "..." --kind design
+loom node create --title "A" --kind task --parent N-0001
+loom node create --title "Option A" --kind variant --parent N-0001
+loom node create --title "Decision: ..." --kind decision --parent N-0001 --summary "..."
+loom edge add N-0003 --type chooses --to N-0002
 loom inbox send agent-a --type review_request --node N-0002 --message "..."
 loom spawn agent-a --role worker -L <loom>
 loom dispatch N-0002 --role scout -L <loom>

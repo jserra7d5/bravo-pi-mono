@@ -24,6 +24,18 @@ function jsonRun(args: string[], opts: { cwd: string; home: string; ok?: boolean
   const res = run([...args, '--json'], opts);
   return JSON.parse(res.stdout);
 }
+function jsonRunInput(args: string[], input: string, opts: { cwd: string; home: string; ok?: boolean }) {
+  const res = spawnSync(process.execPath, [cli, ...args, '--json'], {
+    cwd: opts.cwd,
+    env: { ...process.env, HOME: opts.home, LOOM_HOME: join(opts.home, '.loom') },
+    input,
+    encoding: 'utf8'
+  });
+  if (opts.ok !== false && res.status !== 0) {
+    throw new Error(`loom ${args.join(' ')} failed\nstdout=${res.stdout}\nstderr=${res.stderr}`);
+  }
+  return JSON.parse(res.stdout);
+}
 function workspace() {
   const root = mkdtempSync(join(tmpdir(), 'loom-test-'));
   const home = join(root, 'home');
@@ -42,26 +54,34 @@ test('vertical slice works from inside and outside loom root', () => {
   assert.equal(r.ok, true);
   assert.equal(r.data.loom.name, 'feature-x');
 
-  r = jsonRun(['-L', 'feature-x', 'create', 'Top-level proposal', '--kind', 'proposal', '--tag', 'review', '--tag', 'integration'], { cwd: w.outside, home: w.home });
+  r = jsonRun(['-L', 'feature-x', 'node', 'create', '--title', 'Top-level proposal', '--kind', 'proposal', '--tag', 'review', '--tag', 'integration'], { cwd: w.outside, home: w.home });
   assert.equal(r.data.node.id, 'N-0001');
 
-  r = jsonRun(['-L', 'feature-x', 'show', 'N-0001'], { cwd: w.outside, home: w.home });
+  r = jsonRun(['-L', 'feature-x', 'node', 'show', 'N-0001'], { cwd: w.outside, home: w.home });
   assert.deepEqual(r.data.frontmatter.tags, ['review', 'integration']);
 
-  r = jsonRun(['-L', 'feature-x', 'decompose', 'N-0001', 'Storage', 'Search', 'Agents'], { cwd: w.outside, home: w.home });
-  assert.deepEqual(r.data.children, ['N-0002', 'N-0003', 'N-0004']);
+  for (const title of ['Storage', 'Search', 'Agents']) {
+    jsonRun(['-L', 'feature-x', 'node', 'create', '--title', title, '--kind', 'task', '--parent', 'N-0001'], { cwd: w.outside, home: w.home });
+  }
+  r = jsonRun(['-L', 'feature-x', 'node', 'list', '--parent', 'N-0001'], { cwd: w.outside, home: w.home });
+  assert.deepEqual(r.data.nodes.map((n: any) => n.id), ['N-0002', 'N-0003', 'N-0004']);
 
-  r = jsonRun(['-L', 'feature-x', 'branch', 'N-0002', 'Markdown', 'SQLite', 'Hybrid'], { cwd: w.outside, home: w.home });
-  assert.deepEqual(r.data.variants, ['N-0005', 'N-0006', 'N-0007']);
+  for (const title of ['Markdown', 'SQLite', 'Hybrid']) {
+    const created = jsonRun(['-L', 'feature-x', 'node', 'create', '--title', title, '--kind', 'variant', '--parent', 'N-0002'], { cwd: w.outside, home: w.home });
+    jsonRun(['-L', 'feature-x', 'edge', 'add', created.data.node.id, '--type', 'related', '--to', 'N-0002'], { cwd: w.outside, home: w.home });
+  }
+  r = jsonRun(['-L', 'feature-x', 'node', 'list', '--parent', 'N-0002'], { cwd: w.outside, home: w.home });
+  assert.deepEqual(r.data.nodes.map((n: any) => n.id), ['N-0005', 'N-0006', 'N-0007']);
 
-  r = jsonRun(['-L', 'feature-x', 'decide', 'N-0002', '--choose', 'N-0007', '--summary', 'Hybrid is the v1 choice'], { cwd: w.outside, home: w.home });
-  assert.equal(r.data.chosen, 'N-0007');
+  r = jsonRun(['-L', 'feature-x', 'node', 'create', '--title', 'Decision: Storage', '--kind', 'decision', '--parent', 'N-0002', '--summary', 'Hybrid is the v1 choice'], { cwd: w.outside, home: w.home });
+  assert.equal(r.data.node.id, 'N-0008');
+  jsonRun(['-L', 'feature-x', 'edge', 'add', 'N-0008', '--type', 'chooses', '--to', 'N-0007'], { cwd: w.outside, home: w.home });
 
   r = jsonRun(['-L', 'feature-x', 'reference', 'add', 'N-0007', '--workspace', 'repo', 'packages/tango/src/start.ts', '--label', 'Tango start'], { cwd: w.outside, home: w.home });
   assert.equal(r.data.references[0].workspace, 'repo');
   assert.equal(r.data.references[0].path, 'packages/tango/src/start.ts');
 
-  const note = spawnSync(process.execPath, [cli, '-L', 'feature-x', 'note', 'N-0007', '--stdin', '--json'], {
+  const note = spawnSync(process.execPath, [cli, '-L', 'feature-x', 'note', 'add', 'N-0007', '--stdin', '--json'], {
     cwd: w.outside,
     env: { ...process.env, HOME: w.home, LOOM_HOME: join(w.home, '.loom') },
     input: 'Safe note with `backticks` and $HOME preserved.',
@@ -117,10 +137,10 @@ test('multiple looms under one container resolve by current and local name', () 
   assert.equal(r.data.current, 'main');
   assert.deepEqual(r.data.looms.map((l: any) => l.name).sort(), ['feature-a', 'main']);
 
-  r = jsonRun(['create', 'Main node'], { cwd: w.cwd, home: w.home });
+  r = jsonRun(['node', 'create', '--title', 'Main node'], { cwd: w.cwd, home: w.home });
   assert.equal(r.data.node.id, 'N-0001');
 
-  r = jsonRun(['-L', 'feature-a', 'create', 'Feature node'], { cwd: w.cwd, home: w.home });
+  r = jsonRun(['-L', 'feature-a', 'node', 'create', '--title', 'Feature node'], { cwd: w.cwd, home: w.home });
   assert.equal(r.data.node.id, 'N-0001');
 
   r = jsonRun(['switch', 'feature-a'], { cwd: w.cwd, home: w.home });
@@ -130,16 +150,139 @@ test('multiple looms under one container resolve by current and local name', () 
   assert.equal(r.data.alias, 'feature-a');
   assert.equal(r.data.loomPath, join(w.cwd, '.loom/looms/feature-a'));
 
-  r = jsonRun(['tree'], { cwd: w.cwd, home: w.home });
-  assert.match(r.data.lines.join('\n'), /Feature node/);
-  assert.doesNotMatch(r.data.lines.join('\n'), /Main node/);
+  r = jsonRun(['node', 'list'], { cwd: w.cwd, home: w.home });
+  assert.match(JSON.stringify(r.data.nodes), /Feature node/);
+  assert.doesNotMatch(JSON.stringify(r.data.nodes), /Main node/);
 });
 
 test('json error envelope has stable code', () => {
   const w = workspace();
-  const res = run(['-L', 'missing', 'show', 'N-0001', '--json'], { cwd: w.cwd, home: w.home, ok: false });
+  const res = run(['-L', 'missing', 'node', 'show', 'N-0001', '--json'], { cwd: w.cwd, home: w.home, ok: false });
   assert.notEqual(res.status, 0);
   const payload = JSON.parse(res.stdout);
   assert.equal(payload.ok, false);
+  assert.equal(payload.status, 'error');
   assert.equal(payload.error.code, 'LOOM_NOT_FOUND');
+  assert.equal(payload.error.transient, false);
+});
+
+test('agent-friendly CLI helpers are handoff-safe', () => {
+  const w = workspace();
+  mkdirSync(w.outside, { recursive: true });
+
+  const help = run(['node', '--help'], { cwd: w.cwd, home: w.home });
+  assert.match(help.stdout, /Usage: loom \[-L loom\] node/);
+
+  let r = jsonRun(['init', '--name', 'helpers', '--title', 'Helpers'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.status, 'ok');
+  jsonRun(['node', 'create', '--title', 'Root', '--kind', 'proposal'], { cwd: w.cwd, home: w.home });
+  jsonRun(['node', 'create', '--title', 'Child', '--parent', 'N-0001'], { cwd: w.cwd, home: w.home });
+
+  r = jsonRun(['edge', 'add', 'N-0002', '--to', 'N-0001', '--type', 'depends_on'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.created, true);
+  r = jsonRun(['edge', 'add', 'N-0002', '--to', 'N-0001', '--type', 'depends_on'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.created, false);
+  assert.equal(r.data.duplicate, true);
+
+  r = jsonRun(['reference', 'add', 'N-0002', 'README.md', '--label', 'Readme'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.created, true);
+  r = jsonRun(['reference', 'add', 'N-0002', 'README.md', '--label', 'Readme'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.created, false);
+  assert.equal(r.data.duplicate, true);
+  assert.equal(r.data.references.length, 1);
+
+  r = jsonRun(['context', 'N-0002', '--brief'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.node.id, 'N-0002');
+  assert.equal('body' in r.data, false);
+  assert.equal(typeof r.data.body_preview, 'string');
+
+  r = jsonRun(['graph', 'summary', 'N-0001'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.scope, 'N-0001');
+  assert.equal(r.data.counts.nodes, 2);
+
+  r = jsonRun(['graph', 'doctor', '--scope', 'N-0001'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.ok, true);
+  assert.deepEqual(r.data.findings, []);
+
+  r = jsonRun(['lock', 'status'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.locked, false);
+});
+
+test('v2 noun-first commands, schema, and patch workflow work', () => {
+  const w = workspace();
+  mkdirSync(w.outside, { recursive: true });
+
+  let r = jsonRun(['init', '--name', 'v2', '--title', 'V2'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.status, 'ok');
+
+  r = jsonRun(['node', 'create', '--title', 'Root', '--kind', 'proposal'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.node.id, 'N-0001');
+  r = jsonRun(['node', 'update', 'N-0001', '--state', 'active', '--summary', 'Root summary'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.node.state, 'active');
+  assert.equal(r.data.node.summary, 'Root summary');
+  r = jsonRun(['node', 'list', '--state', 'active'], { cwd: w.cwd, home: w.home });
+  assert.deepEqual(r.data.nodes.map((n: any) => n.id), ['N-0001']);
+
+  r = jsonRun(['note', 'add', 'N-0001', 'Design note'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.node.id, 'N-0001');
+  r = jsonRun(['note', 'list', 'N-0001'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.notes.length, 1);
+  assert.match(r.data.notes[0].body, /Design note/);
+  r = jsonRun(['note', 'retract', 'N-0001:note:1', '--reason', 'test cleanup'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.retracted, 'N-0001:note:1');
+
+  r = jsonRun(['edge', 'types'], { cwd: w.cwd, home: w.home });
+  assert.ok(r.data.types.includes('depends_on'));
+
+  const dryPatch = JSON.stringify({ operations: [
+    { op: 'create_node', local_ref: 'child', title: 'Patch child', kind: 'task', parent: 'N-0001', summary: 'Patch summary', tags: ['a'] },
+    { op: 'add_note', node: '$child', message: 'Patch note' }
+  ]});
+  r = jsonRunInput(['patch', 'preview', '--stdin', '--scope', 'N-0001'], dryPatch, { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.dryRun, true);
+  assert.equal(r.data.summary.created, 1);
+  r = jsonRun(['node', 'list'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.nodes.length, 1);
+
+  r = jsonRunInput(['patch', 'apply', '--stdin', '--scope', 'N-0001'], dryPatch, { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.summary.applied, true);
+  assert.equal(r.data.summary.created, 1);
+  r = jsonRun(['node', 'list'], { cwd: w.cwd, home: w.home });
+  assert.deepEqual(r.data.nodes.map((n: any) => n.id), ['N-0001', 'N-0002']);
+
+  const draftPatch = JSON.stringify({ operations: [
+    { op: 'create_node', local_ref: 'draft_child', title: 'Draft child', parent: 'N-0001' }
+  ]});
+  r = jsonRunInput(['draft', 'create', '--stdin', '--scope', 'N-0001', '--title', 'Draft child patch'], draftPatch, { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.draft.id, 'D-0001');
+  r = jsonRun(['draft', 'list'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.drafts.length, 1);
+  r = jsonRun(['draft', 'commit', 'D-0001'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.committed, true);
+  r = jsonRun(['node', 'list'], { cwd: w.cwd, home: w.home });
+  assert.deepEqual(r.data.nodes.map((n: any) => n.id), ['N-0001', 'N-0002', 'N-0003']);
+
+  r = jsonRun(['edge', 'add', 'N-0002', '--to', 'N-0001', '--type', 'depends_on'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.created, true);
+  r = jsonRun(['edge', 'list', 'N-0002'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.edges[0].type, 'depends_on');
+
+  const badPatch = JSON.stringify({ operations: [
+    { op: 'create_node', local_ref: 'other', title: 'Other root' },
+    { op: 'add_edge', from: 'N-0002', to: '$other', type: 'depends_on' }
+  ]});
+  r = jsonRunInput(['patch', 'validate', '--stdin', '--scope', 'N-0001'], badPatch, { cwd: w.cwd, home: w.home, ok: false });
+  assert.equal(r.status, 'error');
+  assert.equal(r.error.code, 'SCOPE_VIOLATION');
+
+  r = jsonRun(['schema', 'commands'], { cwd: w.cwd, home: w.home });
+  assert.ok(r.data.commands.some((c: any) => c.name === 'patch.apply'));
+  assert.ok(r.data.commands.some((c: any) => c.name === 'draft.commit'));
+  r = jsonRun(['schema', 'command', 'node.create'], { cwd: w.cwd, home: w.home });
+  assert.equal(r.data.command.name, 'node.create');
+
+  r = jsonRun(['node', 'list', '--bogus'], { cwd: w.cwd, home: w.home, ok: false });
+  assert.equal(r.status, 'error');
+  assert.equal(r.error.code, 'INVALID_ARGUMENT');
+  assert.match(r.error.message, /unknown flag/);
 });

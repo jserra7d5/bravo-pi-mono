@@ -3,7 +3,7 @@ description: Analyze Loom graph consistency, readiness, architecture risk, and i
 argument-hint: "<loom/node> [focus]"
 ---
 
-Run a read-only Loom-aware analysis. Use Loom only if a Loom/node/inbox reference or Loom context is provided.
+Route and orchestrate a read-only Loom-aware analysis. Use Loom only if a Loom/node/inbox reference or Loom context is provided. Slash commands choose scope and execution; child agents execute with Loom skills, not slash commands.
 
 User input:
 
@@ -19,4 +19,4 @@ Check for:
 - cross-consistency issues across proposal, design, plan, tasks, results, code references, and validation;
 - architecture smells, hidden coupling, or unjustified compatibility layers.
 
-Return findings by severity with evidence and concrete recommendations. Write back to Loom only if requested.
+Prefer reusing the persistent `loom-coordinator` for this Loom/workstream when analysis spans agents or prior context. If dispatching analysts, give each the `loom-analyze` skill, a distinct scope, and a requirement to report evidence plus a mutation summary (normally "no mutations" for read-only work). Return findings by severity with evidence and concrete recommendations. Write back to Loom only if requested.
