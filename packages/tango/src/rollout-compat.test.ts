@@ -23,7 +23,7 @@ function runCli(args: string[], env: NodeJS.ProcessEnv = {}, cwd = process.cwd()
   });
 }
 
-function makeMeta(options: { name: string; runDir: string; cwd: string; mode: "oneshot" | "interactive"; status?: string; task: string; summary?: string }) {
+function makeMeta(options: { name: string; runDir: string; cwd: string; mode: "oneshot" | "interactive"; status?: string; task: string; summary?: string; resultFinalizedAt?: string }) {
   return {
     name: options.name,
     harness: "pi",
@@ -38,6 +38,7 @@ function makeMeta(options: { name: string; runDir: string; cwd: string; mode: "o
     createdAt: "2024-01-01T00:00:00Z",
     updatedAt: "2024-01-01T00:00:00Z",
     summary: options.summary,
+    resultFinalizedAt: options.resultFinalizedAt,
   };
 }
 
@@ -98,12 +99,12 @@ describe("rollout compatibility", () => {
     const home = tempHome();
     try {
       mkdirSync(join(home, "server"), { recursive: true });
-      writeFileSync(join(home, "server", "server.json"), JSON.stringify({ schemaVersion: 1, url: "http://127.0.0.1:43117", pid: 123, startedAt: "file" }));
+      writeFileSync(join(home, "server", "server.json"), JSON.stringify({ schemaVersion: 1, url: "http://127.0.0.1:43117", pid: process.pid, startedAt: "file" }));
       const open = runCli(["server", "url"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" });
       assert.strictEqual(open.status, 0, open.stderr);
       assert.strictEqual(open.stdout.trim(), "http://127.0.0.1:43117");
 
-      writeFileSync(join(home, "server", "server.json"), JSON.stringify({ schemaVersion: 1, url: "http://127.0.0.1:43118", token: "dev token", pid: 123, startedAt: "file" }));
+      writeFileSync(join(home, "server", "server.json"), JSON.stringify({ schemaVersion: 1, url: "http://127.0.0.1:43118", token: "dev token", pid: process.pid, startedAt: "file" }));
       const authed = runCli(["server", "url"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" });
       assert.strictEqual(authed.status, 0, authed.stderr);
       assert.strictEqual(authed.stdout.trim(), "http://127.0.0.1:43118\ntoken: dev token\nUse the token as a Bearer token, or paste it into the dashboard once prompted.");
@@ -112,17 +113,22 @@ describe("rollout compatibility", () => {
     }
   });
 
-  it("does not append a done status summary to result.md", () => {
+  it("rejects interactive done without a result file unless explicitly summary-only", () => {
     const home = tempHome();
     const cwd = tempHome();
     try {
       const runDir = join(home, "runs", projectSlug(cwd), "interactive-a");
       mkdirSync(runDir, { recursive: true });
       writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "interactive-a", runDir, cwd, mode: "interactive", task: "write a report" })));
-      const result = runCli(["status", "done", "Completed audit", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
-      assert.strictEqual(result.status, 0, result.stderr);
+      const rejected = runCli(["status", "done", "Completed audit", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.notStrictEqual(rejected.status, 0);
+      assert.match(JSON.parse(rejected.stdout).error, /Status summary is not a deliverable/);
       assert.strictEqual(existsSync(join(runDir, "result.md")), false);
-      const body = JSON.parse(result.stdout);
+
+      const summaryOnly = runCli(["status", "done", "Completed audit", "--summary-only", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.strictEqual(summaryOnly.status, 0, summaryOnly.stderr);
+      assert.strictEqual(existsSync(join(runDir, "result.md")), false);
+      const body = JSON.parse(summaryOnly.stdout);
       assert.strictEqual(body.agent.summary, "Completed audit");
 
       const fetched = runCli(["result", "interactive-a", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
@@ -130,7 +136,7 @@ describe("rollout compatibility", () => {
       const fetchedBody = JSON.parse(fetched.stdout);
       assert.strictEqual(fetchedBody.result, "");
       assert.strictEqual(fetchedBody.resultReady, false);
-      assert.match(fetchedBody.resultIssue, /No deliverable result\.md/);
+      assert.match(fetchedBody.resultIssue, /No finalized deliverable result\.md/);
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });
@@ -170,10 +176,11 @@ describe("rollout compatibility", () => {
       mkdirSync(runDir, { recursive: true });
       writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "oneshot-a", runDir, cwd, mode: "oneshot", status: "done", task: "t", summary: "early summary" })));
       const result = runCli(["result", "oneshot-a", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
-      assert.notStrictEqual(result.status, 0);
+      assert.strictEqual(result.status, 0, result.stderr);
       const body = JSON.parse(result.stdout);
-      assert.strictEqual(body.ok, false);
-      assert.match(body.error, /still finalizing/);
+      assert.strictEqual(body.ok, true);
+      assert.strictEqual(body.resultReady, false);
+      assert.match(body.resultIssue, /No finalized deliverable result\.md/);
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });
@@ -235,13 +242,14 @@ describe("rollout compatibility", () => {
     try {
       const runDir = join(home, "runs", projectSlug(cwd), "short-audit");
       mkdirSync(runDir, { recursive: true });
-      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "short-audit", runDir, cwd, mode: "interactive", status: "done", task: "produce audit findings" })));
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "short-audit", runDir, cwd, mode: "interactive", status: "done", task: "produce audit findings", resultFinalizedAt: "2024-01-01T00:01:00.000Z" })));
       writeFileSync(join(runDir, "result.md"), "Done.\n");
       const fetched = runCli(["result", "short-audit", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
       assert.strictEqual(fetched.status, 0, fetched.stderr);
       const body = JSON.parse(fetched.stdout);
-      assert.strictEqual(body.resultReady, false);
-      assert.match(body.resultIssue, /suspiciously short/);
+      assert.strictEqual(body.resultReady, true);
+      assert.strictEqual(body.resultIssue, undefined);
+      assert.match(body.resultWarning, /suspiciously short/);
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });
@@ -268,7 +276,7 @@ describe("rollout compatibility", () => {
     try {
       process.env.TANGO_HOME = home;
       mkdirSync(dirname(serverDiscoveryPath()), { recursive: true });
-      writeFileSync(serverDiscoveryPath(), JSON.stringify({ schemaVersion: 1, url: "http://127.0.0.1:1", token: "file-token", pid: 123, startedAt: "file" }));
+      writeFileSync(serverDiscoveryPath(), JSON.stringify({ schemaVersion: 1, url: "http://127.0.0.1:1", token: "file-token", pid: process.pid, startedAt: "file" }));
       process.env.TANGO_SERVER_URL = "http://127.0.0.1:2";
       process.env.TANGO_SERVER_TOKEN = "env-token";
       assert.deepStrictEqual(readServerDiscovery(), { schemaVersion: 1, url: "http://127.0.0.1:2", token: "env-token", pid: 0, startedAt: "env" });

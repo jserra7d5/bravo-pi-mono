@@ -4,9 +4,9 @@ import { join } from "node:path";
 import type { AgentMetadata, CommandSpec, RoleConfig } from "../types.js";
 import { resolveSkillDir } from "../skillResolver.js";
 
-export function buildClaudeCommand(meta: AgentMetadata, role: RoleConfig | undefined, systemFile: string, task: string): CommandSpec {
+export function buildClaudeCommand(meta: AgentMetadata, role: RoleConfig | undefined, systemFile: string, task: string, options: { prepareHome?: boolean } = {}): CommandSpec {
   if (role?.extensions?.length) throw new Error(`Role ${role.name} uses harness=claude but declares extensions. Pi extensions are only supported by harness=pi.`);
-  prepareClaudeHome(meta, role);
+  if (options.prepareHome !== false) prepareClaudeHome(meta, role);
 
   const args: string[] = [];
   if (meta.mode === "oneshot") args.push("--print", "--verbose", "--output-format", "stream-json", "--no-session-persistence");
@@ -70,7 +70,7 @@ set -e
 if [ -n "\${TANGO_REAL_HOME:-}" ]; then
   export HOME="$TANGO_REAL_HOME"
 fi
-exec /usr/bin/bash "$@"
+exec "\${BASH:-bash}" "$@"
 `, "utf8");
   chmodSync(wrapper, 0o755);
 }

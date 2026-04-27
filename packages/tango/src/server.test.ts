@@ -124,6 +124,19 @@ async function getRawAuthorized(path: string): Promise<{ status: number; text: s
 }
 
 describe("server routes", () => {
+  it("GET /api/v1/operations returns the operations projection", async () => {
+    const { status, body } = await get("/api/v1/operations");
+    assert.strictEqual(status, 200);
+    assert.strictEqual((body as any).schemaVersion, 1);
+    assert.strictEqual((body as any).counts.total, 2);
+    assert.strictEqual((body as any).workstreams.length, 1);
+    assert.strictEqual((body as any).attention[0].name, "agent-b");
+    assert.match((body as any).attention[0].commands.look, /tango look --run-id run_b --lines 200/);
+    assert.strictEqual((body as any).activeAgents[0].name, "agent-a");
+    assert.strictEqual((body as any).recentArtifacts[0].artifactId, "art_1");
+    assert.strictEqual((body as any).suggestedRootSessionId, "r1");
+  });
+
   it("GET /api/v1/workstreams/:rootSessionId/attention returns scoped attention", async () => {
     const { status, body } = await get("/api/v1/workstreams/r1/attention");
     assert.strictEqual(status, 200);

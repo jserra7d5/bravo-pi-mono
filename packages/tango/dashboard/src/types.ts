@@ -57,6 +57,23 @@ export interface AttentionItem {
   reason: string;
   rootSessionId?: string;
   workstreamId?: string;
+  commands: AgentCommands;
+}
+
+export interface AgentSummary {
+  runId?: string;
+  runDir: string;
+  name: string;
+  role?: string;
+  status: string;
+  mode: string;
+  cwd: string;
+  summary?: string;
+  needs?: string;
+  rootSessionId?: string;
+  workstreamId?: string;
+  updatedAt: string;
+  commands: AgentCommands;
 }
 
 export interface ArtifactViewModel {
@@ -65,7 +82,7 @@ export interface ArtifactViewModel {
   title?: string;
   status: "active" | "revoked";
   entry: string;
-  url?: string;
+  url: string;
   createdAt: string;
   ownerRunDir?: string;
 }
@@ -81,6 +98,9 @@ export interface TimelineEvent {
   runId?: string;
   rootSessionId?: string;
   workstreamId?: string;
+  resultReady?: boolean;
+  resultIssue?: string;
+  resultWarning?: string;
 }
 
 export interface DashboardViewModel {
@@ -88,6 +108,19 @@ export interface DashboardViewModel {
   rootSessions: RootSessionCard[];
   globalAttention: AttentionItem[];
   globalCounts: SessionCounts;
+}
+
+export interface OperationsViewModel {
+  schemaVersion: 1;
+  counts: SessionCounts;
+  workstreams: RootSessionCard[];
+  attention: AttentionItem[];
+  activeAgents: AgentSummary[];
+  recentResults: TimelineEvent[];
+  recentCompletions: TimelineEvent[];
+  recentArtifacts: ArtifactViewModel[];
+  timelineTail: TimelineEvent[];
+  suggestedRootSessionId?: string;
 }
 
 export interface WorkstreamDetailViewModel {

@@ -6,7 +6,7 @@ import { packageRoot } from "../paths.js";
 import { wantsToolOrchestration } from "../roles.js";
 import { resolveSkillFile } from "../skillResolver.js";
 
-export function buildPiCommand(meta: AgentMetadata, role: RoleConfig | undefined, systemFile: string, task: string): CommandSpec {
+export function buildPiCommand(meta: AgentMetadata, role: RoleConfig | undefined, systemFile: string, task: string, options: { prepareHome?: boolean } = {}): CommandSpec {
   const mode = meta.mode;
   const args: string[] = [];
   if (mode === "oneshot") args.push("--mode", "json", "-p");
@@ -32,15 +32,15 @@ export function buildPiCommand(meta: AgentMetadata, role: RoleConfig | undefined
     command: "pi",
     args,
     cwd: meta.cwd,
-    env: baseEnv(meta),
+    env: baseEnv(meta, { seedAuth: options.prepareHome !== false }),
     resultParser: "pi-json",
   };
 }
 
-export function baseEnv(meta: AgentMetadata): Record<string, string> {
+export function baseEnv(meta: AgentMetadata, options: { seedAuth?: boolean } = {}): Record<string, string> {
   const realHome = process.env.HOME ?? homedir();
   const piAgentDir = join(meta.homeDir, ".pi", "agent");
-  seedPiAuth(piAgentDir);
+  if (options.seedAuth !== false) seedPiAuth(piAgentDir);
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
     HOME: meta.homeDir,

@@ -4,13 +4,15 @@ export default function AppShell({
   children,
   active,
   onNavigate,
+  live,
 }: {
   children: React.ReactNode;
   active: string;
   onNavigate: (page: string) => void;
+  live?: { connected: boolean; stale: boolean; error: string; lastUpdated?: Date };
 }) {
   const links = [
-    { key: "sessions", label: "Sessions" },
+    { key: "sessions", label: "Operations" },
     { key: "attention", label: "Attention" },
     { key: "artifacts", label: "Artifacts" },
     { key: "timeline", label: "Timeline" },
@@ -37,14 +39,19 @@ export default function AppShell({
               </a>
             ))}
           </nav>
+          {live ? (
+            <div className={`live-indicator ${live.connected ? "live-connected" : "live-disconnected"} ${live.stale ? "live-stale" : ""}`} title={live.error || undefined}>
+              <span>{live.connected ? "Live" : "Polling"}</span>
+              <span>·</span>
+              <span>{live.lastUpdated ? `Updated ${live.lastUpdated.toLocaleTimeString()}` : "Waiting for data"}</span>
+              {live.stale ? <span>· Stale</span> : null}
+            </div>
+          ) : null}
         </div>
       </header>
       <main className="app-main" role="main">
         {children}
       </main>
-      <footer className="app-footer">
-        Tango orchestration dashboard · Local only
-      </footer>
     </div>
   );
 }

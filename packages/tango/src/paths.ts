@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export function packageRoot(): string {
@@ -27,13 +27,33 @@ export function projectSlug(cwd: string): string {
   return `${base}-${hash}`;
 }
 
-export function projectRunRoot(cwd: string): string {
-  return ensureDir(join(dataRoot(), "runs", projectSlug(cwd)));
+export function projectRunRoot(cwd: string, options: { create?: boolean } = {}): string {
+  const root = join(dataRoot(), "runs", projectSlug(cwd));
+  return options.create === false ? root : ensureDir(root);
 }
 
-export function runDirFor(cwd: string, name: string): string {
-  const safe = name.replace(/[^a-zA-Z0-9_.-]+/g, "-");
-  return join(projectRunRoot(cwd), safe);
+export function validateAgentName(name: string): string {
+  if (!name) throw new Error("Agent name must not be empty.");
+  if (name !== name.trim()) throw new Error("Agent name must not start or end with whitespace.");
+  if (name === "." || name === "..") throw new Error("Agent name must not be '.' or '..'.");
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(name)) {
+    throw new Error("Agent name may only contain letters, numbers, '_', '.', or '-', and must start with a letter or number.");
+  }
+  return name;
+}
+
+export function assertPathContained(parent: string, child: string, label = "path"): string {
+  const root = resolve(parent);
+  const target = resolve(child);
+  const rel = relative(root, target);
+  if (rel === "" || (!rel.startsWith("..") && !rel.includes(`..${sep}`) && rel !== "..")) return target;
+  throw new Error(`${label} escapes expected directory: ${target}`);
+}
+
+export function runDirFor(cwd: string, name: string, options: { createRoot?: boolean } = {}): string {
+  const safe = validateAgentName(name);
+  const root = projectRunRoot(cwd, { create: options.createRoot });
+  return assertPathContained(root, join(root, safe), "Run directory");
 }
 
 export function userRolesDir(): string { return join(dataRoot(), "roles"); }

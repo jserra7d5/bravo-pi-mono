@@ -111,6 +111,14 @@ describe("attention records", () => {
     assert.strictEqual(isHandledForRecipient(event, recipient), true);
   });
 
+  it("does not deliver oneshot done events until result is finalized", () => {
+    const recipient = { runId: "parent_1" };
+    const early = makeEvent("done", { mode: "oneshot" });
+    const finalized = makeEvent("done", { mode: "oneshot", resultFinalizedAt: "2024-01-01T00:00:00Z" });
+    assert.strictEqual(shouldDeliverEvent(early, recipient), false);
+    assert.strictEqual(shouldDeliverEvent(finalized, recipient), true);
+  });
+
   it("blocked/error remains deliverable after seen", () => {
     const event = makeEvent("blocked");
     const recipient = { runId: "parent_1" };

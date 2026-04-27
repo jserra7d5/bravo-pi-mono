@@ -7,13 +7,13 @@ Examples:
 ```bash
 tango status running "Investigating files"
 tango status blocked "Waiting for scout output" --needs review
-tango status done "Completed implementation plan"
+tango status done --result-file ./result.md "Completed implementation plan"
 tango status error "Tests failing due to missing dependency" --needs intervention
 ```
 
 Status transitions emit Tango events. When root-session or workstream metadata is present, events include it for lineage-scoped visibility. Updating the message or `--needs` for the same status also emits an event, so parents can see revised `blocked`/`error` details. Parent sessions may be notified automatically when you report `done`, `blocked`, or `error`, so keep the message concise and actionable. For `blocked` or `error`, add `--needs <decision|input|credentials|review|intervention>` when it clarifies the required parent action.
 
-The `tango status` message is only operational metadata (`metadata.summary`); it is not the full deliverable. For short/simple deliverables, write the report to a file and finish with `tango status done --result-file <path> "Short summary"`. For longer work, ensure your final assistant response contains the complete report so the harness can persist it as `result.md`.
+The `tango status` message is only operational metadata (`metadata.summary`); it is not the full deliverable. For interactive agents, `tango status done` requires a full deliverable file: write the report to a file and finish with `tango status done --result-file <path> "Short summary"` (or another explicit deliverable path supported by your harness). If and only if no deliverable is intended, pass the explicit opt-out `--summary-only`. For oneshot agents, Tango can capture the final assistant response as `result.md`; make that final response the complete report, not just a status line.
 
 Attention visibility is currently status-derived in the dashboard; durable attention records and inbox projection are planned. Blocked, error, and `needs` items typically remain visible until resolved or dismissed.
 

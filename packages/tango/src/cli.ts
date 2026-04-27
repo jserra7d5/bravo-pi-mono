@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runOneshotFromRuntime, startAgent } from "./start.js";
 import { projectSlug } from "./paths.js";
@@ -12,12 +12,13 @@ import { getRecipientContext, markLatestDoneHandled, markSeen, shouldDeliverEven
 import { listRoles, loadRole, assembleSystemPrompt } from "./roles.js";
 import { attachTmux, captureTmux, sendTmux, stopTmux } from "./runtime/tmux.js";
 import { isTerminalStatus, reconcileAgentLifecycle } from "./lifecycle.js";
+import { assessResultDeliverable } from "./result.js";
 import type { AgentMetadata, AgentStatus, ThinkingLevel } from "./types.js";
 import { listArtifacts, publishArtifact, readServerDiscovery, revokeArtifact, startTangoServer } from "./server.js";
 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
-const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind"]);
+const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 function parse(argv: string[]): Parsed {
@@ -29,7 +30,9 @@ function parse(argv: string[]): Parsed {
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       const key = eq > 0 ? a.slice(2, eq) : a.slice(2);
-      const val = eq > 0 ? a.slice(eq + 1) : BOOLEAN_FLAGS.has(key) ? true : (argv[i + 1] && !argv[i + 1].startsWith("-") ? argv[++i] : true);
+      if (!key) throw new Error("Invalid empty flag name.");
+      if (!BOOLEAN_FLAGS.has(key) && eq < 0 && (!argv[i + 1] || argv[i + 1].startsWith("-"))) throw new Error(`Missing value for --${key}.`);
+      const val = eq > 0 ? a.slice(eq + 1) : BOOLEAN_FLAGS.has(key) ? true : argv[++i];
       if (flags[key] !== undefined) flags[key] = Array.isArray(flags[key]) ? [...flags[key] as string[], String(val)] : [String(flags[key]), String(val)];
       else flags[key] = val;
     } else positionals.push(a);
@@ -37,23 +40,86 @@ function parse(argv: string[]): Parsed {
   return { flags, positionals };
 }
 
+const GLOBAL_FLAGS = new Set(["json", "cwd"]);
+const COMMAND_FLAGS: Record<string, Set<string>> = {
+  server: new Set(["host", "port", "token", "allow-private-bind"]),
+  start: new Set(["role", "harness", "mode", "model", "thinking", "effort", "clean", "attach", "dry-run", "recursive", "no-recursive"]),
+  list: new Set(["all"]),
+  look: new Set(["run-id", "run-dir", "lines"]),
+  attach: new Set(["run-id", "run-dir"]),
+  message: new Set(["run-id", "run-dir"]),
+  stop: new Set(["run-id", "run-dir"]),
+  delete: new Set(["run-id", "run-dir"]),
+  status: new Set(["run-dir", "needs", "result-file", "summary-only", "no-result"]),
+  watch: new Set(["all", "from-start"]),
+  children: new Set(["run-id", "run-dir", "tree"]),
+  wait: new Set(["run-id", "run-dir", "timeout"]),
+  doctor: new Set(["run-dir", "parent-run-dir"]),
+  metrics: new Set(["run-dir", "payload"]),
+  artifact: new Set(["title", "entry", "mime", "run-dir"]),
+  reconcile: new Set(["all", "children", "parent-run-dir"]),
+  runner: new Set(["run-dir"]),
+  result: new Set(["run-id", "run-dir"]),
+  roles: new Set(),
+};
+
+function validateParsed(cmd: string, parsed: Parsed): void {
+  const allowed = COMMAND_FLAGS[cmd] ?? new Set<string>();
+  if (cmd === "help" || cmd === "--help" || cmd === "-h") return;
+  for (const key of Object.keys(parsed.flags)) {
+    if (!GLOBAL_FLAGS.has(key) && !allowed.has(key)) throw new Error(`Unknown flag for ${cmd}: --${key}`);
+  }
+}
+
 function flagString(flags: Parsed["flags"], name: string): string | undefined {
   const v = flags[name];
   return typeof v === "string" ? v : undefined;
 }
 function flagBool(flags: Parsed["flags"], name: string): boolean { return flags[name] === true || flags[name] === "true"; }
+function flagPositiveInt(flags: Parsed["flags"], name: string, fallback: number, max: number): number {
+  const raw = flagString(flags, name);
+  if (raw === undefined) return fallback;
+  if (!/^\d+$/.test(raw)) throw new Error(`Invalid --${name}: expected a positive integer.`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new Error(`Invalid --${name}: expected 1-${max}.`);
+  return value;
+}
+function flagNonNegativeNumber(flags: Parsed["flags"], name: string, fallback: number): number {
+  const raw = flagString(flags, name);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new Error(`Invalid --${name}: expected a non-negative number.`);
+  return value;
+}
 function flagThinking(flags: Parsed["flags"], name: string): ThinkingLevel | undefined {
   const value = flagString(flags, name);
   if (value !== undefined && !THINKING_LEVELS.has(value as ThinkingLevel)) throw new Error(`Invalid --${name}: ${value}. Expected off, minimal, low, medium, high, or xhigh.`);
   return value as ThinkingLevel | undefined;
 }
 
+function tailFileByLines(path: string, lines: number, maxBytes = 512 * 1024): string {
+  const size = statSync(path).size;
+  const start = Math.max(0, size - maxBytes);
+  const length = size - start;
+  const fd = openSync(path, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    const bytesRead = readSync(fd, buffer, 0, length, start);
+    const prefix = start > 0 ? "[output truncated to tail]\n" : "";
+    return prefix + buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/).slice(-lines).join("\n");
+  } finally {
+    closeSync(fd);
+  }
+}
+
 async function main() {
   const [cmd = "help", ...rest] = process.argv.slice(2);
-  const parsed = parse(rest);
-  const json = flagBool(parsed.flags, "json");
-  const cwd = resolve(flagString(parsed.flags, "cwd") ?? process.cwd());
+  let json = false;
   try {
+    const parsed = parse(rest);
+    json = flagBool(parsed.flags, "json");
+    const cwd = resolve(flagString(parsed.flags, "cwd") ?? process.cwd());
+    validateParsed(cmd, parsed);
     switch (cmd) {
       case "help": case "--help": case "-h": return help();
       case "server": return await cmdServer(parsed);
@@ -98,7 +164,7 @@ async function cmdServer(parsed: Parsed) {
   if (subcommand) throw new Error("Usage: tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN] or tango server url");
   await startTangoServer({
     host: flagString(parsed.flags, "host"),
-    port: flagString(parsed.flags, "port") ? Number(flagString(parsed.flags, "port")) : undefined,
+    port: flagString(parsed.flags, "port") ? flagPositiveInt(parsed.flags, "port", 43117, 65535) : undefined,
     token: flagString(parsed.flags, "token"),
     allowPrivateBind: flagBool(parsed.flags, "allow-private-bind"),
   });
@@ -141,20 +207,24 @@ function cmdList(cwd: string, json: boolean, all: boolean) {
 
 function cmdLook(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
-  if (!name) throw new Error("Usage: tango look <name>");
-  const meta = withMetrics(resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any }));
-  const lines = Number(flagString(parsed.flags, "lines") ?? "200");
+  const runId = flagString(parsed.flags, "run-id");
+  const runDir = flagString(parsed.flags, "run-dir");
+  if (!name && !runId && !runDir) throw new Error("Usage: tango look [name] [--run-id <id>|--run-dir <dir>]");
+  const lines = flagPositiveInt(parsed.flags, "lines", 200, 5000);
+  const meta = withMetrics(resolveTarget({ name, cwd, runId, runDir, env: process.env as any }));
   let text = "";
   if (meta.mode === "interactive" && meta.status === "running") text = captureTmux(meta.tmuxSocket, meta.tmuxSession, lines);
-  else if (existsSync(join(meta.runDir, "output.log"))) text = readFileSync(join(meta.runDir, "output.log"), "utf8").split(/\r?\n/).slice(-lines).join("\n");
+  else if (existsSync(join(meta.runDir, "output.log"))) text = tailFileByLines(join(meta.runDir, "output.log"), lines);
   else if (existsSync(join(meta.runDir, "result.md"))) text = readFileSync(join(meta.runDir, "result.md"), "utf8");
   if (json) printJson({ ok: true, agent: meta, output: text }); else process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
 }
 
 function cmdAttach(parsed: Parsed, cwd: string) {
   const [name] = parsed.positionals;
-  if (!name) throw new Error("Usage: tango attach <name>");
-  const meta = resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any });
+  const runId = flagString(parsed.flags, "run-id");
+  const runDir = flagString(parsed.flags, "run-dir");
+  if (!name && !runId && !runDir) throw new Error("Usage: tango attach [name] [--run-id <id>|--run-dir <dir>]");
+  const meta = resolveTarget({ name, cwd, runId, runDir, env: process.env as any });
   if (meta.mode !== "interactive") throw new Error(`Agent ${meta.name} is not interactive (mode=${meta.mode}). Attach only works with interactive agents.`);
   attachTmux(meta.tmuxSocket, meta.tmuxSession);
 }
@@ -189,27 +259,41 @@ function cmdDelete(parsed: Parsed, cwd: string, json: boolean) {
 
 function cmdStatus(parsed: Parsed, json: boolean) {
   const [state, ...msg] = parsed.positionals;
-  if (!state) throw new Error("Usage: tango status <running|blocked|done|error|stopped> [--result-file <path>] [message]");
+  if (!state) throw new Error("Usage: tango status <running|blocked|done|error|stopped> [--result-file <path>|--summary-only] [message]");
   const runDir = flagString(parsed.flags, "run-dir") ?? process.env.TANGO_RUN_DIR;
   if (!runDir) throw new Error("No run dir. Set TANGO_RUN_DIR or pass --run-dir.");
   if (!isAgentStatus(state)) throw new Error(`Invalid status: ${state}`);
   const summary = msg.join(" ");
-  let meta = updateStatus(runDir, state, summary, { needs: flagString(parsed.flags, "needs") });
   const resultFileFlag = flagString(parsed.flags, "result-file");
-  if (resultFileFlag) {
-    if (state !== "done") throw new Error("--result-file is only valid with `tango status done`.");
-    const source = resolve(resultFileFlag);
-    if (!existsSync(source)) throw new Error(`Result file not found: ${resultFileFlag}`);
-    const resultFile = join(runDir, "result.md");
-    writeFileSync(resultFile, readFileSync(source, "utf8"), "utf8");
-    meta = readMetadata(runDir);
-    meta.resultFile = resultFile;
-    meta.resultFinalizedAt = new Date().toISOString();
-    delete meta.resultIssue;
-    // Keep metadata.summary operational; result.md is the durable deliverable.
-    writeMetadata(meta);
-  }
+  const summaryOnly = flagBool(parsed.flags, "summary-only") || flagBool(parsed.flags, "no-result");
+  if (resultFileFlag && summaryOnly) throw new Error("Use either --result-file or --summary-only/--no-result, not both.");
+  if (resultFileFlag && state !== "done") throw new Error("--result-file is only valid with `tango status done`.");
+  if (summaryOnly && state !== "done") throw new Error("--summary-only/--no-result is only valid with `tango status done`.");
+  if (state === "done") enforceDoneResultPolicy(runDir, { resultFile: resultFileFlag, summaryOnly });
+  if (resultFileFlag) finalizeResultFileBeforeDone(runDir, resultFileFlag);
+  const meta = updateStatus(runDir, state, summary, { needs: flagString(parsed.flags, "needs") });
   if (json) printJson({ ok: true, agent: meta }); else console.log(`${meta.name}: ${meta.status}`);
+}
+
+function enforceDoneResultPolicy(runDir: string, options: { resultFile?: string; summaryOnly: boolean }): void {
+  if (options.resultFile || options.summaryOnly) return;
+  const meta = readMetadata(runDir);
+  if (meta.mode === "interactive") {
+    throw new Error("Status summary is not a deliverable. Interactive agents must finish with `tango status done --result-file <path> \"summary\"`; use explicit --summary-only only when no deliverable is intended.");
+  }
+}
+
+function finalizeResultFileBeforeDone(runDir: string, resultFileFlag: string): void {
+  const source = resolve(resultFileFlag);
+  if (!existsSync(source)) throw new Error(`Result file not found: ${resultFileFlag}`);
+  const resultFile = join(runDir, "result.md");
+  writeFileSync(resultFile, readFileSync(source, "utf8"), "utf8");
+  const meta = readMetadata(runDir);
+  meta.resultFile = resultFile;
+  meta.resultFinalizedAt = new Date().toISOString();
+  delete meta.resultIssue;
+  // Keep metadata.summary operational; result.md is the durable deliverable.
+  writeMetadata(meta);
 }
 
 async function cmdWatch(parsed: Parsed, cwd: string, json: boolean) {
@@ -258,7 +342,7 @@ async function cmdChildren(parsed: Parsed, cwd: string, json: boolean) {
 async function cmdWait(parsed: Parsed, cwd: string, json: boolean) {
   const names = parsed.positionals;
   if (!names.length) throw new Error("Usage: tango wait <name...>");
-  const timeoutMs = Number(flagString(parsed.flags, "timeout") ?? "0") * 1000;
+  const timeoutMs = flagNonNegativeNumber(parsed.flags, "timeout", 0) * 1000;
   const start = Date.now();
   // Resolve targets once so they cannot change mid-loop
   const targets = names.map((name) =>
@@ -269,7 +353,7 @@ async function cmdWait(parsed: Parsed, cwd: string, json: boolean) {
     if (agents.every((a) => isTerminalStatus(a.status))) {
       const rec = getRecipientContext();
       for (const a of agents) {
-        if (a.status === "done") markLatestDoneHandled(rec, a.runDir);
+        if (a.status === "done" && assessResultDeliverable(a).resultReady) markLatestDoneHandled(rec, a.runDir);
       }
       if (json) return printJson({ ok: true, agents });
       for (const a of agents) console.log(`${a.name}: ${a.status}${a.summary ? ` - ${a.summary}` : ""}`);
@@ -327,40 +411,19 @@ function renderChildTree(tree: any[]): string {
 
 function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
-  if (!name) throw new Error("Usage: tango result <name>");
-  const meta = resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any });
-  const file = join(meta.runDir, "result.md");
-  const hasResultFile = existsSync(file);
-  const finalized = meta.mode !== "oneshot" || !!meta.resultFinalizedAt;
-  const result = hasResultFile ? readFileSync(file, "utf8") : "";
-  const issue = resultIssue(meta, hasResultFile, finalized, result);
-  const resultReady = hasResultFile && finalized && !issue;
-  if (meta.mode === "oneshot" && isTerminalStatus(meta.status) && !finalized) {
-    throw new Error("Result is still finalizing; try again shortly.");
-  }
-  markLatestDoneHandled(getRecipientContext(), meta.runDir);
-  if (json) printJson({ ok: true, agent: meta, result, resultReady, resultIssue: issue });
+  const runId = flagString(parsed.flags, "run-id");
+  const runDir = flagString(parsed.flags, "run-dir");
+  if (!name && !runId && !runDir) throw new Error("Usage: tango result [name] [--run-id <id>|--run-dir <dir>]");
+  const meta = resolveTarget({ name, cwd, runId, runDir, env: process.env as any });
+  const assessment = assessResultDeliverable(meta);
+  if (assessment.resultReady) markLatestDoneHandled(getRecipientContext(), meta.runDir);
+  if (json) printJson({ ok: true, agent: meta, result: assessment.result, resultReady: assessment.resultReady, resultIssue: assessment.resultIssue, resultWarning: assessment.resultWarning });
   else {
-    if (issue) process.stderr.write(`tango result: ${issue}\n`);
-    if (result) process.stdout.write(result.endsWith("\n") ? result : `${result}\n`);
+    if (assessment.resultIssue) process.stderr.write(`tango result: ${assessment.resultIssue}\n`);
+    if (assessment.resultWarning) process.stderr.write(`tango result warning: ${assessment.resultWarning}\n`);
+    if (assessment.result) process.stdout.write(assessment.result.endsWith("\n") ? assessment.result : `${assessment.result}\n`);
     else if (meta.summary) process.stdout.write(`[status summary only] ${meta.summary}\n`);
   }
-}
-
-function resultIssue(meta: AgentMetadata, hasResultFile: boolean, finalized: boolean, result: string): string | undefined {
-  if (meta.resultIssue) return meta.resultIssue;
-  if (meta.mode === "oneshot" && isTerminalStatus(meta.status) && hasResultFile && !finalized) return "Result is still finalizing; try again shortly.";
-  if (!hasResultFile) {
-    if (isTerminalStatus(meta.status)) return meta.summary ? "No deliverable result.md found; only metadata.summary is available." : "No deliverable result.md found.";
-    return "Agent is not terminal; result is not ready.";
-  }
-  if (!result.trim()) return "Result deliverable is empty.";
-  if (looksReportLike(meta.task) && result.trim().length < 240) return "Result deliverable is suspiciously short for a report/audit/planning task.";
-  return undefined;
-}
-
-function looksReportLike(task: string): boolean {
-  return /\b(report|audit|findings|investigat(?:e|ion)|research|plan|planning|review|analysis|analy[sz]e|root[- ]cause)\b/i.test(task);
 }
 
 function cmdRoles(parsed: Parsed, json: boolean) {
@@ -472,7 +535,7 @@ function refreshStatus(meta: AgentMetadata): AgentMetadata {
 
 function help() {
   console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]
-  tango server url\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--run-id <id>] [--run-dir <dir>] [--lines N] [--json]\n  tango attach <name> [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango status <state> [message] [--needs kind] [--result-file path]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango wait <name...> [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <name> [--run-id <id>] [--run-dir <dir>]\n  tango roles list|show <name>\n`);
+  tango server url\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango status <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango wait <name...> [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result [name] [--run-id <id>] [--run-dir <dir>]\n  tango roles list|show <name>\n`);
 }
 
 main();

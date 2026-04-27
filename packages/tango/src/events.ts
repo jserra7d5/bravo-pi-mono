@@ -2,6 +2,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, 
 import { dirname, join, resolve } from "node:path";
 import type { AgentMetadata, AgentStatus } from "./types.js";
 import { dataRoot, projectSlug } from "./paths.js";
+import { assessResultDeliverable } from "./result.js";
 
 export type TangoEvent = {
   schemaVersion: 1;
@@ -10,6 +11,7 @@ export type TangoEvent = {
   time: string;
   agent: string;
   role?: string;
+  mode?: AgentMetadata["mode"];
   status: AgentStatus;
   previousStatus?: AgentStatus;
   summary?: string;
@@ -22,6 +24,10 @@ export type TangoEvent = {
   parentRunDir?: string;
   rootSessionId?: string;
   workstreamId?: string;
+  resultFinalizedAt?: string;
+  resultReady?: boolean;
+  resultIssue?: string;
+  resultWarning?: string;
 };
 
 export type EventReadState = { offset: number; carry: string };
@@ -31,6 +37,7 @@ export function eventsPath(): string {
 }
 
 export function appendStatusEvent(meta: AgentMetadata, previousStatus?: AgentStatus): TangoEvent {
+  const assessment = meta.status === "done" ? assessResultDeliverable(meta) : undefined;
   const event: TangoEvent = {
     schemaVersion: 1,
     eventId: `te_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -38,6 +45,7 @@ export function appendStatusEvent(meta: AgentMetadata, previousStatus?: AgentSta
     time: new Date().toISOString(),
     agent: meta.name,
     role: meta.role,
+    mode: meta.mode,
     status: meta.status,
     previousStatus,
     summary: meta.summary,
@@ -50,6 +58,10 @@ export function appendStatusEvent(meta: AgentMetadata, previousStatus?: AgentSta
     parentRunDir: meta.parentRunDir,
     rootSessionId: meta.rootSessionId,
     workstreamId: meta.workstreamId,
+    resultFinalizedAt: meta.resultFinalizedAt,
+    resultReady: assessment?.resultReady,
+    resultIssue: assessment?.resultIssue,
+    resultWarning: assessment?.resultWarning,
   };
   appendEvent(event);
   return event;
@@ -65,6 +77,30 @@ export function initialEventOffset(fromStart: boolean): number {
   const path = eventsPath();
   if (fromStart || !existsSync(path)) return 0;
   return statSync(path).size;
+}
+
+export function readRecentEvents(maxEvents = 1000, maxBytes = 1024 * 1024): { events: TangoEvent[]; errors: string[]; truncated: boolean } {
+  const path = eventsPath();
+  if (!existsSync(path)) return { events: [], errors: [], truncated: false };
+  const size = statSync(path).size;
+  const start = Math.max(0, size - maxBytes);
+  const fd = openSync(path, "r");
+  try {
+    const buffer = Buffer.alloc(size - start);
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, start);
+    let text = buffer.subarray(0, bytesRead).toString("utf8");
+    if (start > 0) text = text.slice(text.indexOf("\n") + 1);
+    const lines = text.split(/\r?\n/).filter((line) => line.trim()).slice(-maxEvents);
+    const events: TangoEvent[] = [];
+    const errors: string[] = [];
+    for (const line of lines) {
+      try { events.push(JSON.parse(line) as TangoEvent); }
+      catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
+    }
+    return { events, errors, truncated: start > 0 };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function readEvents(state: EventReadState): { events: TangoEvent[]; state: EventReadState; errors: string[] } {

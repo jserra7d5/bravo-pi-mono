@@ -1,12 +1,20 @@
 import type { TimelineEvent } from "../types";
 
+const MAX_RENDERED_EVENTS = 200;
+
 export default function TimelinePanel({ events }: { events: TimelineEvent[] }) {
   if (!events.length) {
     return <div className="empty-state">No timeline events.</div>;
   }
+  const rendered = events.slice(-MAX_RENDERED_EVENTS);
   return (
     <div className="card">
-      {events.map((e, i) => (
+      {events.length > rendered.length ? (
+        <div className="agent-meta" style={{ marginBottom: 8 }}>
+          Showing latest {rendered.length} of {events.length} fetched events.
+        </div>
+      ) : null}
+      {rendered.map((e, i) => (
         <div key={`${e.runDir}-${e.time}-${i}`} className="timeline-item">
           <div className="timeline-time">{new Date(e.time).toLocaleString()}</div>
           <div>

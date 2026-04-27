@@ -232,6 +232,7 @@ export function shouldDeliverEvent(
   event: TangoEvent,
   recipient: RecipientContext
 ): boolean {
+  if (event.status === "done" && event.mode === "oneshot" && !event.resultFinalizedAt) return false;
   const record = findAttentionRecord(recipient, event.runDir, event.eventId);
   if (!record) return true;
   if (record.state === "dismissed" || record.state === "superseded") return false;

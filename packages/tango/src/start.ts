@@ -13,17 +13,32 @@ import { buildClaudeCommand } from "./harnesses/claude.js";
 import { startTmux } from "./runtime/tmux.js";
 import { isTerminalStatus } from "./lifecycle.js";
 
+const HARNESSES = new Set(["pi", "claude", "generic"]);
+const MODES = new Set(["oneshot", "interactive"]);
+
+function validateHarness(value: string): "pi" | "claude" | "generic" {
+  if (HARNESSES.has(value)) return value as "pi" | "claude" | "generic";
+  throw new Error(`Invalid harness: ${value}. Expected pi, claude, or generic.`);
+}
+
+function validateMode(value: string): "oneshot" | "interactive" {
+  if (MODES.has(value)) return value as "oneshot" | "interactive";
+  throw new Error(`Invalid mode: ${value}. Expected oneshot or interactive.`);
+}
+
 export async function startAgent(options: StartOptions): Promise<{ meta: AgentMetadata; command: CommandSpec; role?: RoleConfig }> {
   let role: RoleConfig | undefined;
   if (options.roleName) role = loadRole(options.roleName);
-  const harness = options.harness ?? role?.harness ?? "pi";
-  const mode = options.mode ?? role?.mode ?? (harness === "generic" ? "interactive" : "oneshot");
-  const runDir = runDirFor(options.cwd, options.name);
-  if (existsSync(runDir) && options.clean) rmSync(runDir, { recursive: true, force: true });
-  if (existsSync(runDir) && !options.clean) throw new Error(`Run already exists: ${options.name}. Use --clean to replace it.`);
-  mkdirSync(runDir, { recursive: true });
+  const harness = validateHarness(options.harness ?? role?.harness ?? "pi");
+  const mode = validateMode(options.mode ?? role?.mode ?? (harness === "generic" ? "interactive" : "oneshot"));
+  const runDir = runDirFor(options.cwd, options.name, { createRoot: !options.dryRun });
+  if (!options.dryRun) {
+    if (existsSync(runDir) && options.clean) rmSync(runDir, { recursive: true, force: true });
+    if (existsSync(runDir) && !options.clean) throw new Error(`Run already exists: ${options.name}. Use --clean to replace it.`);
+    mkdirSync(runDir, { recursive: true });
+  } else if (existsSync(runDir) && !options.clean) throw new Error(`Run already exists: ${options.name}. Use --clean to replace it.`);
   const homeDir = join(runDir, "home");
-  mkdirSync(homeDir, { recursive: true });
+  if (!options.dryRun) mkdirSync(homeDir, { recursive: true });
 
   const now = new Date().toISOString();
   const meta: AgentMetadata = {
@@ -54,22 +69,32 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
   const system = effectiveRole ? assembleSystemPrompt(effectiveRole) : "You are a helpful coding agent.";
   const systemFile = join(runDir, "system.md");
   const taskFile = join(runDir, "task.md");
-  writeFileSync(systemFile, `${system}\n`, "utf8");
-  writeFileSync(taskFile, `${options.task}\n`, "utf8");
+  if (!options.dryRun) {
+    writeFileSync(systemFile, `${system}\n`, "utf8");
+    writeFileSync(taskFile, `${options.task}\n`, "utf8");
+  }
 
   const command = harness === "generic"
     ? buildGenericCommand(meta, options.task)
     : harness === "claude"
-      ? buildClaudeCommand(meta, effectiveRole, systemFile, options.task)
-      : buildPiCommand(meta, effectiveRole, systemFile, options.task);
-  writeFileSync(join(runDir, "command.json"), `${JSON.stringify(redactCommand(command), null, 2)}\n`, "utf8");
-  writeMetadata(meta);
+      ? buildClaudeCommand(meta, effectiveRole, systemFile, options.task, { prepareHome: !options.dryRun })
+      : buildPiCommand(meta, effectiveRole, systemFile, options.task, { prepareHome: !options.dryRun });
+  if (!options.dryRun) {
+    writeFileSync(join(runDir, "command.json"), `${JSON.stringify(redactCommand(command), null, 2)}\n`, "utf8");
+    writeMetadata(meta);
+  }
 
   if (options.dryRun) return { meta, command: redactCommand(command), role };
 
   const running = transitionStatus(meta.runDir, "running");
   if (mode === "oneshot") startOneshotSupervisor(running, command);
-  else startTmux(meta.tmuxSocket, meta.tmuxSession, command);
+  else {
+    try { startTmux(meta.tmuxSocket, meta.tmuxSession, command); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      transitionStatus(meta.runDir, "error", `Interactive startup failed: ${message}`);
+    }
+  }
   return { meta: readMetadata(meta.runDir), command: redactCommand(command), role };
 }
 
@@ -173,6 +198,7 @@ export async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promis
     let buffer = "";
     let finalText = "";
     let plainOutput = "";
+    let settled = false;
     proc.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
       plainOutput += text;
@@ -184,20 +210,35 @@ export async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promis
     });
     proc.stderr.on("data", (chunk: Buffer) => writeFileSync(errFile, chunk.toString(), { flag: "a" }));
     proc.on("close", (code: number | null) => {
+      if (settled) return;
+      settled = true;
       if (buffer.trim()) processJsonLine(buffer);
       const current = readMetadata(meta.runDir);
       current.exitCode = code ?? 0;
+      const resultText = (spec.resultParser ?? "pi-json") === "plain" ? plainOutput : finalText;
       current.resultFile = resultFile;
-      writeFileSync(resultFile, finalText, "utf8");
+      writeFileSync(resultFile, resultText, "utf8");
       current.resultFinalizedAt = new Date().toISOString();
-      if (finalText.trim()) delete current.resultIssue;
-      else current.resultIssue = "No final assistant text was extracted from the oneshot JSON stream; raw output is preserved in output.log.";
+      if (resultText.trim() && current.exitCode === 0) delete current.resultIssue;
+      else if (current.exitCode !== 0) current.resultIssue = `Oneshot process exited with code ${current.exitCode}; raw output is preserved in output.log${existsSync(errFile) ? " and stderr.log" : ""}.`;
+      else current.resultIssue = (spec.resultParser ?? "pi-json") === "plain"
+        ? "Plain oneshot output was empty; raw output is preserved in output.log."
+        : "No final assistant text was extracted from the oneshot JSON stream; raw output is preserved in output.log.";
       writeMetadata(current);
       if (!isTerminalStatus(current.status)) transitionStatus(meta.runDir, current.exitCode === 0 ? "done" : "error");
       else appendStatusEvent({ ...current, status: current.status }, current.status);
       resolve();
     });
     proc.on("error", (error: Error) => {
+      if (settled) return;
+      settled = true;
+      const current = readMetadata(meta.runDir);
+      current.exitCode = 127;
+      current.resultFile = resultFile;
+      writeFileSync(resultFile, "", "utf8");
+      current.resultFinalizedAt = new Date().toISOString();
+      current.resultIssue = `Failed to start oneshot process: ${error.message}`;
+      writeMetadata(current);
       transitionStatus(meta.runDir, "error", error.message);
       resolve();
     });

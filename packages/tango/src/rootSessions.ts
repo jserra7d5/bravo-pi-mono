@@ -38,6 +38,7 @@ export interface AttentionItem {
   reason: string;
   rootSessionId?: string;
   workstreamId?: string;
+  commands: AgentCommands;
 }
 
 export interface SessionCounts {
@@ -192,6 +193,7 @@ export function gatherAttentionItems(agents: AgentMetadata[]): AttentionItem[] {
       reason: a.needs ? `needs: ${a.needs}` : a.status === "blocked" ? "blocked" : a.status === "error" ? "error" : "attention",
       rootSessionId: a.rootSessionId,
       workstreamId: a.workstreamId,
+      commands: buildAgentCommands(a),
     }));
 }
 

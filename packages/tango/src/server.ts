@@ -11,6 +11,7 @@ import { initialEventOffset, readEvents, type EventReadState } from "./events.js
 import type { AgentMetadata } from "./types.js";
 import {
   buildDashboard,
+  buildOperations,
   buildWorkstreams,
   buildWorkstreamDetail,
   buildWorkstreamAgents,
@@ -75,7 +76,21 @@ export function readServerDiscovery(): ServerDiscovery | undefined {
   if (envUrl) return { schemaVersion: 1, url: envUrl, ...(envToken ? { token: envToken } : {}), pid: 0, startedAt: "env" };
   const p = serverDiscoveryPath();
   if (!existsSync(p)) return undefined;
-  try { return JSON.parse(readFileSync(p, "utf8")) as ServerDiscovery; } catch { return undefined; }
+  try {
+    const discovery = JSON.parse(readFileSync(p, "utf8")) as ServerDiscovery;
+    if (!serverDiscoveryPidAlive(discovery.pid)) return undefined;
+    return discovery;
+  } catch { return undefined; }
+}
+
+function serverDiscoveryPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: any) {
+    return error?.code === "EPERM";
+  }
 }
 
 export async function startTangoServer(options: TangoServerOptions = {}): Promise<{ server: Server; shutdown: () => void }> {
@@ -103,7 +118,8 @@ export async function startTangoServer(options: TangoServerOptions = {}): Promis
   const discovery: ServerDiscovery = { schemaVersion: 1, url: `http://${host}:${actualPort}`, ...(token ? { token } : {}), pid: process.pid, startedAt: new Date().toISOString() };
   writeFileSync(serverDiscoveryPath(), `${JSON.stringify(discovery, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   console.log(`tango server listening on ${discovery.url}`);
-  console.log(`dashboard: ${token ? `${discovery.url}/?token=${encodeURIComponent(token)}` : discovery.url}`);
+  console.log(`dashboard: ${discovery.url}`);
+  if (token) console.log(`dashboard token: ${token}`);
   console.log(`auth: ${token ? "enabled" : "disabled (use --token TOKEN to enable)"}`);
   console.log(`discovery: ${serverDiscoveryPath()}`);
 
@@ -130,7 +146,9 @@ export async function startTangoServer(options: TangoServerOptions = {}): Promis
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { host: string; port: number; token?: string; clients: Set<ServerResponse> }) {
+  applySecurityHeaders(res);
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+  if ((req.method === "POST" || req.method === "PUT" || req.method === "PATCH") && !bodyWithinLimit(req, 1024 * 1024)) return sendJson(res, 413, { ok: false, error: "Request body too large" });
   if (req.method === "GET" && url.pathname === "/api/v1/health") return sendJson(res, 200, { ok: true, schemaVersion: 1, pid: process.pid, time: new Date().toISOString() });
   if (req.method === "GET" && url.pathname === "/api/v1/events") return handleSse(req, res, ctx);
   if (url.pathname.startsWith("/a/")) return serveArtifact(url, res);
@@ -155,6 +173,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
   if (req.method === "POST" && url.pathname === "/api/v1/root-sessions") return sendJson(res, 200, { ok: true, schemaVersion: 1, rootSession: await createOrResumeRootSession(await readJsonBody(req)) });
   if (req.method === "GET" && url.pathname === "/api/v1/artifacts") return sendJson(res, 200, { ok: true, schemaVersion: 1, artifacts: listArtifacts() });
   if (req.method === "GET" && url.pathname === "/api/v1/dashboard") return sendJson(res, 200, { ok: true, ...buildDashboard() });
+  if (req.method === "GET" && url.pathname === "/api/v1/operations") return sendJson(res, 200, { ok: true, ...buildOperations() });
   if (req.method === "GET" && url.pathname === "/api/v1/workstreams") return sendJson(res, 200, { ok: true, ...buildWorkstreams() });
   if (req.method === "GET" && url.pathname.startsWith("/api/v1/workstreams/")) {
     const parts = url.pathname.split("/");
@@ -184,13 +203,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
     }
     if (parts.length === 6 && parts[5] === "timeline") {
       const rootSessionId = parts[4];
-      const timeline = buildTimeline(rootSessionId);
+      const timeline = buildTimeline(rootSessionId, { limit: limitParam(url) });
       if (!timeline) return sendJson(res, 404, { ok: false, error: "Workstream not found" });
       return sendJson(res, 200, { ok: true, ...timeline });
     }
   }
   if (req.method === "GET" && url.pathname === "/api/v1/attention") return sendJson(res, 200, { ok: true, ...buildAttention() });
-  if (req.method === "GET" && url.pathname === "/api/v1/timeline") return sendJson(res, 200, { ok: true, ...buildTimeline() });
+  if (req.method === "GET" && url.pathname === "/api/v1/timeline") return sendJson(res, 200, { ok: true, ...buildTimeline(undefined, { limit: limitParam(url) }) });
   if (req.method === "GET" && url.pathname === "/api/v1/history") return sendJson(res, 200, { ok: true, ...buildHistory() });
   return sendJson(res, 404, { ok: false, error: "Not found" });
 }
@@ -199,16 +218,19 @@ function handleSse(req: IncomingMessage, res: ServerResponse, ctx: { token?: str
   if (!authorized(req, ctx.token)) return sendJson(res, 401, { ok: false, error: "Unauthorized" });
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
+    "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
   });
-  res.write(`event: hello\ndata: ${JSON.stringify({ schemaVersion: 1, time: new Date().toISOString() })}\n\n`);
+  res.write(`retry: 5000\nevent: hello\ndata: ${JSON.stringify({ schemaVersion: 1, time: new Date().toISOString() })}\n\n`);
+  const heartbeat = setInterval(() => res.write(`: heartbeat ${new Date().toISOString()}\n\n`), 15000);
   ctx.clients.add(res);
-  req.on("close", () => ctx.clients.delete(res));
+  req.on("close", () => { clearInterval(heartbeat); ctx.clients.delete(res); });
 }
 
 function broadcastSse(clients: Set<ServerResponse>, name: string, payload: unknown) {
-  const text = `event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`;
+  const eventId = typeof payload === "object" && payload && "eventId" in payload ? String((payload as any).eventId) : `sse_${Date.now()}`;
+  const text = `id: ${eventId}\nevent: ${name}\ndata: ${JSON.stringify(payload)}\n\n`;
   for (const client of clients) client.write(text);
 }
 
@@ -382,7 +404,7 @@ function serveDashboardSpa(res: ServerResponse): void {
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
-  res.writeHead(status, { "Content-Type": "application/json" });
+  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
   res.end(`${JSON.stringify(body)}\n`);
 }
 
@@ -411,7 +433,7 @@ function dashboardHtml(): string {
 <body>
   <h1>Tango Dashboard</h1>
   <nav><a href="/agents">Agents</a><a href="/attention">Attention</a><a href="/artifacts">Artifacts</a><a href="/timeline">Timeline</a></nav>
-  <p class="muted">Prototype dashboard. Token is kept in the local URL query for v1 testing.</p>
+  <p class="muted">Prototype dashboard. Prefer Authorization: Bearer tokens; query tokens remain for local compatibility.</p>
   <section><h2>Agents</h2><div id="agents">Loading...</div></section>
   <section><h2>Attention</h2><div id="attention">Loading...</div></section>
   <section><h2>Artifacts</h2><div id="artifacts">Loading...</div></section>
@@ -460,9 +482,37 @@ es.addEventListener('event', () => load());
 
 async function readJsonBody(req: IncomingMessage): Promise<any> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > 1024 * 1024) throw new Error("Request body too large");
+    chunks.push(buf);
+  }
   const text = Buffer.concat(chunks).toString("utf8");
   return text.trim() ? JSON.parse(text) : {};
+}
+
+function applySecurityHeaders(res: ServerResponse): void {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+}
+
+function bodyWithinLimit(req: IncomingMessage, maxBytes: number): boolean {
+  const length = req.headers["content-length"];
+  if (typeof length !== "string") return true;
+  const bytes = Number(length);
+  return Number.isFinite(bytes) && bytes <= maxBytes;
+}
+
+function limitParam(url: URL): number | undefined {
+  const raw = url.searchParams.get("limit");
+  if (!raw) return undefined;
+  if (!/^\d+$/.test(raw)) throw new Error("Invalid limit: expected a positive integer.");
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < 1 || n > 1000) throw new Error("Invalid limit: expected 1-1000.");
+  return n;
 }
 
 function authorized(req: IncomingMessage, token?: string): boolean {

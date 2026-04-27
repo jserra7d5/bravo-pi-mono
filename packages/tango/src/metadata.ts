@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AgentMetadata, AgentStatus } from "./types.js";
-import { dataRoot, projectRunRoot } from "./paths.js";
+import { assertPathContained, dataRoot, projectRunRoot } from "./paths.js";
 import { appendStatusEvent } from "./events.js";
 
 export function metadataPath(runDir: string): string { return join(runDir, "metadata.json"); }
@@ -33,7 +33,12 @@ export function transitionStatus(runDir: string, status: AgentStatus, summary?: 
   const previousSummary = meta.summary;
   const previousNeeds = meta.needs;
   if (summary) meta.summary = summary;
-  if (options.needs !== undefined) meta.needs = options.needs;
+  if (options.needs !== undefined) {
+    if (options.needs) meta.needs = options.needs;
+    else delete meta.needs;
+  } else if (status === "done" || status === "stopped") {
+    delete meta.needs;
+  }
   if (previousStatus === status) {
     writeMetadata(meta);
     if ((summary && summary !== previousSummary) || (options.needs !== undefined && options.needs !== previousNeeds)) appendStatusEvent(meta, previousStatus);
@@ -66,5 +71,6 @@ export function listMetadata(cwd?: string): AgentMetadata[] {
 }
 
 export function removeRunDir(runDir: string): void {
-  if (existsSync(runDir)) rmSync(runDir, { recursive: true, force: true });
+  const safe = assertPathContained(join(dataRoot(), "runs"), runDir, "Run directory");
+  if (existsSync(safe)) rmSync(safe, { recursive: true, force: true });
 }

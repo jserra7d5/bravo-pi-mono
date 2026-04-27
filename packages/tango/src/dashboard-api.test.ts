@@ -9,6 +9,7 @@ import type { RootSessionRecord, ArtifactManifest } from "./server.js";
 import { appendEvent } from "./events.js";
 import {
   buildDashboard,
+  buildOperations,
   buildWorkstreams,
   buildWorkstreamDetail,
   buildWorkstreamAgents,
@@ -182,6 +183,22 @@ describe("buildDashboard", () => {
   });
 });
 
+describe("buildOperations", () => {
+  it("returns durable operations projection with commands and sorted slices", () => {
+    const vm = buildOperations();
+    assert.strictEqual(vm.schemaVersion, 1);
+    assert.strictEqual(vm.workstreams.length, 2);
+    assert.strictEqual(vm.counts.total, 3);
+    assert.strictEqual(vm.attention.length, 1);
+    assert.strictEqual(vm.attention[0].name, "agent-b");
+    assert.match(vm.attention[0].commands.look, /tango look --run-id run_b --lines 200/);
+    assert.ok(vm.activeAgents.some((a) => a.name === "agent-a" && a.commands.result.includes("run_a")));
+    assert.strictEqual(vm.timelineTail.length, 2);
+    assert.deepStrictEqual(vm.recentArtifacts.map((a) => a.artifactId).sort(), ["art_1", "art_2", "art_3", "art_4", "art_5"]);
+    assert.strictEqual(vm.suggestedRootSessionId, "r1");
+  });
+});
+
 describe("buildWorkstreams", () => {
   it("returns workstreams list", () => {
     const vm = buildWorkstreams();
@@ -209,6 +226,7 @@ describe("buildWorkstreamDetail", () => {
     assert.ok(vm);
     const ids = vm!.artifacts.map((a) => a.artifactId).sort();
     assert.deepStrictEqual(ids, ["art_1"]);
+    assert.strictEqual(vm!.artifacts[0].url, "/a/art_1/tok_1/index.html");
   });
 
   it("excludes artifacts with mismatched rootSessionId+workstreamId from both workstreams", () => {
@@ -310,6 +328,15 @@ describe("buildTimeline", () => {
     assert.ok(vm);
     assert.strictEqual(vm!.events.length, 1);
     assert.strictEqual(vm!.events[0].agent, "agent-a");
+  });
+
+  it("limits timeline results from the tail", () => {
+    const vm = buildTimeline(undefined, { limit: 1 });
+    assert.ok(vm);
+    assert.strictEqual(vm!.limit, 1);
+    assert.strictEqual(vm!.total, 2);
+    assert.strictEqual(vm!.events.length, 1);
+    assert.strictEqual(vm!.events[0].agent, "agent-c");
   });
 });
 

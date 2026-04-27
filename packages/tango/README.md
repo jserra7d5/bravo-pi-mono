@@ -59,7 +59,7 @@ Pi harness behavior similarly keeps Pi runtime state isolated while loading a Ta
 
 `tango start` returns after an agent is launched. One-shot agents continue in a detached finite runner, so coordinators can observe them with `tango list`, `tango wait`, and proactive status events while they run.
 
-Status changes are written to a durable event log at `$TANGO_HOME/events.jsonl`. `tango watch` tails this log; the Pi extension uses it to send persisted, deduped, batched notifications to parent sessions when child agents finish, block, or error. `tango children`, `tango wait`, `tango reconcile`, and `tango doctor events` support parent/child coordination, stale lifecycle repair, and event-delivery smoke tests.
+Status changes are written to a durable event log at `$TANGO_HOME/events.jsonl`. `tango watch` tails this log; the Pi extension uses it to send persisted, deduped, batched notifications to parent sessions when child agents finish, block, or error. For interactive agents, `tango status done` requires `--result-file <path>` so `result.md` contains the full deliverable; use explicit `--summary-only` only when no deliverable is intended. `tango children`, `tango wait`, `tango reconcile`, and `tango doctor events` support parent/child coordination, stale lifecycle repair, and event-delivery smoke tests.
 
 Pi-harness Tango children also write best-effort metrics snapshots to `<runDir>/metrics.json` for tool counts, token/context usage, and runtime-oriented TUI summaries. `tango list --json` and `tango children --json` include these snapshots when available; `tango metrics update --run-dir <dir> --payload <json>` is the internal update surface used by the Pi metrics extension.
 
@@ -71,7 +71,7 @@ Tango's CLI is designed to remain usable without the optional dashboard server r
 
 - `tango list --json`, `tango roles list`, and other read-only CLI commands should work with no `TANGO_SERVER_URL`, no `TANGO_SERVER_TOKEN`, and no discovery file.
 - `tango start ...` launches only the requested agent; it must not auto-start `tango server`. Start the dashboard explicitly with `tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]`.
-- Dashboard/API auth is disabled by default on the localhost server. Passing `--token TOKEN` explicitly enables token auth and prints a tokenized dashboard URL.
+- Dashboard/API auth is disabled by default on the localhost server. Passing `--token TOKEN` explicitly enables token auth and prints the dashboard URL plus token separately.
 - Server discovery is read from `TANGO_SERVER_URL` (and optional `TANGO_SERVER_TOKEN`) when set; otherwise Tango falls back to `$TANGO_HOME/server/server.json` written by `tango server`.
 - `tango artifact publish` stores artifacts regardless of server availability. It prints/returns a URL only when server discovery is available; otherwise it returns the artifact id for later listing/serving.
 - Validate package rollout with:

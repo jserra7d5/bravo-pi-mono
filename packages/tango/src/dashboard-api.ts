@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { listMetadata } from "./metadata.js";
 import { listRootSessions, listArtifacts, type RootSessionRecord, type ArtifactManifest } from "./server.js";
-import { readEvents, type TangoEvent } from "./events.js";
+import { readRecentEvents } from "./events.js";
 import { readMetrics } from "./metrics.js";
 import type { AgentMetadata } from "./types.js";
 import {
@@ -10,6 +10,8 @@ import {
   groupByRootSession,
   gatherAttentionItems,
   computeSessionCounts,
+  buildAgentCommands,
+  type AgentCommands,
   type AgentTreeNode,
   type AttentionItem,
   type SessionCounts,
@@ -44,13 +46,42 @@ export interface WorkstreamDetailViewModel {
   artifacts: ArtifactViewModel[];
 }
 
+export interface OperationsViewModel {
+  schemaVersion: 1;
+  counts: SessionCounts;
+  workstreams: RootSessionCard[];
+  attention: AttentionItem[];
+  activeAgents: AgentSummary[];
+  recentResults: TimelineEvent[];
+  recentCompletions: TimelineEvent[];
+  recentArtifacts: ArtifactViewModel[];
+  timelineTail: TimelineEvent[];
+  suggestedRootSessionId?: string;
+}
+
+export interface AgentSummary {
+  runId?: string;
+  runDir: string;
+  name: string;
+  role?: string;
+  status: string;
+  mode: string;
+  cwd: string;
+  summary?: string;
+  needs?: string;
+  rootSessionId?: string;
+  workstreamId?: string;
+  updatedAt: string;
+  commands: AgentCommands;
+}
+
 export interface ArtifactViewModel {
   artifactId: string;
   token: string;
   title?: string;
   status: "active" | "revoked";
   entry: string;
-  url?: string;
+  url: string;
   createdAt: string;
   ownerRunDir?: string;
 }
@@ -66,6 +97,9 @@ export interface TimelineEvent {
   runId?: string;
   rootSessionId?: string;
   workstreamId?: string;
+  resultReady?: boolean;
+  resultIssue?: string;
+  resultWarning?: string;
 }
 
 const UNSCOPED_ROOT_SESSION_ID = "unscoped";
@@ -135,6 +169,36 @@ export function buildDashboard(now = Date.now()): DashboardViewModel {
 export function buildWorkstreams(now = Date.now()): { schemaVersion: 1; workstreams: RootSessionCard[] } {
   const vm = buildDashboard(now);
   return { schemaVersion: 1, workstreams: vm.rootSessions };
+}
+
+export function buildOperations(now = Date.now()): OperationsViewModel {
+  const agents = listMetadata(undefined);
+  const dashboard = buildDashboard(now);
+  const timeline = buildTimeline(undefined, { limit: 80 })!;
+  const activeAgents = agents
+    .filter((a) => classifyAgent(a, now) === "active")
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, 12)
+    .map(toAgentSummary);
+  const recentCompletions = timeline.events
+    .filter((e) => ["done", "error", "stopped"].includes((e.status || "").toLowerCase()))
+    .slice(-10)
+    .reverse();
+  const recentArtifacts = (buildArtifacts()?.artifacts ?? [])
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 10);
+  return {
+    schemaVersion: 1,
+    counts: dashboard.globalCounts,
+    workstreams: dashboard.rootSessions,
+    attention: dashboard.globalAttention.slice(0, 20),
+    activeAgents,
+    recentResults: recentCompletions,
+    recentCompletions,
+    recentArtifacts,
+    timelineTail: timeline.events.slice(-30),
+    suggestedRootSessionId: suggestRootSessionId(dashboard.rootSessions, dashboard.globalAttention, activeAgents),
+  };
 }
 
 function getWorkstreamAgents(rootSessionId: string): { rs: RootSessionRecord; agents: AgentMetadata[] } | undefined {
@@ -226,10 +290,8 @@ export function buildArtifacts(rootSessionId?: string): { schemaVersion: 1; arti
   return { schemaVersion: 1, artifacts: filterArtifactsByWorkstream(artifacts, wa.rs, wa.agents).map(toArtifactViewModel) };
 }
 
-export function buildTimeline(rootSessionId?: string): { schemaVersion: 1; events: TimelineEvent[] } | undefined {
-  const state = { offset: 0, carry: "" };
-  const allEvents = readEvents(state).events;
-  let events = allEvents;
+export function buildTimeline(rootSessionId?: string, options: { limit?: number } = {}): { schemaVersion: 1; events: TimelineEvent[]; limit: number; total: number } | undefined {
+  let events = readRecentEvents(5000, 2 * 1024 * 1024).events;
   if (rootSessionId) {
     const rs = listRootSessions().find((r) => r.rootSessionId === rootSessionId);
     if (!rs) return undefined;
@@ -237,9 +299,14 @@ export function buildTimeline(rootSessionId?: string): { schemaVersion: 1; event
       (e) => e.rootSessionId === rootSessionId || (rs && e.workstreamId === rs.workstreamId)
     );
   }
+  const limit = boundedLimit(options.limit, 200, 1000);
+  const total = events.length;
+  const limited = events.slice(-limit);
   return {
     schemaVersion: 1,
-    events: events.map((e) => ({
+    limit,
+    total,
+    events: limited.map((e) => ({ 
       time: e.time,
       type: e.type,
       agent: e.agent,
@@ -250,6 +317,9 @@ export function buildTimeline(rootSessionId?: string): { schemaVersion: 1; event
       runId: e.runId,
       rootSessionId: e.rootSessionId,
       workstreamId: e.workstreamId,
+      resultReady: e.resultReady,
+      resultIssue: e.resultIssue,
+      resultWarning: e.resultWarning,
     })),
   };
 }
@@ -262,6 +332,50 @@ export function buildHistory(): { schemaVersion: 1; historical: AgentMetadata[];
   return { schemaVersion: 1, historical, legacy };
 }
 
+function toAgentSummary(a: AgentMetadata): AgentSummary {
+  return {
+    runId: a.runId,
+    runDir: a.runDir,
+    name: a.name,
+    role: a.role,
+    status: a.status,
+    mode: a.mode,
+    cwd: a.cwd,
+    summary: a.summary,
+    needs: a.needs,
+    rootSessionId: a.rootSessionId,
+    workstreamId: a.workstreamId,
+    updatedAt: a.updatedAt,
+    commands: buildAgentCommands(a),
+  };
+}
+
+function suggestRootSessionId(
+  workstreams: RootSessionCard[],
+  attention: AttentionItem[],
+  activeAgents: AgentSummary[]
+): string | undefined {
+  for (const item of attention) {
+    const match = matchWorkstream(workstreams, item.rootSessionId, item.workstreamId);
+    if (match) return match.rootSessionId;
+  }
+  for (const agent of activeAgents) {
+    const match = matchWorkstream(workstreams, agent.rootSessionId, agent.workstreamId);
+    if (match) return match.rootSessionId;
+  }
+  return workstreams[0]?.rootSessionId;
+}
+
+function matchWorkstream(
+  workstreams: RootSessionCard[],
+  rootSessionId?: string,
+  workstreamId?: string
+): RootSessionCard | undefined {
+  if (rootSessionId) return workstreams.find((w) => w.rootSessionId === rootSessionId);
+  if (workstreamId) return workstreams.find((w) => w.workstreamId === workstreamId);
+  return undefined;
+}
+
 function toArtifactViewModel(a: ArtifactManifest): ArtifactViewModel {
   return {
     artifactId: a.artifactId,
@@ -271,5 +385,15 @@ function toArtifactViewModel(a: ArtifactManifest): ArtifactViewModel {
     entry: a.entry,
     createdAt: a.createdAt,
     ownerRunDir: a.ownerRunDir,
+    url: `/a/${encodeURIComponent(a.artifactId)}/${encodeURIComponent(a.token)}/${encodePathSegments(a.entry)}`,
   };
+}
+
+function boundedLimit(value: number | undefined, fallback: number, max: number): number {
+  if (!Number.isFinite(value) || value === undefined) return fallback;
+  return Math.max(1, Math.min(max, Math.floor(value)));
+}
+
+function encodePathSegments(path: string): string {
+  return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
 }

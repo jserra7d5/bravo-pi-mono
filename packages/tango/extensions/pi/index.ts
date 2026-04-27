@@ -258,8 +258,21 @@ function renderResultResult(result: any, { expanded }: { expanded: boolean }, th
   if (result.isError) return errorText(result, theme);
   const agent = result.details?.agent;
   const output = result.details?.result ?? "";
-  if (!expanded) return new Text(`${theme.fg("success", "✓")} ${theme.fg("accent", agent?.name ?? "agent")} result ${theme.fg("muted", firstLine(output))}`, 0, 0);
-  return textBlock([`${theme.fg("toolTitle", "Tango result")} ${theme.fg("accent", agent?.name ?? "")}`, "", output || theme.fg("dim", "No result.")]);
+  const ready = result.details?.resultReady === true;
+  const issue = result.details?.resultIssue;
+  const warning = result.details?.resultWarning;
+  const color = issue || !ready ? "warning" : warning ? "warning" : "success";
+  const icon = issue || !ready ? "⚠" : warning ? "⚠" : "✓";
+  const status = issue || !ready ? (issue || "result not ready") : warning ? warning : firstLine(output);
+  if (!expanded) return new Text(`${theme.fg(color, icon)} ${theme.fg("accent", agent?.name ?? "agent")} result ${theme.fg("muted", status)}`, 0, 0);
+  return textBlock([
+    `${theme.fg("toolTitle", "Tango result")} ${theme.fg("accent", agent?.name ?? "")}`,
+    issue ? theme.fg("warning", `Result issue: ${issue}`) : "",
+    warning ? theme.fg("warning", `Result warning: ${warning}`) : "",
+    ready ? theme.fg("success", "Result ready") : theme.fg("warning", "Result not ready"),
+    "",
+    output || theme.fg("dim", "No result."),
+  ].filter(Boolean));
 }
 
 async function updateFooterStatus(ctx: any, signal?: AbortSignal) {
@@ -352,6 +365,10 @@ function handleTangoEventLine(pi: ExtensionAPI, ctx: any, line: string) {
 }
 
 function suggestedAction(event: any): string {
+  if (event.runId) {
+    if (event.status === "done") return `tango result --run-id ${event.runId}`;
+    return `tango look --run-id ${event.runId} --lines 120`;
+  }
   if (event.status === "done") return `tango_result ${event.agent}`;
   return `tango_look ${event.agent} --lines 120`;
 }
@@ -533,12 +550,16 @@ export default function (pi: ExtensionAPI) {
       state: StringEnum(["running", "blocked", "done", "error", "stopped"] as const),
       message: Type.Optional(Type.String()),
       needs: Type.Optional(Type.String({ description: "Needed parent action for blocked/error statuses, e.g. decision, input, credentials, review, intervention." })),
+      resultFile: Type.Optional(Type.String({ description: "Path to a full deliverable to copy into result.md when state is done. Required for interactive agents unless summaryOnly is explicitly true. The status message remains only a short operational summary." })),
+      summaryOnly: Type.Optional(Type.Boolean({ description: "Explicitly complete without a result.md deliverable. Only valid with state=done; use only when no deliverable is intended." })),
       runDir: Type.Optional(Type.String({ description: "Optional run directory; defaults to TANGO_RUN_DIR." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const args = ["status", params.state];
       if (params.message) args.push(params.message);
       if (params.needs) args.push("--needs", params.needs);
+      if (params.resultFile) args.push("--result-file", params.resultFile);
+      if (params.summaryOnly) args.push("--summary-only");
       if (params.runDir) args.push("--run-dir", params.runDir);
       args.push("--json");
       const out = toolResult(await runTango(args, signal));

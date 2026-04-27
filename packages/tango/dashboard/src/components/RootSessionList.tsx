@@ -8,7 +8,7 @@ export default function RootSessionList({
   onSelect: (id: string) => void;
 }) {
   if (!sessions.length) {
-    return <div className="empty-state">No root sessions found.</div>;
+    return <div className="empty-state">No sessions found.</div>;
   }
   return (
     <div className="card-grid">
@@ -18,27 +18,28 @@ export default function RootSessionList({
           className="card"
           onClick={() => onSelect(rs.rootSessionId)}
           style={{ textAlign: "left", cursor: "pointer" }}
-          aria-label={`Open root session ${rs.title || rs.rootSessionId}`}
+          aria-label={`Open session ${rs.title || rs.rootSessionId}`}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <strong>{rs.title || rs.rootSessionId}</strong>
             {rs.attentionCount > 0 ? (
-              <span className="badge" style={{ background: "var(--error)", color: "#fff" }}>
-                {rs.attentionCount}
+              <span className="count-pill attention">
+                Attention: {rs.attentionCount}
               </span>
             ) : null}
           </div>
           <div className="agent-meta">
-            {rs.kind} · {rs.cwd || "—"}
+            {rs.kind} session · workstream {rs.workstreamId} · {rs.cwd || "—"}
           </div>
-          <div className="agent-meta" style={{ marginTop: 6 }}>
-            <span className="badge" title="Attention">{rs.counts.attention}</span>{" "}
-            <span className="badge" title="Active">{rs.counts.active}</span>{" "}
-            <span className="badge" title="Recent">{rs.counts.recent}</span>{" "}
-            <span className="badge" title="Historical">{rs.counts.historical}</span>{" "}
-            <span className="badge" title="Legacy">{rs.counts.legacy}</span>
+          <div className="count-row" style={{ marginTop: 8 }}>
+            <span className="count-pill attention">Attention: {rs.counts.attention}</span>
+            <span className="count-pill active">Active: {rs.counts.active}</span>
+            <span className="count-pill">Recent: {rs.counts.recent}</span>
+            <span className="count-pill">Historical: {rs.counts.historical}</span>
+            <span className="count-pill">Legacy: {rs.counts.legacy}</span>
+            <span className="count-pill">Total: {rs.counts.total}</span>
           </div>
-          <div className="agent-meta" style={{ marginTop: 4 }}>
+          <div className="agent-meta" style={{ marginTop: 8 }}>
             Last seen: {new Date(rs.lastSeenAt).toLocaleString()}
           </div>
         </button>
