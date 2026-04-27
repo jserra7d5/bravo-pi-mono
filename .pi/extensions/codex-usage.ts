@@ -185,8 +185,10 @@ function formatReset(resetAt: number | undefined, now = Date.now()): string | un
 	const minutes = Math.ceil(diffMs / 60_000);
 	if (minutes < 60) return `${minutes}m`;
 	const hours = Math.ceil(minutes / 60);
-	if (hours < 48) return `${hours}h`;
-	return `${Math.ceil(hours / 24)}d`;
+	if (hours < 24) return `${hours}h`;
+	const days = Math.floor(hours / 24);
+	const remainingHours = hours % 24;
+	return remainingHours > 0 ? `${days}d${remainingHours}h` : `${days}d`;
 }
 
 function formatDuration(seconds: number | undefined, fallback: string): string {
