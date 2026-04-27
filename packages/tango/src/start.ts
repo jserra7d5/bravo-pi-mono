@@ -6,6 +6,7 @@ import type { AgentMetadata, CommandSpec, RoleConfig, StartOptions } from "./typ
 import { runDirFor } from "./paths.js";
 import { assembleSystemPrompt, loadRole } from "./roles.js";
 import { readMetadata, transitionStatus, writeMetadata } from "./metadata.js";
+import { appendStatusEvent } from "./events.js";
 import { buildPiCommand } from "./harnesses/pi.js";
 import { buildGenericCommand } from "./harnesses/generic.js";
 import { buildClaudeCommand } from "./harnesses/claude.js";
@@ -83,20 +84,56 @@ function redactCommand(command: CommandSpec): CommandSpec {
 
 function extractResultText(parser: CommandSpec["resultParser"], event: any, current: string): string {
   if (parser === "pi-json") {
-    if (event.type === "message_end" && event.message?.role === "assistant") {
-      const parts = event.message.content ?? [];
-      for (const part of parts) if (part.type === "text") current = part.text;
-    }
+    const text = assistantTextFromEvent(event);
+    if (text) return text;
+    const delta = assistantTextDeltaFromEvent(event);
+    if (delta) return `${current}${delta}`;
     return current;
   }
   if (parser === "claude-stream-json") {
     if (event.type === "result" && typeof event.result === "string") return event.result;
-    if (event.type === "assistant" && Array.isArray(event.message?.content)) {
-      const text = event.message.content.filter((part: any) => part.type === "text" && typeof part.text === "string").map((part: any) => part.text).join("\n");
-      if (text) return current ? `${current}\n${text}` : text;
-    }
+    const text = assistantTextFromEvent(event);
+    if (text) return current ? `${current}\n${text}` : text;
   }
   return current;
+}
+
+function assistantTextFromEvent(event: any): string {
+  if (!event || typeof event !== "object") return "";
+  if ((event.type === "message_end" || event.type === "message" || event.type === "assistant") && event.message?.role === "assistant") {
+    return textFromContent(event.message.content);
+  }
+  if ((event.type === "response.completed" || event.type === "response.done") && event.response) {
+    return textFromResponseOutput(event.response.output);
+  }
+  if (event.type === "final" && event.role === "assistant" && typeof event.text === "string") return event.text;
+  return "";
+}
+
+function assistantTextDeltaFromEvent(event: any): string {
+  if (!event || typeof event !== "object") return "";
+  if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && typeof event.delta.text === "string") return event.delta.text;
+  if ((event.type === "response.output_text.delta" || event.type === "text_delta") && typeof event.delta === "string") return event.delta;
+  if ((event.type === "response.output_text.delta" || event.type === "text_delta") && typeof event.text === "string") return event.text;
+  return "";
+}
+
+function textFromResponseOutput(output: any): string {
+  if (!Array.isArray(output)) return "";
+  return output.map((item) => textFromContent(item?.content)).filter(Boolean).join("\n");
+}
+
+function textFromContent(content: any): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object") return "";
+      if ((part.type === "text" || part.type === "output_text") && typeof part.text === "string") return part.text;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function runtimeCommandPath(runDir: string): string { return join(runDir, "command.runtime.json"); }
@@ -151,9 +188,13 @@ export async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promis
       const current = readMetadata(meta.runDir);
       current.exitCode = code ?? 0;
       current.resultFile = resultFile;
-      writeFileSync(resultFile, finalText || plainOutput || "", "utf8");
+      writeFileSync(resultFile, finalText, "utf8");
+      current.resultFinalizedAt = new Date().toISOString();
+      if (finalText.trim()) delete current.resultIssue;
+      else current.resultIssue = "No final assistant text was extracted from the oneshot JSON stream; raw output is preserved in output.log.";
       writeMetadata(current);
       if (!isTerminalStatus(current.status)) transitionStatus(meta.runDir, current.exitCode === 0 ? "done" : "error");
+      else appendStatusEvent({ ...current, status: current.status }, current.status);
       resolve();
     });
     proc.on("error", (error: Error) => {

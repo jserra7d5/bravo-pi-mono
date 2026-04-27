@@ -4,8 +4,10 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { projectSlug } from "./paths.js";
 import { fileURLToPath } from "node:url";
 import { publishArtifact, readServerDiscovery, serverDiscoveryPath, startTangoServer } from "./server.js";
+import { runOneshot } from "./start.js";
 
 const cliPath = join(dirname(fileURLToPath(import.meta.url)), "cli.js");
 
@@ -19,6 +21,24 @@ function runCli(args: string[], env: NodeJS.ProcessEnv = {}, cwd = process.cwd()
     env: { ...process.env, ...env },
     encoding: "utf8",
   });
+}
+
+function makeMeta(options: { name: string; runDir: string; cwd: string; mode: "oneshot" | "interactive"; status?: string; task: string; summary?: string }) {
+  return {
+    name: options.name,
+    harness: "pi",
+    mode: options.mode,
+    status: options.status ?? "running",
+    cwd: options.cwd,
+    task: options.task,
+    runDir: options.runDir,
+    homeDir: join(options.runDir, "home"),
+    tmuxSocket: join(options.runDir, "tmux.sock"),
+    tmuxSession: "tango",
+    createdAt: "2024-01-01T00:00:00Z",
+    updatedAt: "2024-01-01T00:00:00Z",
+    summary: options.summary,
+  };
 }
 
 describe("rollout compatibility", () => {
@@ -86,9 +106,145 @@ describe("rollout compatibility", () => {
       writeFileSync(join(home, "server", "server.json"), JSON.stringify({ schemaVersion: 1, url: "http://127.0.0.1:43118", token: "dev token", pid: 123, startedAt: "file" }));
       const authed = runCli(["server", "url"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" });
       assert.strictEqual(authed.status, 0, authed.stderr);
-      assert.strictEqual(authed.stdout.trim(), "http://127.0.0.1:43118/?token=dev%20token");
+      assert.strictEqual(authed.stdout.trim(), "http://127.0.0.1:43118\ntoken: dev token\nUse the token as a Bearer token, or paste it into the dashboard once prompted.");
     } finally {
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does not append a done status summary to result.md", () => {
+    const home = tempHome();
+    const cwd = tempHome();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "interactive-a");
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "interactive-a", runDir, cwd, mode: "interactive", task: "write a report" })));
+      const result = runCli(["status", "done", "Completed audit", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.strictEqual(result.status, 0, result.stderr);
+      assert.strictEqual(existsSync(join(runDir, "result.md")), false);
+      const body = JSON.parse(result.stdout);
+      assert.strictEqual(body.agent.summary, "Completed audit");
+
+      const fetched = runCli(["result", "interactive-a", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.strictEqual(fetched.status, 0, fetched.stderr);
+      const fetchedBody = JSON.parse(fetched.stdout);
+      assert.strictEqual(fetchedBody.result, "");
+      assert.strictEqual(fetchedBody.resultReady, false);
+      assert.match(fetchedBody.resultIssue, /No deliverable result\.md/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("copies an explicit status result file into result.md", () => {
+    const home = tempHome();
+    const cwd = tempHome();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "interactive-b");
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "interactive-b", runDir, cwd, mode: "interactive", task: "simple task" })));
+      const source = join(cwd, "deliverable.md");
+      writeFileSync(source, "Full deliverable\nDetails here.\n");
+      const result = runCli(["status", "done", "Short summary", "--result-file", source, "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.strictEqual(result.status, 0, result.stderr);
+      assert.strictEqual(readFileSync(join(runDir, "result.md"), "utf8"), "Full deliverable\nDetails here.\n");
+      const body = JSON.parse(result.stdout);
+      assert.strictEqual(body.agent.summary, "Short summary");
+      assert.ok(body.agent.resultFinalizedAt);
+
+      const fetched = runCli(["result", "interactive-b", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.strictEqual(fetched.status, 0, fetched.stderr);
+      assert.strictEqual(JSON.parse(fetched.stdout).resultReady, true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not return a summary while a terminal oneshot result is still finalizing", () => {
+    const home = tempHome();
+    const cwd = tempHome();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "oneshot-a");
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "oneshot-a", runDir, cwd, mode: "oneshot", status: "done", task: "t", summary: "early summary" })));
+      const result = runCli(["result", "oneshot-a", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.notStrictEqual(result.status, 0);
+      const body = JSON.parse(result.stdout);
+      assert.strictEqual(body.ok, false);
+      assert.match(body.error, /still finalizing/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat oneshot thinking-only/raw json as a valid deliverable", async () => {
+    const home = tempHome();
+    const cwd = tempHome();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "oneshot-thinking");
+      mkdirSync(runDir, { recursive: true });
+      const script = join(cwd, "emit-thinking.mjs");
+      writeFileSync(script, "console.log(JSON.stringify({type:'thinking', text:'secret thoughts'}));\n");
+      const meta = makeMeta({ name: "oneshot-thinking", runDir, cwd, mode: "oneshot", status: "running", task: "audit findings" });
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(meta));
+      await runOneshot(meta as any, { command: process.execPath, args: [script], cwd, env: process.env as Record<string, string>, resultParser: "pi-json" });
+      assert.strictEqual(readFileSync(join(runDir, "result.md"), "utf8"), "");
+      assert.match(JSON.parse(readFileSync(join(runDir, "metadata.json"), "utf8")).resultIssue, /No final assistant text/);
+      assert.match(readFileSync(join(runDir, "output.log"), "utf8"), /thinking/);
+      const fetched = runCli(["result", "oneshot-thinking", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.strictEqual(fetched.status, 0, fetched.stderr);
+      const body = JSON.parse(fetched.stdout);
+      assert.strictEqual(body.result, "");
+      assert.strictEqual(body.resultReady, false);
+      assert.match(body.resultIssue, /No final assistant text/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("extracts normal oneshot final assistant text", async () => {
+    const home = tempHome();
+    const cwd = tempHome();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "oneshot-final");
+      mkdirSync(runDir, { recursive: true });
+      const script = join(cwd, "emit-final.mjs");
+      writeFileSync(script, "console.log(JSON.stringify({type:'message_end', message:{role:'assistant', content:[{type:'text', text:'Final deliverable\\nWith details.'}]}}));\n");
+      const meta = makeMeta({ name: "oneshot-final", runDir, cwd, mode: "oneshot", status: "running", task: "simple task" });
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(meta));
+      await runOneshot(meta as any, { command: process.execPath, args: [script], cwd, env: process.env as Record<string, string>, resultParser: "pi-json" });
+      assert.strictEqual(readFileSync(join(runDir, "result.md"), "utf8"), "Final deliverable\nWith details.");
+      const fetched = runCli(["result", "oneshot-final", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.strictEqual(fetched.status, 0, fetched.stderr);
+      const body = JSON.parse(fetched.stdout);
+      assert.strictEqual(body.resultReady, true);
+      assert.strictEqual(body.resultIssue, undefined);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("warns when report-like deliverables are suspiciously short", () => {
+    const home = tempHome();
+    const cwd = tempHome();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "short-audit");
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "short-audit", runDir, cwd, mode: "interactive", status: "done", task: "produce audit findings" })));
+      writeFileSync(join(runDir, "result.md"), "Done.\n");
+      const fetched = runCli(["result", "short-audit", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.strictEqual(fetched.status, 0, fetched.stderr);
+      const body = JSON.parse(fetched.stdout);
+      assert.strictEqual(body.resultReady, false);
+      assert.match(body.resultIssue, /suspiciously short/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
     }
   });
 

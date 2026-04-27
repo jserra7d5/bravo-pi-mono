@@ -83,6 +83,8 @@ export interface AgentMetadata {
   rootSessionId?: string;
   workstreamId?: string;
   resultFile?: string;
+  resultFinalizedAt?: string;
+  resultIssue?: string;
   metrics?: AgentMetricsSnapshot;
 }
 

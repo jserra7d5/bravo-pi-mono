@@ -11,8 +11,9 @@ Useful commands:
 - `tango look <name> [--run-id <id>] [--run-dir <dir>] --lines 200 --json` inspects an agent's current output.
 - `tango message <name> [--run-id <id>] [--run-dir <dir>] "message"` sends follow-up instructions to an interactive agent.
 - `tango status blocked "reason"` marks yourself blocked.
-- `tango status done "summary"` marks yourself complete.
-- `tango result <name> [--run-id <id>] [--run-dir <dir>]` reads a completed agent's result.
+- `tango status done "summary"` marks yourself complete; the summary is operational metadata and does not create/overwrite `result.md`.
+- `tango status done --result-file <path> "summary"` marks yourself complete and copies a full deliverable into `result.md`.
+- `tango result <name> [--run-id <id>] [--run-dir <dir>]` reads a completed agent's deliverable and reports readiness/issues when missing or suspicious.
 - `tango children [parent-name] [--run-id <id>] [--run-dir <dir>] --tree` shows child agents by lineage.
 - `tango wait <name...> [--run-id <id>] [--run-dir <dir>] --json` waits until named children are terminal.
 

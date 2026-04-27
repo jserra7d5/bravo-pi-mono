@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { runOneshotFromRuntime, startAgent } from "./start.js";
 import { projectSlug } from "./paths.js";
 import { fail, printJson } from "./json.js";
-import { listMetadata, readMetadata, removeRunDir, transitionStatus, updateStatus } from "./metadata.js";
+import { listMetadata, readMetadata, removeRunDir, transitionStatus, updateStatus, writeMetadata } from "./metadata.js";
 import { readMetrics, writeMetrics } from "./metrics.js";
 import { appendEvent, eventMatchesLineage, initialEventOffset, readEvents, type TangoEvent } from "./events.js";
 import { resolveTarget, isChildOf } from "./targetResolver.js";
@@ -88,7 +88,11 @@ async function cmdServer(parsed: Parsed) {
     if (extra.length > 0) throw new Error("Usage: tango server url");
     const discovery = readServerDiscovery();
     if (!discovery) throw new Error("No Tango server discovery found. Start one with `tango server`.");
-    console.log(discovery.token ? `${discovery.url}/?token=${encodeURIComponent(discovery.token)}` : discovery.url);
+    if (discovery.token) {
+      console.log(discovery.url);
+      console.log(`token: ${discovery.token}`);
+      console.log("Use the token as a Bearer token, or paste it into the dashboard once prompted.");
+    } else console.log(discovery.url);
     return;
   }
   if (subcommand) throw new Error("Usage: tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN] or tango server url");
@@ -185,13 +189,26 @@ function cmdDelete(parsed: Parsed, cwd: string, json: boolean) {
 
 function cmdStatus(parsed: Parsed, json: boolean) {
   const [state, ...msg] = parsed.positionals;
-  if (!state) throw new Error("Usage: tango status <running|blocked|done|error|stopped> [message]");
+  if (!state) throw new Error("Usage: tango status <running|blocked|done|error|stopped> [--result-file <path>] [message]");
   const runDir = flagString(parsed.flags, "run-dir") ?? process.env.TANGO_RUN_DIR;
   if (!runDir) throw new Error("No run dir. Set TANGO_RUN_DIR or pass --run-dir.");
   if (!isAgentStatus(state)) throw new Error(`Invalid status: ${state}`);
   const summary = msg.join(" ");
-  const meta = updateStatus(runDir, state, summary, { needs: flagString(parsed.flags, "needs") });
-  if (state === "done" && msg.length) writeFileSync(join(runDir, "result.md"), `${summary}\n`, { flag: "a" });
+  let meta = updateStatus(runDir, state, summary, { needs: flagString(parsed.flags, "needs") });
+  const resultFileFlag = flagString(parsed.flags, "result-file");
+  if (resultFileFlag) {
+    if (state !== "done") throw new Error("--result-file is only valid with `tango status done`.");
+    const source = resolve(resultFileFlag);
+    if (!existsSync(source)) throw new Error(`Result file not found: ${resultFileFlag}`);
+    const resultFile = join(runDir, "result.md");
+    writeFileSync(resultFile, readFileSync(source, "utf8"), "utf8");
+    meta = readMetadata(runDir);
+    meta.resultFile = resultFile;
+    meta.resultFinalizedAt = new Date().toISOString();
+    delete meta.resultIssue;
+    // Keep metadata.summary operational; result.md is the durable deliverable.
+    writeMetadata(meta);
+  }
   if (json) printJson({ ok: true, agent: meta }); else console.log(`${meta.name}: ${meta.status}`);
 }
 
@@ -313,9 +330,37 @@ function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
   if (!name) throw new Error("Usage: tango result <name>");
   const meta = resolveTarget({ name, cwd, runId: flagString(parsed.flags, "run-id"), runDir: flagString(parsed.flags, "run-dir"), env: process.env as any });
   const file = join(meta.runDir, "result.md");
-  const result = existsSync(file) ? readFileSync(file, "utf8") : (meta.summary ?? "");
+  const hasResultFile = existsSync(file);
+  const finalized = meta.mode !== "oneshot" || !!meta.resultFinalizedAt;
+  const result = hasResultFile ? readFileSync(file, "utf8") : "";
+  const issue = resultIssue(meta, hasResultFile, finalized, result);
+  const resultReady = hasResultFile && finalized && !issue;
+  if (meta.mode === "oneshot" && isTerminalStatus(meta.status) && !finalized) {
+    throw new Error("Result is still finalizing; try again shortly.");
+  }
   markLatestDoneHandled(getRecipientContext(), meta.runDir);
-  if (json) printJson({ ok: true, agent: meta, result }); else process.stdout.write(result.endsWith("\n") ? result : `${result}\n`);
+  if (json) printJson({ ok: true, agent: meta, result, resultReady, resultIssue: issue });
+  else {
+    if (issue) process.stderr.write(`tango result: ${issue}\n`);
+    if (result) process.stdout.write(result.endsWith("\n") ? result : `${result}\n`);
+    else if (meta.summary) process.stdout.write(`[status summary only] ${meta.summary}\n`);
+  }
+}
+
+function resultIssue(meta: AgentMetadata, hasResultFile: boolean, finalized: boolean, result: string): string | undefined {
+  if (meta.resultIssue) return meta.resultIssue;
+  if (meta.mode === "oneshot" && isTerminalStatus(meta.status) && hasResultFile && !finalized) return "Result is still finalizing; try again shortly.";
+  if (!hasResultFile) {
+    if (isTerminalStatus(meta.status)) return meta.summary ? "No deliverable result.md found; only metadata.summary is available." : "No deliverable result.md found.";
+    return "Agent is not terminal; result is not ready.";
+  }
+  if (!result.trim()) return "Result deliverable is empty.";
+  if (looksReportLike(meta.task) && result.trim().length < 240) return "Result deliverable is suspiciously short for a report/audit/planning task.";
+  return undefined;
+}
+
+function looksReportLike(task: string): boolean {
+  return /\b(report|audit|findings|investigat(?:e|ion)|research|plan|planning|review|analysis|analy[sz]e|root[- ]cause)\b/i.test(task);
 }
 
 function cmdRoles(parsed: Parsed, json: boolean) {
@@ -427,7 +472,7 @@ function refreshStatus(meta: AgentMetadata): AgentMetadata {
 
 function help() {
   console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]
-  tango server url\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--run-id <id>] [--run-dir <dir>] [--lines N] [--json]\n  tango attach <name> [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango status <state> [message] [--needs kind]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango wait <name...> [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <name> [--run-id <id>] [--run-dir <dir>]\n  tango roles list|show <name>\n`);
+  tango server url\n  tango start <name> --role <role> [--harness pi|claude|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [task...]\n  tango list [--json] [--all]\n  tango look <name> [--run-id <id>] [--run-dir <dir>] [--lines N] [--json]\n  tango attach <name> [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango status <state> [message] [--needs kind] [--result-file path]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango wait <name...> [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <name> [--run-id <id>] [--run-dir <dir>]\n  tango roles list|show <name>\n`);
 }
 
 main();
