@@ -1,9 +1,9 @@
 ---
-description: Analyze Loom graph consistency, readiness, architecture risk, and implementation alignment
-argument-hint: "<loom/node> [focus]"
+description: Analyze Loom graph health, drift, gaps, and risks
+argument-hint: "<loom/node-or-scope> [focus]"
 ---
 
-Route and orchestrate a read-only Loom-aware analysis. Use Loom only if a Loom/node/inbox reference or Loom context is provided. Slash commands choose scope and execution; child agents execute with Loom skills, not slash commands.
+Analyze Loom-backed work in this Claude Code session. Claude Code plugin commands cannot dispatch reviewer agents; perform the audit directly using the `loom-analyze` skill guidance and Loom diagnostics such as `loom graph doctor`.
 
 User input:
 
@@ -11,12 +11,8 @@ User input:
 $ARGUMENTS
 ```
 
-Check for:
-- unresolved decisions or stale branches;
-- implementation tasks not tied to chosen design;
-- rejected/deferred alternatives influencing current work;
-- missing review/validation nodes;
-- cross-consistency issues across proposal, design, plan, tasks, results, code references, and validation;
-- architecture smells, hidden coupling, or unjustified compatibility layers.
-
-Prefer reusing the persistent `loom-coordinator` for this Loom/workstream when analysis spans agents or prior context. If dispatching analysts, give each the `loom-analyze` skill, a distinct scope, and a requirement to report evidence plus a mutation summary (normally "no mutations" for read-only work). Return findings by severity with evidence and concrete recommendations. Write back to Loom only if requested.
+Workflow:
+1. Inspect the target Loom scope and recent context.
+2. Check graph consistency, unresolved decisions, stale branches, missing validation/review, implementation drift, and architecture risks.
+3. Record findings as Loom notes when useful.
+4. Summarize issues by severity with concrete next actions.

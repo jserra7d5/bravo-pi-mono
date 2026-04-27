@@ -247,6 +247,13 @@ test('Claude plugin exposes Loom commands and skills', () => {
     'loom-spec.md'
   ]);
 
+  for (const command of commands) {
+    const body = readFileSync(join(packageRoot, 'commands', command), 'utf8');
+    assert.doesNotMatch(body, /Prefer reusing the persistent `loom-coordinator`/);
+    assert.doesNotMatch(body, /child agents execute/);
+    assert.match(body, /Claude Code/);
+  }
+
   const skills = readdirSync(join(packageRoot, 'skills')).filter(name => existsSync(join(packageRoot, 'skills', name, 'SKILL.md'))).sort();
   assert.ok(skills.includes('loom-plan'));
   assert.ok(skills.includes('loom-design'));

@@ -1,9 +1,9 @@
 ---
-description: Coordinate implementation of Loom task nodes with worktrees, validation, and review
-argument-hint: "<loom/node> [implementation instructions]"
+description: Implement Loom-backed tasks with durable progress tracking
+argument-hint: "<loom/node/task> [constraints]"
 ---
 
-Route and orchestrate implementation for the referenced Loom task. Use Loom only if a Loom/node/inbox reference or Loom context is provided. Slash commands are coordinator/root-session entrypoints; implementation agents execute with Loom skills, not slash commands.
+Implement Loom-backed work in this Claude Code session. Claude Code plugin commands cannot spawn a persistent `loom-coordinator` or recursively delegate; use the `loom-implement` skill guidance directly, stay within the assigned scope, and record progress in Loom. If parallel agents are needed, stop and provide scoped handoff instructions for the user.
 
 User input:
 
@@ -12,15 +12,9 @@ $ARGUMENTS
 ```
 
 Workflow:
-1. Fetch task context and confirm readiness.
-2. Prefer reusing the persistent `loom-coordinator` for this Loom/workstream to own assignment, status, and integration memory.
-3. Use the worktree convention: worktrees live at `dirname(source_repo)/.worktrees/basename(source_repo)/`.
-4. Record source repo, branch, commit, dirty state, worktree path/branch, validation env, and assigned agents.
-5. Do not create worktrees from dirty source state silently.
-6. Dispatch implementation agents only with bounded scope, the `loom-implement` skill (or another specific Loom skill), review/validation expectations, mutation authority, and stop conditions.
-7. For multi-writer implementation, scope writers to distinct nodes/files/worktrees/branches; avoid overlapping edits unless a coordinator explicitly serializes integration.
-8. Require mutation summaries from every writer: files changed, Loom nodes/notes/inbox items updated, validation run, blockers, and handoff branch/diff location.
-9. Record results, blockers, validation, and review outcomes in Loom.
-10. Do not delete worktrees or branches without explicit approval.
-
-Prefer integration worktrees for curated changes and worker worktrees for isolated attempts.
+1. Inspect the assigned Loom node/context and confirm scope, acceptance criteria, and mutation authority.
+2. Check repo state before edits. Do not create worktrees from dirty source state silently.
+3. Implement the smallest coherent slice.
+4. Record Loom notes for decisions, blockers, validation, and results using v2 commands such as `loom note add`, `loom node update`, and `loom patch apply`.
+5. Run practical validation. If validation becomes long-running or exposes unrelated failures, stop and report.
+6. Return a mutation summary: files changed, Loom nodes/notes updated, validation run, blockers, and follow-up review needed.

@@ -1,9 +1,9 @@
 ---
-description: Check whether a Loom node is ready for spec, design, plan, implementation, or review
-argument-hint: "<mode> <loom/node> [focus]"
+description: Check whether Loom-backed work is ready for the next phase
+argument-hint: "<loom/node> [target phase]"
 ---
 
-Route and orchestrate a readiness check for a Loom-backed workflow. Use Loom only if a Loom/node/inbox reference or Loom context is provided. Slash commands choose scope and execution; child agents execute with Loom skills, not slash commands.
+Check readiness for a Loom-backed node in this Claude Code session. Claude Code plugin commands do not delegate; use the `loom-ready` skill guidance directly and record blockers/readiness notes in Loom.
 
 User input:
 
@@ -11,17 +11,8 @@ User input:
 $ARGUMENTS
 ```
 
-Modes may include `spec`, `design`, `plan`, `implement`, and `review`.
-
-Prefer reusing the persistent `loom-coordinator` for this Loom/workstream when readiness affects shared sequencing or agent assignment. If delegating, instruct the child agent to use `loom-ready`, define read/write authority, and require a mutation summary (usually no mutations unless writing a Loom note was requested).
-
-For implementation readiness, verify:
-- chosen design/decision exists;
-- task scope is clear;
-- target repos, base branches/commits, and dirty state are known;
-- worktree plan is defined when needed;
-- validation commands/environment paths are known or explicitly deferred;
-- review/validation path exists or is intentionally unnecessary;
-- blockers and assumptions are explicit.
-
-Return PASS/BLOCKED/READY-WITH-RISKS with concise reasons and next actions.
+Workflow:
+1. Inspect the target node and requested next phase.
+2. Verify required context, decisions, scope, validation expectations, ownership, and risks.
+3. Mark readiness/blockers with Loom notes or node state updates as appropriate.
+4. Summarize readiness verdict and required next actions.
