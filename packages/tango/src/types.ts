@@ -229,6 +229,10 @@ export interface StartOptions {
   dryRun?: boolean;
   recursive?: boolean;
   resultRequired?: boolean;
+  parentRunId?: string;
+  parentRunDir?: string;
+  rootSessionId?: string;
+  workstreamId?: string;
 }
 
 export interface CommandSpec {

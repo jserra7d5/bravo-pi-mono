@@ -230,6 +230,10 @@ async function cmdStart(parsed: Parsed, cwd: string, json: boolean) {
     clean: flagBool(parsed.flags, "clean"),
     dryRun: flagBool(parsed.flags, "dry-run"),
     recursive: parsed.flags.recursive === undefined ? undefined : flagBool(parsed.flags, "recursive"),
+    parentRunId: process.env.TANGO_RUN_ID,
+    parentRunDir: process.env.TANGO_RUN_DIR,
+    rootSessionId: process.env.TANGO_ROOT_SESSION_ID,
+    workstreamId: process.env.TANGO_WORKSTREAM_ID,
     resultRequired: parsed.flags["result-required"] !== undefined
       ? true
       : parsed.flags["no-result-required"] !== undefined

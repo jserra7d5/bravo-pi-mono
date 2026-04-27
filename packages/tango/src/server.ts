@@ -326,6 +326,10 @@ async function serverStartRun(input: any): Promise<{ agent: AgentMetadata; comma
     dryRun: input?.dryRun === true,
     recursive: typeof input?.recursive === "boolean" ? input.recursive : undefined,
     resultRequired: typeof input?.resultRequired === "boolean" ? input.resultRequired : undefined,
+    parentRunId: stringParam(input?.parentRunId),
+    parentRunDir: stringParam(input?.parentRunDir),
+    rootSessionId: stringParam(input?.rootSessionId),
+    workstreamId: stringParam(input?.workstreamId),
     json: true,
   });
   return { agent: result.meta, command: result.command, state: result.meta.runDir ? buildRunState(result.meta) : undefined };
