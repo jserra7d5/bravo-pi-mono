@@ -90,6 +90,7 @@ function help(){ out(`loom ${VERSION}\n\nUsage: loom [-L loom] <command> [args]\
 function commandHelp(cmd:string, rest:string[]){
   const topic = [cmd, ...rest].join(' ').trim();
   const docs:Record<string,string>={
+    'create-loom':`Usage: loom create-loom --name <name> --title <title> [--workspace id=path]\n\nCreate a new Loom inside an existing .loom container. Use this for a fresh workstream when the repo already has Loom initialized. If no .loom container exists yet, use: loom init --name <name> --title <title>.`,
     node:`Usage: loom [-L loom] node <create|show|update|list> ...\n\ncreate [--title text|title words] [--kind kind] [--parent N-0001] [--summary text] [--tag tag]\nshow <node>\nupdate <node> [--title text] [--kind kind] [--state state] [--parent N-0001|none] [--summary text] [--tag tag]\nlist [--kind kind] [--state state] [--parent N-0001|none]`,
     edge:`Usage: loom [-L loom] edge <add|list|types> ...\n\nadd <from-node> --to <to-node> [--type relationship]\nlist [node]\ntypes`,
     context:`Usage: loom [-L loom] context <node> [--brief]\n\nShow node context. --brief omits the full body and returns body_preview/body_omitted for agent control loops.`,
@@ -101,6 +102,7 @@ function commandHelp(cmd:string, rest:string[]){
     reference:`Usage: loom [-L loom] reference <add|list> <node> [path] [--workspace id] [--label text] [--kind kind]\n\nAdd/list file references. Duplicate references are treated as successful no-ops.`,
     note:`Usage: loom [-L loom] note <node> [message | --stdin]\n       loom [-L loom] note add <node> [message | --stdin]\n       loom [-L loom] note list <node>\n       loom [-L loom] note retract <node:note:n> --reason text\n\nAppend/list/retract durable notes. Use --stdin for nontrivial note bodies.`,
   };
+  if(cmd==='create') return out(`Removed command: loom create\n\nUse one of:\n  loom node create --title \"Node title\" [--kind task] [--parent N-0001]\n  loom create-loom --name <name> --title \"Loom title\"\n`);
   out(docs[topic] || docs[cmd] || `No command-specific help for ${topic}. Run 'loom --help'.`);
 }
 
