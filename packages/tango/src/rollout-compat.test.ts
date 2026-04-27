@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -41,6 +42,17 @@ function makeMeta(options: { name: string; runDir: string; cwd: string; mode: "o
     resultFinalizedAt: options.resultFinalizedAt,
     resultRequired: options.resultRequired,
   };
+}
+
+function listen(server: ReturnType<typeof createServer>): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") reject(new Error("Expected TCP server address"));
+      else resolve(address.port);
+    });
+  });
 }
 
 describe("rollout compatibility", () => {
@@ -108,6 +120,35 @@ describe("rollout compatibility", () => {
       assert.strictEqual(body.agent.name, "dry-run-agent");
       assert.ok(existsSync(join(home, "server", "server.json")), "tango start should create server discovery state for the server-first active protocol");
     } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces a stale pre-run-api server discovery before active commands", async () => {
+    const home = tempHome();
+    const cwd = tempHome();
+    const staleServer = createServer((req, res) => {
+      if (req.url === "/api/v1/health") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, schemaVersion: 1 }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Not found" }));
+    });
+    try {
+      const stalePort = await listen(staleServer);
+      mkdirSync(join(home, "server"), { recursive: true });
+      writeFileSync(join(home, "server", "server.json"), JSON.stringify({ schemaVersion: 1, url: `http://127.0.0.1:${stalePort}`, pid: process.pid, startedAt: "stale" }));
+
+      const result = runCli(["ps", "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.strictEqual(result.status, 0, result.stderr);
+      assert.deepStrictEqual(JSON.parse(result.stdout), { ok: true, agents: [] });
+      const discovery = JSON.parse(readFileSync(join(home, "server", "server.json"), "utf8"));
+      assert.notStrictEqual(discovery.url, `http://127.0.0.1:${stalePort}`);
+    } finally {
+      await new Promise<void>((resolve) => staleServer.close(() => resolve()));
       rmSync(home, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });
     }

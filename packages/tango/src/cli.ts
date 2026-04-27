@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +16,7 @@ import { attachTmux, captureTmux, sendTmux, stopTmux, tmuxAlive } from "./runtim
 import { isTerminalStatus, reconcileAgentLifecycle } from "./lifecycle.js";
 import { assessResultDeliverable, validateResultContent } from "./result.js";
 import type { AgentMetadata, AgentStatus, ThinkingLevel } from "./types.js";
-import { listArtifacts, publishArtifact, readServerDiscovery, revokeArtifact, startTangoServer } from "./server.js";
+import { listArtifacts, publishArtifact, readServerDiscovery, revokeArtifact, serverDiscoveryPath, startTangoServer, type ServerDiscovery } from "./server.js";
 import { buildRunState as cpBuildRunState, messageRun, readActivity, reportRun, stopRun } from "./controlPlane.js";
 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
@@ -290,7 +290,11 @@ function scopedListAgents(cwd: string, all: boolean): AgentMetadata[] {
 
 async function ensureServer(): Promise<NonNullable<ReturnType<typeof readServerDiscovery>>> {
   const existing = readServerDiscovery();
-  if (existing) return existing;
+  if (existing) {
+    if (await serverSupportsRunApi(existing)) return existing;
+    if (process.env.TANGO_SERVER_URL) throw new Error("Configured Tango server is not compatible with this Tango CLI.");
+    rmSync(serverDiscoveryPath(), { force: true });
+  }
   if (process.env.TANGO_SERVER_URL) throw new Error("Configured Tango server is not reachable.");
   const child = spawn(process.execPath, [cliPath, "server", "--port", "0"], {
     detached: true,
@@ -302,9 +306,21 @@ async function ensureServer(): Promise<NonNullable<ReturnType<typeof readServerD
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 100));
     const discovery = readServerDiscovery();
-    if (discovery) return discovery;
+    if (discovery && await serverSupportsRunApi(discovery)) return discovery;
   }
   throw new Error("Timed out starting Tango server for active command.");
+}
+
+async function serverSupportsRunApi(discovery: ServerDiscovery): Promise<boolean> {
+  const headers: Record<string, string> = { "accept": "application/json" };
+  if (discovery.token) headers.authorization = `Bearer ${discovery.token}`;
+  try {
+    const url = new URL("/api/v1/runs?cwd=/", discovery.url);
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(1000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 async function serverRequest(method: "GET" | "POST", path: string, body?: unknown): Promise<any> {
