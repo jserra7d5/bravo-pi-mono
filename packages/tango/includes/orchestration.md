@@ -6,15 +6,15 @@ Tango uses stable runtime identity (run ID, run directory, root session, workstr
 
 Useful commands:
 
-- `tango start <name> --role <role> "task"` starts a child agent.
+- `tango start <name> --role <role> "task"` starts a child agent. Interactive agents require a deliverable by default; use `--no-result-required` only for status-only agents.
 - `tango list --json [--all]` lists agents in the current project or across `TANGO_HOME`.
 - `tango look <name> [--run-id <id>] [--run-dir <dir>] --lines 200 --json` inspects an agent's current output.
 - `tango message <name> [--run-id <id>] [--run-dir <dir>] "message"` sends follow-up instructions to an interactive agent.
 - `tango status blocked "reason"` marks yourself blocked.
 - `tango status done --result-file <path> "summary"` marks an interactive agent complete and copies a full deliverable into `result.md` before notifying parents.
-- `tango status done --summary-only "summary"` is the explicit opt-out when no deliverable is intended; the summary is operational metadata and does not create/overwrite `result.md`.
-- Oneshot agents may have their final assistant response captured as `result.md`; interactive agents must use `--result-file` unless explicitly opting out with `--summary-only`.
-- `tango result <name> [--run-id <id>] [--run-dir <dir>]` reads a completed agent's deliverable and reports readiness/issues/warnings when missing or suspicious.
+- `tango status done --summary-only "summary"` is the explicit opt-out only for agents started with `--no-result-required`; the summary is operational metadata and does not create/overwrite `result.md`.
+- Oneshot agents may have their final assistant response captured as `result.md`; interactive agents must use `--result-file` unless the run was explicitly started as not requiring a result.
+- `tango result <name> [--run-id <id>] [--run-dir <dir>] [--watch] [--timeout seconds]` reads a completed agent's deliverable and reports readiness/issues/warnings when missing or suspicious.
 - `tango children [parent-name] [--run-id <id>] [--run-dir <dir>] --tree` shows child agents by lineage.
 - `tango wait <name...> [--run-id <id>] [--run-dir <dir>] --json` waits until named children are terminal.
 

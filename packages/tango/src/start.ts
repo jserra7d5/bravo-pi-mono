@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentMetadata, CommandSpec, RoleConfig, StartOptions } from "./types.js";
@@ -63,6 +63,7 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
     model: options.model ?? role?.model,
     thinking: options.thinking ?? role?.thinking,
     effort: options.effort ?? role?.effort,
+    resultRequired: options.resultRequired ?? (mode === "interactive" ? true : undefined),
   };
 
   const effectiveRole = role ? { ...role, harness, model: meta.model, thinking: meta.thinking, effort: meta.effort, recursive: options.recursive ?? role.recursive } : undefined;
@@ -132,6 +133,18 @@ function assistantTextFromEvent(event: any): string {
     return textFromResponseOutput(event.response.output);
   }
   if (event.type === "final" && event.role === "assistant" && typeof event.text === "string") return event.text;
+  if ((event.type === "turn_end" || event.type === "agent_end") && typeof event.text === "string") return event.text;
+  if ((event.type === "turn_end" || event.type === "agent_end") && typeof event.result === "string") return event.result;
+  if ((event.type === "turn_end" || event.type === "agent_end") && event.message?.role === "assistant") return textFromContent(event.message.content);
+  if ((event.type === "turn_end" || event.type === "agent_end") && Array.isArray(event.messages)) {
+    return event.messages
+      .filter((message: any) => message?.role === "assistant")
+      .map((message: any) => textFromContent(message.content))
+      .filter(Boolean)
+      .join("\n");
+  }
+  if ((event.type === "turn_end" || event.type === "agent_end") && typeof event.response?.output_text === "string") return event.response.output_text;
+  if ((event.type === "turn_end" || event.type === "agent_end") && event.response) return textFromResponseOutput(event.response.output);
   return "";
 }
 
@@ -171,11 +184,24 @@ function startOneshotSupervisor(meta: AgentMetadata, command: CommandSpec): void
   const supervisorEnv = { ...process.env } as Record<string, string>;
   const tangoHome = process.env.TANGO_HOME ?? command.env.TANGO_HOME;
   if (tangoHome) supervisorEnv.TANGO_HOME = tangoHome;
+  const supervisorLog = join(meta.runDir, "supervisor.log");
+  const fd = openSync(supervisorLog, "a");
+  writeFileSync(supervisorLog, `${new Date().toISOString()} starting oneshot supervisor\n`, { flag: "a" });
   const supervisor = spawn(process.execPath, [cliPath, "runner", "oneshot", "--run-dir", meta.runDir], {
     cwd: meta.cwd,
     env: supervisorEnv,
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", fd, fd],
+  });
+  closeSync(fd);
+  if (supervisor.pid) {
+    const current = readMetadata(meta.runDir);
+    current.supervisorPid = supervisor.pid;
+    writeMetadata(current);
+  }
+  supervisor.on("error", (error) => {
+    writeFileSync(supervisorLog, `${new Date().toISOString()} supervisor spawn error: ${error.message}\n`, { flag: "a" });
+    finalizeSupervisorSpawnError(meta.runDir, error);
   });
   supervisor.unref();
 }
@@ -186,15 +212,33 @@ export async function runOneshotFromRuntime(runDir: string): Promise<void> {
   await runOneshot(meta, command);
 }
 
+function finalizeSupervisorSpawnError(runDir: string, error: Error): void {
+  const resultFile = join(runDir, "result.md");
+  try {
+    const current = readMetadata(runDir);
+    current.exitCode = 127;
+    current.resultFile = resultFile;
+    if (!existsSync(resultFile)) writeFileSync(resultFile, "", "utf8");
+    current.resultFinalizedAt = new Date().toISOString();
+    current.resultIssue = `Failed to start oneshot supervisor: ${error.message}`;
+    writeMetadata(current);
+    transitionStatus(runDir, "error", error.message);
+  } catch {}
+}
+
 export async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promise<void> {
   const eventsFile = join(meta.runDir, "events.jsonl");
   const outFile = join(meta.runDir, "output.log");
   const errFile = join(meta.runDir, "stderr.log");
   const resultFile = join(meta.runDir, "result.md");
+  const supervisorLog = join(meta.runDir, "supervisor.log");
+  const logSupervisor = (message: string) => writeFileSync(supervisorLog, `${new Date().toISOString()} ${message}\n`, { flag: "a" });
+  logSupervisor(`runner starting command: ${spec.command} ${spec.args.join(" ")}`);
   await new Promise<void>((resolve) => {
     const proc = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, stdio: ["ignore", "pipe", "pipe"] });
-    meta.pid = proc.pid;
-    writeMetadata(meta);
+    const started = readMetadata(meta.runDir);
+    started.pid = proc.pid;
+    writeMetadata(started);
     let buffer = "";
     let finalText = "";
     let plainOutput = "";
@@ -209,12 +253,19 @@ export async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promis
       for (const line of lines) processJsonLine(line);
     });
     proc.stderr.on("data", (chunk: Buffer) => writeFileSync(errFile, chunk.toString(), { flag: "a" }));
-    proc.on("close", (code: number | null) => {
+    proc.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;
+      logSupervisor(`child close code=${code ?? "null"} signal=${signal ?? "null"}`);
       settled = true;
       if (buffer.trim()) processJsonLine(buffer);
       const current = readMetadata(meta.runDir);
-      current.exitCode = code ?? 0;
+      current.exitCode = code ?? (signal ? 128 : 0);
+      if (isTerminalStatus(current.status)) {
+        writeMetadata(current);
+        appendStatusEvent({ ...current, status: current.status }, current.status);
+        resolve();
+        return;
+      }
       const resultText = (spec.resultParser ?? "pi-json") === "plain" ? plainOutput : finalText;
       current.resultFile = resultFile;
       writeFileSync(resultFile, resultText, "utf8");
@@ -225,12 +276,12 @@ export async function runOneshot(meta: AgentMetadata, spec: CommandSpec): Promis
         ? "Plain oneshot output was empty; raw output is preserved in output.log."
         : "No final assistant text was extracted from the oneshot JSON stream; raw output is preserved in output.log.";
       writeMetadata(current);
-      if (!isTerminalStatus(current.status)) transitionStatus(meta.runDir, current.exitCode === 0 ? "done" : "error");
-      else appendStatusEvent({ ...current, status: current.status }, current.status);
+      transitionStatus(meta.runDir, current.exitCode === 0 ? "done" : "error");
       resolve();
     });
     proc.on("error", (error: Error) => {
       if (settled) return;
+      logSupervisor(`child error: ${error.message}`);
       settled = true;
       const current = readMetadata(meta.runDir);
       current.exitCode = 127;

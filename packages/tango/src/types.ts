@@ -74,6 +74,7 @@ export interface AgentMetadata {
   thinking?: ThinkingLevel;
   effort?: string;
   pid?: number;
+  supervisorPid?: number;
   exitCode?: number | null;
   summary?: string;
   needs?: string;
@@ -84,6 +85,8 @@ export interface AgentMetadata {
   workstreamId?: string;
   resultFile?: string;
   resultFinalizedAt?: string;
+  resultSummaryOnlyAt?: string;
+  resultRequired?: boolean;
   resultIssue?: string;
   metrics?: AgentMetricsSnapshot;
 }
@@ -103,6 +106,7 @@ export interface StartOptions {
   json?: boolean;
   dryRun?: boolean;
   recursive?: boolean;
+  resultRequired?: boolean;
 }
 
 export interface CommandSpec {

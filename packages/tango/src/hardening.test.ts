@@ -82,6 +82,225 @@ describe("Tango CLI/runtime hardening", () => {
     }
   });
 
+  it("stops oneshot runs and finalizes an empty stopped result issue when no result exists", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "stop-one");
+      mkdirSync(runDir, { recursive: true });
+      const meta = {
+        name: "stop-one",
+        harness: "generic",
+        mode: "oneshot",
+        status: "running",
+        cwd,
+        task: "long task",
+        runDir,
+        homeDir: join(runDir, "home"),
+        tmuxSocket: join(runDir, "tmux.sock"),
+        tmuxSession: "tango",
+        createdAt: "2024-01-01T00:00:00Z",
+        updatedAt: "2024-01-01T00:00:00Z",
+        runId: "run_stop_one",
+        pid: 99999999,
+        supervisorPid: 99999998,
+      };
+      writeFileSync(join(runDir, "metadata.json"), `${JSON.stringify(meta, null, 2)}\n`);
+
+      const result = runCli(["stop", "--run-id", "run_stop_one", "--json"], { TANGO_HOME: home }, cwd);
+
+      assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+      const body = JSON.parse(result.stdout);
+      assert.strictEqual(body.agent.status, "stopped");
+      assert.match(body.agent.resultIssue, /stopped before producing/);
+      assert.strictEqual(readFileSync(join(runDir, "result.md"), "utf8"), "");
+      assert.match(readFileSync(join(runDir, "supervisor.log"), "utf8"), /stop:/);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("stopping oneshot with an unfinalized result marks it as stopped issue without overwriting content", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "stop-partial");
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify({
+        name: "stop-partial",
+        harness: "generic",
+        mode: "oneshot",
+        status: "running",
+        cwd,
+        task: "long task",
+        runDir,
+        homeDir: join(runDir, "home"),
+        tmuxSocket: join(runDir, "tmux.sock"),
+        tmuxSession: "tango",
+        createdAt: "2024-01-01T00:00:00Z",
+        updatedAt: "2024-01-01T00:00:00Z",
+        runId: "run_stop_partial",
+      }));
+      writeFileSync(join(runDir, "result.md"), "partial draft", "utf8");
+
+      const result = runCli(["stop", "--run-id", "run_stop_partial", "--json"], { TANGO_HOME: home }, cwd);
+
+      assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+      const body = JSON.parse(result.stdout);
+      assert.strictEqual(body.agent.status, "stopped");
+      assert.match(body.agent.resultIssue, /stopped before producing/);
+      assert.ok(body.agent.resultFinalizedAt);
+      assert.strictEqual(readFileSync(join(runDir, "result.md"), "utf8"), "partial draft");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("result --watch reports timeout assessment without marking ready", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "watching");
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify({
+        name: "watching",
+        harness: "generic",
+        mode: "oneshot",
+        status: "running",
+        cwd,
+        task: "simple task",
+        runDir,
+        homeDir: join(runDir, "home"),
+        tmuxSocket: join(runDir, "tmux.sock"),
+        tmuxSession: "tango",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        runId: "run_watching",
+      }));
+
+      const result = runCli(["result", "--run-id", "run_watching", "--watch", "--timeout", "0.01", "--json"], { TANGO_HOME: home }, cwd);
+
+      assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+      const body = JSON.parse(result.stdout);
+      assert.strictEqual(body.ok, false);
+      assert.strictEqual(body.timeout, true);
+      assert.strictEqual(body.resultReady, false);
+      assert.match(body.resultIssue, /not ready|no child PID/i);
+      assert.strictEqual(body.resultAssessment.resultReady, false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("allows blocked status to update and transition back to running", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const meta = writeMeta(home, cwd, "blocked-agent", { status: "blocked", summary: "waiting", needs: "input", resultFile: undefined, resultFinalizedAt: undefined });
+      const update = runCli(["status", "blocked", "still waiting", "--needs", "review", "--run-dir", meta.runDir, "--json"], { TANGO_HOME: home }, cwd);
+      assert.strictEqual(update.status, 0, update.stderr || update.stdout);
+      assert.strictEqual(JSON.parse(update.stdout).agent.summary, "still waiting");
+      assert.strictEqual(JSON.parse(update.stdout).agent.needs, "review");
+
+      const running = runCli(["status", "running", "resumed", "--run-dir", meta.runDir, "--json"], { TANGO_HOME: home }, cwd);
+      assert.strictEqual(running.status, 0, running.stderr || running.stdout);
+      const body = JSON.parse(running.stdout);
+      assert.strictEqual(body.agent.status, "running");
+      assert.strictEqual(body.agent.summary, "resumed");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects transitions away from final terminal statuses", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const meta = writeMeta(home, cwd, "sticky", { status: "done", summary: "finished" });
+      const result = runCli(["status", "running", "--run-dir", meta.runDir, "again", "--json"], { TANGO_HOME: home }, cwd);
+
+      assert.notStrictEqual(result.status, 0);
+      assert.match(JSON.parse(result.stdout).error, /terminal agent status from done to running/i);
+      assert.strictEqual(JSON.parse(readFileSync(join(meta.runDir, "metadata.json"), "utf8")).status, "done");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects changed duplicate done finalization", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const meta = writeMeta(home, cwd, "done-again", { status: "done", summary: "finished" });
+      const source = join(cwd, "new-result.md");
+      writeFileSync(source, "new result\n");
+      const result = runCli(["status", "done", "--run-dir", meta.runDir, "--result-file", source, "changed", "--json"], { TANGO_HOME: home }, cwd);
+
+      assert.notStrictEqual(result.status, 0);
+      assert.match(JSON.parse(result.stdout).error, /already done|immutable/i);
+      assert.strictEqual(readFileSync(join(meta.runDir, "result.md"), "utf8"), "result for done-again\n");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("allows exact duplicate done status as a no-op", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const meta = writeMeta(home, cwd, "done-noop", { status: "done", summary: "finished" });
+      const result = runCli(["status", "done", "--run-dir", meta.runDir, "finished", "--json"], { TANGO_HOME: home }, cwd);
+
+      assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+      const body = JSON.parse(result.stdout);
+      assert.strictEqual(body.agent.status, "done");
+      assert.strictEqual(body.agent.resultFinalizedAt, "2024-01-01T00:00:01Z");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("wait --json includes per-agent result assessments", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      writeMeta(home, cwd, "waited");
+      const result = runCli(["wait", "--run-id", "run_waited", "--json"], { TANGO_HOME: home }, cwd);
+
+      assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+      const body = JSON.parse(result.stdout);
+      assert.strictEqual(body.agents[0].resultAssessment.resultReady, true);
+      assert.strictEqual(body.agents[0].resultAssessment.result, "result for waited\n");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("starts interactive agents with deliverables required by default unless opted out", () => {
+    const cwd = tempDir();
+    const home = tempDir();
+    try {
+      const required = runCli(["start", "needs-result", "--harness", "generic", "--mode", "interactive", "--dry-run", "--json", "do work"], { TANGO_HOME: home }, cwd);
+      assert.strictEqual(required.status, 0, required.stderr || required.stdout);
+      assert.strictEqual(JSON.parse(required.stdout).agent.resultRequired, true);
+
+      const optional = runCli(["start", "no-result", "--harness", "generic", "--mode", "interactive", "--no-result-required", "--dry-run", "--json", "do work"], { TANGO_HOME: home }, cwd);
+      assert.strictEqual(optional.status, 0, optional.stderr || optional.stdout);
+      assert.strictEqual(JSON.parse(optional.stdout).agent.resultRequired, false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("supports generated run-id commands without positional names", () => {
     const cwd = tempDir();
     const home = tempDir();

@@ -23,7 +23,7 @@ function runCli(args: string[], env: NodeJS.ProcessEnv = {}, cwd = process.cwd()
   });
 }
 
-function makeMeta(options: { name: string; runDir: string; cwd: string; mode: "oneshot" | "interactive"; status?: string; task: string; summary?: string; resultFinalizedAt?: string }) {
+function makeMeta(options: { name: string; runDir: string; cwd: string; mode: "oneshot" | "interactive"; status?: string; task: string; summary?: string; resultFinalizedAt?: string; resultRequired?: boolean }) {
   return {
     name: options.name,
     harness: "pi",
@@ -39,6 +39,7 @@ function makeMeta(options: { name: string; runDir: string; cwd: string; mode: "o
     updatedAt: "2024-01-01T00:00:00Z",
     summary: options.summary,
     resultFinalizedAt: options.resultFinalizedAt,
+    resultRequired: options.resultRequired,
   };
 }
 
@@ -113,30 +114,48 @@ describe("rollout compatibility", () => {
     }
   });
 
-  it("rejects interactive done without a result file unless explicitly summary-only", () => {
+  it("rejects result-required interactive done without a result file or summary-only escape", () => {
     const home = tempHome();
     const cwd = tempHome();
     try {
       const runDir = join(home, "runs", projectSlug(cwd), "interactive-a");
       mkdirSync(runDir, { recursive: true });
-      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "interactive-a", runDir, cwd, mode: "interactive", task: "write a report" })));
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "interactive-a", runDir, cwd, mode: "interactive", task: "write a report", resultRequired: true })));
       const rejected = runCli(["status", "done", "Completed audit", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
       assert.notStrictEqual(rejected.status, 0);
       assert.match(JSON.parse(rejected.stdout).error, /Status summary is not a deliverable/);
       assert.strictEqual(existsSync(join(runDir, "result.md")), false);
 
       const summaryOnly = runCli(["status", "done", "Completed audit", "--summary-only", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.notStrictEqual(summaryOnly.status, 0);
+      assert.match(JSON.parse(summaryOnly.stdout).error, /required deliverable/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("allows explicit summary-only only for runs with no required deliverable", () => {
+    const home = tempHome();
+    const cwd = tempHome();
+    try {
+      const runDir = join(home, "runs", projectSlug(cwd), "interactive-summary-only");
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "metadata.json"), JSON.stringify(makeMeta({ name: "interactive-summary-only", runDir, cwd, mode: "interactive", task: "quick status", resultRequired: false })));
+
+      const summaryOnly = runCli(["status", "done", "Completed status-only task", "--summary-only", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
       assert.strictEqual(summaryOnly.status, 0, summaryOnly.stderr);
       assert.strictEqual(existsSync(join(runDir, "result.md")), false);
       const body = JSON.parse(summaryOnly.stdout);
-      assert.strictEqual(body.agent.summary, "Completed audit");
+      assert.strictEqual(body.agent.summary, "Completed status-only task");
+      assert.ok(body.agent.resultSummaryOnlyAt);
 
-      const fetched = runCli(["result", "interactive-a", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      const fetched = runCli(["result", "interactive-summary-only", "--run-dir", runDir, "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
       assert.strictEqual(fetched.status, 0, fetched.stderr);
       const fetchedBody = JSON.parse(fetched.stdout);
       assert.strictEqual(fetchedBody.result, "");
       assert.strictEqual(fetchedBody.resultReady, false);
-      assert.match(fetchedBody.resultIssue, /No finalized deliverable result\.md/);
+      assert.match(fetchedBody.resultIssue, /summary-only/);
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });

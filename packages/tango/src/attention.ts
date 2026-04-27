@@ -24,6 +24,8 @@ export interface AttentionRecord {
   updatedAt: string;
   summary?: string;
   needs?: string;
+  resultFinalizedAt?: string;
+  resultIssue?: string;
 }
 
 export interface RecipientContext {
@@ -52,7 +54,7 @@ function recordKey(record: AttentionRecord): string {
     runId: record.recipientRunId,
     runDir: record.recipientRunDir,
     rootSessionId: record.recipientRootSessionId,
-  })}|${record.targetRunDir}|${record.eventId}`;
+  })}|${record.targetRunDir}|${recordLogicalKey(record)}`;
 }
 
 function recipientMatch(record: AttentionRecord, recipient: RecipientContext): boolean {
@@ -92,11 +94,50 @@ export function findAttentionRecord(
   );
 }
 
+function completionKey(status: AgentStatus, resultFinalizedAt?: string, resultIssue?: string, needs?: string): string | undefined {
+  if (status !== "done") return undefined;
+  if (!resultFinalizedAt && !resultIssue && !needs) return undefined;
+  return `done:${resultFinalizedAt ?? ""}|${resultIssue ?? ""}|${needs ?? ""}`;
+}
+
+function recordLogicalKey(record: AttentionRecord): string {
+  return completionKey(record.status, record.resultFinalizedAt, record.resultIssue, record.needs) ?? record.eventId;
+}
+
+function eventLogicalKey(event: TangoEvent): string {
+  return completionKey(event.status, event.resultFinalizedAt, event.resultIssue, event.needs) ?? event.eventId;
+}
+
+function findLogicalAttentionRecord(
+  recipient: RecipientContext,
+  event: TangoEvent
+): AttentionRecord | undefined {
+  const logicalKey = eventLogicalKey(event);
+  return readAllAttentionRecords().find((r) =>
+    r.targetRunDir === event.runDir &&
+    recordLogicalKey(r) === logicalKey &&
+    recipientMatch(r, recipient)
+  );
+}
+
+function findResultHandledRecord(
+  recipient: RecipientContext,
+  targetRunDir: string,
+  resultFinalizedAt: string
+): AttentionRecord | undefined {
+  return readAllAttentionRecords().find((r) =>
+    r.targetRunDir === targetRunDir &&
+    r.status === "done" &&
+    r.resultFinalizedAt === resultFinalizedAt &&
+    recipientMatch(r, recipient)
+  );
+}
+
 export function upsertAttentionFromEvent(
   event: TangoEvent,
   recipient: RecipientContext
 ): AttentionRecord {
-  const existing = findAttentionRecord(recipient, event.runDir, event.eventId);
+  const existing = findAttentionRecord(recipient, event.runDir, event.eventId) ?? findLogicalAttentionRecord(recipient, event);
   const now = new Date().toISOString();
   let record: AttentionRecord;
   if (existing) {
@@ -106,6 +147,8 @@ export function upsertAttentionFromEvent(
       previousStatus: event.previousStatus ?? existing.previousStatus,
       summary: event.summary ?? existing.summary,
       needs: event.needs ?? existing.needs,
+      resultFinalizedAt: event.resultFinalizedAt ?? existing.resultFinalizedAt,
+      resultIssue: event.resultIssue ?? existing.resultIssue,
       updatedAt: now,
     };
     if (existing.state === "superseded" && event.previousStatus !== event.status) {
@@ -129,12 +172,14 @@ export function upsertAttentionFromEvent(
       updatedAt: now,
       summary: event.summary,
       needs: event.needs,
+      resultFinalizedAt: event.resultFinalizedAt,
+      resultIssue: event.resultIssue,
     };
     // Supersede older unresolved records for the same recipient+target
     const older = readAllAttentionRecords().filter((r) =>
       recipientMatch(r, recipient) &&
       r.targetRunDir === event.runDir &&
-      r.eventId !== event.eventId &&
+      recordLogicalKey(r) !== eventLogicalKey(event) &&
       r.state !== "handled" &&
       r.state !== "dismissed" &&
       r.state !== "superseded"
@@ -204,6 +249,35 @@ export function markSuperseded(
   return markAttentionState(recipient, targetRunDir, eventId, "superseded");
 }
 
+export function markResultHandled(
+  recipient: RecipientContext,
+  targetRunDir: string,
+  resultFinalizedAt: string
+): AttentionRecord {
+  const existing = findResultHandledRecord(recipient, targetRunDir, resultFinalizedAt);
+  if (existing) {
+    return markAttentionState(recipient, targetRunDir, existing.eventId, "handled") ?? existing;
+  }
+  const now = new Date().toISOString();
+  const record: AttentionRecord = {
+    schemaVersion: 1,
+    attentionId: `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    recipientRunId: recipient.runId,
+    recipientRunDir: recipient.runDir,
+    recipientRootSessionId: recipient.rootSessionId,
+    targetRunDir,
+    targetAgentName: "unknown",
+    eventId: `result_${resultFinalizedAt}`,
+    status: "done",
+    state: "handled",
+    createdAt: now,
+    updatedAt: now,
+    resultFinalizedAt,
+  };
+  appendAttentionRecord(record);
+  return record;
+}
+
 export function markLatestDoneHandled(
   recipient: RecipientContext,
   targetRunDir: string
@@ -233,7 +307,7 @@ export function shouldDeliverEvent(
   recipient: RecipientContext
 ): boolean {
   if (event.status === "done" && event.mode === "oneshot" && !event.resultFinalizedAt) return false;
-  const record = findAttentionRecord(recipient, event.runDir, event.eventId);
+  const record = findAttentionRecord(recipient, event.runDir, event.eventId) ?? findLogicalAttentionRecord(recipient, event);
   if (!record) return true;
   return record.state === "new";
 }
@@ -243,7 +317,7 @@ export function shouldFlushClaimedEvent(
   recipient: RecipientContext
 ): boolean {
   if (event.status === "done" && event.mode === "oneshot" && !event.resultFinalizedAt) return false;
-  const record = findAttentionRecord(recipient, event.runDir, event.eventId);
+  const record = findAttentionRecord(recipient, event.runDir, event.eventId) ?? findLogicalAttentionRecord(recipient, event);
   return record?.state === "delivered" && record.status === event.status;
 }
 
@@ -251,7 +325,7 @@ export function isHandledForRecipient(
   event: TangoEvent,
   recipient: RecipientContext
 ): boolean {
-  const record = findAttentionRecord(recipient, event.runDir, event.eventId);
+  const record = findAttentionRecord(recipient, event.runDir, event.eventId) ?? findLogicalAttentionRecord(recipient, event);
   return record?.state === "handled" || record?.state === "dismissed" || record?.state === "superseded";
 }
 

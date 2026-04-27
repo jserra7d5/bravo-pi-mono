@@ -451,6 +451,7 @@ export default function (pi: ExtensionAPI) {
       mode: Type.Optional(StringEnum(["oneshot", "interactive"] as const)),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const)),
       clean: Type.Optional(Type.Boolean({ default: false })),
+      noResultRequired: Type.Optional(Type.Boolean({ description: "Opt out of the default interactive-agent deliverable requirement. Use only for status-only child agents where no result.md deliverable is intended." })),
       cwd: Type.Optional(Type.String({ description: "Working directory/project root for this agent. Defaults to the current Pi process cwd." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
@@ -458,6 +459,7 @@ export default function (pi: ExtensionAPI) {
       if (params.mode) args.push("--mode", params.mode);
       if (params.thinking) args.push("--thinking", params.thinking);
       if (params.clean) args.push("--clean");
+      if (params.noResultRequired) args.push("--no-result-required");
       args.push(params.task);
       const out = toolResult(await runTango(args, signal));
       await updateFooterStatus(ctx, signal);
@@ -553,8 +555,8 @@ export default function (pi: ExtensionAPI) {
       state: StringEnum(["running", "blocked", "done", "error", "stopped"] as const),
       message: Type.Optional(Type.String()),
       needs: Type.Optional(Type.String({ description: "Needed parent action for blocked/error statuses, e.g. decision, input, credentials, review, intervention." })),
-      resultFile: Type.Optional(Type.String({ description: "Path to a full deliverable to copy into result.md when state is done. Required for interactive agents unless summaryOnly is explicitly true. The status message remains only a short operational summary." })),
-      summaryOnly: Type.Optional(Type.Boolean({ description: "Explicitly complete without a result.md deliverable. Only valid with state=done; use only when no deliverable is intended." })),
+      resultFile: Type.Optional(Type.String({ description: "Path to a full deliverable to copy into result.md when state is done. Required for interactive agents. The status message remains only a short operational summary." })),
+      summaryOnly: Type.Optional(Type.Boolean({ description: "Explicitly complete without a result.md deliverable. Only valid with state=done for agents started with noResultRequired/no-result-required." })),
       runDir: Type.Optional(Type.String({ description: "Optional run directory; defaults to TANGO_RUN_DIR." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {

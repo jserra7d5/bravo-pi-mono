@@ -119,6 +119,78 @@ describe("result readiness", () => {
     assert.strictEqual(updated.resultIssue, undefined);
   });
 
+  it("preserves supervisorPid when recording the oneshot child pid", async () => {
+    const meta = makeMeta({ mode: "oneshot", status: "running", harness: "generic", supervisorPid: 424242 });
+    writeMetadata(meta);
+    const spec: CommandSpec = {
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('ok')"],
+      cwd: tempHome,
+      env: { ...process.env, TANGO_HOME: tempHome } as Record<string, string>,
+      resultParser: "plain",
+    };
+
+    await runOneshot(meta, spec);
+
+    const updated = readMetadata(meta.runDir);
+    assert.strictEqual(updated.supervisorPid, 424242);
+    assert.ok(updated.pid);
+    assert.notStrictEqual(updated.pid, updated.supervisorPid);
+  });
+
+  it("does not overwrite a pre-finalized stopped result on late oneshot close", async () => {
+    const meta = makeMeta({
+      mode: "oneshot",
+      status: "stopped",
+      harness: "generic",
+      resultFile: join(tempHome, "runs", "proj", "agent", "result.md"),
+      resultFinalizedAt: "2024-01-01T00:00:01.000Z",
+      resultIssue: "Oneshot agent was stopped before producing a finalized result.",
+    });
+    writeMetadata(meta);
+    writeFileSync(join(meta.runDir, "result.md"), "", "utf8");
+    const spec: CommandSpec = {
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('late output')"],
+      cwd: tempHome,
+      env: { ...process.env, TANGO_HOME: tempHome } as Record<string, string>,
+      resultParser: "plain",
+    };
+
+    await runOneshot(meta, spec);
+
+    const updated = readMetadata(meta.runDir);
+    assert.strictEqual(updated.status, "stopped");
+    assert.strictEqual(updated.resultIssue, "Oneshot agent was stopped before producing a finalized result.");
+    assert.strictEqual(updated.resultFinalizedAt, "2024-01-01T00:00:01.000Z");
+    assert.strictEqual(readFileSync(join(meta.runDir, "result.md"), "utf8"), "");
+    assert.strictEqual(updated.exitCode, 0);
+  });
+
+  it("extracts Pi turn_end and agent_end final message fixtures", async () => {
+    for (const [name, event, expected] of [
+      ["turn", { type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "turn final" }] } }, "turn final"],
+      ["agent", { type: "agent_end", messages: [{ role: "user", content: "ignored" }, { role: "assistant", content: [{ type: "text", text: "agent final" }] }] }, "agent final"],
+    ] as const) {
+      const meta = makeMeta({ name, runDir: join(tempHome, "runs", "proj", name), mode: "oneshot", status: "running", harness: "generic", task: "simple task" });
+      writeMetadata(meta);
+      const spec: CommandSpec = {
+        command: process.execPath,
+        args: ["-e", `console.log(${JSON.stringify(JSON.stringify(event))})`],
+        cwd: tempHome,
+        env: { ...process.env, TANGO_HOME: tempHome } as Record<string, string>,
+        resultParser: "pi-json",
+      };
+
+      await runOneshot(meta, spec);
+
+      const updated = readMetadata(meta.runDir);
+      assert.strictEqual(updated.status, "done");
+      assert.strictEqual(readFileSync(join(meta.runDir, "result.md"), "utf8"), expected);
+      assert.strictEqual(updated.resultIssue, undefined);
+    }
+  });
+
   it("finalizes a usable result issue when oneshot spawn fails", async () => {
     const meta = makeMeta({ mode: "oneshot", status: "running", harness: "generic" });
     writeMetadata(meta);

@@ -32,6 +32,21 @@ export function transitionStatus(runDir: string, status: AgentStatus, summary?: 
   const previousStatus = meta.status;
   const previousSummary = meta.summary;
   const previousNeeds = meta.needs;
+  const nextNeeds = options.needs !== undefined
+    ? (options.needs || undefined)
+    : (status === "done" || status === "stopped" ? undefined : previousNeeds);
+  const nextSummary = summary ? summary : previousSummary;
+
+  if (isTerminalStatusLocal(previousStatus)) {
+    if (previousStatus !== status) {
+      throw new Error(`Cannot transition terminal agent status from ${previousStatus} to ${status}. Terminal statuses are sticky.`);
+    }
+    if (nextSummary !== previousSummary || nextNeeds !== previousNeeds) {
+      throw new Error(`Cannot modify terminal agent status ${previousStatus}; terminal status updates are immutable after finalization.`);
+    }
+    return meta;
+  }
+
   if (summary) meta.summary = summary;
   if (options.needs !== undefined) {
     if (options.needs) meta.needs = options.needs;
@@ -48,6 +63,10 @@ export function transitionStatus(runDir: string, status: AgentStatus, summary?: 
   writeMetadata(meta);
   appendStatusEvent(meta, previousStatus);
   return meta;
+}
+
+function isTerminalStatusLocal(status: AgentStatus): boolean {
+  return status === "done" || status === "error" || status === "stopped";
 }
 
 export function listMetadata(cwd?: string): AgentMetadata[] {

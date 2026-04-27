@@ -13,6 +13,7 @@ import {
   markDelivered,
   markHandled,
   markLatestDoneHandled,
+  markResultHandled,
   markSeen,
   readAllAttentionRecords,
   shouldDeliverEvent,
@@ -118,6 +119,44 @@ describe("attention records", () => {
     const finalized = makeEvent("done", { mode: "oneshot", resultFinalizedAt: "2024-01-01T00:00:00Z" });
     assert.strictEqual(shouldDeliverEvent(early, recipient), false);
     assert.strictEqual(shouldDeliverEvent(finalized, recipient), true);
+  });
+
+  it("dedupes duplicate done events by logical finalized completion, not eventId", () => {
+    const recipient = { runId: "parent_1" };
+    const first = makeEvent("done", { runDir: "/tmp/run-logical", resultFinalizedAt: "2024-01-01T00:00:00Z" });
+    const duplicate = makeEvent("done", { runDir: "/tmp/run-logical", resultFinalizedAt: "2024-01-01T00:00:00Z" });
+    const record = upsertAttentionFromEvent(first, recipient);
+    markDelivered(recipient, first.runDir, first.eventId);
+
+    const secondRecord = upsertAttentionFromEvent(duplicate, recipient);
+
+    assert.strictEqual(secondRecord.attentionId, record.attentionId);
+    assert.strictEqual(shouldDeliverEvent(duplicate, recipient), false);
+  });
+
+  it("treats a changed finalized result as new attention", () => {
+    const recipient = { runId: "parent_1" };
+    const first = makeEvent("done", { runDir: "/tmp/run-changed", resultFinalizedAt: "2024-01-01T00:00:00Z" });
+    const changed = makeEvent("done", { runDir: "/tmp/run-changed", resultFinalizedAt: "2024-01-01T00:00:01Z" });
+    upsertAttentionFromEvent(first, recipient);
+    markDelivered(recipient, first.runDir, first.eventId);
+
+    const changedRecord = upsertAttentionFromEvent(changed, recipient);
+
+    assert.notStrictEqual(changedRecord.eventId, first.eventId);
+    assert.strictEqual(shouldDeliverEvent(changed, recipient), true);
+  });
+
+  it("marks consumed finalized results handled before later duplicate done events arrive", () => {
+    const recipient = { runId: "parent_1" };
+    const finalizedAt = "2024-01-01T00:00:00Z";
+    markResultHandled(recipient, "/tmp/run-consumed", finalizedAt);
+    const later = makeEvent("done", { runDir: "/tmp/run-consumed", resultFinalizedAt: finalizedAt });
+
+    upsertAttentionFromEvent(later, recipient);
+
+    assert.strictEqual(shouldDeliverEvent(later, recipient), false);
+    assert.strictEqual(isHandledForRecipient(later, recipient), true);
   });
 
   it("delivered events are not deliverable again", () => {
