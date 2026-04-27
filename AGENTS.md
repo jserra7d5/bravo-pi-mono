@@ -5,7 +5,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 ## Repository Layout
 
 - `packages/` contains independently versioned/packaged tools and pi packages.
-- `packages/tango/` contains the Tango CLI, runtime, roles, prompt includes, skills, and Pi extension wrapper.
+- `packages/tango/` contains the Tango CLI, runtime, roles, prompt includes, skills, and Pi extension wrapper. Tango includes harnesses for Pi, Claude Code, Gemini CLI, and generic shell agents.
 - `packages/loom/` contains the Loom CLI for durable recursive work graphs, context, inboxes, and Tango-compatible coordination.
 - `packages/caveman/` contains the Pi extension for session-scoped terse response mode (`/caveman`, `/normal`).
 - `docs/specs/` contains design specs. Each spec should live under a slug directory, e.g. `docs/specs/tango-v1/design.md`.
@@ -29,4 +29,5 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `npm run check --workspace @bravo/caveman` — type-check the Caveman Pi extension.
 - `npm test --workspace @bravo/loom` — run Loom's vertical-slice tests.
 - `tango roles list` — inspect available Tango roles when the CLI is on PATH.
+- Gemini Tango roles use only `gemini-3.1-pro-preview` or `gemini-3-flash-preview`; see `packages/tango/docs/gemini-harness.md` and `docs/specs/tango-gemini-cli-runtime/design.md`.
 - `loom agent guide` — print the compact runtime-agnostic Loom guide for agents.

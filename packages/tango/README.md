@@ -101,4 +101,4 @@ Tango's CLI is designed to remain usable without the optional dashboard server r
   - `npm run check --workspace @bravo/tango`
   - `npm run build --workspace @bravo/tango`
 
-See `../../docs/specs/tango-v1/design.md`, `../../docs/specs/tango-events/design.md`, `../../docs/specs/tango-home-tooling/design.md`, and `../../docs/specs/tango-claude-code-runtime/design.md` for design details.
+See `../../docs/specs/tango-v1/design.md`, `../../docs/specs/tango-events/design.md`, `../../docs/specs/tango-home-tooling/design.md`, `../../docs/specs/tango-claude-code-runtime/design.md`, and `../../docs/specs/tango-gemini-cli-runtime/design.md` for design details. See `docs/gemini-harness.md` for Gemini harness usage.
