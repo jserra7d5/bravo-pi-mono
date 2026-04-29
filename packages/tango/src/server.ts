@@ -11,7 +11,7 @@ import { initialEventOffset, readEvents, readRecentEvents, type EventReadState }
 import { resolveTarget } from "./targetResolver.js";
 import { startAgent } from "./start.js";
 import { assessResultDeliverable } from "./result.js";
-import { buildRunState, followRun, messageRun, readActivity, reportRun, stopRun } from "./controlPlane.js";
+import { buildRunState, followRun, messageRun, readActivity, reportRun, stopRun, waitRuns, type WaitCondition, type WaitMode } from "./controlPlane.js";
 import { markHandled, markSeen } from "./attention.js";
 import { buildBoard } from "./board.js";
 import { appendMessageRecord, filterInboxItems, markInboxItem, markResultItemsHandled, syncInboxFromAgents } from "./inbox.js";
@@ -207,7 +207,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
   if (req.method === "GET" && url.pathname === "/api/v1/runs/result") {
     const meta = resolveServerTarget(url);
     const assessment = assessResultDeliverable(meta);
-    if (assessment.resultReady || assessment.safeToRead) markResultItemsHandled(meta);
+    if (url.searchParams.get("peek") !== "true" && (assessment.resultReady || assessment.safeToRead)) markResultItemsHandled(meta);
     return sendJson(res, 200, { ok: true, schemaVersion: 1, agent: meta, state: buildRunState(meta), result: assessment.result, assessment });
   }
   if (req.method === "POST" && url.pathname === "/api/v1/runs/start") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverStartRun(await readJsonBody(req))) });
@@ -215,6 +215,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
   if (req.method === "POST" && url.pathname === "/api/v1/runs/report") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverReportRun(await readJsonBody(req))) });
   if (req.method === "POST" && url.pathname === "/api/v1/runs/stop") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverStopRun(await readJsonBody(req), url)) });
   if (req.method === "POST" && url.pathname === "/api/v1/runs/follow") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverFollowRun(await readJsonBody(req), url)) });
+  if (req.method === "POST" && url.pathname === "/api/v1/runs/wait") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverWaitRuns(await readJsonBody(req), url)) });
   if (req.method === "POST" && url.pathname === "/api/v1/runs/attention/ack") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverAckAttention(await readJsonBody(req), url)) });
   if (req.method === "GET" && url.pathname === "/api/v1/root-sessions") return sendJson(res, 200, { ok: true, schemaVersion: 1, rootSessions: listRootSessions() });
   if (req.method === "POST" && url.pathname === "/api/v1/root-sessions") return sendJson(res, 200, { ok: true, schemaVersion: 1, rootSession: await createOrResumeRootSession(await readJsonBody(req)) });
@@ -232,7 +233,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
       if (scope.runDir && resolve(agent.runDir) !== resolve(scope.runDir) && (!agent.parentRunDir || resolve(agent.parentRunDir) !== resolve(scope.runDir))) return false;
       return true;
     });
-    return sendJson(res, 200, { ok: true, schemaVersion: 1, inbox: filterInboxItems(syncInboxFromAgents(scopedAgents), scope) });
+    const includeAll = url.searchParams.get("include") === "all" || url.searchParams.get("all") === "true";
+    const inbox = filterInboxItems(syncInboxFromAgents(scopedAgents), scope).filter((item) => includeAll || (item.state !== "handled" && item.state !== "dismissed"));
+    return sendJson(res, 200, { ok: true, schemaVersion: 1, inbox });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/v1/inbox/")) return sendJson(res, 200, { ok: true, schemaVersion: 1, item: await serverInboxAction(req, url) });
   if (req.method === "POST" && url.pathname === "/api/v1/messages") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverStructuredMessage(await readJsonBody(req), url)) });
@@ -389,6 +392,26 @@ async function serverFollowRun(input: any, url: URL): Promise<{ agent: AgentMeta
   const timeoutMs = Math.max(0, Number(input?.timeoutMs ?? input?.timeout ?? 0));
   const result = await followRun(meta, until as any, timeoutMs);
   return { ...result, condition: until };
+}
+
+async function serverWaitRuns(input: any, url: URL) {
+  const condition = (stringParam(input?.until) ?? url.searchParams.get("until") ?? "terminal") as WaitCondition;
+  if (!["terminal", "result-ready", "attention", "blocked", "error", "settled", "inbox"].includes(condition)) throw new HttpError(400, "bad_wait_condition", "Invalid wait condition.");
+  const mode = (stringParam(input?.mode) ?? url.searchParams.get("mode") ?? "all") as WaitMode;
+  if (!["any", "all"].includes(mode)) throw new HttpError(400, "bad_wait_mode", "Invalid wait mode.");
+  const cwd = resolve(stringParam(input?.cwd) ?? url.searchParams.get("cwd") ?? process.cwd());
+  const names: string[] = Array.isArray(input?.names) ? input.names.map((name: unknown) => String(name)) : [];
+  const runIds: string[] = Array.isArray(input?.runIds) ? input.runIds.map((runId: unknown) => String(runId)) : [];
+  const runDirs: string[] = Array.isArray(input?.runDirs) ? input.runDirs.map((runDir: unknown) => String(runDir)) : [];
+  const targets = [
+    ...names.map((name) => resolveTarget({ name, cwd, env: process.env as any })),
+    ...runIds.map((runId) => resolveTarget({ cwd, runId, env: process.env as any })),
+    ...runDirs.map((runDir) => resolveTarget({ cwd, runDir, env: process.env as any })),
+  ];
+  const rawTimeoutMs = input?.timeoutMs !== undefined ? Number(input.timeoutMs) : Number(input?.timeout ?? 0) * 1000;
+  const result = await waitRuns(targets, condition, mode, Math.max(0, rawTimeoutMs));
+  if (result.timedOut) throw new HttpError(504, "timeout", `Timed out waiting for ${mode} ${condition}.`);
+  return result;
 }
 
 function serverEvents(url: URL): { events: unknown[]; errors: string[]; truncated: boolean; cursor: string } {

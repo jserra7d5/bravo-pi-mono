@@ -17,12 +17,12 @@ import { isTerminalStatus, reconcileAgentLifecycle } from "./lifecycle.js";
 import { assessResultDeliverable, validateResultContent } from "./result.js";
 import type { AgentMetadata, AgentStatus, ThinkingLevel } from "./types.js";
 import { listArtifacts, publishArtifact, readServerDiscovery, revokeArtifact, serverDiscoveryPath, startTangoServer, type ServerDiscovery } from "./server.js";
-import { buildRunState as cpBuildRunState, messageRun, readActivity, reportRun, stopRun } from "./controlPlane.js";
+import { buildRunState as cpBuildRunState, messageRun, readActivity, reportRun, stopRun, waitRuns, type WaitCondition, type WaitMode } from "./controlPlane.js";
 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
 const cliPath = fileURLToPath(import.meta.url);
-const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "active", "problems", "health", "full", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required", "raw", "events", "urgent"]);
+const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "active", "problems", "health", "full", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required", "raw", "events", "urgent", "unread", "peek"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 class ServerRequestError extends Error {
@@ -68,13 +68,13 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   watch: new Set(["all", "from-start"]),
   children: new Set(["run-id", "run-dir", "tree"]),
   follow: new Set(["run-id", "run-dir", "timeout", "until"]),
-  wait: new Set(["run-id", "run-dir", "timeout"]),
+  wait: new Set(["run-id", "run-dir", "timeout", "until", "mode"]),
   doctor: new Set(["run-dir", "parent-run-dir"]),
   metrics: new Set(["run-dir", "payload"]),
   artifact: new Set(["title", "entry", "mime", "run-dir"]),
   reconcile: new Set(["all", "children", "parent-run-dir"]),
   runner: new Set(["run-dir"]),
-  result: new Set(["run-id", "run-dir", "watch", "timeout"]),
+  result: new Set(["run-id", "run-dir", "watch", "timeout", "unread", "inbox", "peek", "root-session-id", "workstream-id"]),
   board: new Set(["root-session-id", "workstream-id", "run-id", "run-dir"]),
   inbox: new Set(["root-session-id", "workstream-id", "run-id", "run-dir"]),
   "collect-results": new Set(["root-session-id", "workstream-id", "run-id", "run-dir"]),
@@ -173,7 +173,7 @@ async function main() {
       case "watch": return await cmdWatch(parsed, cwd, json);
       case "children": return await cmdChildren(parsed, cwd, json);
       case "follow": return await cmdFollow(parsed, cwd, json);
-      case "wait": return legacyCommand("wait", "follow --until terminal", json);
+      case "wait": return await cmdWait(parsed, cwd, json);
       case "doctor": return cmdDoctor(parsed, cwd, json);
       case "metrics": return cmdMetrics(parsed, json);
       case "artifact": return await cmdArtifact(parsed, cwd, json);
@@ -182,7 +182,7 @@ async function main() {
       case "result": return await cmdResult(parsed, cwd, json);
       case "board": return await cmdBoard(parsed, json);
       case "inbox": return await cmdInbox(parsed, json);
-      case "collect-results": return await cmdCollectResults(parsed, cwd, json);
+      case "collect-results": return legacyCommand("collect-results", "result --unread", json);
       case "recover": return cmdRecover(parsed, json);
       case "roles": return cmdRoles(parsed, json);
       default: return fail(`Unknown command: ${cmd}`, json);
@@ -761,6 +761,33 @@ async function cmdFollow(parsed: Parsed, cwd: string, json: boolean) {
   }
 }
 
+async function cmdWait(parsed: Parsed, cwd: string, json: boolean) {
+  const condition = (flagString(parsed.flags, "until") ?? "terminal") as WaitCondition;
+  if (!["terminal", "result-ready", "attention", "blocked", "error", "settled", "inbox"].includes(condition)) throw new Error(`Invalid --until ${condition}. Expected terminal, result-ready, attention, blocked, error, settled, or inbox.`);
+  const mode = (flagString(parsed.flags, "mode") ?? "all") as WaitMode;
+  if (!["any", "all"].includes(mode)) throw new Error("Invalid --mode. Expected any or all.");
+  const timeoutMs = flagNonNegativeNumber(parsed.flags, "timeout", 0) * 1000;
+  const names = parsed.positionals;
+  const runIds = flagStrings(parsed.flags, "run-id");
+  const runDirs = flagStrings(parsed.flags, "run-dir");
+  const targets = [
+    ...names.map((name) => resolveTarget({ name, cwd, env: process.env as any })),
+    ...runIds.map((id) => resolveTarget({ cwd, runId: id, env: process.env as any })),
+    ...runDirs.map((dir) => resolveTarget({ cwd, runDir: dir, env: process.env as any })),
+  ];
+  if (!targets.length) throw new Error("Usage: tango wait <targets...> [--run-id <id>] [--run-dir <dir>] --until <terminal|result-ready|attention> [--mode any|all] [--timeout seconds]");
+  const result = await waitRuns(targets, condition, mode, timeoutMs);
+  if (json) {
+    process.exitCode = result.timedOut ? 1 : 0;
+    return printJson({ ok: !result.timedOut, schemaVersion: 1, timeout: result.timedOut || undefined, ...result });
+  }
+  if (result.timedOut) process.stderr.write(`tango wait: timed out waiting for ${mode} ${condition}\n`);
+  console.log(`${result.matched.length} matched, ${result.pending.length} pending`);
+  for (const item of result.matched) console.log(`  ✓ ${item.name} [${item.status}]`);
+  for (const item of result.pending) console.log(`  … ${item.name} [${item.status}]`);
+  if (result.timedOut) process.exitCode = 1;
+}
+
 function cmdDoctor(parsed: Parsed, cwd: string, json: boolean) {
   const [sub] = parsed.positionals;
   if (sub !== "events") throw new Error("Usage: tango doctor events");
@@ -807,7 +834,12 @@ async function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
   const [name] = parsed.positionals;
   const runId = flagString(parsed.flags, "run-id");
   const runDir = flagString(parsed.flags, "run-dir");
-  if (!name && !runId && !runDir) throw new Error("Usage: tango result [name] [--run-id <id>|--run-dir <dir>] [--watch] [--timeout seconds]");
+  const inboxId = flagString(parsed.flags, "inbox");
+  const unread = flagBool(parsed.flags, "unread");
+  const peek = flagBool(parsed.flags, "peek");
+  const targetCount = [!!name || !!runId || !!runDir, !!inboxId, unread].filter(Boolean).length;
+  if (targetCount !== 1) throw new Error("Usage: tango result <target>|--run-id <id>|--run-dir <dir>|--unread|--inbox <id> [--peek] [--watch] [--timeout seconds]");
+  if (unread || inboxId) return await cmdResultInbox(parsed, cwd, json, peek, inboxId);
   let timedOut = false;
   if (flagBool(parsed.flags, "watch")) {
     const timeoutMs = flagNonNegativeNumber(parsed.flags, "timeout", 0) * 1000;
@@ -817,8 +849,33 @@ async function cmdResult(parsed: Parsed, cwd: string, json: boolean) {
       timedOut = true;
     }
   }
-  const payload = await serverRequest("GET", `/api/v1/runs/result?${targetQuery(cwd, name, runId, runDir)}`);
+  const query = new URLSearchParams(targetQuery(cwd, name, runId, runDir));
+  if (peek) query.set("peek", "true");
+  const payload = await serverRequest("GET", `/api/v1/runs/result?${query.toString()}`);
   return printResult(payload.agent, payload.assessment, json, timedOut);
+}
+
+async function cmdResultInbox(parsed: Parsed, cwd: string, json: boolean, peek: boolean, inboxId?: string) {
+  const inboxPath = inboxId ? "/api/v1/inbox" : `/api/v1/inbox${scopeQuery(parsed)}`;
+  const inboxPayload = await serverRequest("GET", inboxPath);
+  const resultItems = (inboxPayload.inbox ?? []).filter((item: any) => item.type === "result" && item.state !== "handled" && item.state !== "dismissed" && (!inboxId || item.inboxId === inboxId));
+  if (inboxId && !resultItems.length) throw new Error(`Inbox result item not found or already handled: ${inboxId}`);
+  const results = [];
+  for (const item of resultItems) {
+    const sourceRunDir = item.source?.runDir;
+    if (!sourceRunDir) continue;
+    const query = new URLSearchParams(targetQuery(cwd, undefined, undefined, sourceRunDir));
+    query.set("peek", "true");
+    const payload = await serverRequest("GET", `/api/v1/runs/result?${query.toString()}`);
+    if (!peek) await serverRequest("POST", `/api/v1/inbox/${encodeURIComponent(item.inboxId)}/handled`);
+    results.push({ inboxId: item.inboxId, agent: payload.agent, result: payload.assessment?.result || (payload.assessment?.resultState === "summary-only" ? payload.agent?.summary : ""), resultReady: payload.assessment?.resultReady, resultState: payload.assessment?.resultState, safeToRead: payload.assessment?.safeToRead, assessment: payload.assessment });
+  }
+  if (json) return printJson({ ok: true, results });
+  if (!results.length) return console.log("No unread results.");
+  for (const r of results) {
+    console.log(`\n## ${r.agent.name}`);
+    process.stdout.write(r.result ? (r.result.endsWith("\n") ? r.result : `${r.result}\n`) : `[summary] ${r.agent.summary ?? ""}\n`);
+  }
 }
 
 function printResult(meta: AgentMetadata, assessment: ReturnType<typeof assessResultDeliverable>, json: boolean, timeout = false) {
@@ -1019,7 +1076,7 @@ function refreshStatus(meta: AgentMetadata): AgentMetadata {
 
 function help() {
   console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]
-  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango ps [--json] [--all]\n  tango inspect [name] [--run-id <id>] [--run-dir <dir>] [--json]\n  tango activity [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json] [--raw]\n  tango follow <name> --until terminal|result-resolved|attention [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango report <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result [name] [--run-id <id>] [--run-dir <dir>] [--watch] [--timeout seconds]\n  tango board [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox read|handled|dismiss <inbox-id> [--json]\n  tango collect-results [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango recover --run-dir <dir> [--json]\n  tango roles list|show <name>\n\nRemoved active protocol commands fail fast: tango status, tango look, tango list, bare tango wait.\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized and summary-only results handled so duplicate completion notifications are suppressed.\n`);
+  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango ps [--json] [--all]\n  tango inspect [name] [--run-id <id>] [--run-dir <dir>] [--json]\n  tango activity [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json] [--raw]\n  tango follow <name> --until terminal|result-resolved|attention [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango wait <targets...> [--run-id <id>] [--run-dir <dir>] --until terminal|result-ready|attention [--mode any|all] [--timeout seconds] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango report <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <target>|--run-id <id>|--run-dir <dir>|--unread|--inbox <id> [--peek] [--watch] [--timeout seconds] [--json]\n  tango board [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox read|handled|dismiss <inbox-id> [--json]\n  tango recover --run-dir <dir> [--json]\n  tango roles list|show <name>\n\nRemoved active protocol commands fail fast: tango status, tango look, tango list, tango collect-results.\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized and summary-only results handled so duplicate completion notifications are suppressed.\n`);
 }
 
 main();

@@ -7,6 +7,16 @@ import type { AgentMetadata } from "./types.js";
 
 export type BoardSection = "active" | "blocked" | "stalled" | "offline" | "unreadResults" | "recentCompletions" | "recentErrors";
 
+export interface DescendantAggregate {
+  total: number;
+  active: number;
+  blocked: number;
+  stalled: number;
+  offline: number;
+  ready: number;
+  error: number;
+}
+
 export interface BoardItem {
   name: string;
   role?: string;
@@ -29,6 +39,10 @@ export interface BoardItem {
   unread?: boolean;
   inboxId?: string;
   next: "activity" | "inbox" | "result" | "none";
+  modeMarker: "↔" | "→";
+  delegationCapable: boolean;
+  delegationMarker?: "L";
+  descendantAggregate: DescendantAggregate;
 }
 
 export interface BoardView {
@@ -43,6 +57,9 @@ export interface BoardView {
   recentCompletions: BoardItem[];
   recentErrors: BoardItem[];
   inbox: InboxItem[];
+  tree: {
+    directChildren: BoardItem[];
+  };
 }
 
 function agentInScope(agent: AgentMetadata, scope: InboxRecipient): boolean {
@@ -60,7 +77,7 @@ function latestUnreadResult(inbox: InboxItem[], meta: AgentMetadata): InboxItem 
   return inbox.find((item) => item.type === "result" && item.state === "unread" && resolve(item.source.runDir) === resolve(meta.runDir));
 }
 
-function toItem(meta: AgentMetadata, inbox: InboxItem[], next: BoardItem["next"]): BoardItem {
+function toItem(meta: AgentMetadata, inbox: InboxItem[], next: BoardItem["next"], allAgents: AgentMetadata[] = []): BoardItem {
   const metrics = meta.metrics ?? readMetrics(meta.runDir);
   const assessment = assessResultDeliverable(meta);
   const unreadResult = latestUnreadResult(inbox, meta);
@@ -88,7 +105,45 @@ function toItem(meta: AgentMetadata, inbox: InboxItem[], next: BoardItem["next"]
     unread: !!unreadResult,
     inboxId: unreadResult?.inboxId,
     next,
+    modeMarker: meta.mode === "interactive" ? "↔" : "→",
+    delegationCapable: meta.role === "lead",
+    delegationMarker: meta.role === "lead" ? "L" : undefined,
+    descendantAggregate: descendantAggregate(meta, allAgents, inbox),
   };
+}
+
+function isDirectChildOf(child: AgentMetadata, parent: AgentMetadata): boolean {
+  if (parent.runId && child.parentRunId === parent.runId) return true;
+  return !!child.parentRunDir && resolve(child.parentRunDir) === resolve(parent.runDir);
+}
+
+function agentKey(agent: AgentMetadata): string {
+  return agent.runId ?? resolve(agent.runDir);
+}
+
+function descendantsOf(parent: AgentMetadata, agents: AgentMetadata[], visited = new Set<string>()): AgentMetadata[] {
+  visited.add(agentKey(parent));
+  const direct = agents.filter((agent) => isDirectChildOf(agent, parent) && !visited.has(agentKey(agent)));
+  return direct.flatMap((agent) => [agent, ...descendantsOf(agent, agents, visited)]);
+}
+
+function emptyAggregate(): DescendantAggregate {
+  return { total: 0, active: 0, blocked: 0, stalled: 0, offline: 0, ready: 0, error: 0 };
+}
+
+function descendantAggregate(parent: AgentMetadata, agents: AgentMetadata[], inbox: InboxItem[]): DescendantAggregate {
+  const aggregate = emptyAggregate();
+  for (const agent of descendantsOf(parent, agents)) {
+    aggregate.total++;
+    const derived = derivedAttentionState(agent);
+    if (derived === "stalled") aggregate.stalled++;
+    else if (derived === "offline") aggregate.offline++;
+    else if (agent.status === "running" || agent.status === "created") aggregate.active++;
+    if (agent.status === "blocked") aggregate.blocked++;
+    if (agent.status === "error") aggregate.error++;
+    if (assessResultDeliverable(agent).resultReady || latestUnreadResult(inbox, agent)) aggregate.ready++;
+  }
+  return aggregate;
 }
 
 function age(iso?: string): string {
@@ -101,7 +156,8 @@ function age(iso?: string): string {
 }
 
 export function buildBoard(scope: InboxRecipient = {}): BoardView {
-  const agents = listMetadata(undefined).map((agent) => ({ ...agent, metrics: readMetrics(agent.runDir) })).filter((agent) => agentInScope(agent, scope));
+  const allAgents = listMetadata(undefined).map((agent) => ({ ...agent, metrics: readMetrics(agent.runDir) }));
+  const agents = allAgents.filter((agent) => agentInScope(agent, scope));
   syncInboxFromAgents(agents);
   const inbox = filterInboxItems(readInboxItems(), scope);
   const unresolved = inbox.filter((item) => item.state === "unread" || item.state === "read");
@@ -109,11 +165,11 @@ export function buildBoard(scope: InboxRecipient = {}): BoardView {
   const stalledAgents = agents.filter((a) => derivedAttentionState(a) === "stalled");
   const offlineAgents = agents.filter((a) => derivedAttentionState(a) === "offline");
   const derivedRunDirs = new Set([...stalledAgents, ...offlineAgents].map((a) => resolve(a.runDir)));
-  const active = agents.filter((a) => (a.status === "running" || a.status === "created") && !derivedRunDirs.has(resolve(a.runDir))).map((a) => toItem(a, inbox, "activity"));
-  const blocked = agents.filter((a) => a.status === "blocked").map((a) => toItem(a, inbox, "inbox"));
-  const recentCompletions = agents.filter((a) => a.status === "done" || a.status === "stopped").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 20).map((a) => toItem(a, inbox, "result"));
-  const recentErrors = agents.filter((a) => a.status === "error").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 20).map((a) => toItem(a, inbox, "inbox"));
-  const unreadResults = agents.filter((a) => latestUnreadResult(inbox, a)).map((a) => toItem(a, inbox, "result"));
+  const active = agents.filter((a) => (a.status === "running" || a.status === "created") && !derivedRunDirs.has(resolve(a.runDir))).map((a) => toItem(a, inbox, "activity", allAgents));
+  const blocked = agents.filter((a) => a.status === "blocked").map((a) => toItem(a, inbox, "inbox", allAgents));
+  const recentCompletions = agents.filter((a) => a.status === "done" || a.status === "stopped").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 20).map((a) => toItem(a, inbox, "result", allAgents));
+  const recentErrors = agents.filter((a) => a.status === "error").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 20).map((a) => toItem(a, inbox, "inbox", allAgents));
+  const unreadResults = agents.filter((a) => latestUnreadResult(inbox, a)).map((a) => toItem(a, inbox, "result", allAgents));
 
   return {
     schemaVersion: 1,
@@ -130,11 +186,26 @@ export function buildBoard(scope: InboxRecipient = {}): BoardView {
     },
     active,
     blocked,
-    stalled: stalledAgents.map((a) => ({ ...toItem(a, inbox, "inbox"), status: "stalled" })),
-    offline: offlineAgents.map((a) => ({ ...toItem(a, inbox, "inbox"), status: "offline" })),
+    stalled: stalledAgents.map((a) => ({ ...toItem(a, inbox, "inbox", allAgents), status: "stalled" })),
+    offline: offlineAgents.map((a) => ({ ...toItem(a, inbox, "inbox", allAgents), status: "offline" })),
     unreadResults,
     recentCompletions,
     recentErrors,
     inbox: unresolved,
+    tree: {
+      directChildren: directChildrenForScope(agents, scope).map((a) => toItem(a, inbox, latestUnreadResult(inbox, a) ? "result" : a.status === "blocked" || a.status === "error" ? "inbox" : (a.status === "running" || a.status === "created") ? "activity" : "none", allAgents)),
+    },
   };
+}
+
+function directChildrenForScope(agents: AgentMetadata[], scope: InboxRecipient): AgentMetadata[] {
+  const parent = agents.find((agent) => (scope.runId && agent.runId === scope.runId) || (scope.runDir && resolve(agent.runDir) === resolve(scope.runDir!)));
+  if (parent) return agents.filter((agent) => isDirectChildOf(agent, parent));
+  return agents.filter((agent) => {
+    if (scope.runId || scope.runDir) return false;
+    if (agent.parentRunId || agent.parentRunDir) {
+      return !agents.some((candidate) => isDirectChildOf(agent, candidate));
+    }
+    return true;
+  });
 }

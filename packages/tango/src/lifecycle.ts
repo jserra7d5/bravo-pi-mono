@@ -6,7 +6,7 @@ import { tmuxAlive } from "./runtime/tmux.js";
 export const STARTUP_PID_GRACE_MS = 10_000;
 
 export function isTerminalStatus(status: AgentStatus): boolean {
-  return status === "done" || status === "error" || status === "blocked" || status === "stopped";
+  return status === "done" || status === "error" || status === "stopped";
 }
 
 export function pidAlive(pid: number | undefined): boolean | undefined {

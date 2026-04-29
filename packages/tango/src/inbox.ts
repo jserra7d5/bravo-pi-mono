@@ -212,20 +212,26 @@ export function filterInboxItems(items: InboxItem[], scope: InboxRecipient = {})
 }
 
 export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem[] {
+  const activeDedupeKeys = new Set<string>();
+  const syncedRunDirs = new Set(agents.map((agent) => resolve(agent.runDir)));
   for (const meta of agents) {
     const source: InboxSource = { runId: meta.runId, runDir: meta.runDir, agentName: meta.name };
     if (meta.status === "blocked") {
+      const key = dedupeKey("blocked", meta);
+      activeDedupeKeys.add(key);
       upsertInboxItem({
         type: "blocked",
         recipient: recipientFor(meta),
         source,
         summary: meta.summary ?? "Agent is blocked",
         body: meta.needs ? `Needs: ${meta.needs}` : meta.summary,
-        dedupeKey: dedupeKey("blocked", meta),
+        dedupeKey: key,
       });
     }
     const derived = derivedAttentionState(meta);
     if (derived) {
+      const key = dedupeKey(derived, meta);
+      activeDedupeKeys.add(key);
       upsertInboxItem({
         type: derived,
         recipient: recipientFor(meta),
@@ -233,10 +239,12 @@ export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem
         summary: derived === "offline" ? "Agent appears offline" : "Agent appears stalled",
         body: derived === "offline" ? "Expected process heartbeat is gone." : "Agent is alive but has not shown recent meaningful activity.",
         urgent: derived === "offline",
-        dedupeKey: dedupeKey(derived, meta),
+        dedupeKey: key,
       });
     }
     if (meta.status === "error") {
+      const key = dedupeKey("error", meta);
+      activeDedupeKeys.add(key);
       upsertInboxItem({
         type: "error",
         recipient: recipientFor(meta),
@@ -244,11 +252,13 @@ export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem
         summary: meta.summary ?? "Agent errored",
         body: meta.needs ? `Needs: ${meta.needs}` : meta.summary,
         urgent: true,
-        dedupeKey: dedupeKey("error", meta),
+        dedupeKey: key,
       });
     }
     const assessment = assessResultDeliverable(meta);
     if (assessment.resultReady) {
+      const key = dedupeKey("result", meta, meta.resultFinalizedAt ?? meta.resultSummaryOnlyAt ?? "ready");
+      activeDedupeKeys.add(key);
       upsertInboxItem({
         type: "result",
         recipient: recipientFor(meta),
@@ -261,9 +271,15 @@ export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem
           finalizedAt: meta.resultFinalizedAt ?? meta.resultSummaryOnlyAt,
           issue: assessment.resultIssue,
         },
-        dedupeKey: dedupeKey("result", meta, meta.resultFinalizedAt ?? meta.resultSummaryOnlyAt ?? "ready"),
+        dedupeKey: key,
       });
     }
+  }
+  for (const item of readInboxItems()) {
+    if (!["blocked", "stalled", "offline", "error"].includes(item.type)) continue;
+    if (item.state === "handled" || item.state === "dismissed") continue;
+    if (!syncedRunDirs.has(resolve(item.source.runDir))) continue;
+    if (!activeDedupeKeys.has(item.dedupeKey)) markInboxItem(item.inboxId, "handled");
   }
   return readInboxItems();
 }

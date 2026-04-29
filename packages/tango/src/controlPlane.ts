@@ -6,6 +6,7 @@ import { attachTmux, captureTmux, sendTmux, stopTmux, tmuxAlive } from "./runtim
 import { isTerminalStatus, reconcileAgentLifecycle } from "./lifecycle.js";
 import { assessResultDeliverable, validateResultContent } from "./result.js";
 import { getRecipientContext, markLatestDoneHandled, markResultHandled, readAllAttentionRecords } from "./attention.js";
+import { derivedAttentionState, readInboxItems } from "./inbox.js";
 import type { AgentMetadata, AgentStatus, ActivityEvent, ActivitySummary, RunState } from "./types.js";
 
 export interface TargetRef {
@@ -17,6 +18,27 @@ export interface TargetRef {
 }
 
 export type FollowCondition = "terminal" | "result-resolved" | "attention";
+export type WaitCondition = "terminal" | "result-ready" | "attention" | "blocked" | "error" | "settled" | "inbox";
+export type WaitMode = "any" | "all";
+
+export interface WaitTargetState {
+  runId?: string;
+  runDir: string;
+  name: string;
+  status: AgentStatus | "stalled" | "offline";
+  resultReady: boolean;
+  attention: boolean;
+  inbox: boolean;
+}
+
+export interface WaitResult {
+  condition: WaitCondition;
+  mode: WaitMode;
+  matched: WaitTargetState[];
+  pending: WaitTargetState[];
+  failed: WaitTargetState[];
+  timedOut: boolean;
+}
 
 export function refreshRunStatus(meta: AgentMetadata): AgentMetadata {
   return reconcileAgentLifecycle(meta);
@@ -153,6 +175,49 @@ export async function followRun(meta: AgentMetadata, until: FollowCondition, tim
     }
     if (timeoutMs > 0 && Date.now() - start > timeoutMs) throw new Error(`Timed out following ${meta.name} until ${until}`);
     await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
+export async function waitRuns(targets: AgentMetadata[], condition: WaitCondition, mode: WaitMode, timeoutMs: number): Promise<WaitResult> {
+  if (!targets.length) throw new Error("Target required: pass at least one target to wait on.");
+  const start = Date.now();
+  while (true) {
+    const states = targets.map((target) => waitTargetState(withRunMetrics(refreshRunStatus(readMetadata(target.runDir)))));
+    const matched = states.filter((state) => waitConditionMet(state, condition));
+    const pending = states.filter((state) => !waitConditionMet(state, condition));
+    const done = mode === "any" ? matched.length > 0 : pending.length === 0;
+    if (done) return { condition, mode, matched, pending, failed: [], timedOut: false };
+    if (timeoutMs > 0 && Date.now() - start > timeoutMs) return { condition, mode, matched, pending, failed: [], timedOut: true };
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
+function waitTargetState(meta: AgentMetadata): WaitTargetState {
+  const assessment = assessResultDeliverable(meta);
+  const derived = derivedAttentionState(meta);
+  const unresolvedInbox = readInboxItems().some((item) =>
+    item.state !== "handled" && item.state !== "dismissed" && resolve(item.source.runDir) === resolve(meta.runDir)
+  );
+  return {
+    runId: meta.runId,
+    runDir: meta.runDir,
+    name: meta.name,
+    status: derived ?? meta.status,
+    resultReady: assessment.safeToRead || assessment.resultReady,
+    attention: meta.status === "blocked" || meta.status === "error" || derived === "stalled" || derived === "offline" || unresolvedInbox,
+    inbox: unresolvedInbox,
+  };
+}
+
+function waitConditionMet(state: WaitTargetState, condition: WaitCondition): boolean {
+  switch (condition) {
+    case "terminal": return state.status === "done" || state.status === "error" || state.status === "stopped";
+    case "result-ready": return state.resultReady;
+    case "attention": return state.attention;
+    case "blocked": return state.status === "blocked";
+    case "error": return state.status === "error";
+    case "settled": return state.status === "done" || state.status === "error" || state.status === "stopped" || state.attention;
+    case "inbox": return state.inbox;
   }
 }
 
