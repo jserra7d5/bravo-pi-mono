@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { truncateTail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@mariozechner/pi-coding-agent";
-import { Container, Spacer, Text } from "@mariozechner/pi-tui";
+import { Box, Container, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -232,6 +232,33 @@ function renderAgentResult(result: any, { expanded }: { expanded: boolean }, the
   ].filter(Boolean));
 }
 
+function renderBoardResult(result: any, { expanded }: { expanded: boolean }, theme: any) {
+  if (result.isError) return errorText(result, theme);
+  const counts = result.details?.counts ?? {};
+  const summary = `Tango board: ${counts.active ?? 0} running · ${counts.blocked ?? 0} blocked · ${counts.unread ?? 0} unread`;
+  if (!expanded) return new Text(theme.fg("toolTitle", summary), 0, 0);
+  const lines = [theme.fg("toolTitle", summary), ""];
+  for (const section of ["active", "blocked", "unreadResults", "recentErrors"]) {
+    const items = result.details?.[section] ?? [];
+    if (!items.length) continue;
+    lines.push(theme.fg("accent", section));
+    for (const item of items) lines.push(`  ${theme.fg(statusColor(item.status), statusIcon(item.status))} ${item.name} ${theme.fg("muted", item.summary ?? item.activity ?? "")}`);
+  }
+  return new Text(lines.join("\n"), 0, 0);
+}
+
+function renderInboxResult(result: any, { expanded }: { expanded: boolean }, theme: any) {
+  if (result.isError) return errorText(result, theme);
+  const items = result.details?.inbox ?? (result.details?.item ? [result.details.item] : []);
+  const unread = items.filter((item: any) => item.state === "unread").length;
+  const summary = `Tango inbox: ${unread} unread · ${items.length} total`;
+  if (!expanded) return new Text(theme.fg("toolTitle", summary), 0, 0);
+  const lines = [theme.fg("toolTitle", summary), ""];
+  for (const item of items) lines.push(`${theme.fg("accent", item.inboxId)} ${item.state} ${item.type} ${item.source?.agentName ?? ""}: ${preview(item.summary ?? item.body ?? "", 160)}`);
+  if (!items.length) lines.push(theme.fg("dim", "No inbox items."));
+  return new Text(lines.join("\n"), 0, 0);
+}
+
 function renderListResult(result: any, { expanded }: { expanded: boolean }, theme: any) {
   if (result.isError) return errorText(result, theme);
   const agents = result.details?.agents ?? [];
@@ -327,28 +354,26 @@ function targetLabel(args: { name?: string; runId?: string; runDir?: string }): 
   return args.name ?? args.runId ?? args.runDir ?? "<target>";
 }
 
-// Import durable subscription/lease stores from compiled dist to keep the Pi
-// extension aligned with the CLI runtime modules it already executes.
-// @ts-ignore: dist has no declarations, but the module exists after build.
-import {
-  createSubscription,
-  deliveryKeyForRunState,
-  listSubscriptionsForRecipient,
-  markSubscriptionDeliveryError,
-  markSubscriptionHandled,
-  markSubscriptionNotified,
-  type ParentSubscription,
-  type SubscriptionRecipient,
-} from "../../dist/subscriptions.js";
+// Import durable lease store from compiled dist to keep the Pi extension
+// aligned with the CLI runtime modules it already executes.
 // @ts-ignore: dist has no declarations, but the module exists after build.
 import { acquireRootOwnerLease, heartbeatRootOwnerLease, ownsRootLease, type RootOwnerLease } from "../../dist/leases.js";
 
 let ownerId = `pi_${process.pid}_${randomBytes(4).toString("hex")}`;
 let ownerLease: RootOwnerLease | undefined;
 let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
-let subscriptionPollTimer: ReturnType<typeof setInterval> | undefined;
+let inboxPollTimer: ReturnType<typeof setInterval> | undefined;
+const deliveredInboxIds = new Set<string>();
+const localWakeRunIds = new Set<string>();
+const localWakeRunDirs = new Set<string>();
 
-function currentRecipient(cwd = process.cwd()): SubscriptionRecipient {
+type RootRecipient = {
+  rootSessionId?: string;
+  workstreamId?: string;
+  cwd: string;
+};
+
+function currentRecipient(cwd = process.cwd()): RootRecipient {
   return {
     rootSessionId: process.env.TANGO_ROOT_SESSION_ID,
     workstreamId: process.env.TANGO_WORKSTREAM_ID,
@@ -380,98 +405,105 @@ function ownsCurrentLease(recipient = currentRecipient()): boolean {
   try { return ownsRootLease({ ...recipient, ownerId }); } catch { return false; }
 }
 
-function runStateFromInspect(json: any): any | undefined {
-  if (!json) return undefined;
-  if (json.state?.schemaVersion === 1) return json.state;
-  if (json.runState?.schemaVersion === 1) return json.runState;
-  if (json.identity && json.agent && json.result) return json;
-  return undefined;
+function inboxAction(item: any): string {
+  const runId = item.source?.runId;
+  const runDir = item.source?.runDir;
+  if (item.type === "result") return runId ? `tango_result(runId: ${runId})` : `tango_result(runDir: ${runDir})`;
+  const target = runId ? `runId: ${runId}` : `runDir: ${runDir}`;
+  return `tango_activity(${target}, lines: 120) or tango_inbox(action: "handled", inboxId: "${item.inboxId}")`;
 }
 
-async function inspectSubscriptionTarget(sub: ParentSubscription, signal?: AbortSignal): Promise<any | undefined> {
-  const args = ["inspect"];
-  if (sub.target.runId) args.push("--run-id", sub.target.runId);
-  else args.push("--run-dir", sub.target.runDir);
-  args.push("--json");
-  const result = await runTango(args, signal);
-  if (result.code !== 0) return undefined;
-  return runStateFromInspect(result.json);
+function inboxWakeText(item: any): string {
+  const name = item.source?.agentName ?? item.source?.runId ?? item.source?.runDir ?? "Tango agent";
+  const summary = item.summary ?? item.body ?? item.type;
+  return `Tango ${item.type}: ${name} — ${summary}\nNext: ${inboxAction(item)}`;
 }
 
-function subscriptionAction(sub: ParentSubscription, state: any): string {
-  const runId = state.identity?.runId ?? sub.target.runId;
-  if (state.agent?.state === "done") return runId ? `tango_result(runId: ${runId})` : `tango_result(runDir: ${sub.target.runDir})`;
-  return runId ? `tango_activity(runId: ${runId}, lines: 120)` : `tango_activity(runDir: ${sub.target.runDir}, lines: 120)`;
+function inboxNotifyLevel(item: any): NotifyLevel {
+  if (item.type === "error" || item.type === "offline") return "error";
+  if (item.type === "blocked" || item.type === "stalled" || item.urgent) return "warning";
+  if (item.type === "result") return "success";
+  return "info";
 }
 
-function subscriptionWakeText(sub: ParentSubscription, state: any): string {
-  const name = state.identity?.name ?? sub.target.name ?? sub.target.runId ?? sub.target.runDir;
-  const role = state.identity?.role ?? sub.target.role ?? "agent";
-  const status = state.agent?.state ?? "unknown";
-  const needs = state.agent?.needs ? `\nNeeds: ${state.agent.needs}` : "";
-  const summary = state.agent?.summary ? `\nSummary: ${state.agent.summary}` : "";
-  return `[SYSTEM: Tango child update]\nAgent: ${name}\nRole: ${role}\nStatus: ${status}${needs}${summary}\nNext: ${subscriptionAction(sub, state)}`;
-}
-
-async function checkSubscriptionsOnce(pi: ExtensionAPI, ctx: any, signal?: AbortSignal) {
-  const recipient = currentRecipient();
-  if (!ownsCurrentLease(recipient)) return;
-  const subscriptions = listSubscriptionsForRecipient(recipient, ["active", "notified"]);
-  for (const sub of subscriptions) {
-    if (!ownsCurrentLease(recipient)) return;
-    let state: any | undefined;
-    try { state = await inspectSubscriptionTarget(sub, signal); } catch { continue; }
-    if (!state) continue;
-    const agentState = state.agent?.state;
-    if (!sub.notifyOn.includes(agentState)) continue;
-    const deliveryKey = deliveryKeyForRunState(state);
-    if (!deliveryKey) continue;
-    if (sub.state === "notified" && sub.lastDeliveredKey === deliveryKey) continue;
-    try {
-      const level: NotifyLevel = agentState === "error" ? "error" : agentState === "blocked" ? "warning" : "success";
-      if (ctx?.hasUI) ctx.ui.notify(`${state.identity?.name ?? sub.target.name ?? "Tango agent"} is ${agentState}`, level);
-      pi.sendUserMessage(subscriptionWakeText(sub, state), { deliverAs: "followUp" });
-      markSubscriptionNotified(sub.subscriptionId, deliveryKey, ownerId);
-    } catch (error) {
-      markSubscriptionDeliveryError(sub.subscriptionId, error instanceof Error ? error.message : String(error));
-    }
-  }
-}
-
-function startSubscriptionPoller(pi: ExtensionAPI, ctx: any) {
-  if (subscriptionPollTimer) return;
-  void checkSubscriptionsOnce(pi, ctx, ctx?.signal);
-  subscriptionPollTimer = setInterval(() => {
-    void checkSubscriptionsOnce(pi, ctx, ctx?.signal).catch(() => {});
-  }, 2_000);
-}
-
-function stopSubscriptionPoller() {
-  if (subscriptionPollTimer) clearInterval(subscriptionPollTimer);
-  subscriptionPollTimer = undefined;
-}
-
-function maybeCreateStartSubscription(result: ExecResult, cwd?: string) {
+function rememberLocalWakeTarget(result: ExecResult) {
   const meta = result.json?.agent ?? result.json?.metadata ?? result.json?.meta;
   const runId = meta?.runId ?? result.json?.runId ?? result.json?.identity?.runId;
   const runDir = meta?.runDir ?? result.json?.runDir ?? result.json?.identity?.runDir;
-  if (!runDir) return undefined;
-  return createSubscription({
-    recipient: currentRecipient(cwd ?? process.cwd()),
-    target: {
-      runId,
-      runDir,
-      name: meta?.name ?? result.json?.name ?? result.json?.identity?.name,
-      role: meta?.role ?? result.json?.role ?? result.json?.identity?.role,
-    },
-  });
+  if (runId) localWakeRunIds.add(runId);
+  if (runDir) localWakeRunDirs.add(resolve(runDir));
 }
 
-function markToolTargetHandled(params: { runId?: string; runDir?: string; name?: string }, result?: ExecResult) {
-  const runId = params.runId ?? result?.json?.runId ?? result?.json?.identity?.runId ?? result?.json?.agent?.runId;
-  const runDir = params.runDir ?? result?.json?.runDir ?? result?.json?.identity?.runDir ?? result?.json?.agent?.runDir;
-  if (!runId && !runDir) return;
-  try { markSubscriptionHandled({ runId, runDir }, currentRecipient(), "pi-tool"); } catch {}
+function isLocalWakeItem(item: any): boolean {
+  const parentRunId = process.env.TANGO_RUN_ID;
+  const parentRunDir = process.env.TANGO_RUN_DIR ? resolve(process.env.TANGO_RUN_DIR) : undefined;
+  if (parentRunId && item.recipient?.runId === parentRunId) return true;
+  if (parentRunDir && item.recipient?.runDir && resolve(item.recipient.runDir) === parentRunDir) return true;
+  if (item.source?.runId && localWakeRunIds.has(item.source.runId)) return true;
+  if (item.source?.runDir && localWakeRunDirs.has(resolve(item.source.runDir))) return true;
+  return false;
+}
+
+function renderTangoMessage(message: any, { expanded }: { expanded: boolean }, theme: any) {
+  const details = message.details ?? {};
+  const item = details.item ?? {};
+  const channel = details.channel ?? "message";
+  const type = item.type ?? details.type ?? "update";
+  const level = inboxNotifyLevel(item);
+  const color = level === "error" ? "error" : level === "warning" ? "warning" : level === "success" ? "success" : "accent";
+  const agent = item.source?.agentName ?? item.source?.runId ?? item.source?.runDir ?? details.agent ?? "Tango";
+  const title = `${theme.fg(color, "◆ Tango")} ${theme.fg("muted", channel)} ${theme.fg(color, type)} ${theme.fg("dim", agent)}`;
+  const lines = [title];
+  if (item.summary) lines.push(`  ${item.summary}`);
+  if (item.body && (expanded || !item.summary)) lines.push(`  ${theme.fg("muted", preview(item.body, expanded ? 500 : 160))}`);
+  if (expanded) {
+    if (item.inboxId) lines.push(theme.fg("dim", `  inbox: ${item.inboxId} (${item.state ?? "unknown"})`));
+    if (item.source?.runId) lines.push(theme.fg("dim", `  run: ${item.source.runId}`));
+    lines.push(theme.fg("dim", `  next: ${inboxAction(item)}`));
+  } else {
+    lines.push(theme.fg("dim", `  ${inboxAction(item)}`));
+  }
+  const box = new Box(1, 1, (text: string) => theme.bg("customMessageBg", text));
+  box.addChild(new Text(lines.join("\n"), 0, 0));
+  return box;
+}
+
+async function checkInboxOnce(pi: ExtensionAPI, ctx: any, signal?: AbortSignal) {
+  const recipient = currentRecipient();
+  if (!ownsCurrentLease(recipient)) return;
+  const result = await runTango(["inbox", "--json"], signal);
+  if (result.code !== 0) return;
+  const items = Array.isArray(result.json?.inbox) ? result.json.inbox : [];
+  for (const item of items) {
+    if (!ownsCurrentLease(recipient)) return;
+    if (item.state === "handled" || item.state === "dismissed") continue;
+    if (!isLocalWakeItem(item)) continue;
+    if (deliveredInboxIds.has(item.inboxId)) continue;
+    try {
+      const level = inboxNotifyLevel(item);
+      if (ctx?.hasUI) ctx.ui.notify(`${item.source?.agentName ?? "Tango agent"}: ${item.summary ?? item.type}`, level);
+      pi.sendMessage({
+        customType: "tango-message",
+        content: inboxWakeText(item),
+        display: true,
+        details: { channel: "inbox", item },
+      }, { deliverAs: "followUp", triggerTurn: true });
+      deliveredInboxIds.add(item.inboxId);
+    } catch {}
+  }
+}
+
+function startInboxPoller(pi: ExtensionAPI, ctx: any) {
+  if (inboxPollTimer) return;
+  void checkInboxOnce(pi, ctx, ctx?.signal);
+  inboxPollTimer = setInterval(() => {
+    void checkInboxOnce(pi, ctx, ctx?.signal).catch(() => {});
+  }, 2_000);
+}
+
+function stopInboxPoller() {
+  if (inboxPollTimer) clearInterval(inboxPollTimer);
+  inboxPollTimer = undefined;
 }
 
 function startParentReconciler(ctx: any) {
@@ -482,17 +514,19 @@ function startParentReconciler(ctx: any) {
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.registerMessageRenderer("tango-message", renderTangoMessage);
+
   pi.on("session_start", async (_event, ctx) => {
     try { ensureRootSessionRecord(); } catch {}
     if (ctx.hasUI) ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", "Tango: ready"));
     try { acquireCurrentLease(); } catch {}
     startLeaseHeartbeat();
-    startSubscriptionPoller(pi, ctx);
+    startInboxPoller(pi, ctx);
     startParentReconciler(ctx);
   });
 
   pi.on("session_shutdown", async () => {
-    stopSubscriptionPoller();
+    stopInboxPoller();
     stopLeaseHeartbeat();
     if (reconcileTimer) clearInterval(reconcileTimer);
     reconcileTimer = undefined;
@@ -526,12 +560,8 @@ export default function (pi: ExtensionAPI) {
       if (params.noResultRequired) args.push("--no-result-required");
       args.push(params.task);
       const result = await runTango(args, signal);
-      let subscription: any;
-      if (result.code === 0) {
-        try { subscription = maybeCreateStartSubscription(result, params.cwd); } catch {}
-      }
+      if (result.code === 0) rememberLocalWakeTarget(result);
       const out = toolResult(result);
-      if (subscription && out.details && typeof out.details === "object") (out.details as any).subscription = { subscriptionId: subscription.subscriptionId, state: subscription.state };
       await updateFooterStatus(ctx, signal);
       return out;
     },
@@ -569,6 +599,87 @@ export default function (pi: ExtensionAPI) {
     },
     renderCall(_args, theme) { return new Text(theme.fg("toolTitle", "tango ps"), 0, 0); },
     renderResult(result, options, theme) { return renderListResult(result, options, theme); },
+  });
+
+  pi.registerTool({
+    name: "tango_board",
+    label: "Tango Board",
+    description: "Show the current Tango coordination board. Wraps `tango board --json`.",
+    parameters: Type.Object({
+      rootSessionId: Type.Optional(Type.String()),
+      workstreamId: Type.Optional(Type.String()),
+      runId: Type.Optional(Type.String()),
+      runDir: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const args = ["board", "--json"];
+      if (params.rootSessionId) args.push("--root-session-id", params.rootSessionId);
+      if (params.workstreamId) args.push("--workstream-id", params.workstreamId);
+      if (params.runId) args.push("--run-id", params.runId);
+      if (params.runDir) args.push("--run-dir", params.runDir);
+      const out = toolResult(await runTango(args, signal));
+      await updateFooterStatus(ctx, signal);
+      return out;
+    },
+    renderCall(_args, theme) { return new Text(theme.fg("toolTitle", "tango board"), 0, 0); },
+    renderResult(result, options, theme) { return renderBoardResult(result, options, theme); },
+  });
+
+  pi.registerTool({
+    name: "tango_inbox",
+    label: "Tango Inbox",
+    description: "List or update Tango inbox items. Wraps `tango inbox --json` and `tango inbox read|handled|dismiss`.",
+    parameters: Type.Object({
+      action: Type.Optional(StringEnum(["list", "read", "handled", "dismiss"] as const)),
+      inboxId: Type.Optional(Type.String()),
+      rootSessionId: Type.Optional(Type.String()),
+      workstreamId: Type.Optional(Type.String()),
+      runId: Type.Optional(Type.String()),
+      runDir: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const action = params.action ?? "list";
+      const args = ["inbox"];
+      if (action !== "list") {
+        if (!params.inboxId) return { content: [{ type: "text" as const, text: "inboxId is required for inbox actions" }], details: { ok: false }, isError: true };
+        args.push(action, params.inboxId);
+      }
+      args.push("--json");
+      if (params.rootSessionId) args.push("--root-session-id", params.rootSessionId);
+      if (params.workstreamId) args.push("--workstream-id", params.workstreamId);
+      if (params.runId) args.push("--run-id", params.runId);
+      if (params.runDir) args.push("--run-dir", params.runDir);
+      const out = toolResult(await runTango(args, signal));
+      await updateFooterStatus(ctx, signal);
+      return out;
+    },
+    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango inbox")} ${theme.fg("accent", args.action ?? "list")}`, 0, 0); },
+    renderResult(result, options, theme) { return renderInboxResult(result, options, theme); },
+  });
+
+  pi.registerTool({
+    name: "tango_collect_results",
+    label: "Tango Collect Results",
+    description: "Collect unread Tango result inbox items and mark them handled. Wraps `tango collect-results --json`.",
+    parameters: Type.Object({
+      rootSessionId: Type.Optional(Type.String()),
+      workstreamId: Type.Optional(Type.String()),
+      runId: Type.Optional(Type.String()),
+      runDir: Type.Optional(Type.String()),
+      cwd: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const args = addCwd(["collect-results", "--json"], params.cwd);
+      if (params.rootSessionId) args.push("--root-session-id", params.rootSessionId);
+      if (params.workstreamId) args.push("--workstream-id", params.workstreamId);
+      if (params.runId) args.push("--run-id", params.runId);
+      if (params.runDir) args.push("--run-dir", params.runDir);
+      const out = toolResult(await runTango(args, signal));
+      await updateFooterStatus(ctx, signal);
+      return out;
+    },
+    renderCall(_args, theme) { return new Text(theme.fg("toolTitle", "tango collect-results"), 0, 0); },
+    renderResult(result, options, theme) { return renderResultResult(result, options, theme); },
   });
 
   pi.registerTool({
@@ -611,7 +722,6 @@ export default function (pi: ExtensionAPI) {
         result.stdout = JSON.stringify(result.json, null, 2);
       }
       const out = toolResult(result);
-      if (result.code === 0) markToolTargetHandled(params, result);
       return out;
     },
     renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango activity")} ${theme.fg("accent", targetLabel(args))} ${theme.fg("dim", `--lines ${args.lines ?? 200}`)}`, 0, 0); },
@@ -652,12 +762,16 @@ export default function (pi: ExtensionAPI) {
       runId: Type.Optional(Type.String({ description: "Stable Tango run ID. Preferred when known." })),
       runDir: Type.Optional(Type.String({ description: "Stable Tango run directory. Preferred when known." })),
       message: Type.String(),
+      type: Type.Optional(StringEnum(["instruction", "ask", "update", "broadcast"] as const)),
+      urgent: Type.Optional(Type.Boolean()),
       cwd: Type.Optional(Type.String({ description: "Project working directory used to resolve the agent name. Defaults to the current Pi process cwd." })),
     }),
     async execute(_id, params, signal) {
       const error = requireNameOrTarget(params);
       if (error) return { content: [{ type: "text" as const, text: error }], details: { ok: false, error }, isError: true };
       const args = addTarget(["message"], params).concat([params.message, "--json"]);
+      if (params.type) args.push("--type", params.type);
+      if (params.urgent) args.push("--urgent");
       return toolResult(await runTango(addCwd(args, params.cwd), signal));
     },
     renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango message")} ${theme.fg("accent", targetLabel(args))} ${theme.fg("dim", preview(args.message))}`, 0, 0); },
@@ -736,7 +850,6 @@ export default function (pi: ExtensionAPI) {
         result.stdout = JSON.stringify(result.json, null, 2);
       }
       const out = toolResult(result);
-      if (result.code === 0) markToolTargetHandled(params, result);
       return out;
     },
     renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango result")} ${theme.fg("accent", targetLabel(args))}`, 0, 0); },
@@ -770,17 +883,13 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({ args: Type.Array(Type.String({ description: "Argument passed to tango, excluding the tango binary." })) }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const command = params.args[0];
-      const allowed = new Set(["start", "ps", "inspect", "activity", "follow", "message", "stop", "delete", "report", "result", "roles", "children", "doctor", "metrics", "reconcile", "recover"]);
+      const allowed = new Set(["start", "ps", "inspect", "activity", "follow", "message", "stop", "delete", "report", "result", "board", "inbox", "collect-results", "roles", "children", "doctor", "metrics", "reconcile", "recover"]);
       if (!command || !allowed.has(command)) {
         return { content: [{ type: "text" as const, text: `Unsupported tango command: ${command ?? "<empty>"}` }], details: { ok: false, command }, isError: true };
       }
       const result = await runTango(withJson(params.args), signal);
-      let subscription: any;
-      if (command === "start" && result.code === 0) {
-        try { subscription = maybeCreateStartSubscription(result); } catch {}
-      }
+      if (command === "start" && result.code === 0) rememberLocalWakeTarget(result);
       const out = toolResult(command === "ps" ? compactPsResult(result) : result);
-      if (subscription && out.details && typeof out.details === "object") (out.details as any).subscription = { subscriptionId: subscription.subscriptionId, state: subscription.state };
       await updateFooterStatus(ctx, signal);
       return out;
     },

@@ -13,6 +13,8 @@ import { startAgent } from "./start.js";
 import { assessResultDeliverable } from "./result.js";
 import { buildRunState, followRun, messageRun, readActivity, reportRun, stopRun } from "./controlPlane.js";
 import { markHandled, markSeen } from "./attention.js";
+import { buildBoard } from "./board.js";
+import { appendMessageRecord, filterInboxItems, markInboxItem, markResultItemsHandled, syncInboxFromAgents } from "./inbox.js";
 import type { AgentMetadata, RootSessionIdentity } from "./types.js";
 import {
   buildDashboard,
@@ -205,6 +207,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
   if (req.method === "GET" && url.pathname === "/api/v1/runs/result") {
     const meta = resolveServerTarget(url);
     const assessment = assessResultDeliverable(meta);
+    if (assessment.resultReady || assessment.safeToRead) markResultItemsHandled(meta);
     return sendJson(res, 200, { ok: true, schemaVersion: 1, agent: meta, state: buildRunState(meta), result: assessment.result, assessment });
   }
   if (req.method === "POST" && url.pathname === "/api/v1/runs/start") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverStartRun(await readJsonBody(req))) });
@@ -219,6 +222,20 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
   if (req.method === "GET" && url.pathname === "/api/v1/artifacts") return sendJson(res, 200, { ok: true, schemaVersion: 1, artifacts: listArtifacts() });
   if (req.method === "GET" && url.pathname === "/api/v1/dashboard") return sendJson(res, 200, { ok: true, ...buildDashboard() });
   if (req.method === "GET" && url.pathname === "/api/v1/operations") return sendJson(res, 200, { ok: true, ...buildOperations() });
+  if (req.method === "GET" && url.pathname === "/api/v1/board") return sendJson(res, 200, { ok: true, ...buildBoard(scopeFromUrl(url)) });
+  if (req.method === "GET" && url.pathname === "/api/v1/inbox") {
+    const scope = scopeFromUrl(url);
+    const scopedAgents = listMetadata(undefined).filter((agent) => {
+      if (scope.rootSessionId && agent.rootSessionId !== scope.rootSessionId) return false;
+      if (scope.workstreamId && agent.workstreamId !== scope.workstreamId) return false;
+      if (scope.runId && agent.runId !== scope.runId && agent.parentRunId !== scope.runId) return false;
+      if (scope.runDir && resolve(agent.runDir) !== resolve(scope.runDir) && (!agent.parentRunDir || resolve(agent.parentRunDir) !== resolve(scope.runDir))) return false;
+      return true;
+    });
+    return sendJson(res, 200, { ok: true, schemaVersion: 1, inbox: filterInboxItems(syncInboxFromAgents(scopedAgents), scope) });
+  }
+  if (req.method === "POST" && url.pathname.startsWith("/api/v1/inbox/")) return sendJson(res, 200, { ok: true, schemaVersion: 1, item: await serverInboxAction(req, url) });
+  if (req.method === "POST" && url.pathname === "/api/v1/messages") return sendJson(res, 200, { ok: true, schemaVersion: 1, ...(await serverStructuredMessage(await readJsonBody(req), url)) });
   if (req.method === "GET" && url.pathname === "/api/v1/workstreams") return sendJson(res, 200, { ok: true, ...buildWorkstreams() });
   if (req.method === "GET" && url.pathname.startsWith("/api/v1/workstreams/")) {
     const parts = url.pathname.split("/");
@@ -227,6 +244,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
       const detail = buildWorkstreamDetail(rootSessionId);
       if (!detail) return sendJson(res, 404, { ok: false, error: "Workstream not found" });
       return sendJson(res, 200, { ok: true, ...detail });
+    }
+    if (parts.length === 6 && parts[5] === "board") {
+      const rootSessionId = parts[4];
+      return sendJson(res, 200, { ok: true, ...buildBoard({ rootSessionId }) });
+    }
+    if (parts.length === 6 && parts[5] === "inbox") {
+      const rootSessionId = parts[4];
+      return sendJson(res, 200, { ok: true, schemaVersion: 1, inbox: filterInboxItems(syncInboxFromAgents(), { rootSessionId }) });
     }
     if (parts.length === 6 && parts[5] === "agents") {
       const rootSessionId = parts[4];
@@ -383,6 +408,97 @@ async function serverAckAttention(input: any, url: URL): Promise<{ record?: unkn
   const state = input?.state === "handled" ? "handled" : "seen";
   const record = state === "handled" ? markHandled(recipient, meta.runDir, eventId) : markSeen(recipient, meta.runDir, eventId);
   return { record, state };
+}
+
+function scopeFromUrl(url: URL) {
+  return {
+    rootSessionId: url.searchParams.get("rootSessionId") ?? undefined,
+    workstreamId: url.searchParams.get("workstreamId") ?? undefined,
+    runId: url.searchParams.get("runId") ?? undefined,
+    runDir: url.searchParams.get("runDir") ?? url.searchParams.get("run-dir") ?? undefined,
+  };
+}
+
+async function serverInboxAction(_req: IncomingMessage, url: URL) {
+  const parts = url.pathname.split("/");
+  const inboxId = decodeURIComponent(parts[4] ?? "");
+  const action = parts[5];
+  if (!inboxId || !["read", "handled", "dismiss"].includes(action)) throw new HttpError(400, "bad_request", "Usage: /api/v1/inbox/:id/read|handled|dismiss");
+  const state = action === "dismiss" ? "dismissed" : action as "read" | "handled";
+  const item = markInboxItem(inboxId, state);
+  if (!item) throw new HttpError(404, "not_found", "Inbox item not found");
+  return item;
+}
+
+async function serverStructuredMessage(input: any, url: URL): Promise<{ message: unknown; agent?: AgentMetadata; state?: unknown }> {
+  const type = stringParam(input?.type) ?? "instruction";
+  if (!["instruction", "ask", "update", "result", "state-change", "broadcast"].includes(type)) throw new HttpError(400, "bad_request", "Invalid message type");
+  const body = requiredString(input?.body ?? input?.message, "body");
+  let agent: AgentMetadata | undefined;
+  try {
+    if (input?.name || input?.runId || input?.runDir || url.searchParams.get("name") || url.searchParams.get("runId") || url.searchParams.get("runDir")) {
+      agent = resolveServerTarget(url, input);
+    }
+  } catch (error) {
+    if (type !== "broadcast") throw error;
+  }
+  const message = appendMessageRecord({
+    type: type as any,
+    body,
+    urgent: input?.urgent === true,
+    fromRunId: stringParam(input?.fromRunId) ?? process.env.TANGO_RUN_ID,
+    fromRunDir: stringParam(input?.fromRunDir) ?? process.env.TANGO_RUN_DIR,
+    toRunId: agent?.runId ?? stringParam(input?.toRunId),
+    toRunDir: agent?.runDir ?? stringParam(input?.toRunDir),
+    rootSessionId: agent?.rootSessionId ?? stringParam(input?.rootSessionId),
+    workstreamId: agent?.workstreamId ?? stringParam(input?.workstreamId),
+    attachments: Array.isArray(input?.attachments) ? input.attachments.filter((v: unknown): v is string => typeof v === "string") : undefined,
+  });
+  if (agent) {
+    messageRun(agent, formatTangoMessage({
+      type: type as any,
+      body,
+      urgent: input?.urgent === true,
+      messageId: (message as any).messageId,
+      fromRunId: (message as any).fromRunId,
+      fromRunDir: (message as any).fromRunDir,
+      toRunId: agent.runId,
+      toRunDir: agent.runDir,
+      rootSessionId: agent.rootSessionId,
+      workstreamId: agent.workstreamId,
+    }));
+  }
+  return { message, agent, state: agent ? buildRunState(agent) : undefined };
+}
+
+function formatTangoMessage(input: {
+  messageId?: string;
+  type: "instruction" | "ask" | "update" | "result" | "state-change" | "broadcast";
+  body: string;
+  urgent?: boolean;
+  fromRunId?: string;
+  fromRunDir?: string;
+  toRunId?: string;
+  toRunDir?: string;
+  rootSessionId?: string;
+  workstreamId?: string;
+}): string {
+  const lines = [
+    "---BEGIN TANGO MESSAGE---",
+    `Type: ${input.type}`,
+    input.messageId ? `Message-Id: ${input.messageId}` : undefined,
+    input.urgent ? "Urgent: true" : "Urgent: false",
+    input.fromRunId ? `From-Run-Id: ${input.fromRunId}` : undefined,
+    input.fromRunDir ? `From-Run-Dir: ${input.fromRunDir}` : undefined,
+    input.toRunId ? `To-Run-Id: ${input.toRunId}` : undefined,
+    input.toRunDir ? `To-Run-Dir: ${input.toRunDir}` : undefined,
+    input.rootSessionId ? `Root-Session-Id: ${input.rootSessionId}` : undefined,
+    input.workstreamId ? `Workstream-Id: ${input.workstreamId}` : undefined,
+    "",
+    input.body,
+    "---END TANGO MESSAGE---",
+  ];
+  return lines.filter((line): line is string => line !== undefined).join("\n");
 }
 
 async function handleRootSessionApi(req: IncomingMessage, res: ServerResponse, url: URL) {

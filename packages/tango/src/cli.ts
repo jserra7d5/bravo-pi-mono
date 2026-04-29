@@ -22,7 +22,7 @@ import { buildRunState as cpBuildRunState, messageRun, readActivity, reportRun, 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
 const cliPath = fileURLToPath(import.meta.url);
-const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "active", "problems", "health", "full", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required", "raw", "events"]);
+const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "active", "problems", "health", "full", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required", "raw", "events", "urgent"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 class ServerRequestError extends Error {
@@ -60,7 +60,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   list: new Set(["all"]),
   look: new Set(["run-id", "run-dir", "lines"]),
   attach: new Set(["run-id", "run-dir"]),
-  message: new Set(["run-id", "run-dir"]),
+  message: new Set(["run-id", "run-dir", "type", "urgent", "attachment"]),
   stop: new Set(["run-id", "run-dir"]),
   delete: new Set(["run-id", "run-dir"]),
   report: new Set(["run-dir", "needs", "result-file", "summary-only", "no-result", "checkpoint"]),
@@ -75,6 +75,9 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   reconcile: new Set(["all", "children", "parent-run-dir"]),
   runner: new Set(["run-dir"]),
   result: new Set(["run-id", "run-dir", "watch", "timeout"]),
+  board: new Set(["root-session-id", "workstream-id", "run-id", "run-dir"]),
+  inbox: new Set(["root-session-id", "workstream-id", "run-id", "run-dir"]),
+  "collect-results": new Set(["root-session-id", "workstream-id", "run-id", "run-dir"]),
   recover: new Set(["run-dir"]),
   roles: new Set(),
 };
@@ -177,6 +180,9 @@ async function main() {
       case "reconcile": return cmdReconcile(parsed, cwd, json);
       case "runner": return await cmdRunner(parsed);
       case "result": return await cmdResult(parsed, cwd, json);
+      case "board": return await cmdBoard(parsed, json);
+      case "inbox": return await cmdInbox(parsed, json);
+      case "collect-results": return await cmdCollectResults(parsed, cwd, json);
       case "recover": return cmdRecover(parsed, json);
       case "roles": return cmdRoles(parsed, json);
       default: return fail(`Unknown command: ${cmd}`, json);
@@ -325,9 +331,12 @@ async function serverSupportsRunApi(discovery: ServerDiscovery): Promise<boolean
   const headers: Record<string, string> = { "accept": "application/json" };
   if (discovery.token) headers.authorization = `Bearer ${discovery.token}`;
   try {
-    const url = new URL("/api/v1/runs?cwd=/", discovery.url);
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(1000) });
-    return res.ok;
+    const runsUrl = new URL("/api/v1/runs?cwd=/", discovery.url);
+    const runsRes = await fetch(runsUrl, { headers, signal: AbortSignal.timeout(1000) });
+    if (!runsRes.ok) return false;
+    const boardUrl = new URL("/api/v1/board?runId=__compat_probe__", discovery.url);
+    const boardRes = await fetch(boardUrl, { headers, signal: AbortSignal.timeout(3000) });
+    return boardRes.ok;
   } catch {
     return false;
   }
@@ -541,11 +550,16 @@ function cmdAttach(parsed: Parsed, cwd: string) {
 async function cmdMessage(parsed: Parsed, cwd: string, json: boolean) {
   const runId = flagString(parsed.flags, "run-id");
   const runDir = flagString(parsed.flags, "run-dir");
+  const type = flagString(parsed.flags, "type");
   const [first, ...rest] = parsed.positionals;
-  const name = (runId || runDir) && rest.length === 0 ? undefined : first;
-  const msg = (runId || runDir) && rest.length === 0 ? parsed.positionals : rest;
-  if ((!name && !runId && !runDir) || msg.length === 0) throw new Error("Usage: tango message [name] <message> [--run-id <id>|--run-dir <dir>]");
-  const payload = await serverRequest("POST", "/api/v1/runs/message", { name, cwd, runId, runDir, message: msg.join(" ") });
+  const broadcast = type === "broadcast";
+  const name = broadcast ? undefined : (runId || runDir) && rest.length === 0 ? undefined : first;
+  const msg = broadcast ? parsed.positionals : (runId || runDir) && rest.length === 0 ? parsed.positionals : rest;
+  if (((!broadcast && !name && !runId && !runDir)) || msg.length === 0) throw new Error("Usage: tango message [name] <message> [--run-id <id>|--run-dir <dir>] [--type instruction|ask|update|broadcast]");
+  const attachments = flagStrings(parsed.flags, "attachment");
+  const payload = type || flagBool(parsed.flags, "urgent") || attachments.length
+    ? await serverRequest("POST", "/api/v1/messages", { name, cwd, runId, runDir, type: type ?? "instruction", body: msg.join(" "), urgent: flagBool(parsed.flags, "urgent"), attachments })
+    : await serverRequest("POST", "/api/v1/runs/message", { name, cwd, runId, runDir, message: msg.join(" ") });
   if (json) printJson(payload); else console.log("sent");
 }
 
@@ -817,6 +831,68 @@ function printResult(meta: AgentMetadata, assessment: ReturnType<typeof assessRe
   else if (meta.summary) process.stdout.write(`[summary] ${meta.summary}\n`);
 }
 
+function scopeQuery(parsed: Parsed): string {
+  const params = new URLSearchParams();
+  const hasExplicitScope = ["root-session-id", "workstream-id", "run-id", "run-dir"].some((name) => parsed.flags[name] !== undefined);
+  const rootSessionId = flagString(parsed.flags, "root-session-id") ?? (!hasExplicitScope ? process.env.TANGO_ROOT_SESSION_ID : undefined);
+  const workstreamId = flagString(parsed.flags, "workstream-id") ?? (!hasExplicitScope ? process.env.TANGO_WORKSTREAM_ID : undefined);
+  const runId = flagString(parsed.flags, "run-id") ?? (!hasExplicitScope ? process.env.TANGO_RUN_ID : undefined);
+  const runDir = flagString(parsed.flags, "run-dir") ?? (!hasExplicitScope ? process.env.TANGO_RUN_DIR : undefined);
+  if (rootSessionId) params.set("rootSessionId", rootSessionId);
+  if (workstreamId) params.set("workstreamId", workstreamId);
+  if (runId) params.set("runId", runId);
+  if (runDir) params.set("runDir", runDir);
+  const text = params.toString();
+  return text ? `?${text}` : "";
+}
+
+async function cmdBoard(parsed: Parsed, json: boolean) {
+  const payload = await serverRequest("GET", `/api/v1/board${scopeQuery(parsed)}`);
+  if (json) return printJson(payload);
+  console.log(`Tango board: ${payload.counts.active} running · ${payload.counts.blocked} blocked · ${payload.counts.unread} unread`);
+  for (const section of ["active", "blocked", "unreadResults", "recentErrors"] as const) {
+    const items = payload[section] ?? [];
+    if (!items.length) continue;
+    console.log(`\n${section}:`);
+    for (const item of items) console.log(`  ${item.name} [${item.status}] ${item.summary ?? item.activity ?? ""}`.trimEnd());
+  }
+}
+
+async function cmdInbox(parsed: Parsed, json: boolean) {
+  const [sub, inboxId] = parsed.positionals;
+  if (["read", "handled", "dismiss"].includes(sub ?? "")) {
+    if (!inboxId) throw new Error(`Usage: tango inbox ${sub} <inbox-id>`);
+    const payload = await serverRequest("POST", `/api/v1/inbox/${encodeURIComponent(inboxId)}/${sub}`);
+    if (json) return printJson(payload);
+    return console.log(`${payload.item.inboxId}: ${payload.item.state}`);
+  }
+  if (sub) throw new Error("Usage: tango inbox [--json] | tango inbox read|handled|dismiss <inbox-id>");
+  const payload = await serverRequest("GET", `/api/v1/inbox${scopeQuery(parsed)}`);
+  if (json) return printJson(payload);
+  const items = payload.inbox ?? [];
+  if (!items.length) return console.log("No inbox items.");
+  for (const item of items) console.log(`${item.inboxId} ${item.state.padEnd(8)} ${item.type.padEnd(8)} ${item.source.agentName}: ${item.summary ?? ""}`);
+}
+
+async function cmdCollectResults(parsed: Parsed, cwd: string, json: boolean) {
+  const inboxPayload = await serverRequest("GET", `/api/v1/inbox${scopeQuery(parsed)}`);
+  const resultItems = (inboxPayload.inbox ?? []).filter((item: any) => item.type === "result" && item.state !== "handled" && item.state !== "dismissed");
+  const results = [];
+  for (const item of resultItems) {
+    const runDir = item.source?.runDir;
+    if (!runDir) continue;
+    const payload = await serverRequest("GET", `/api/v1/runs/result?${targetQuery(cwd, undefined, undefined, runDir)}`);
+    await serverRequest("POST", `/api/v1/inbox/${encodeURIComponent(item.inboxId)}/handled`);
+    results.push({ inboxId: item.inboxId, agent: payload.agent, result: payload.result || (payload.assessment?.resultState === "summary-only" ? payload.agent?.summary : ""), assessment: payload.assessment });
+  }
+  if (json) return printJson({ ok: true, results });
+  if (!results.length) return console.log("No unread results.");
+  for (const r of results) {
+    console.log(`\n## ${r.agent.name}`);
+    console.log(r.result || `[summary] ${r.agent.summary ?? ""}`);
+  }
+}
+
 function cmdRecover(parsed: Parsed, json: boolean) {
   const runDir = flagString(parsed.flags, "run-dir") ?? parsed.positionals[0];
   if (!runDir) throw new Error("Usage: tango recover --run-dir <dir>");
@@ -943,7 +1019,7 @@ function refreshStatus(meta: AgentMetadata): AgentMetadata {
 
 function help() {
   console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]
-  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango ps [--json] [--all]\n  tango inspect [name] [--run-id <id>] [--run-dir <dir>] [--json]\n  tango activity [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json] [--raw]\n  tango follow <name> --until terminal|result-resolved|attention [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango report <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result [name] [--run-id <id>] [--run-dir <dir>] [--watch] [--timeout seconds]\n  tango recover --run-dir <dir> [--json]\n  tango roles list|show <name>\n\nRemoved active protocol commands fail fast: tango status, tango look, tango list, bare tango wait.\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized and summary-only results handled so duplicate completion notifications are suppressed.\n`);
+  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango ps [--json] [--all]\n  tango inspect [name] [--run-id <id>] [--run-dir <dir>] [--json]\n  tango activity [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json] [--raw]\n  tango follow <name> --until terminal|result-resolved|attention [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango report <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result [name] [--run-id <id>] [--run-dir <dir>] [--watch] [--timeout seconds]\n  tango board [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox read|handled|dismiss <inbox-id> [--json]\n  tango collect-results [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango recover --run-dir <dir> [--json]\n  tango roles list|show <name>\n\nRemoved active protocol commands fail fast: tango status, tango look, tango list, bare tango wait.\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized and summary-only results handled so duplicate completion notifications are suppressed.\n`);
 }
 
 main();
