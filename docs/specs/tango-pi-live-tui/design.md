@@ -173,9 +173,13 @@ Default widget recursion policy:
 Aging policy:
 
 - Show all active/blocked/error/stalled/offline direct children.
+- Running oneshot agents remain visible until they reach a terminal/result state.
+- Result-ready or unread terminal oneshots remain visible until the result/error inbox item is handled, dismissed, or collected.
+- Successfully completed and handled oneshots remain visible for a short grace period, default `terminalHandledGraceMs = 2 * 60_000`, then disappear from the compact widget.
+- Stopped terminal oneshots with no actionable inbox item remain visible only briefly, default `terminalUnactionableGraceMs = 60_000`.
 - Show up to 3 recent result-ready/completed direct children.
-- Hide handled/dismissed result items after next refresh.
-- Hide old done/stopped items after e.g. 10 minutes unless unread.
+- Hide handled/dismissed result items after next refresh once their grace period expires.
+- Keep older terminal oneshots available in `/tango-status` recent/history, not in the compact widget.
 
 #### Timer behavior
 
@@ -457,6 +461,28 @@ Add optional settings/commands:
 - `/tango-ui placement above|below|footer-only`
 - `/tango-ui scope local|workstream|root`
 - `/tango-watch <run-id>` / `/tango-unwatch <run-id>`
+
+### Phase 6 — Raw CLI result ergonomics for non-Pi harnesses
+
+Tango should never truncate the canonical result. A completed deliverable lives in `result.md`, and `tango result` should be able to emit the complete result bytes. Any shortening is presentation-only: compact TUI cards, shell-tool previews, or host UIs may preview/truncate what they display, but the underlying result must remain complete and directly addressable.
+
+Claude Code and other non-Pi harnesses often invoke `tango result ... --watch` through a generic shell tool whose UI may truncate large stdout. That is a host display limitation, not a Tango result policy. Tango should make it easy to avoid that display bottleneck without changing the full-result contract.
+
+Add result-oriented CLI affordances:
+
+- `tango result <target> --path` prints only the durable `result.md` path after waiting/assessment.
+- `tango result <target> --save <file>` copies the full durable result to a requested path and prints a short confirmation.
+- `tango result <target> --json --no-content` returns metadata/path/assessment without embedding the full result string.
+- `tango collect-results --json --no-content` returns one record per result with path, bytes, summary, and assessment, not full Markdown content.
+
+Recommended non-Pi pattern when the host shell UI truncates stdout:
+
+```bash
+tango result integration-arch --watch --timeout 600 --path
+# then read/copy the printed result.md path with the harness-native file tool
+```
+
+Pi TUI result cards should similarly preview only in compact views, while preserving explicit actions to open/read the full result.
 
 ## Validation checklist
 
