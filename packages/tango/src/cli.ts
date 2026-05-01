@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { connect } from "node:net";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runOneshotFromRuntime, startAgent } from "./start.js";
@@ -319,7 +321,7 @@ async function ensureServer(): Promise<NonNullable<ReturnType<typeof readServerD
 
   const lockPath = `${serverDiscoveryPath()}.start.lock`;
   mkdirSync(dirname(lockPath), { recursive: true });
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 15000;
   let startedByThisProcess = false;
   let spawnPort = preferredPort === 0 || fixedProbe.occupied ? "0" : String(preferredPort);
   while (Date.now() < deadline) {
@@ -351,7 +353,7 @@ async function ensureServer(): Promise<NonNullable<ReturnType<typeof readServerD
     await new Promise((resolve) => setTimeout(resolve, startedByThisProcess ? 100 : 150));
   }
   if (startedByThisProcess) rmSync(lockPath, { force: true });
-  throw new Error("Timed out starting Tango server for active command.");
+  throw new Error("Timed out starting Tango server for active command after 15s.");
 }
 
 function reapStaleServerStartLock(lockPath: string): void {
@@ -389,14 +391,31 @@ async function discoverFixedLocalServer(port: number): Promise<{ discovery?: Ser
   if (port === 0) return { occupied: false };
   const discovery: ServerDiscovery = { schemaVersion: 1, url: `http://127.0.0.1:${port}`, pid: 0, startedAt: new Date().toISOString(), dataRoot: dataRoot() };
   const health = await serverHealth(discovery);
-  if (!health.ok) return { occupied: false };
+  if (!health.ok) return { occupied: await localPortListening(port) };
   const expectedRoot = dataRoot();
   const healthRoot = typeof health.dataRoot === "string" ? resolve(health.dataRoot) : undefined;
-  if (!healthRoot || healthRoot !== expectedRoot) return { occupied: true };
-  const found = { ...discovery, pid: typeof health.pid === "number" ? health.pid : 0, dataRoot: healthRoot };
+  const defaultRoot = join(homedir(), ".tango");
+  if (healthRoot && healthRoot !== expectedRoot) return { occupied: true };
+  if (!healthRoot && expectedRoot !== defaultRoot) return { occupied: true };
+  const found = { ...discovery, pid: typeof health.pid === "number" ? health.pid : 0, ...(healthRoot ? { dataRoot: healthRoot } : {}) };
   mkdirSync(dirname(serverDiscoveryPath()), { recursive: true });
   writeFileSync(serverDiscoveryPath(), `${JSON.stringify(found, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   return { discovery: found, occupied: true };
+}
+
+async function localPortListening(port: number): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    const done = (occupied: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(occupied);
+    };
+    socket.setTimeout(300);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(true));
+    socket.once("error", (error: any) => done(error?.code !== "ECONNREFUSED"));
+  });
 }
 
 async function serverHealth(discovery: ServerDiscovery): Promise<any> {

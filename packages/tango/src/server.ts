@@ -507,7 +507,7 @@ async function serverStructuredMessage(input: any, url: URL): Promise<{ message:
     attachments: Array.isArray(input?.attachments) ? input.attachments.filter((v: unknown): v is string => typeof v === "string") : undefined,
   });
   if (agent) {
-    messageRun(agent, formatTangoMessage({
+    const deliveredBody = agent.harness === "pi" ? body : formatTangoMessage({
       type: type as any,
       body,
       urgent: input?.urgent === true,
@@ -518,7 +518,8 @@ async function serverStructuredMessage(input: any, url: URL): Promise<{ message:
       toRunDir: agent.runDir,
       rootSessionId: agent.rootSessionId,
       workstreamId: agent.workstreamId,
-    }));
+    });
+    messageRun(agent, deliveredBody);
   }
   return { message, agent, state: agent ? buildRunState(agent) : undefined };
 }
