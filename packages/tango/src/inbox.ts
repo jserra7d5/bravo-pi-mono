@@ -126,6 +126,13 @@ function dedupeKey(type: InboxType, meta: AgentMetadata, suffix = "current"): st
   return `${type}:${meta.runId ?? resolve(meta.runDir)}:${suffix}`;
 }
 
+function attentionVersion(meta: AgentMetadata, type: InboxType): string {
+  const basis = [type, meta.status, meta.needs ?? "", meta.summary ?? "", meta.lastReportAt ?? meta.updatedAt ?? ""].join("|");
+  let hash = 0;
+  for (let i = 0; i < basis.length; i++) hash = ((hash << 5) - hash + basis.charCodeAt(i)) | 0;
+  return Math.abs(hash).toString(36);
+}
+
 function ageMs(iso?: string): number {
   const time = Date.parse(iso ?? "");
   return Number.isFinite(time) ? Date.now() - time : 0;
@@ -217,7 +224,7 @@ export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem
   for (const meta of agents) {
     const source: InboxSource = { runId: meta.runId, runDir: meta.runDir, agentName: meta.name };
     if (meta.status === "blocked") {
-      const key = dedupeKey("blocked", meta);
+      const key = dedupeKey("blocked", meta, attentionVersion(meta, "blocked"));
       activeDedupeKeys.add(key);
       upsertInboxItem({
         type: "blocked",
@@ -230,7 +237,7 @@ export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem
     }
     const derived = derivedAttentionState(meta);
     if (derived) {
-      const key = dedupeKey(derived, meta);
+      const key = dedupeKey(derived, meta, attentionVersion(meta, derived));
       activeDedupeKeys.add(key);
       upsertInboxItem({
         type: derived,
@@ -243,7 +250,7 @@ export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem
       });
     }
     if (meta.status === "error") {
-      const key = dedupeKey("error", meta);
+      const key = dedupeKey("error", meta, attentionVersion(meta, "error"));
       activeDedupeKeys.add(key);
       upsertInboxItem({
         type: "error",
@@ -284,11 +291,31 @@ export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem
   return readInboxItems();
 }
 
+function isUnresolved(item: InboxItem): boolean {
+  return item.state !== "handled" && item.state !== "dismissed";
+}
+
+function inspectionStateForNonResult(item: InboxItem, meta: AgentMetadata): InboxState {
+  if (item.type === "error") return meta.status === "error" ? "read" : "handled";
+  if (item.type === "blocked") return meta.status === "blocked" ? "read" : "handled";
+  if (item.type === "stalled" || item.type === "offline") return derivedAttentionState(meta) === item.type ? "read" : "handled";
+  if (meta.status === "done" || meta.status === "stopped") return "handled";
+  return "read";
+}
+
+export function markActivityItemsInspected(meta: AgentMetadata): InboxItem[] {
+  const items = readInboxItems().filter((item) =>
+    item.type !== "result" &&
+    isUnresolved(item) &&
+    resolve(item.source.runDir) === resolve(meta.runDir)
+  );
+  return items.map((item) => markInboxItem(item.inboxId, inspectionStateForNonResult(item, meta))!).filter(Boolean);
+}
+
 export function markResultItemsHandled(meta: AgentMetadata): InboxItem[] {
   const items = readInboxItems().filter((item) =>
     item.type === "result" &&
-    item.state !== "handled" &&
-    item.state !== "dismissed" &&
+    isUnresolved(item) &&
     resolve(item.source.runDir) === resolve(meta.runDir)
   );
   return items.map((item) => markInboxItem(item.inboxId, "handled")!).filter(Boolean);

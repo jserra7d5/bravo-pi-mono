@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { closeSync, existsSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runOneshotFromRuntime, startAgent } from "./start.js";
-import { projectSlug } from "./paths.js";
+import { dataRoot, projectSlug } from "./paths.js";
 import { fail, printJson } from "./json.js";
 import { listMetadata, readMetadata, removeRunDir, transitionStatus, updateStatus, writeMetadata } from "./metadata.js";
 import { readMetrics, writeMetrics } from "./metrics.js";
@@ -22,6 +22,7 @@ import { buildRunState as cpBuildRunState, messageRun, readActivity, reportRun, 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
 const cliPath = fileURLToPath(import.meta.url);
+const DEFAULT_SERVER_PORT = 43117;
 const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "active", "problems", "health", "full", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required", "raw", "events", "urgent", "unread", "peek"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -56,7 +57,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   start: new Set(["role", "harness", "mode", "model", "thinking", "effort", "clean", "attach", "dry-run", "recursive", "no-recursive", "result-required", "no-result-required"]),
   ps: new Set(["all", "active", "problems", "health", "full", "limit", "state"]),
   inspect: new Set(["run-id", "run-dir"]),
-  activity: new Set(["run-id", "run-dir", "lines", "raw", "events"]),
+  activity: new Set(["run-id", "run-dir", "lines", "raw", "events", "peek"]),
   list: new Set(["all"]),
   look: new Set(["run-id", "run-dir", "lines"]),
   attach: new Set(["run-id", "run-dir"]),
@@ -76,7 +77,7 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   runner: new Set(["run-dir"]),
   result: new Set(["run-id", "run-dir", "watch", "timeout", "unread", "inbox", "peek", "root-session-id", "workstream-id"]),
   board: new Set(["root-session-id", "workstream-id", "run-id", "run-dir"]),
-  inbox: new Set(["root-session-id", "workstream-id", "run-id", "run-dir"]),
+  inbox: new Set(["root-session-id", "workstream-id", "run-id", "run-dir", "all"]),
   "collect-results": new Set(["root-session-id", "workstream-id", "run-id", "run-dir"]),
   recover: new Set(["run-dir"]),
   roles: new Set(),
@@ -312,34 +313,108 @@ async function ensureServer(): Promise<NonNullable<ReturnType<typeof readServerD
     rmSync(serverDiscoveryPath(), { force: true });
   }
   if (process.env.TANGO_SERVER_URL) throw new Error("Configured Tango server is not reachable.");
-  const child = spawn(process.execPath, [cliPath, "server", "--port", "0"], {
-    detached: true,
-    stdio: "ignore",
-    env: process.env,
-  });
-  child.unref();
+  const preferredPort = preferredServerPort();
+  const fixedProbe = await discoverFixedLocalServer(preferredPort);
+  if (fixedProbe.discovery) return fixedProbe.discovery;
+
+  const lockPath = `${serverDiscoveryPath()}.start.lock`;
+  mkdirSync(dirname(lockPath), { recursive: true });
   const deadline = Date.now() + 5000;
+  let startedByThisProcess = false;
+  let spawnPort = preferredPort === 0 || fixedProbe.occupied ? "0" : String(preferredPort);
   while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
     const discovery = readServerDiscovery();
-    if (discovery && await serverSupportsRunApi(discovery)) return discovery;
+    if (discovery && await serverSupportsRunApi(discovery)) {
+      if (startedByThisProcess) rmSync(lockPath, { force: true });
+      return discovery;
+    }
+
+    let lockFd: number | undefined;
+    try {
+      lockFd = openSync(lockPath, "wx");
+      writeFileSync(lockFd, `${process.pid}\n${new Date().toISOString()}\n`, "utf8");
+      closeSync(lockFd);
+      lockFd = undefined;
+      startedByThisProcess = true;
+      const child = spawn(process.execPath, [cliPath, "server", "--port", spawnPort], {
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+      });
+      child.unref();
+    } catch (error: any) {
+      if (lockFd !== undefined) closeSync(lockFd);
+      if (error?.code !== "EEXIST") throw error;
+      reapStaleServerStartLock(lockPath);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, startedByThisProcess ? 100 : 150));
   }
+  if (startedByThisProcess) rmSync(lockPath, { force: true });
   throw new Error("Timed out starting Tango server for active command.");
 }
 
-async function serverSupportsRunApi(discovery: ServerDiscovery): Promise<boolean> {
+function reapStaleServerStartLock(lockPath: string): void {
+  try {
+    const stat = statSync(lockPath);
+    const [pidText] = readFileSync(lockPath, "utf8").split(/\r?\n/);
+    const pid = Number(pidText);
+    if (Number.isInteger(pid) && pid > 0 && !processAlive(pid)) {
+      rmSync(lockPath, { force: true });
+      return;
+    }
+    if (Date.now() - stat.mtimeMs > 15_000) rmSync(lockPath, { force: true });
+  } catch {}
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: any) {
+    return error?.code === "EPERM";
+  }
+}
+
+function preferredServerPort(): number {
+  const raw = process.env.TANGO_SERVER_PORT;
+  if (raw === undefined || raw === "") return DEFAULT_SERVER_PORT;
+  if (!/^\d+$/.test(raw)) throw new Error("TANGO_SERVER_PORT must be an integer between 0 and 65535.");
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("TANGO_SERVER_PORT must be an integer between 0 and 65535.");
+  return port;
+}
+
+async function discoverFixedLocalServer(port: number): Promise<{ discovery?: ServerDiscovery; occupied: boolean }> {
+  if (port === 0) return { occupied: false };
+  const discovery: ServerDiscovery = { schemaVersion: 1, url: `http://127.0.0.1:${port}`, pid: 0, startedAt: new Date().toISOString(), dataRoot: dataRoot() };
+  const health = await serverHealth(discovery);
+  if (!health.ok) return { occupied: false };
+  const expectedRoot = dataRoot();
+  const healthRoot = typeof health.dataRoot === "string" ? resolve(health.dataRoot) : undefined;
+  if (!healthRoot || healthRoot !== expectedRoot) return { occupied: true };
+  const found = { ...discovery, pid: typeof health.pid === "number" ? health.pid : 0, dataRoot: healthRoot };
+  mkdirSync(dirname(serverDiscoveryPath()), { recursive: true });
+  writeFileSync(serverDiscoveryPath(), `${JSON.stringify(found, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  return { discovery: found, occupied: true };
+}
+
+async function serverHealth(discovery: ServerDiscovery): Promise<any> {
   const headers: Record<string, string> = { "accept": "application/json" };
   if (discovery.token) headers.authorization = `Bearer ${discovery.token}`;
   try {
-    const runsUrl = new URL("/api/v1/runs?cwd=/", discovery.url);
-    const runsRes = await fetch(runsUrl, { headers, signal: AbortSignal.timeout(1000) });
-    if (!runsRes.ok) return false;
-    const boardUrl = new URL("/api/v1/board?runId=__compat_probe__", discovery.url);
-    const boardRes = await fetch(boardUrl, { headers, signal: AbortSignal.timeout(3000) });
-    return boardRes.ok;
+    const healthUrl = new URL("/api/v1/health", discovery.url);
+    const res = await fetch(healthUrl, { headers, signal: AbortSignal.timeout(1000) });
+    if (!res.ok) return { ok: false };
+    return await res.json().catch(() => ({ ok: false }));
   } catch {
-    return false;
+    return { ok: false };
   }
+}
+
+async function serverSupportsRunApi(discovery: ServerDiscovery): Promise<boolean> {
+  const payload = await serverHealth(discovery);
+  return payload?.ok === true && payload?.schemaVersion === 1 && Array.isArray(payload.capabilities) && payload.capabilities.includes("runs");
 }
 
 async function serverRequest(method: "GET" | "POST", path: string, body?: unknown): Promise<any> {
@@ -528,6 +603,7 @@ async function cmdActivity(parsed: Parsed, cwd: string, json: boolean) {
   params.set("limit", String(lines));
   if (flagBool(parsed.flags, "raw")) params.set("raw", "true");
   if (flagBool(parsed.flags, "events")) params.set("events", "true");
+  if (flagBool(parsed.flags, "peek")) params.set("peek", "true");
   const payload = await serverRequest("GET", `/api/v1/runs/activity?${params.toString()}`);
   if (json) printJson(payload);
   else process.stdout.write(payload.output.endsWith("\n") ? payload.output : `${payload.output}\n`);
@@ -753,9 +829,15 @@ async function cmdFollow(parsed: Parsed, cwd: string, json: boolean) {
   } catch (error) {
     if (json && error instanceof ServerRequestError && error.status === 504) {
       const statePayload = await serverRequest("GET", `/api/v1/runs/state?${targetQuery(cwd, name, runId, runDir)}`);
-      const resultPayload = await serverRequest("GET", `/api/v1/runs/result?${targetQuery(cwd, name, runId, runDir)}`);
+      const stateResult = statePayload.state?.result;
+      const resultAssessment = stateResult ? {
+        ...stateResult,
+        resultReady: stateResult.ready,
+        resultIssue: stateResult.issue,
+        resultWarning: stateResult.warning,
+      } : undefined;
       process.exitCode = 0;
-      return printJson({ ok: false, timeout: true, condition: until, state: statePayload.state, agent: resultPayload.agent, resultAssessment: resultPayload.assessment });
+      return printJson({ ok: false, timeout: true, condition: until, state: statePayload.state, agent: statePayload.state?.identity, resultAssessment });
     }
     throw error;
   }
@@ -923,8 +1005,11 @@ async function cmdInbox(parsed: Parsed, json: boolean) {
     if (json) return printJson(payload);
     return console.log(`${payload.item.inboxId}: ${payload.item.state}`);
   }
-  if (sub) throw new Error("Usage: tango inbox [--json] | tango inbox read|handled|dismiss <inbox-id>");
-  const payload = await serverRequest("GET", `/api/v1/inbox${scopeQuery(parsed)}`);
+  if (sub) throw new Error("Usage: tango inbox [--json] [--all] | tango inbox read|handled|dismiss <inbox-id>");
+  const query = scopeQuery(parsed);
+  const includeAll = flagBool(parsed.flags, "all");
+  const sep = query ? "&" : "?";
+  const payload = await serverRequest("GET", `/api/v1/inbox${query}${includeAll ? `${sep}include=all` : ""}`);
   if (json) return printJson(payload);
   const items = payload.inbox ?? [];
   if (!items.length) return console.log("No inbox items.");
@@ -1076,7 +1161,7 @@ function refreshStatus(meta: AgentMetadata): AgentMetadata {
 
 function help() {
   console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]
-  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango ps [--json] [--all]\n  tango inspect [name] [--run-id <id>] [--run-dir <dir>] [--json]\n  tango activity [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json] [--raw]\n  tango follow <name> --until terminal|result-resolved|attention [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango wait <targets...> [--run-id <id>] [--run-dir <dir>] --until terminal|result-ready|attention [--mode any|all] [--timeout seconds] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango report <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <target>|--run-id <id>|--run-dir <dir>|--unread|--inbox <id> [--peek] [--watch] [--timeout seconds] [--json]\n  tango board [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox read|handled|dismiss <inbox-id> [--json]\n  tango recover --run-dir <dir> [--json]\n  tango roles list|show <name>\n\nRemoved active protocol commands fail fast: tango status, tango look, tango list, tango collect-results.\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized and summary-only results handled so duplicate completion notifications are suppressed.\n`);
+  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango ps [--json] [--all]\n  tango inspect [name] [--run-id <id>] [--run-dir <dir>] [--json]\n  tango activity [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json] [--raw] [--peek]\n  tango follow <name> --until terminal|result-resolved|attention [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango wait <targets...> [--run-id <id>] [--run-dir <dir>] --until terminal|result-ready|attention [--mode any|all] [--timeout seconds] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango report <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <target>|--run-id <id>|--run-dir <dir>|--unread|--inbox <id> [--peek] [--watch] [--timeout seconds] [--json]\n  tango board [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--all] [--json]\n  tango inbox read|handled|dismiss <inbox-id> [--json]\n  tango recover --run-dir <dir> [--json]\n  tango roles list|show <name>\n\nRemoved active protocol commands fail fast: tango status, tango look, tango list, tango collect-results.\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized and summary-only results handled so duplicate completion notifications are suppressed.\n`);
 }
 
 main();

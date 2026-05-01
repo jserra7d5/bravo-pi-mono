@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "lm_z62olhbb",
+  "name": "tango-server-dashboard",
+  "title": "Tango Server Dashboard and Root Session Control Plane",
+  "root": "../..",
+  "workspaces": []
+}

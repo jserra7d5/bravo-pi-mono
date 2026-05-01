@@ -68,6 +68,20 @@ describe("rollout compatibility", () => {
     }
   });
 
+  it("honors TANGO_SERVER_PORT=0 for discovery-backed ephemeral autostart", () => {
+    const home = tempHome();
+    try {
+      const result = runCli(["ps", "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "", TANGO_SERVER_PORT: "0" });
+      assert.strictEqual(result.status, 0, result.stderr);
+      const discovery = JSON.parse(readFileSync(join(home, "server", "server.json"), "utf8"));
+      assert.match(discovery.url, /^http:\/\/127\.0\.0\.1:\d+$/);
+      assert.notStrictEqual(discovery.url, "http://127.0.0.1:43117");
+      assert.strictEqual(discovery.dataRoot, home);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("runs tango roles list without a Tango server", () => {
     const home = tempHome();
     try {

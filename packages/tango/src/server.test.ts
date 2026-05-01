@@ -137,6 +137,15 @@ async function getRawAuthorized(path: string): Promise<{ status: number; text: s
 }
 
 describe("server routes", () => {
+  it("GET /api/v1/health advertises server capabilities without auth", async () => {
+    const res = await getRaw("/api/v1/health");
+    assert.strictEqual(res.status, 200);
+    const body = JSON.parse(res.text) as any;
+    assert.strictEqual(body.ok, true);
+    assert.strictEqual(body.schemaVersion, 1);
+    assert.ok(body.capabilities.includes("runs"));
+  });
+
   it("GET /api/v1/operations returns the operations projection", async () => {
     const { status, body } = await get("/api/v1/operations");
     assert.strictEqual(status, 200);

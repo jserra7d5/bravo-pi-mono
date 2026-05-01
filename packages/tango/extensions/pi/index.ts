@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { truncateTail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@mariozechner/pi-coding-agent";
-import { Box, Container, Spacer, Text } from "@mariozechner/pi-tui";
+import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -19,6 +19,27 @@ type NotifyLevel = "info" | "error" | "warning" | "success";
 
 let reconcileTimer: ReturnType<typeof setInterval> | undefined;
 let liveWidgetTimer: ReturnType<typeof setInterval> | undefined;
+
+function signalWithTimeout(parent: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  timer.unref?.();
+  const cleanup = () => clearTimeout(timer);
+  controller.signal.addEventListener("abort", cleanup, { once: true });
+  if (parent) {
+    if (parent.aborted) controller.abort();
+    else parent.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  return controller.signal;
+}
+
+function passiveDelayMs(failures: number): number {
+  return Math.min(30_000, 2_000 * Math.max(1, 2 ** Math.min(failures, 4)));
+}
+
+async function runPassiveTango(args: string[], parentSignal?: AbortSignal, timeoutMs = 1500): Promise<ExecResult> {
+  return runTango(args, signalWithTimeout(parentSignal, timeoutMs));
+}
 
 function tangoHome(): string {
   return process.env.TANGO_HOME || join(process.env.TANGO_REAL_HOME || process.env.HOME || process.cwd(), ".tango");
@@ -59,8 +80,8 @@ function ensureRootSessionRecord() {
 
 async function runTango(args: string[], signal?: AbortSignal): Promise<ExecResult> {
   const candidates: Array<{ command: string; args: string[] }> = [
-    { command: "tango", args },
     { command: process.execPath, args: [distCli, ...args] },
+    { command: "tango", args },
   ];
   let last: ExecResult = { code: 1, stdout: "", stderr: "tango not found" };
   for (const c of candidates) {
@@ -89,6 +110,23 @@ function run(command: string, args: string[], signal?: AbortSignal): Promise<Exe
   });
 }
 
+function conciseToolContent(json: any, fallback: string): string {
+  if (!json || typeof json !== "object") return fallback;
+  if (typeof json.result === "string" && json.agent) return json.result;
+  if (Array.isArray(json.results)) return json.results.length ? `${json.results.length} Tango result${json.results.length === 1 ? "" : "s"}` : "No unread Tango results.";
+  if (json.output !== undefined && json.agent) {
+    const status = json.agent.status ?? "unknown";
+    const summary = json.agent.summary ?? json.activity?.latestSource ?? "activity available";
+    return `${json.agent.name ?? "agent"}: ${status}${summary ? ` — ${preview(summary, 68)}` : ""}`;
+  }
+  if (Array.isArray(json.agents)) return preview(`Tango agents: ${json.agents.length}${json.counts ? ` · ${Object.entries(json.counts).map(([k, v]) => `${v} ${k}`).join(" · ")}` : ""}`, 88);
+  if (json.counts) return `Tango board: ${json.counts.active ?? 0} active · ${json.counts.blocked ?? 0} blocked · ${json.counts.unreadResults ?? 0} result`;
+  if (json.condition && Array.isArray(json.matched)) return `tango wait ${json.condition}: ${json.matched.length} matched · ${json.pending?.length ?? 0} pending`;
+  if (json.agent?.name) return `${json.agent.name}: ${json.agent.status ?? json.state?.agent?.state ?? "ok"}`;
+  if (json.ok === true) return "Tango command completed.";
+  return fallback;
+}
+
 function toolResult(result: ExecResult) {
   if (result.code !== 0) {
     return {
@@ -97,8 +135,9 @@ function toolResult(result: ExecResult) {
       isError: true,
     };
   }
+  const fallback = result.stdout;
   return {
-    content: [{ type: "text" as const, text: result.json ? JSON.stringify(result.json, null, 2) : result.stdout }],
+    content: [{ type: "text" as const, text: result.json ? conciseToolContent(result.json, fallback) : fallback }],
     details: result.json ?? { ok: true, stdout: result.stdout },
   };
 }
@@ -162,7 +201,20 @@ function preview(value: unknown, max = 120): string {
 }
 
 function textBlock(lines: string[]) {
-  return new Text(lines.join("\n"), 0, 0);
+  return {
+    invalidate() {},
+    render(width: number) {
+      return lines.map((line) => trunc(line, width));
+    },
+  };
+}
+
+function safeWidth(width: unknown): number {
+  return typeof width === "number" && Number.isFinite(width) && width > 0 ? Math.floor(width) : 80;
+}
+
+function trunc(line: string, width: unknown): string {
+  return truncateToWidth(line, safeWidth(width), "");
 }
 
 function errorText(result: any, theme: any) {
@@ -211,53 +263,62 @@ function metricsSummary(agent: any): string {
 
 function agentSummary(agent: any): string {
   const metrics = metricsSummary(agent);
-  return `${agent?.role ?? "agent"} · ${agent?.mode ?? "?"}/${agent?.harness ?? "?"} · ${agent?.status ?? "unknown"}${metrics ? ` · ${metrics}` : ""}`;
+  return `${agent?.role ?? "agent"} · ${agent?.mode ?? "?"}/${agent?.harness ?? "?"}${metrics ? ` · ${metrics}` : ""}`;
+}
+
+function commandLine(theme: any, command: string, target?: string, meta?: string): any {
+  return textBlock([`${theme.fg("muted", "▸")} ${theme.fg("toolTitle", command)}${target ? ` ${theme.fg("accent", target)}` : ""}${meta ? ` ${theme.fg("dim", meta)}` : ""}`]);
 }
 
 function renderAgentResult(result: any, { expanded }: { expanded: boolean }, theme: any, title: string) {
   if (result.isError) return errorText(result, theme);
   const agent = result.details?.agent;
-  if (!agent) return new Text(theme.fg("success", `✓ ${title}`), 0, 0);
+  if (!agent) return textBlock([theme.fg("success", `✓ ${title}`)]);
   const icon = statusIcon(agent.status);
-  const head = `${theme.fg(statusColor(agent.status), icon)} ${theme.fg("toolTitle", title)} ${theme.fg("accent", agent.name)}`;
-  if (!expanded) return textBlock([head, `  ${theme.fg("muted", agentSummary(agent))}`]);
+  const color = statusColor(agent.status);
+  const meta = agentSummary(agent);
+  const task = firstLine(agent.summary ?? agent.task ?? "");
+  const head = `${theme.fg(color, icon)} ${theme.fg("toolTitle", agent.name)} ${theme.fg(color, agent.status)} ${theme.fg("dim", `· ${meta}`)}${task ? theme.fg("muted", ` — ${preview(task, 72)}`) : ""}`;
+  if (!expanded) return textBlock([head]);
   return textBlock([
     head,
-    `  ${theme.fg("muted", "Role:")} ${agent.role ?? "-"}`,
-    `  ${theme.fg("muted", "Harness:")} ${agent.harness}`,
-    `  ${theme.fg("muted", "Mode:")} ${agent.mode}`,
-    `  ${theme.fg("muted", "Status:")} ${agent.status}`,
-    agent.metrics ? `  ${theme.fg("muted", "Metrics:")} ${metricsSummary(agent)}` : "",
-    `  ${theme.fg("muted", "Run dir:")} ${theme.fg("dim", agent.runDir ?? "")}`,
-    agent.task ? `  ${theme.fg("muted", "Task:")} ${preview(agent.task, 180)}` : "",
+    `  ${theme.fg("muted", "task")} ${preview(agent.task ?? "", 220)}`,
+    agent.needs ? `  ${theme.fg("warning", "needs")} ${agent.needs}` : "",
+    agent.metrics ? `  ${theme.fg("muted", "metrics")} ${metricsSummary(agent)}` : "",
+    `  ${theme.fg("muted", "run")} ${theme.fg("dim", agent.runId ?? agent.runDir ?? "")}`,
   ].filter(Boolean));
 }
 
 function renderBoardResult(result: any, { expanded }: { expanded: boolean }, theme: any) {
   if (result.isError) return errorText(result, theme);
   const counts = result.details?.counts ?? {};
-  const summary = `Tango board: ${counts.active ?? 0} running · ${counts.blocked ?? 0} blocked · ${counts.unread ?? 0} unread`;
-  if (!expanded) return new Text(theme.fg("toolTitle", summary), 0, 0);
-  const lines = [theme.fg("toolTitle", summary), ""];
-  for (const section of ["active", "blocked", "unreadResults", "recentErrors"]) {
+  const summary = `Tango board · ${counts.active ?? 0} active · ${counts.blocked ?? 0} blocked · ${counts.unreadResults ?? 0} results · ${counts.unread ?? 0} updates`;
+  if (!expanded) return textBlock([`${theme.fg("accent", "◆")} ${theme.fg("toolTitle", summary)}`]);
+  const lines = [`${theme.fg("accent", "◆ Tango board")} ${theme.fg("muted", `${counts.active ?? 0} active · ${counts.blocked ?? 0} blocked · ${counts.unread ?? 0} updates`)}`];
+  for (const [label, section] of [["Running", "active"], ["Needs attention", "blocked"], ["Results", "unreadResults"], ["Errors", "recentErrors"]] as const) {
     const items = result.details?.[section] ?? [];
     if (!items.length) continue;
-    lines.push(theme.fg("accent", section));
-    for (const item of items) lines.push(`  ${theme.fg(statusColor(item.status), statusIcon(item.status))} ${item.name} ${theme.fg("muted", item.summary ?? item.activity ?? "")}`);
+    lines.push("", theme.fg("accent", label));
+    for (const item of items.slice(0, 8)) lines.push(`  ${boardRow(item, theme)}`);
   }
-  return new Text(lines.join("\n"), 0, 0);
+  return textBlock(lines);
 }
 
 function renderInboxResult(result: any, { expanded }: { expanded: boolean }, theme: any) {
   if (result.isError) return errorText(result, theme);
   const items = result.details?.inbox ?? (result.details?.item ? [result.details.item] : []);
   const unread = items.filter((item: any) => item.state === "unread").length;
-  const summary = `Tango inbox: ${unread} unread · ${items.length} total`;
-  if (!expanded) return new Text(theme.fg("toolTitle", summary), 0, 0);
-  const lines = [theme.fg("toolTitle", summary), ""];
-  for (const item of items) lines.push(`${theme.fg("accent", item.inboxId)} ${item.state} ${item.type} ${item.source?.agentName ?? ""}: ${preview(item.summary ?? item.body ?? "", 160)}`);
-  if (!items.length) lines.push(theme.fg("dim", "No inbox items."));
-  return new Text(lines.join("\n"), 0, 0);
+  const summary = `Tango updates · ${unread} unread · ${items.length} actionable`;
+  if (!expanded) return textBlock([`${theme.fg(items.length ? "warning" : "success", items.length ? "◆" : "✓")} ${theme.fg("toolTitle", summary)}`]);
+  const lines = [`${theme.fg("accent", "◆ Tango updates")} ${theme.fg("muted", `${unread} unread · ${items.length} actionable`)}`];
+  for (const item of items) {
+    const level = inboxNotifyLevel(item);
+    const color = level === "error" ? "error" : level === "warning" ? "warning" : level === "success" ? "success" : "accent";
+    lines.push(`${theme.fg(color, statusIcon(item.type === "result" ? "done" : item.type === "error" ? "error" : item.type === "blocked" ? "blocked" : "running"))} ${theme.fg("toolTitle", item.source?.agentName ?? "agent")} ${theme.fg(color, item.type)} ${theme.fg("muted", preview(item.summary ?? item.body ?? "", 110))}`);
+    if (expanded) lines.push(`  ${theme.fg("dim", inboxAction(item))}`);
+  }
+  if (!items.length) lines.push(theme.fg("dim", "No actionable Tango updates."));
+  return textBlock(lines);
 }
 
 function renderListResult(result: any, { expanded }: { expanded: boolean }, theme: any) {
@@ -267,32 +328,68 @@ function renderListResult(result: any, { expanded }: { expanded: boolean }, them
     acc[a.status ?? "unknown"] = (acc[a.status ?? "unknown"] ?? 0) + 1;
     return acc;
   }, {});
-  const summary = `Tango agents: ${counts.running ?? 0} running · ${counts.done ?? 0} done · ${counts.error ?? 0} error`;
-  if (!expanded) return new Text(theme.fg("toolTitle", summary), 0, 0);
-  const lines = [theme.fg("toolTitle", summary), ""];
+  const summary = `Tango agents · ${counts.running ?? 0} running · ${counts.blocked ?? 0} blocked · ${counts.done ?? 0} done · ${counts.error ?? 0} error`;
+  if (!expanded) return textBlock([`${theme.fg("accent", "◆")} ${theme.fg("toolTitle", summary)}`]);
+  const lines = [`${theme.fg("accent", "◆ Tango agents")} ${theme.fg("muted", `${agents.length} shown`)}`];
   for (const a of agents) {
     const icon = theme.fg(statusColor(a.status), statusIcon(a.status));
     const metrics = metricsSummary(a);
-    lines.push(`${icon} ${theme.fg("accent", String(a.name).padEnd(18))} ${String(a.role ?? "-").padEnd(10)} ${a.mode}/${a.harness} ${theme.fg("muted", a.status ?? "unknown")}${metrics ? ` ${theme.fg("dim", metrics)}` : ""}`);
+    lines.push(`${icon} ${theme.fg("toolTitle", String(a.name))} ${theme.fg("muted", `${a.role ?? "-"} · ${a.mode}/${a.harness}`)} ${theme.fg(statusColor(a.status), a.status ?? "unknown")}${metrics ? ` ${theme.fg("dim", `· ${metrics}`)}` : ""}`);
   }
   if (!agents.length) lines.push(theme.fg("dim", "No Tango agents."));
-  return new Text(lines.join("\n"), 0, 0);
+  return textBlock(lines);
+}
+
+function parseActivityText(text: string): any | undefined {
+  const trimmed = text.trim().replace(/^\[tool\]\s*/, "");
+  if (!trimmed.startsWith("{")) return undefined;
+  try { return JSON.parse(trimmed); } catch { return undefined; }
+}
+
+function activitySummaryText(event: any): string | undefined {
+  const text = String(event?.text ?? "").trim();
+  if (!text || text.includes("[redacted reasoning signature]")) return undefined;
+  const parsed = parseActivityText(text);
+  if (!parsed) return text;
+  if (parsed.type === "session") return `session started · ${parsed.cwd ?? ""}`.trim();
+  if (parsed.type === "agent_start") return "agent started";
+  if (parsed.type === "turn_start") return "turn started";
+  const message = parsed.message ?? parsed.assistantMessageEvent?.partial;
+  const role = message?.role;
+  const content = Array.isArray(message?.content) ? message.content : [];
+  const textPart = content.find((part: any) => part?.type === "text" && part.text)?.text;
+  if (textPart) return `${role ?? "message"}: ${firstLine(textPart)}`;
+  const eventType = parsed.assistantMessageEvent?.type ?? parsed.type;
+  if (eventType === "thinking_start") return "assistant thinking";
+  if (eventType === "message_start" || eventType === "message_end" || eventType === "message_update") return undefined;
+  return undefined;
+}
+
+function renderActivityEventLine(event: any, theme: any): string {
+  const kind = event?.kind ?? "log";
+  const icon = kind === "tool" ? "▸" : kind === "assistant" ? "●" : kind === "user" ? "◌" : "·";
+  const color = kind === "tool" ? "accent" : kind === "assistant" ? "success" : kind === "user" ? "warning" : "dim";
+  return `${theme.fg(color, icon)} ${theme.fg("muted", kind)} ${preview(activitySummaryText(event) ?? "activity", 120)}`;
 }
 
 function renderLookResult(result: any, { expanded }: { expanded: boolean }, theme: any) {
   if (result.isError) return errorText(result, theme);
   const agent = result.details?.agent;
-  const output = result.details?.output ?? "";
+  const events = Array.isArray(result.details?.events) ? result.details.events : [];
+  const activity = result.details?.activity;
+  const status = agent?.status ?? "unknown";
+  const headline = agent?.summary ?? (activity?.latestSource ? `latest: ${activity.latestSource}` : "activity available");
   if (!expanded) {
-    return textBlock([
-      `${theme.fg("toolTitle", agent?.name ?? "Tango output")}: ${theme.fg("muted", firstLine(output) || "no output")}`,
-    ]);
+    return textBlock([`${theme.fg(statusColor(status), statusIcon(status))} ${theme.fg("toolTitle", agent?.name ?? "Tango activity")} ${theme.fg(statusColor(status), status)} ${theme.fg("muted", `· ${preview(headline, 90)}`)}`]);
   }
-  const c = new Container();
-  c.addChild(new Text(`${theme.fg("toolTitle", "Tango output")} ${theme.fg("accent", agent?.name ?? "")}`, 0, 0));
-  c.addChild(new Spacer(1));
-  c.addChild(new Text(output || theme.fg("dim", "No output."), 0, 0));
-  return c;
+  const meaningful = events.map((event: any) => ({ event, text: activitySummaryText(event) })).filter((item: any) => item.text).slice(-80);
+  return textBlock([
+    `${theme.fg("accent", "◆ Tango activity")} ${theme.fg("toolTitle", agent?.name ?? "")}`,
+    `${theme.fg(statusColor(status), statusIcon(status))} ${theme.fg(statusColor(status), status)}${headline ? theme.fg("muted", ` · ${preview(headline, 100)}`) : ""}`,
+    activity?.sources?.length ? `${theme.fg("dim", "sources")} ${activity.sources.join(", ")}` : "",
+    "",
+    ...(meaningful.length ? meaningful.map((item: any) => renderActivityEventLine(item.event, theme)) : [theme.fg("dim", "No meaningful activity output.")]),
+  ].filter(Boolean));
 }
 
 function renderResultResult(result: any, { expanded }: { expanded: boolean }, theme: any) {
@@ -305,10 +402,11 @@ function renderResultResult(result: any, { expanded }: { expanded: boolean }, th
   const warning = result.details?.resultWarning;
   const color = issue || !ready ? "warning" : warning ? "warning" : "success";
   const icon = issue || !ready ? "⚠" : warning ? "⚠" : "✓";
-  const status = issue || !ready ? (issue || "result not ready") : warning ? warning : firstLine(output);
-  if (!expanded) return new Text(`${theme.fg(color, icon)} ${theme.fg("accent", agent?.name ?? "agent")} result ${theme.fg("muted", status)}`, 0, 0);
+  const status = issue || !ready ? (issue || "not ready") : warning ? warning : "ready";
+  const first = firstLine(output);
+  if (!expanded) return textBlock([`${theme.fg(color, icon)} ${theme.fg("toolTitle", agent?.name ?? "agent")} ${theme.fg(color, "result")} ${theme.fg("muted", status)}${first && ready ? theme.fg("dim", ` · ${preview(first, 70)}`) : ""}`]);
   return textBlock([
-    `${theme.fg("toolTitle", "Tango result")} ${theme.fg("accent", agent?.name ?? "")}`,
+    `${theme.fg("accent", "◆ Tango result")} ${theme.fg("toolTitle", agent?.name ?? "")}`,
     issue ? theme.fg("warning", `Result issue: ${issue}`) : "",
     warning ? theme.fg("warning", `Result warning: ${warning}`) : "",
     ready ? theme.fg("success", "Result ready") : theme.fg("warning", "Result not ready"),
@@ -324,7 +422,7 @@ function renderResultListResult(result: any, { expanded }: { expanded: boolean }
     const label = count === 1 ? "1 result" : `${count} results`;
     const first = results[0];
     const suffix = first ? ` · ${first.agent?.name ?? "agent"}: ${firstLine(first.result ?? first.agent?.summary ?? "")}` : "";
-    return new Text(`${theme.fg(count ? "success" : "muted", count ? "✓" : "○")} ${theme.fg("accent", "Tango results")} ${theme.fg("muted", label + suffix)}`, 0, 0);
+    return textBlock([`${theme.fg(count ? "success" : "muted", count ? "✓" : "○")} ${theme.fg("accent", "Tango results")} ${theme.fg("muted", label + suffix)}`]);
   }
   const lines = [`${theme.fg("toolTitle", "Tango results")} ${theme.fg("accent", String(count))}`];
   for (const item of results) {
@@ -337,14 +435,26 @@ function renderResultListResult(result: any, { expanded }: { expanded: boolean }
 
 async function updateFooterStatus(ctx: any, signal?: AbortSignal) {
   if (!ctx?.hasUI) return;
-  const result = await runTango(["ps", "--json"], signal);
-  const agents = result.json?.agents ?? [];
-  const running = agents.filter((a: any) => a.status === "running").length;
-  const done = agents.filter((a: any) => a.status === "done").length;
-  const tools = agents.reduce((sum: number, a: any) => sum + (typeof a.metrics?.toolCalls === "number" ? a.metrics.toolCalls : 0), 0);
-  const tokens = agents.reduce((sum: number, a: any) => sum + (typeof a.metrics?.tokens?.total === "number" ? a.metrics.tokens.total : 0), 0);
-  const suffix = [`${running} running`, `${done} done`, tools ? `${tools} tools` : "", tokens ? formatTokens(tokens) : ""].filter(Boolean).join(" · ");
-  ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", `Tango: ${suffix}`));
+  if (footerUpdateInFlight || Date.now() < footerUpdateSkipUntil) return;
+  footerUpdateInFlight = true;
+  try {
+    const result = await runPassiveTango(["ps", "--json"], signal, 1500);
+    if (result.code !== 0) throw new Error(result.stderr || `tango ps exited ${result.code}`);
+    footerUpdateFailures = 0;
+    footerUpdateSkipUntil = 0;
+    const agents = result.json?.agents ?? [];
+    const running = agents.filter((a: any) => a.status === "running").length;
+    const done = agents.filter((a: any) => a.status === "done").length;
+    const tools = agents.reduce((sum: number, a: any) => sum + (typeof a.metrics?.toolCalls === "number" ? a.metrics.toolCalls : 0), 0);
+    const tokens = agents.reduce((sum: number, a: any) => sum + (typeof a.metrics?.tokens?.total === "number" ? a.metrics.tokens.total : 0), 0);
+    const suffix = [`${running} running`, `${done} done`, tools ? `${tools} tools` : "", tokens ? formatTokens(tokens) : ""].filter(Boolean).join(" · ");
+    ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", `Tango: ${suffix}`));
+  } catch {
+    footerUpdateFailures += 1;
+    footerUpdateSkipUntil = Date.now() + passiveDelayMs(footerUpdateFailures);
+  } finally {
+    footerUpdateInFlight = false;
+  }
 }
 
 function withJson(args: string[]): string[] {
@@ -383,6 +493,18 @@ let ownerId = `pi_${process.pid}_${randomBytes(4).toString("hex")}`;
 let ownerLease: RootOwnerLease | undefined;
 let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let inboxPollTimer: ReturnType<typeof setInterval> | undefined;
+let footerUpdateInFlight = false;
+let footerUpdateFailures = 0;
+let footerUpdateSkipUntil = 0;
+let inboxPollInFlight = false;
+let inboxPollFailures = 0;
+let inboxPollSkipUntil = 0;
+let liveWidgetInFlight = false;
+let liveWidgetFailures = 0;
+let liveWidgetSkipUntil = 0;
+let reconcileInFlight = false;
+let reconcileFailures = 0;
+let reconcileSkipUntil = 0;
 const deliveredInboxIds = new Set<string>();
 const localWakeRunIds = new Set<string>();
 const localWakeRunDirs = new Set<string>();
@@ -430,7 +552,9 @@ function inboxAction(item: any): string {
   const runDir = item.source?.runDir;
   if (item.type === "result") return runId ? `tango_result(runId: ${runId})` : `tango_result(runDir: ${runDir})`;
   const target = runId ? `runId: ${runId}` : `runDir: ${runDir}`;
-  return `tango_activity(${target}, lines: 120) or tango_inbox(action: "handled", inboxId: "${item.inboxId}")`;
+  const activity = `tango_activity(${target}, lines: 120)`;
+  if (item.type === "blocked" || item.type === "ask") return `${activity} then tango_message(${target}, message: ...)`;
+  return activity;
 }
 
 function inboxWakeText(item: any): string {
@@ -472,44 +596,57 @@ function renderTangoMessage(message: any, { expanded }: { expanded: boolean }, t
   const level = inboxNotifyLevel(item);
   const color = level === "error" ? "error" : level === "warning" ? "warning" : level === "success" ? "success" : "accent";
   const agent = item.source?.agentName ?? item.source?.runId ?? item.source?.runDir ?? details.agent ?? "Tango";
-  const title = `${theme.fg(color, "◆ Tango")} ${theme.fg("muted", channel)} ${theme.fg(color, type)} ${theme.fg("dim", agent)}`;
+  const title = `${theme.fg(color, "◆ Tango")} ${theme.fg(color, type)} ${theme.fg("toolTitle", agent)} ${theme.fg("muted", channel)}`;
   const lines = [title];
-  if (item.summary) lines.push(`  ${item.summary}`);
-  if (item.body && (expanded || !item.summary)) lines.push(`  ${theme.fg("muted", preview(item.body, expanded ? 500 : 160))}`);
-  if (expanded) {
-    if (item.inboxId) lines.push(theme.fg("dim", `  inbox: ${item.inboxId} (${item.state ?? "unknown"})`));
-    if (item.source?.runId) lines.push(theme.fg("dim", `  run: ${item.source.runId}`));
-    lines.push(theme.fg("dim", `  next: ${inboxAction(item)}`));
-  } else {
-    lines.push(theme.fg("dim", `  ${inboxAction(item)}`));
-  }
-  const box = new Box(1, 1, (text: string) => theme.bg("customMessageBg", text));
-  box.addChild(new Text(lines.join("\n"), 0, 0));
-  return box;
+  if (item.summary) lines.push(`  ${theme.fg("muted", preview(item.summary, expanded ? 180 : 100))}`);
+  if (item.body && (expanded || !item.summary)) lines.push(`  ${theme.fg("dim", preview(item.body, expanded ? 220 : 120))}`);
+  lines.push(`  ${theme.fg("accent", "next")} ${theme.fg("dim", inboxAction(item))}`);
+  if (expanded && item.source?.runId) lines.push(theme.fg("dim", `  run ${item.source.runId}`));
+  return textBlock(lines);
+}
+
+async function refreshUnresolvedInboxItem(inboxId: string, signal?: AbortSignal): Promise<any | undefined> {
+  const result = await runPassiveTango(["inbox", "--json"], signal, 1500);
+  if (result.code !== 0) return undefined;
+  const items = Array.isArray(result.json?.inbox) ? result.json.inbox : [];
+  return items.find((item: any) => item.inboxId === inboxId && item.state === "unread");
 }
 
 async function checkInboxOnce(pi: ExtensionAPI, ctx: any, signal?: AbortSignal) {
+  if (inboxPollInFlight || Date.now() < inboxPollSkipUntil) return;
   const recipient = currentRecipient();
   if (!ownsCurrentLease(recipient)) return;
-  const result = await runTango(["inbox", "--json"], signal);
-  if (result.code !== 0) return;
-  const items = Array.isArray(result.json?.inbox) ? result.json.inbox : [];
-  for (const item of items) {
-    if (!ownsCurrentLease(recipient)) return;
-    if (item.state === "handled" || item.state === "dismissed") continue;
-    if (!isLocalWakeItem(item)) continue;
-    if (deliveredInboxIds.has(item.inboxId)) continue;
-    try {
-      const level = inboxNotifyLevel(item);
-      if (ctx?.hasUI) ctx.ui.notify(`${item.source?.agentName ?? "Tango agent"}: ${item.summary ?? item.type}`, level);
-      pi.sendMessage({
-        customType: "tango-message",
-        content: inboxWakeText(item),
-        display: true,
-        details: { channel: "inbox", item },
-      }, { deliverAs: "followUp", triggerTurn: true });
-      deliveredInboxIds.add(item.inboxId);
-    } catch {}
+  inboxPollInFlight = true;
+  try {
+    const result = await runPassiveTango(["inbox", "--json"], signal, 1500);
+    if (result.code !== 0) throw new Error(result.stderr || `tango inbox exited ${result.code}`);
+    inboxPollFailures = 0;
+    inboxPollSkipUntil = 0;
+    const items = Array.isArray(result.json?.inbox) ? result.json.inbox : [];
+    for (const item of items) {
+      if (!ownsCurrentLease(recipient)) return;
+      if (item.state !== "unread") continue;
+      if (!isLocalWakeItem(item)) continue;
+      if (deliveredInboxIds.has(item.inboxId)) continue;
+      const current = await refreshUnresolvedInboxItem(item.inboxId, signal);
+      if (!current || !isLocalWakeItem(current)) continue;
+      try {
+        const level = inboxNotifyLevel(current);
+        if (ctx?.hasUI) ctx.ui.notify(`${current.source?.agentName ?? "Tango agent"}: ${current.summary ?? current.type}`, level);
+        pi.sendMessage({
+          customType: "tango-message",
+          content: inboxWakeText(current),
+          display: true,
+          details: { channel: "inbox", item: current },
+        }, { deliverAs: "followUp", triggerTurn: true });
+        deliveredInboxIds.add(current.inboxId);
+      } catch {}
+    }
+  } catch {
+    inboxPollFailures += 1;
+    inboxPollSkipUntil = Date.now() + passiveDelayMs(inboxPollFailures);
+  } finally {
+    inboxPollInFlight = false;
   }
 }
 
@@ -529,7 +666,20 @@ function stopInboxPoller() {
 function startParentReconciler(ctx: any) {
   if (reconcileTimer || !process.env.TANGO_RUN_DIR) return;
   reconcileTimer = setInterval(() => {
-    void runTango(["reconcile", "--children", "--json"], ctx?.signal).then(() => updateFooterStatus(ctx, ctx?.signal)).catch(() => {});
+    if (reconcileInFlight || Date.now() < reconcileSkipUntil) return;
+    reconcileInFlight = true;
+    void runPassiveTango(["reconcile", "--children", "--json"], ctx?.signal, 3000)
+      .then((result) => {
+        if (result.code !== 0) throw new Error(result.stderr || `tango reconcile exited ${result.code}`);
+        reconcileFailures = 0;
+        reconcileSkipUntil = 0;
+        return updateFooterStatus(ctx, ctx?.signal);
+      })
+      .catch(() => {
+        reconcileFailures += 1;
+        reconcileSkipUntil = Date.now() + passiveDelayMs(reconcileFailures);
+      })
+      .finally(() => { reconcileInFlight = false; });
   }, 15_000);
 }
 
@@ -557,9 +707,13 @@ function isLocalBoardItem(item: any): boolean {
   return false;
 }
 
+function hasUnreadResult(item: any): boolean {
+  return item.unread === true;
+}
+
 function isLiveVisible(item: any, now = Date.now()): boolean {
   if (["running", "created", "blocked", "stalled", "offline", "error"].includes(item.status)) return true;
-  if (item.unread || item.resultReady) return true;
+  if (hasUnreadResult(item)) return true;
   const updated = Date.parse(item.updatedAt ?? "");
   if (!Number.isFinite(updated)) return false;
   const age = now - updated;
@@ -570,52 +724,76 @@ function isLiveVisible(item: any, now = Date.now()): boolean {
 
 function livePriority(item: any): number {
   if (item.status === "blocked" || item.status === "error") return 0;
-  if (item.unread || item.resultReady) return 1;
+  if (hasUnreadResult(item)) return 1;
   if (item.status === "running" || item.status === "created") return 2;
   return 3;
 }
 
 function boardRow(item: any, theme?: any): string {
-  const effective = item.unread || item.resultReady ? "done" : item.status;
+  const effective = hasUnreadResult(item) ? "done" : item.status;
   const icon = statusIcon(effective);
   const marker = `${item.modeMarker ?? (item.mode === "interactive" ? "↔" : "→")}${item.delegationMarker ? ` ${item.delegationMarker}` : ""}`;
-  const status = item.unread || item.resultReady ? "result" : item.status;
+  const status = hasUnreadResult(item) ? "result" : item.status;
   const summary = item.needs ?? item.summary ?? item.activity ?? "";
   const name = `${item.name ?? "agent"}`;
-  const role = item.role ? `${item.role} ` : "";
-  const base = `${icon} ${marker} ${role}${name}`;
-  const tail = `${status}${summary ? ` · ${preview(summary, 52)}` : ""}${aggregateText(item.descendantAggregate)}`;
-  if (!theme) return `${base} ${tail}`;
-  return `${theme.fg(statusColor(effective), icon)} ${theme.fg("accent", marker)} ${theme.fg("toolTitle", role)}${theme.fg("accent", name)} ${theme.fg(statusColor(effective), status)}${tail.replace(status, "")}`;
+  const role = item.role ? `${item.role}` : "agent";
+  const plain = `${icon} ${marker} ${name} ${status} · ${role}${summary ? ` · ${preview(summary, 52)}` : ""}${aggregateText(item.descendantAggregate)}`;
+  if (!theme) return plain;
+  return `${theme.fg(statusColor(effective), icon)} ${theme.fg("accent", marker)} ${theme.fg("toolTitle", name)} ${theme.fg(statusColor(effective), status)} ${theme.fg("dim", `· ${role}`)}${summary ? theme.fg("muted", ` · ${preview(summary, 52)}`) : ""}${theme.fg("dim", aggregateText(item.descendantAggregate))}`;
+}
+
+function liveAgentCard(item: any, theme: any): string[] {
+  const effective = hasUnreadResult(item) ? "done" : item.status;
+  const color = statusColor(effective);
+  const icon = statusIcon(effective);
+  const marker = item.modeMarker ?? (item.mode === "interactive" ? "↔" : "→");
+  const status = hasUnreadResult(item) ? "result" : item.status;
+  const meta = [item.role, marker, item.activity].filter(Boolean).join(" · ");
+  const summary = item.needs ?? item.summary ?? "";
+  return [`${theme.fg(color, icon)} ${theme.fg("toolTitle", item.name ?? "agent")} ${theme.fg(color, status)} ${theme.fg("dim", `· ${meta}`)}${summary ? theme.fg("muted", ` — ${preview(summary, 64)}`) : ""}`];
 }
 
 async function refreshLiveWidget(ctx: any, signal?: AbortSignal) {
   if (!ctx?.hasUI || !ctx.ui?.setWidget) return;
-  const args = ["board", "--json"];
-  if (process.env.TANGO_RUN_ID) args.push("--run-id", process.env.TANGO_RUN_ID);
-  else if (process.env.TANGO_RUN_DIR) args.push("--run-dir", process.env.TANGO_RUN_DIR);
-  const result = await runTango(args, signal);
-  if (result.code !== 0) return;
-  const direct = result.json?.tree?.directChildren ?? [];
-  const now = Date.now();
-  const local = direct
-    .filter(isLocalBoardItem)
-    .filter((item: any) => isLiveVisible(item, now))
-    .sort((a: any, b: any) => livePriority(a) - livePriority(b) || Date.parse(b.updatedAt ?? "") - Date.parse(a.updatedAt ?? ""));
-  if (!local.length) {
-    ctx.ui.setWidget("tango-live", undefined);
-    return;
+  if (liveWidgetInFlight || Date.now() < liveWidgetSkipUntil) return;
+  liveWidgetInFlight = true;
+  try {
+    const args = ["board", "--json"];
+    if (process.env.TANGO_RUN_ID) args.push("--run-id", process.env.TANGO_RUN_ID);
+    else if (process.env.TANGO_RUN_DIR) args.push("--run-dir", process.env.TANGO_RUN_DIR);
+    const result = await runPassiveTango(args, signal, 1500);
+    if (result.code !== 0) throw new Error(result.stderr || `tango board exited ${result.code}`);
+    liveWidgetFailures = 0;
+    liveWidgetSkipUntil = 0;
+    const direct = result.json?.tree?.directChildren ?? [];
+    const now = Date.now();
+    const local = direct
+      .filter(isLocalBoardItem)
+      .filter((item: any) => isLiveVisible(item, now))
+      .sort((a: any, b: any) => livePriority(a) - livePriority(b) || Date.parse(b.updatedAt ?? "") - Date.parse(a.updatedAt ?? ""));
+    if (!local.length) {
+      ctx.ui.setWidget("tango-live", undefined);
+      return;
+    }
+    const active = local.filter((item: any) => item.status === "running" || item.status === "created").length;
+    const blocked = local.filter((item: any) => item.status === "blocked").length;
+    const results = local.filter((item: any) => hasUnreadResult(item)).length;
+    ctx.ui.setWidget("tango-live", (_tui: any, theme: any) => ({
+      invalidate() {},
+      render(width: number) {
+        const header = `${theme.fg("accent", "◆ Tango")} ${theme.fg("muted", `${active} active · ${blocked} blocked · ${results} result`)}`;
+        const lines = [header];
+        for (const item of local.slice(0, 4)) lines.push(...liveAgentCard(item, theme));
+        if (local.length > 4) lines.push(theme.fg("dim", `+${local.length - 4} more`));
+        return lines.map((line) => trunc(line, width));
+      },
+    }), { placement: "belowEditor" });
+  } catch {
+    liveWidgetFailures += 1;
+    liveWidgetSkipUntil = Date.now() + passiveDelayMs(liveWidgetFailures);
+  } finally {
+    liveWidgetInFlight = false;
   }
-  const active = local.filter((item: any) => item.status === "running" || item.status === "created").length;
-  const blocked = local.filter((item: any) => item.status === "blocked").length;
-  const results = local.filter((item: any) => item.unread || item.resultReady).length;
-  ctx.ui.setWidget("tango-live", (_tui: any, theme: any) => ({
-    invalidate() {},
-    render() {
-      const header = `${theme.fg("accent", "◆ Tango")} ${theme.fg("muted", `${active} active · ${blocked} blocked · ${results} result`)}`;
-      return [header, ...local.slice(0, 3).map((item: any) => `  ${boardRow(item, theme)}`)];
-    },
-  }), { placement: "belowEditor" });
 }
 
 function startLiveWidget(ctx: any) {
@@ -684,8 +862,8 @@ export default function (pi: ExtensionAPI) {
       return out;
     },
     renderCall(args, theme) {
-      const suffix = args.thinking ? `as ${args.role}, thinking ${args.thinking}` : `as ${args.role}`;
-      return textBlock([`${theme.fg("toolTitle", "tango start")} ${theme.fg("accent", targetLabel(args))} ${theme.fg("muted", suffix)}`, `  ${theme.fg("dim", preview(args.task))}`]);
+      const meta = `${args.role}${args.mode ? ` · ${args.mode}` : ""}${args.thinking ? ` · ${args.thinking}` : ""}`;
+      return textBlock([`${theme.fg("muted", "▸")} ${theme.fg("toolTitle", "tango start")} ${theme.fg("accent", targetLabel(args))} ${theme.fg("dim", meta)}${args.task ? theme.fg("muted", ` — ${preview(args.task, 90)}`) : ""}`]);
     },
     renderResult(result, options, theme) { return renderAgentResult(result, options, theme, "Started"); },
   });
@@ -715,7 +893,7 @@ export default function (pi: ExtensionAPI) {
       await updateFooterStatus(ctx, signal);
       return out;
     },
-    renderCall(_args, theme) { return new Text(theme.fg("toolTitle", "tango ps"), 0, 0); },
+    renderCall(_args, theme) { return commandLine(theme, "tango ps"); },
     renderResult(result, options, theme) { return renderListResult(result, options, theme); },
   });
 
@@ -739,14 +917,14 @@ export default function (pi: ExtensionAPI) {
       await updateFooterStatus(ctx, signal);
       return out;
     },
-    renderCall(_args, theme) { return new Text(theme.fg("toolTitle", "tango board"), 0, 0); },
+    renderCall(_args, theme) { return commandLine(theme, "tango board"); },
     renderResult(result, options, theme) { return renderBoardResult(result, options, theme); },
   });
 
   pi.registerTool({
     name: "tango_inbox",
     label: "Tango Inbox",
-    description: "List or update Tango inbox items. Wraps `tango inbox --json` and `tango inbox read|handled|dismiss`.",
+    description: "List Tango update items. Manual read/handled/dismiss actions are admin/debug escape hatches; normal Pi UX should consume updates via tango_result or tango_activity.",
     parameters: Type.Object({
       action: Type.Optional(StringEnum(["list", "read", "handled", "dismiss"] as const)),
       inboxId: Type.Optional(Type.String()),
@@ -771,7 +949,7 @@ export default function (pi: ExtensionAPI) {
       await updateFooterStatus(ctx, signal);
       return out;
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango inbox")} ${theme.fg("accent", args.action ?? "list")}`, 0, 0); },
+    renderCall(args, theme) { return commandLine(theme, "tango updates", args.action ?? "list"); },
     renderResult(result, options, theme) { return renderInboxResult(result, options, theme); },
   });
 
@@ -790,7 +968,7 @@ export default function (pi: ExtensionAPI) {
       if (error) return { content: [{ type: "text" as const, text: error }], details: { ok: false, error }, isError: true };
       return toolResult(await runTango(addCwd(addTarget(["inspect"], params).concat("--json"), params.cwd), signal));
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango inspect")} ${theme.fg("accent", targetLabel(args))}`, 0, 0); },
+    renderCall(args, theme) { return commandLine(theme, "tango inspect", targetLabel(args)); },
     renderResult(result, options, theme) { return renderAgentResult(result, options, theme, "Inspect"); },
   });
 
@@ -803,12 +981,15 @@ export default function (pi: ExtensionAPI) {
       runId: Type.Optional(Type.String({ description: "Stable Tango run ID. Preferred when known." })),
       runDir: Type.Optional(Type.String({ description: "Stable Tango run directory. Preferred when known." })),
       lines: Type.Optional(Type.Number({ default: 200 })),
+      peek: Type.Optional(Type.Boolean({ description: "Inspect without marking matching inbox items read/handled." })),
       cwd: Type.Optional(Type.String({ description: "Project working directory used to resolve the agent name. Defaults to the current Pi process cwd." })),
     }),
     async execute(_id, params, signal) {
       const error = requireNameOrTarget(params);
       if (error) return { content: [{ type: "text" as const, text: error }], details: { ok: false, error }, isError: true };
-      const result = await runTango(addCwd(addTarget(["activity"], params).concat(["--lines", String(params.lines ?? 200), "--json"]), params.cwd), signal);
+      const activityArgs = addTarget(["activity"], params).concat(["--lines", String(params.lines ?? 200), "--json"]);
+      if (params.peek) activityArgs.push("--peek");
+      const result = await runTango(addCwd(activityArgs, params.cwd), signal);
       if (result.json?.output) {
         const truncated = truncateTail(String(result.json.output), { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
         result.json.output = truncated.content + (truncated.truncated ? "\n\n[Output truncated]" : "");
@@ -817,7 +998,7 @@ export default function (pi: ExtensionAPI) {
       const out = toolResult(result);
       return out;
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango activity")} ${theme.fg("accent", targetLabel(args))} ${theme.fg("dim", `--lines ${args.lines ?? 200}`)}`, 0, 0); },
+    renderCall(args, theme) { return commandLine(theme, "tango activity", targetLabel(args), `${args.lines ?? 200} lines${args.peek ? " · peek" : ""}`); },
     renderResult(result, options, theme) { return renderLookResult(result, options, theme); },
   });
 
@@ -842,7 +1023,7 @@ export default function (pi: ExtensionAPI) {
       await updateFooterStatus(ctx, signal);
       return out;
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango follow")} ${theme.fg("accent", targetLabel(args))} ${theme.fg("dim", `--until ${args.until}`)}`, 0, 0); },
+    renderCall(args, theme) { return commandLine(theme, "tango follow", targetLabel(args), args.until); },
     renderResult(result, options, theme) { return renderAgentResult(result, options, theme, "Follow"); },
   });
 
@@ -869,11 +1050,11 @@ export default function (pi: ExtensionAPI) {
       await updateFooterStatus(ctx, signal);
       return out;
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango wait")} ${theme.fg("accent", args.until)} ${theme.fg("dim", args.mode ?? "all")}`, 0, 0); },
+    renderCall(args, theme) { return commandLine(theme, "tango wait", args.until, args.mode ?? "all"); },
     renderResult(result, _options, theme) {
       if ((result as any).isError) return errorText(result, theme);
       const d = (result as any).details ?? {};
-      return new Text(`${theme.fg(d.timeout ? "warning" : "success", d.timeout ? "…" : "✓")} tango wait ${d.condition}: ${d.matched?.length ?? 0} matched · ${d.pending?.length ?? 0} pending`, 0, 0);
+      return textBlock([`${theme.fg(d.timeout ? "warning" : "success", d.timeout ? "…" : "✓")} ${theme.fg("toolTitle", "tango wait")} ${theme.fg("muted", `${d.condition}: ${d.matched?.length ?? 0} matched · ${d.pending?.length ?? 0} pending`)}`]);
     },
   });
 
@@ -898,10 +1079,10 @@ export default function (pi: ExtensionAPI) {
       if (params.urgent) args.push("--urgent");
       return toolResult(await runTango(addCwd(args, params.cwd), signal));
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango message")} ${theme.fg("accent", targetLabel(args))} ${theme.fg("dim", preview(args.message))}`, 0, 0); },
+    renderCall(args, theme) { return commandLine(theme, "tango message", targetLabel(args), preview(args.message, 90)); },
     renderResult(result, _options, theme) {
       if ((result as any).isError) return errorText(result, theme);
-      return new Text(`${theme.fg("success", "→ Sent message")}`, 0, 0);
+      return textBlock([`${theme.fg("success", "→")} ${theme.fg("toolTitle", "message sent")}`]);
     },
   });
 
@@ -922,7 +1103,7 @@ export default function (pi: ExtensionAPI) {
       await updateFooterStatus(ctx, signal);
       return out;
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango stop")} ${theme.fg("accent", targetLabel(args))}`, 0, 0); },
+    renderCall(args, theme) { return commandLine(theme, "tango stop", targetLabel(args)); },
     renderResult(result, options, theme) { return renderAgentResult(result, options, theme, "Stopped"); },
   });
 
@@ -950,7 +1131,7 @@ export default function (pi: ExtensionAPI) {
       await updateFooterStatus(ctx, signal);
       return out;
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango report")} ${theme.fg(statusColor(args.state), `${statusIcon(args.state)} ${args.state}`)} ${theme.fg("dim", preview(args.message ?? ""))}`, 0, 0); },
+    renderCall(args, theme) { return commandLine(theme, "tango report", `${statusIcon(args.state)} ${args.state}`, preview(args.message ?? "", 90)); },
     renderResult(result, options, theme) { return renderAgentResult(result, options, theme, "Report"); },
   });
 
@@ -981,7 +1162,7 @@ export default function (pi: ExtensionAPI) {
       args.push("--json");
       return toolResult(await runTango(addCwd(args, params.cwd), signal));
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango result")} ${theme.fg("accent", targetLabel(args))}`, 0, 0); },
+    renderCall(args, theme) { return commandLine(theme, "tango result", args.unread ? "unread" : args.inboxId ? "inbox" : targetLabel(args), args.peek ? "peek" : undefined); },
     renderResult(result, options, theme) { return renderResultResult(result, options, theme); },
   });
 
@@ -1001,7 +1182,7 @@ export default function (pi: ExtensionAPI) {
       if (params.tree) args.push("--tree");
       return toolResult(await runTango(addCwd(args, params.cwd), signal));
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango children")} ${theme.fg("accent", args.name ?? args.runId ?? args.runDir ?? "current")}`, 0, 0); },
+    renderCall(args, theme) { return commandLine(theme, "tango children", args.name ?? args.runId ?? args.runDir ?? "current"); },
     renderResult(result, options, theme) { return renderListResult(result, options, theme); },
   });
 
@@ -1022,12 +1203,12 @@ export default function (pi: ExtensionAPI) {
       await updateFooterStatus(ctx, signal);
       return out;
     },
-    renderCall(args, theme) { return new Text(`${theme.fg("toolTitle", "tango")} ${theme.fg("muted", args.args.join(" "))}`, 0, 0); },
+    renderCall(args, theme) { return commandLine(theme, "tango", undefined, args.args.join(" ")); },
     renderResult(result, options, theme) {
       if ((result as any).isError) return errorText(result, theme);
-      if (!options.expanded) return new Text(theme.fg("success", "✓ tango command completed"), 0, 0);
+      if (!options.expanded) return textBlock([theme.fg("success", "✓ tango command completed")]);
       const details = (result.details ?? {}) as any;
-      return new Text(details.stdout ?? JSON.stringify(details, null, 2), 0, 0);
+      return textBlock(String(details.stdout ?? JSON.stringify(details, null, 2)).split(/\r?\n/));
     },
   });
 

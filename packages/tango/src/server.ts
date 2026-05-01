@@ -14,7 +14,7 @@ import { assessResultDeliverable } from "./result.js";
 import { buildRunState, followRun, messageRun, readActivity, reportRun, stopRun, waitRuns, type WaitCondition, type WaitMode } from "./controlPlane.js";
 import { markHandled, markSeen } from "./attention.js";
 import { buildBoard } from "./board.js";
-import { appendMessageRecord, filterInboxItems, markInboxItem, markResultItemsHandled, syncInboxFromAgents } from "./inbox.js";
+import { appendMessageRecord, filterInboxItems, markActivityItemsInspected, markInboxItem, markResultItemsHandled, syncInboxFromAgents } from "./inbox.js";
 import type { AgentMetadata, RootSessionIdentity } from "./types.js";
 import {
   buildDashboard,
@@ -41,6 +41,7 @@ export interface ServerDiscovery {
   token?: string;
   pid: number;
   startedAt: string;
+  dataRoot?: string;
 }
 
 export interface RootSessionRecord {
@@ -116,6 +117,19 @@ function serverDiscoveryPidAlive(pid: number): boolean {
   }
 }
 
+function sameServerDiscovery(a: ServerDiscovery, b: ServerDiscovery): boolean {
+  return a.pid === b.pid && a.url === b.url && a.token === b.token;
+}
+
+function discoveryStillPointsToSelf(discovery: ServerDiscovery): boolean {
+  try {
+    const current = JSON.parse(readFileSync(serverDiscoveryPath(), "utf8")) as ServerDiscovery;
+    return sameServerDiscovery(current, discovery);
+  } catch {
+    return false;
+  }
+}
+
 export async function startTangoServer(options: TangoServerOptions = {}): Promise<{ server: Server; shutdown: () => void }> {
   const host = options.host ?? "127.0.0.1";
   if (!isLocalHost(host) && !options.allowPrivateBind) throw new Error("Refusing non-local bind without --allow-private-bind");
@@ -141,7 +155,7 @@ export async function startTangoServer(options: TangoServerOptions = {}): Promis
 
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : port;
-  const discovery: ServerDiscovery = { schemaVersion: 1, url: `http://${host}:${actualPort}`, ...(token ? { token } : {}), pid: process.pid, startedAt: new Date().toISOString() };
+  const discovery: ServerDiscovery = { schemaVersion: 1, url: `http://${host}:${actualPort}`, ...(token ? { token } : {}), pid: process.pid, startedAt: new Date().toISOString(), dataRoot: dataRoot() };
   writeFileSync(serverDiscoveryPath(), `${JSON.stringify(discovery, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   console.log(`tango server listening on ${discovery.url}`);
   console.log(`dashboard: ${discovery.url}`);
@@ -151,19 +165,31 @@ export async function startTangoServer(options: TangoServerOptions = {}): Promis
 
   let eventState: EventReadState = { offset: initialEventOffset(false), carry: "" };
   const interval = setInterval(() => {
+    if (clients.size === 0) return;
     const next = readEvents(eventState);
     eventState = next.state;
     for (const event of next.events) broadcastSse(clients, "event", event);
   }, 1000);
+  let missingDiscoveryChecks = 0;
+  const retireInterval = setInterval(() => {
+    if (!existsSync(serverDiscoveryPath())) {
+      missingDiscoveryChecks += 1;
+      if (missingDiscoveryChecks >= 3) shutdown();
+      return;
+    }
+    missingDiscoveryChecks = 0;
+    if (!discoveryStillPointsToSelf(discovery)) shutdown();
+  }, 2000);
 
   const shutdown = () => {
     clearInterval(interval);
+    clearInterval(retireInterval);
     for (const client of clients) client.end();
     server.close();
     try {
       const discoveryPath = serverDiscoveryPath();
       const current = JSON.parse(readFileSync(discoveryPath, "utf8")) as ServerDiscovery;
-      if (current.pid === discovery.pid && current.url === discovery.url && current.token === discovery.token) rmSync(discoveryPath, { force: true });
+      if (sameServerDiscovery(current, discovery)) rmSync(discoveryPath, { force: true });
     } catch {}
   };
   process.once("SIGINT", () => { shutdown(); process.exit(0); });
@@ -175,7 +201,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
   applySecurityHeaders(res);
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
   if ((req.method === "POST" || req.method === "PUT" || req.method === "PATCH") && !bodyWithinLimit(req, 1024 * 1024)) return sendJson(res, 413, { ok: false, error: "Request body too large" });
-  if (req.method === "GET" && url.pathname === "/api/v1/health") return sendJson(res, 200, { ok: true, schemaVersion: 1, pid: process.pid, time: new Date().toISOString() });
+  if (req.method === "GET" && url.pathname === "/api/v1/health") return sendJson(res, 200, { ok: true, schemaVersion: 1, pid: process.pid, time: new Date().toISOString(), capabilities: ["runs", "board", "inbox"], dataRoot: dataRoot(), tangoHome: dataRoot() });
   if (req.method === "GET" && url.pathname === "/api/v1/events") return handleSse(req, res, ctx);
   if (req.method === "GET" && url.pathname === "/api/v1/subscribe") return handleSse(req, res, ctx);
   if (url.pathname.startsWith("/a/")) return serveArtifact(url, res);
@@ -201,6 +227,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
   if (req.method === "GET" && url.pathname === "/api/v1/runs/state") return sendJson(res, 200, { ok: true, schemaVersion: 1, state: buildRunState(resolveServerTarget(url)) });
   if (req.method === "GET" && url.pathname === "/api/v1/runs/activity") {
     const meta = resolveServerTarget(url);
+    if (url.searchParams.get("peek") !== "true") markActivityItemsInspected(meta);
     const activity = readActivity(meta, { lines: limitParam(url), raw: url.searchParams.get("raw") === "true", events: url.searchParams.get("events") === "true" });
     return sendJson(res, 200, { ok: true, schemaVersion: 1, agent: meta, output: activity.text, events: activity.events, activity: activity.summary });
   }
@@ -254,7 +281,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
     }
     if (parts.length === 6 && parts[5] === "inbox") {
       const rootSessionId = parts[4];
-      return sendJson(res, 200, { ok: true, schemaVersion: 1, inbox: filterInboxItems(syncInboxFromAgents(), { rootSessionId }) });
+      const includeAll = url.searchParams.get("include") === "all" || url.searchParams.get("all") === "true";
+      const inbox = filterInboxItems(syncInboxFromAgents(), { rootSessionId }).filter((item) => includeAll || (item.state !== "handled" && item.state !== "dismissed"));
+      return sendJson(res, 200, { ok: true, schemaVersion: 1, inbox });
     }
     if (parts.length === 6 && parts[5] === "agents") {
       const rootSessionId = parts[4];

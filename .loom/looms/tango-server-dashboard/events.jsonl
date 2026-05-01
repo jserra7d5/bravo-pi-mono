@@ -1,0 +1,88 @@
+{"type":"node.created","node_id":"N-0001","title":"Tango server dashboard and root-session control plane","kind":"proposal","event_id":"E-1777250467714-6zcp","time":"2026-04-27T00:41:07.714Z"}
+{"type":"node.updated","node_id":"N-0001","event_id":"E-1777250485855-ufd5","time":"2026-04-27T00:41:25.855Z"}
+{"type":"node.decomposed","source":"N-0001","children":["N-0002","N-0003","N-0004","N-0005","N-0006","N-0007"],"event_id":"E-1777250490369-aswh","time":"2026-04-27T00:41:30.369Z"}
+{"type":"node.updated","node_id":"N-0002","event_id":"E-1777250501788-y671","time":"2026-04-27T00:41:41.788Z"}
+{"type":"node.updated","node_id":"N-0003","event_id":"E-1777250501954-ynxs","time":"2026-04-27T00:41:41.954Z"}
+{"type":"node.updated","node_id":"N-0004","event_id":"E-1777250502116-j62x","time":"2026-04-27T00:41:42.116Z"}
+{"type":"node.updated","node_id":"N-0005","event_id":"E-1777250502280-ws19","time":"2026-04-27T00:41:42.280Z"}
+{"type":"node.updated","node_id":"N-0006","event_id":"E-1777250502443-0dyr","time":"2026-04-27T00:41:42.443Z"}
+{"type":"node.updated","node_id":"N-0007","event_id":"E-1777250502604-9bfs","time":"2026-04-27T00:41:42.604Z"}
+{"type":"node.updated","node_id":"N-0003","event_id":"E-1777250550325-9dmz","time":"2026-04-27T00:42:30.325Z"}
+{"type":"node.updated","node_id":"N-0003","event_id":"E-1777250580064-z85x","time":"2026-04-27T00:43:00.064Z"}
+{"type":"node.updated","node_id":"N-0002","event_id":"E-1777250593296-ys7e","time":"2026-04-27T00:43:13.296Z"}
+{"type":"node.updated","node_id":"N-0005","event_id":"E-1777250603663-z9oc","time":"2026-04-27T00:43:23.663Z"}
+{"type":"node.updated","node_id":"N-0006","event_id":"E-1777250603827-ihsy","time":"2026-04-27T00:43:23.827Z"}
+{"type":"node.updated","node_id":"N-0007","event_id":"E-1777250603997-1fl5","time":"2026-04-27T00:43:23.997Z"}
+{"type":"node.updated","node_id":"N-0004","event_id":"E-1777250607454-f93z","time":"2026-04-27T00:43:27.454Z"}
+{"type":"node.updated","node_id":"N-0001","event_id":"E-1777250613256-q03o","time":"2026-04-27T00:43:33.256Z"}
+{"type":"node.updated","node_id":"N-0002","event_id":"E-1777250677411-z4ej","time":"2026-04-27T00:44:37.411Z"}
+{"type":"node.created","node_id":"N-0008","title":"Chosen v1 architecture decisions","kind":"decision","event_id":"E-1777250834705-34ky","time":"2026-04-27T00:47:14.705Z"}
+{"type":"node.created","node_id":"N-0009","title":"Root session lifecycle v1 decision","kind":"decision","event_id":"E-1777250834886-wgby","time":"2026-04-27T00:47:14.886Z"}
+{"type":"node.created","node_id":"N-0010","title":"Timeline and history API scope decision","kind":"decision","event_id":"E-1777250835075-ah8x","time":"2026-04-27T00:47:15.075Z"}
+{"type":"node.created","node_id":"N-0011","title":"Durable attention and delivery state","kind":"task","event_id":"E-1777250835260-4yxo","time":"2026-04-27T00:47:15.260Z"}
+{"type":"node.created","node_id":"N-0012","title":"Review: lineage resolver and notification routing","kind":"review","event_id":"E-1777250835453-17mo","time":"2026-04-27T00:47:15.453Z"}
+{"type":"node.created","node_id":"N-0013","title":"Review: dashboard API contracts","kind":"review","event_id":"E-1777250835663-xrrj","time":"2026-04-27T00:47:15.663Z"}
+{"type":"node.created","node_id":"N-0014","title":"Review: React dashboard UX and accessibility","kind":"review","event_id":"E-1777250835895-8raf","time":"2026-04-27T00:47:15.895Z"}
+{"type":"node.created","node_id":"N-0015","title":"Review: artifact hosting security","kind":"review","event_id":"E-1777250836112-zcdp","time":"2026-04-27T00:47:16.112Z"}
+{"type":"node.created","node_id":"N-0016","title":"Review: Loom coupling boundary","kind":"review","event_id":"E-1777250836336-1qcw","time":"2026-04-27T00:47:16.336Z"}
+{"type":"edge.added","from":"N-0001","to":"N-0008","edge_type":"decomposes_to","event_id":"E-1777250840673-i6pq","time":"2026-04-27T00:47:20.673Z"}
+{"type":"edge.added","from":"N-0001","to":"N-0009","edge_type":"decomposes_to","event_id":"E-1777250840914-bzu7","time":"2026-04-27T00:47:20.914Z"}
+{"type":"edge.added","from":"N-0001","to":"N-0010","edge_type":"decomposes_to","event_id":"E-1777250841160-10va","time":"2026-04-27T00:47:21.160Z"}
+{"type":"edge.added","from":"N-0001","to":"N-0011","edge_type":"decomposes_to","event_id":"E-1777250841411-4ayk","time":"2026-04-27T00:47:21.411Z"}
+{"type":"edge.added","from":"N-0001","to":"N-0012","edge_type":"decomposes_to","event_id":"E-1777250841672-9w7m","time":"2026-04-27T00:47:21.672Z"}
+{"type":"edge.added","from":"N-0001","to":"N-0013","edge_type":"decomposes_to","event_id":"E-1777250841931-blgg","time":"2026-04-27T00:47:21.931Z"}
+{"type":"edge.added","from":"N-0001","to":"N-0014","edge_type":"decomposes_to","event_id":"E-1777250842185-ggyb","time":"2026-04-27T00:47:22.185Z"}
+{"type":"edge.added","from":"N-0001","to":"N-0015","edge_type":"decomposes_to","event_id":"E-1777250842449-bk5k","time":"2026-04-27T00:47:22.449Z"}
+{"type":"edge.added","from":"N-0001","to":"N-0016","edge_type":"decomposes_to","event_id":"E-1777250842723-zlj3","time":"2026-04-27T00:47:22.723Z"}
+{"type":"edge.added","from":"N-0004","to":"N-0003","edge_type":"depends_on","event_id":"E-1777250842988-oz6k","time":"2026-04-27T00:47:22.988Z"}
+{"type":"edge.added","from":"N-0011","to":"N-0002","edge_type":"depends_on","event_id":"E-1777250843259-1z38","time":"2026-04-27T00:47:23.259Z"}
+{"type":"edge.added","from":"N-0003","to":"N-0009","edge_type":"depends_on","event_id":"E-1777250843527-q512","time":"2026-04-27T00:47:23.527Z"}
+{"type":"edge.added","from":"N-0003","to":"N-0010","edge_type":"depends_on","event_id":"E-1777250843808-j99a","time":"2026-04-27T00:47:23.808Z"}
+{"type":"edge.added","from":"N-0012","to":"N-0002","edge_type":"reviews","event_id":"E-1777250844085-j4m3","time":"2026-04-27T00:47:24.085Z"}
+{"type":"edge.added","from":"N-0013","to":"N-0003","edge_type":"reviews","event_id":"E-1777250844385-kcct","time":"2026-04-27T00:47:24.385Z"}
+{"type":"edge.added","from":"N-0014","to":"N-0004","edge_type":"reviews","event_id":"E-1777250844716-cbzk","time":"2026-04-27T00:47:24.716Z"}
+{"type":"edge.added","from":"N-0015","to":"N-0005","edge_type":"reviews","event_id":"E-1777250845014-wrgq","time":"2026-04-27T00:47:25.014Z"}
+{"type":"edge.added","from":"N-0016","to":"N-0006","edge_type":"reviews","event_id":"E-1777250845305-hsnz","time":"2026-04-27T00:47:25.305Z"}
+{"type":"node.updated","node_id":"N-0008","event_id":"E-1777250859070-l7np","time":"2026-04-27T00:47:39.070Z"}
+{"type":"node.resolved","node_id":"N-0008","resolution":"decided","event_id":"E-1777250859388-2h7b","time":"2026-04-27T00:47:39.388Z"}
+{"type":"node.updated","node_id":"N-0009","event_id":"E-1777250859708-ipyr","time":"2026-04-27T00:47:39.708Z"}
+{"type":"node.resolved","node_id":"N-0009","resolution":"decided","event_id":"E-1777250860026-16f8","time":"2026-04-27T00:47:40.026Z"}
+{"type":"node.updated","node_id":"N-0010","event_id":"E-1777250860355-xsst","time":"2026-04-27T00:47:40.355Z"}
+{"type":"node.resolved","node_id":"N-0010","resolution":"decided","event_id":"E-1777250860661-z24q","time":"2026-04-27T00:47:40.661Z"}
+{"type":"node.updated","node_id":"N-0011","event_id":"E-1777250869752-mjfl","time":"2026-04-27T00:47:49.752Z"}
+{"type":"node.updated","node_id":"N-0002","event_id":"E-1777250870071-tnrm","time":"2026-04-27T00:47:50.071Z"}
+{"type":"node.updated","node_id":"N-0003","event_id":"E-1777250870394-q337","time":"2026-04-27T00:47:50.394Z"}
+{"type":"node.updated","node_id":"N-0012","event_id":"E-1777250881328-vepy","time":"2026-04-27T00:48:01.328Z"}
+{"type":"node.updated","node_id":"N-0013","event_id":"E-1777250881628-cpk4","time":"2026-04-27T00:48:01.628Z"}
+{"type":"node.updated","node_id":"N-0014","event_id":"E-1777250881922-nsev","time":"2026-04-27T00:48:01.922Z"}
+{"type":"node.updated","node_id":"N-0015","event_id":"E-1777250882221-9hb8","time":"2026-04-27T00:48:02.221Z"}
+{"type":"node.updated","node_id":"N-0016","event_id":"E-1777250882527-qz5d","time":"2026-04-27T00:48:02.527Z"}
+{"type":"node.updated","node_id":"N-0001","event_id":"E-1777250904863-y4eu","time":"2026-04-27T00:48:24.863Z"}
+{"type":"node.updated","node_id":"N-0001","event_id":"E-1777251270106-y5xl","time":"2026-04-27T00:54:30.106Z"}
+{"type":"node.updated","node_id":"N-0002","event_id":"E-1777252241159-s87m","time":"2026-04-27T01:10:41.159Z"}
+{"type":"node.updated","node_id":"N-0012","event_id":"E-1777252420924-kfjz","time":"2026-04-27T01:13:40.924Z"}
+{"type":"node.updated","node_id":"N-0003","event_id":"E-1777253806459-qee0","time":"2026-04-27T01:36:46.459Z"}
+{"type":"node.updated","node_id":"N-0003","event_id":"E-1777253841725-k7bs","time":"2026-04-27T01:37:21.725Z"}
+{"type":"node.updated","node_id":"N-0012","event_id":"E-1777254238856-xb4x","time":"2026-04-27T01:43:58.856Z"}
+{"type":"node.updated","node_id":"N-0002","event_id":"E-1777254239176-47u9","time":"2026-04-27T01:43:59.176Z"}
+{"type":"node.created","node_id":"N-0017","title":"task","kind":"task","event_id":"E-1777254686366-jwzj","time":"2026-04-27T01:51:26.366Z"}
+{"type":"node.created","node_id":"N-0018","title":"Update Tango prompt modules for server and root-session semantics","kind":"task","event_id":"E-1777254708099-ie3v","time":"2026-04-27T01:51:48.099Z"}
+{"type":"node.updated","node_id":"N-0017","event_id":"E-1777254715980-y14f","time":"2026-04-27T01:51:55.980Z"}
+{"type":"node.updated","node_id":"N-0018","event_id":"E-1777254716322-dz42","time":"2026-04-27T01:51:56.322Z"}
+{"type":"node.updated","node_id":"N-0018","event_id":"E-1777255070369-5iuy","time":"2026-04-27T01:57:50.369Z"}
+{"type":"node.updated","node_id":"N-0018","event_id":"E-1777255089132-rogg","time":"2026-04-27T01:58:09.132Z"}
+{"type":"node.resolved","node_id":"N-0018","resolution":"implemented","event_id":"E-1777255096644-czy8","time":"2026-04-27T01:58:16.644Z"}
+{"type":"node.updated","node_id":"N-0011","event_id":"E-1777255243341-dya0","time":"2026-04-27T02:00:43.341Z"}
+{"type":"node.updated","node_id":"N-0003","event_id":"E-1777255270045-np2q","time":"2026-04-27T02:01:10.045Z"}
+{"type":"node.updated","node_id":"N-0018","event_id":"E-1777255296566-nmlu","time":"2026-04-27T02:01:36.566Z"}
+{"type":"node.updated","node_id":"N-0011","event_id":"E-1777256695665-sgjc","time":"2026-04-27T02:24:55.665Z"}
+{"type":"node.updated","node_id":"N-0003","event_id":"E-1777256778277-ysos","time":"2026-04-27T02:26:18.277Z"}
+{"type":"node.updated","node_id":"N-0018","event_id":"E-1777257476226-imj4","time":"2026-04-27T02:37:56.226Z"}
+{"type":"node.updated","node_id":"N-0018","event_id":"E-1777257520099-hdd0","time":"2026-04-27T02:38:40.099Z"}
+{"type":"node.updated","node_id":"N-0004","event_id":"E-1777259844339-gdgy","time":"2026-04-27T03:17:24.339Z"}
+{"type":"node.updated","node_id":"N-0005","event_id":"E-1777259844711-e4mr","time":"2026-04-27T03:17:24.711Z"}
+{"type":"node.updated","node_id":"N-0004","event_id":"E-1777260026458-9ama","time":"2026-04-27T03:20:26.458Z"}
+{"type":"node.updated","node_id":"N-0005","event_id":"E-1777260026815-k9io","time":"2026-04-27T03:20:26.815Z"}
+{"type":"node.updated","node_id":"N-0005","event_id":"E-1777260224576-n3dk","time":"2026-04-27T03:23:44.576Z"}
+{"type":"node.updated","node_id":"N-0005","event_id":"E-1777260516718-vl3u","time":"2026-04-27T03:28:36.718Z"}
+{"type":"node.updated","node_id":"N-0007","event_id":"E-1777260959901-ocly","time":"2026-04-27T03:35:59.901Z"}
