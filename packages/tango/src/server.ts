@@ -174,7 +174,11 @@ export async function startTangoServer(options: TangoServerOptions = {}): Promis
   const retireInterval = setInterval(() => {
     if (!existsSync(serverDiscoveryPath())) {
       missingDiscoveryChecks += 1;
-      if (missingDiscoveryChecks >= 3) shutdown();
+      if (missingDiscoveryChecks >= 3) {
+        mkdirSync(serverDir(), { recursive: true });
+        writeFileSync(serverDiscoveryPath(), `${JSON.stringify(discovery, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+        missingDiscoveryChecks = 0;
+      }
       return;
     }
     missingDiscoveryChecks = 0;

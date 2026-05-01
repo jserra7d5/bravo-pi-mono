@@ -308,18 +308,25 @@ function scopedListAgents(cwd: string, all: boolean): AgentMetadata[] {
 }
 
 async function ensureServer(): Promise<NonNullable<ReturnType<typeof readServerDiscovery>>> {
+  const lockPath = `${serverDiscoveryPath()}.start.lock`;
   const existing = readServerDiscovery();
   if (existing) {
-    if (await serverSupportsRunApi(existing)) return existing;
-    if (process.env.TANGO_SERVER_URL) throw new Error("Configured Tango server is not compatible with this Tango CLI.");
-    rmSync(serverDiscoveryPath(), { force: true });
+    const health = await serverHealth(existing);
+    if (serverHealthSupportsRunApi(health)) {
+      rmSync(lockPath, { force: true });
+      return existing;
+    }
+    if (process.env.TANGO_SERVER_URL) throw new Error(health?.ok === true ? "Configured Tango server is not compatible with this Tango CLI." : "Configured Tango server is not reachable.");
+    if (health?.ok === true) rmSync(serverDiscoveryPath(), { force: true });
   }
   if (process.env.TANGO_SERVER_URL) throw new Error("Configured Tango server is not reachable.");
   const preferredPort = preferredServerPort();
   const fixedProbe = await discoverFixedLocalServer(preferredPort);
-  if (fixedProbe.discovery) return fixedProbe.discovery;
+  if (fixedProbe.discovery) {
+    rmSync(lockPath, { force: true });
+    return fixedProbe.discovery;
+  }
 
-  const lockPath = `${serverDiscoveryPath()}.start.lock`;
   mkdirSync(dirname(lockPath), { recursive: true });
   const deadline = Date.now() + 15000;
   let startedByThisProcess = false;
@@ -432,7 +439,10 @@ async function serverHealth(discovery: ServerDiscovery): Promise<any> {
 }
 
 async function serverSupportsRunApi(discovery: ServerDiscovery): Promise<boolean> {
-  const payload = await serverHealth(discovery);
+  return serverHealthSupportsRunApi(await serverHealth(discovery));
+}
+
+function serverHealthSupportsRunApi(payload: any): boolean {
   return payload?.ok === true && payload?.schemaVersion === 1 && Array.isArray(payload.capabilities) && payload.capabilities.includes("runs");
 }
 
