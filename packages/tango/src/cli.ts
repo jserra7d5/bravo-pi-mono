@@ -8,24 +8,25 @@ import { fileURLToPath } from "node:url";
 import { runOneshotFromRuntime, startAgent } from "./start.js";
 import { dataRoot, projectSlug } from "./paths.js";
 import { fail, printJson } from "./json.js";
-import { listMetadata, readMetadata, removeRunDir, transitionStatus, updateStatus, writeMetadata } from "./metadata.js";
+import { listMetadata, readMetadata, removeRunDir, writeMetadata } from "./metadata.js";
 import { readMetrics, writeMetrics } from "./metrics.js";
 import { appendEvent, eventMatchesLineage, initialEventOffset, readEvents, type TangoEvent } from "./events.js";
 import { resolveTarget, isChildOf } from "./targetResolver.js";
 import { getRecipientContext, markLatestDoneHandled, markResultHandled } from "./attention.js";
 import { listRoles, loadRole, assembleSystemPrompt } from "./roles.js";
-import { attachTmux, captureTmux, sendTmux, stopTmux, tmuxAlive } from "./runtime/tmux.js";
-import { isTerminalStatus, reconcileAgentLifecycle } from "./lifecycle.js";
+import { attachTmux, captureTmux, stopTmux, tmuxAlive } from "./runtime/tmux.js";
+import { reconcileAgentLifecycle } from "./lifecycle.js";
 import { assessResultDeliverable, validateResultContent } from "./result.js";
 import type { AgentMetadata, AgentStatus, ThinkingLevel } from "./types.js";
 import { listArtifacts, publishArtifact, readServerDiscovery, revokeArtifact, serverDiscoveryPath, startTangoServer, type ServerDiscovery } from "./server.js";
 import { buildRunState as cpBuildRunState, messageRun, readActivity, reportRun, stopRun, waitRuns, type WaitCondition, type WaitMode } from "./controlPlane.js";
+import { readCheckpointBody, readCheckpoints } from "./checkpoints.js";
 
 interface Parsed { flags: Record<string, string | boolean | string[]>; positionals: string[] }
 
 const cliPath = fileURLToPath(import.meta.url);
 const DEFAULT_SERVER_PORT = 43117;
-const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "active", "problems", "health", "full", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required", "raw", "events", "urgent", "unread", "peek"]);
+const BOOLEAN_FLAGS = new Set(["json", "clean", "attach", "dry-run", "all", "active", "problems", "health", "full", "recursive", "no-recursive", "from-start", "tree", "children", "allow-private-bind", "summary-only", "no-result", "watch", "result-required", "no-result-required", "raw", "events", "urgent", "unread", "peek", "force-terminal", "latest"]);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 class ServerRequestError extends Error {
@@ -60,14 +61,15 @@ const COMMAND_FLAGS: Record<string, Set<string>> = {
   ps: new Set(["all", "active", "problems", "health", "full", "limit", "state"]),
   inspect: new Set(["run-id", "run-dir"]),
   activity: new Set(["run-id", "run-dir", "lines", "raw", "events", "peek"]),
+  checkpoint: new Set(["run-id", "run-dir", "latest", "all"]),
   list: new Set(["all"]),
   look: new Set(["run-id", "run-dir", "lines"]),
   attach: new Set(["run-id", "run-dir"]),
-  message: new Set(["run-id", "run-dir", "type", "urgent", "attachment"]),
+  message: new Set(["run-id", "run-dir", "type", "urgent", "attachment", "force-terminal"]),
   stop: new Set(["run-id", "run-dir"]),
   delete: new Set(["run-id", "run-dir"]),
-  report: new Set(["run-dir", "needs", "result-file", "summary-only", "no-result", "checkpoint"]),
-  status: new Set(["run-dir", "needs", "result-file", "summary-only", "no-result"]),
+  report: new Set(["run-dir", "needs", "result-file", "summary-only", "no-result", "checkpoint", "checkpoint-file"]),
+  status: new Set(["run-dir", "needs", "result-file", "summary-only", "no-result", "checkpoint", "checkpoint-file"]),
   watch: new Set(["all", "from-start"]),
   children: new Set(["run-id", "run-dir", "tree"]),
   follow: new Set(["run-id", "run-dir", "timeout", "until"]),
@@ -165,6 +167,7 @@ async function main() {
       case "ps": return await cmdList(parsed, cwd, json);
       case "inspect": return await cmdInspect(parsed, cwd, json);
       case "activity": return await cmdActivity(parsed, cwd, json);
+      case "checkpoint": return cmdCheckpoint(parsed, cwd, json);
       case "list": return legacyCommand("list", "ps", json);
       case "look": return legacyCommand("look", "activity", json);
       case "attach": return cmdAttach(parsed, cwd);
@@ -498,9 +501,9 @@ async function cmdList(parsed: Parsed, cwd: string, json: boolean) {
     return true;
   });
   const requestedStates = new Set(flagStrings(parsed.flags, "state"));
-  if (flagBool(parsed.flags, "active")) for (const s of ["running", "created"]) requestedStates.add(s);
+  if (flagBool(parsed.flags, "active")) for (const s of ["running", "idle", "created"]) requestedStates.add(s);
   if (flagBool(parsed.flags, "problems") || flagBool(parsed.flags, "health")) for (const s of ["blocked", "error"]) requestedStates.add(s);
-  if (flagBool(parsed.flags, "health")) for (const s of ["running", "created"]) requestedStates.add(s);
+  if (flagBool(parsed.flags, "health")) for (const s of ["running", "idle", "created"]) requestedStates.add(s);
   if (requestedStates.size) states = states.filter((s: any) => requestedStates.has(s.agent.state));
   const counts = countStates(states);
   const total = states.length;
@@ -525,7 +528,7 @@ function countStates(states: any[]): Record<string, number> {
 }
 
 function sortRunStatesForList(states: any[]): any[] {
-  const rank: Record<string, number> = { error: 0, blocked: 1, running: 2, created: 3, stopped: 4, done: 5 };
+  const rank: Record<string, number> = { error: 0, blocked: 1, running: 2, idle: 3, created: 4, stopped: 5, done: 6 };
   return [...states].sort((a, b) => {
     const ar = rank[a.agent?.state] ?? 9;
     const br = rank[b.agent?.state] ?? 9;
@@ -539,78 +542,6 @@ function sortRunStatesForList(states: any[]): any[] {
 function summarizeRunStateForList(s: any) {
   const task = String(s.identity.task ?? "").replace(/\s+/g, " ").trim();
   return { ...s.identity, task: task.length > 240 ? `${task.slice(0, 239)}…` : task, taskTruncated: task.length > 240 || task !== s.identity.task, status: s.agent.state, summary: s.agent.summary, needs: s.agent.needs, result: s.result, metrics: s.metrics };
-}
-
-function buildRunState(meta: AgentMetadata) {
-  const refreshed = withMetrics(refreshStatus(meta));
-  const assessment = assessResultDeliverable(refreshed);
-  const processState = isTerminalStatus(refreshed.status)
-    ? "exited"
-    : refreshed.mode === "interactive" && tmuxAlive(refreshed.tmuxSocket, refreshed.tmuxSession)
-      ? "running"
-      : refreshed.mode === "oneshot" && (refreshed.pid || refreshed.supervisorPid)
-        ? "running"
-        : "unknown";
-  return {
-    schemaVersion: 1,
-    identity: {
-      runId: refreshed.runId,
-      runDir: refreshed.runDir,
-      name: refreshed.name,
-      role: refreshed.role,
-      mode: refreshed.mode,
-      harness: refreshed.harness,
-      parentRunId: refreshed.parentRunId,
-      rootSessionId: refreshed.rootSessionId,
-      workstreamId: refreshed.workstreamId,
-      cwd: refreshed.cwd,
-      task: refreshed.task,
-    },
-    process: {
-      state: processState,
-      pid: refreshed.pid,
-      supervisorPid: refreshed.supervisorPid,
-      tmuxSocket: refreshed.tmuxSocket,
-      tmuxSession: refreshed.tmuxSession,
-      exitCode: refreshed.exitCode,
-      observedAt: new Date().toISOString(),
-    },
-    agent: {
-      state: refreshed.status,
-      terminal: isTerminalStatus(refreshed.status),
-      attentionRequired: refreshed.status === "blocked" || refreshed.status === "error",
-      summary: refreshed.summary,
-      needs: refreshed.needs,
-      updatedAt: refreshed.updatedAt,
-    },
-    result: {
-      state: assessment.resultState,
-      ready: assessment.resultReady,
-      safeToRead: assessment.safeToRead,
-      deliverable: assessment.deliverable,
-      path: assessment.hasResultFile ? assessment.resultFile : undefined,
-      finalizedAt: refreshed.resultFinalizedAt ?? refreshed.resultSummaryOnlyAt,
-      issue: assessment.resultIssue,
-      warning: assessment.resultWarning,
-    },
-    activity: {
-      available: true,
-      recommended: "tango activity",
-    },
-    attention: {
-      requested: refreshed.status === "blocked" || refreshed.status === "error",
-      needs: refreshed.needs,
-    },
-    metrics: refreshed.metrics,
-    next: nextAction(refreshed, assessment),
-  };
-}
-
-function nextAction(meta: AgentMetadata, assessment: ReturnType<typeof assessResultDeliverable>) {
-  if (meta.status === "blocked") return { recommended: "message", reason: meta.needs ?? "agent is blocked" };
-  if (!assessment.safeToRead) return { recommended: "follow", until: "result-resolved" };
-  if (assessment.safeToRead) return { recommended: "result" };
-  return { recommended: "inspect" };
 }
 
 async function cmdInspect(parsed: Parsed, cwd: string, json: boolean) {
@@ -649,6 +580,24 @@ function cmdLook(parsed: Parsed, cwd: string, json: boolean) {
   return cmdActivity(parsed, cwd, json);
 }
 
+function cmdCheckpoint(parsed: Parsed, cwd: string, json: boolean) {
+  const [name] = parsed.positionals;
+  const runId = flagString(parsed.flags, "run-id");
+  const runDir = flagString(parsed.flags, "run-dir");
+  if (!name && !runId && !runDir) throw new Error("Usage: tango checkpoint [name] [--run-id <id>|--run-dir <dir>] [--latest|--all] [--json]");
+  const meta = resolveTarget({ name, cwd, runId, runDir, env: process.env as any });
+  const checkpoints = readCheckpoints(meta.runDir);
+  const selected = flagBool(parsed.flags, "all") ? checkpoints : checkpoints.slice(-1);
+  if (json) return printJson({ ok: true, schemaVersion: 1, agent: meta, checkpoints: selected });
+  if (!selected.length) return console.log("No checkpoints.");
+  const text = selected.map((checkpoint) => {
+    const body = readCheckpointBody(checkpoint).trim();
+    const header = `${checkpoint.createdAt} ${checkpoint.checkpointId}: ${checkpoint.summary}`;
+    return body && body !== checkpoint.summary ? `${header}\n${body}` : header;
+  }).join("\n\n");
+  console.log(text);
+}
+
 function cmdAttach(parsed: Parsed, cwd: string) {
   const [name] = parsed.positionals;
   const runId = flagString(parsed.flags, "run-id");
@@ -669,9 +618,10 @@ async function cmdMessage(parsed: Parsed, cwd: string, json: boolean) {
   const msg = broadcast ? parsed.positionals : (runId || runDir) && rest.length === 0 ? parsed.positionals : rest;
   if (((!broadcast && !name && !runId && !runDir)) || msg.length === 0) throw new Error("Usage: tango message [name] <message> [--run-id <id>|--run-dir <dir>] [--type instruction|ask|update|broadcast]");
   const attachments = flagStrings(parsed.flags, "attachment");
+  const forceTerminal = flagBool(parsed.flags, "force-terminal");
   const payload = type || flagBool(parsed.flags, "urgent") || attachments.length
-    ? await serverRequest("POST", "/api/v1/messages", { name, cwd, runId, runDir, type: type ?? "instruction", body: msg.join(" "), urgent: flagBool(parsed.flags, "urgent"), attachments })
-    : await serverRequest("POST", "/api/v1/runs/message", { name, cwd, runId, runDir, message: msg.join(" ") });
+    ? await serverRequest("POST", "/api/v1/messages", { name, cwd, runId, runDir, type: type ?? "instruction", body: msg.join(" "), urgent: flagBool(parsed.flags, "urgent"), attachments, forceTerminal })
+    : await serverRequest("POST", "/api/v1/runs/message", { name, cwd, runId, runDir, message: msg.join(" "), forceTerminal });
   if (json) printJson(payload); else console.log("sent");
 }
 
@@ -718,16 +668,18 @@ function cmdDelete(parsed: Parsed, cwd: string, json: boolean) {
 
 async function cmdReport(parsed: Parsed, json: boolean) {
   const [state, ...msg] = parsed.positionals;
-  if (!state) throw new Error("Usage: tango report <running|blocked|done|error|stopped> [--result-file <path>|--summary-only] [message]");
+  if (!state) throw new Error("Usage: tango report <running|idle|blocked|done|error|stopped> [--result-file <path>|--summary-only] [--checkpoint <summary> --checkpoint-file <path>] [message]");
   const runDir = flagString(parsed.flags, "run-dir") ?? process.env.TANGO_RUN_DIR;
   if (!runDir) throw new Error("No run dir. Set TANGO_RUN_DIR or pass --run-dir.");
   if (!isAgentStatus(state)) throw new Error(`Invalid status: ${state}`);
   const resultFileFlag = flagString(parsed.flags, "result-file");
   const summaryOnly = flagBool(parsed.flags, "summary-only") || flagBool(parsed.flags, "no-result");
   if (resultFileFlag && summaryOnly) throw new Error("Use either --result-file or --summary-only/--no-result, not both.");
-  if (resultFileFlag && state !== "done") throw new Error("--result-file is only valid with `tango report done`.");
-  if (summaryOnly && state !== "done") throw new Error("--summary-only/--no-result is only valid with `tango report done`.");
-  const payload = await serverRequest("POST", "/api/v1/runs/report", { runDir, state, summary: msg.join(" "), needs: flagString(parsed.flags, "needs"), resultFile: resultFileFlag, summaryOnly });
+  if (resultFileFlag && state !== "done" && state !== "idle") throw new Error("--result-file is only valid with `tango report done` or reusable `tango report idle`.");
+  if (summaryOnly && state !== "done" && state !== "idle") throw new Error("--summary-only/--no-result is only valid with `tango report done` or reusable `tango report idle`.");
+  const checkpointSummary = flagString(parsed.flags, "checkpoint");
+  const checkpointFile = flagString(parsed.flags, "checkpoint-file");
+  const payload = await serverRequest("POST", "/api/v1/runs/report", { runDir, state, summary: msg.join(" "), needs: flagString(parsed.flags, "needs"), resultFile: resultFileFlag, summaryOnly, checkpointSummary, checkpointFile });
   if (json) printJson(payload); else console.log(`${payload.agent.name}: ${payload.agent.status}`);
 }
 
@@ -1139,7 +1091,7 @@ function cmdRecover(parsed: Parsed, json: boolean) {
   const runDir = flagString(parsed.flags, "run-dir") ?? parsed.positionals[0];
   if (!runDir) throw new Error("Usage: tango recover --run-dir <dir>");
   const meta = readMetadata(runDir);
-  const state = buildRunState(meta);
+  const state = cpBuildRunState(meta);
   const payload = { ok: true, degraded: true, nonAckable: true, state, agent: meta, note: "Explicit recovery view from run directory; not active protocol state." };
   if (json) return printJson(payload);
   console.log(`${meta.name}: ${meta.status} [degraded recovery]`);
@@ -1248,7 +1200,7 @@ function withMetrics<T extends AgentMetadata>(meta: T): T {
 }
 
 function isAgentStatus(status: string): status is AgentStatus {
-  return status === "created" || status === "running" || status === "done" || status === "error" || status === "blocked" || status === "stopped" || status === "unknown";
+  return status === "created" || status === "running" || status === "idle" || status === "done" || status === "error" || status === "blocked" || status === "stopped" || status === "unknown";
 }
 
 function isFinalStatus(status: AgentStatus): boolean {
@@ -1261,8 +1213,8 @@ function refreshStatus(meta: AgentMetadata): AgentMetadata {
 
 function help() {
   console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]
-  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango ps [--json] [--all]\n  tango inspect [name] [--run-id <id>] [--run-dir <dir>] [--json]\n  tango activity [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json] [--raw] [--peek]\n  tango follow <name> --until terminal|result-resolved|attention [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango wait <targets...> [--run-id <id>] [--run-dir <dir>] --until terminal|result-ready|attention [--mode any|all] [--timeout seconds] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango report <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango doctor events [--json]
-  tango doctor server [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <target>|--run-id <id>|--run-dir <dir>|--unread|--inbox <id> [--peek] [--watch] [--timeout seconds] [--json]\n  tango board [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--all] [--json]\n  tango inbox read|handled|dismiss <inbox-id> [--json]\n  tango recover --run-dir <dir> [--json]\n  tango roles list|show <name>\n\nRemoved active protocol commands fail fast: tango status, tango look, tango list, tango collect-results.\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized and summary-only results handled so duplicate completion notifications are suppressed.\n`);
+  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango ps [--json] [--all]\n  tango inspect [name] [--run-id <id>] [--run-dir <dir>] [--json]\n  tango activity [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json] [--raw] [--peek]\n  tango checkpoint [name] [--run-id <id>] [--run-dir <dir>] [--latest|--all] [--json]\n  tango follow <name> --until terminal|result-resolved|attention [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango wait <targets...> [--run-id <id>] [--run-dir <dir>] --until terminal|result-ready|attention [--mode any|all] [--timeout seconds] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] [--force-terminal] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango report <running|idle|blocked|done|error|stopped> [message] [--needs kind] [--result-file path|--summary-only] [--checkpoint summary] [--checkpoint-file path]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango doctor events [--json]
+  tango doctor server [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <target>|--run-id <id>|--run-dir <dir>|--unread|--inbox <id> [--peek] [--watch] [--timeout seconds] [--json]\n  tango board [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--all] [--json]\n  tango inbox read|handled|dismiss <inbox-id> [--json]\n  tango recover --run-dir <dir> [--json]\n  tango roles list|show <name>\n\nRemoved active protocol commands fail fast: tango status, tango look, tango list, tango collect-results.\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Interactive idle is non-terminal/reusable and means awaiting another task; done closes/finalizes normal retasking.\n  Use --checkpoint/--checkpoint-file for durable progress updates that do not finalize a result.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized and summary-only results handled so duplicate completion notifications are suppressed.\n`);
 }
 
 main();

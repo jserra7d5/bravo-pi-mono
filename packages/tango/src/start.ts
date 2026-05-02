@@ -66,6 +66,7 @@ export async function startAgent(options: StartOptions): Promise<{ meta: AgentMe
     thinking: options.thinking ?? role?.thinking,
     effort: options.effort ?? role?.effort,
     resultRequired: options.resultRequired ?? (mode === "interactive" ? true : undefined),
+    reusable: mode === "interactive" ? true : undefined,
   };
 
   const effectiveRole = role ? { ...role, harness, model: meta.model, thinking: meta.thinking, effort: meta.effort, recursive: options.recursive ?? role.recursive } : undefined;

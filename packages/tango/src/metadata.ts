@@ -34,7 +34,7 @@ export function transitionStatus(runDir: string, status: AgentStatus, summary?: 
   const previousNeeds = meta.needs;
   const nextNeeds = options.needs !== undefined
     ? (options.needs || undefined)
-    : (status === "done" || status === "stopped" ? undefined : previousNeeds);
+    : (status === "idle" || status === "done" || status === "stopped" ? undefined : previousNeeds);
   const nextSummary = summary ? summary : previousSummary;
 
   if (isTerminalStatusLocal(previousStatus)) {
@@ -51,8 +51,14 @@ export function transitionStatus(runDir: string, status: AgentStatus, summary?: 
   if (options.needs !== undefined) {
     if (options.needs) meta.needs = options.needs;
     else delete meta.needs;
-  } else if (status === "done" || status === "stopped") {
+  } else if (status === "idle" || status === "done" || status === "stopped") {
     delete meta.needs;
+  }
+  if (status === "idle") {
+    meta.idleSince = new Date().toISOString();
+    if (meta.mode === "interactive") meta.reusable = true;
+  } else if (previousStatus === "idle" && status === "running") {
+    delete meta.idleSince;
   }
   if (previousStatus === status) {
     writeMetadata(meta);

@@ -138,7 +138,7 @@ function descendantAggregate(parent: AgentMetadata, agents: AgentMetadata[], inb
     const derived = derivedAttentionState(agent);
     if (derived === "stalled") aggregate.stalled++;
     else if (derived === "offline") aggregate.offline++;
-    else if (agent.status === "running" || agent.status === "created") aggregate.active++;
+    else if (agent.status === "running" || agent.status === "created" || agent.status === "idle") aggregate.active++;
     if (agent.status === "blocked") aggregate.blocked++;
     if (agent.status === "error") aggregate.error++;
     if (assessResultDeliverable(agent).resultReady || latestUnreadResult(inbox, agent)) aggregate.ready++;
@@ -165,7 +165,7 @@ export function buildBoard(scope: InboxRecipient = {}): BoardView {
   const stalledAgents = agents.filter((a) => derivedAttentionState(a) === "stalled");
   const offlineAgents = agents.filter((a) => derivedAttentionState(a) === "offline");
   const derivedRunDirs = new Set([...stalledAgents, ...offlineAgents].map((a) => resolve(a.runDir)));
-  const active = agents.filter((a) => (a.status === "running" || a.status === "created") && !derivedRunDirs.has(resolve(a.runDir))).map((a) => toItem(a, inbox, "activity", allAgents));
+  const active = agents.filter((a) => (a.status === "running" || a.status === "created" || a.status === "idle") && !derivedRunDirs.has(resolve(a.runDir))).map((a) => toItem(a, inbox, "activity", allAgents));
   const blocked = agents.filter((a) => a.status === "blocked").map((a) => toItem(a, inbox, "inbox", allAgents));
   const recentCompletions = agents.filter((a) => a.status === "done" || a.status === "stopped").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 20).map((a) => toItem(a, inbox, "result", allAgents));
   const recentErrors = agents.filter((a) => a.status === "error").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 20).map((a) => toItem(a, inbox, "inbox", allAgents));
@@ -193,7 +193,7 @@ export function buildBoard(scope: InboxRecipient = {}): BoardView {
     recentErrors,
     inbox: unresolved,
     tree: {
-      directChildren: directChildrenForScope(agents, scope).map((a) => toItem(a, inbox, latestUnreadResult(inbox, a) ? "result" : a.status === "blocked" || a.status === "error" ? "inbox" : (a.status === "running" || a.status === "created") ? "activity" : "none", allAgents)),
+      directChildren: directChildrenForScope(agents, scope).map((a) => toItem(a, inbox, latestUnreadResult(inbox, a) ? "result" : a.status === "blocked" || a.status === "error" ? "inbox" : (a.status === "running" || a.status === "created" || a.status === "idle") ? "activity" : "none", allAgents)),
     },
   };
 }

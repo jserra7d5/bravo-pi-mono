@@ -11,7 +11,7 @@ import { initialEventOffset, readEvents, readRecentEvents, type EventReadState }
 import { resolveTarget } from "./targetResolver.js";
 import { startAgent } from "./start.js";
 import { assessResultDeliverable } from "./result.js";
-import { buildRunState, followRun, messageRun, readActivity, reportRun, stopRun, waitRuns, type WaitCondition, type WaitMode } from "./controlPlane.js";
+import { assertMessageRunAllowed, buildRunState, followRun, messageRun, readActivity, reportRun, stopRun, waitRuns, type WaitCondition, type WaitMode } from "./controlPlane.js";
 import { markHandled, markSeen } from "./attention.js";
 import { buildBoard } from "./board.js";
 import { appendMessageRecord, filterInboxItems, markActivityItemsInspected, markInboxItem, markResultItemsHandled, syncInboxFromAgents } from "./inbox.js";
@@ -67,7 +67,7 @@ function toHttpError(error: unknown): HttpError {
   const message = error instanceof Error ? error.message : String(error);
   if (/timed out/i.test(message)) return new HttpError(504, "timeout", message);
   if (/not found/i.test(message)) return new HttpError(404, "not_found", message);
-  if (/Cannot transition terminal|immutable|required deliverable|Invalid status|Invalid result|placeholder|suspiciously short|not allowed/i.test(message)) return new HttpError(409, "conflict", message);
+  if (/terminal_run|Cannot transition terminal|immutable|required deliverable|Invalid status|Invalid result|placeholder|suspiciously short|not allowed/i.test(message)) return new HttpError(409, message.startsWith("terminal_run") ? "terminal_run" : "conflict", message);
   if (/Missing|Invalid|Use either|Target required|Usage:/i.test(message)) return new HttpError(400, "bad_request", message);
   return new HttpError(500, "internal_error", message);
 }
@@ -406,7 +406,7 @@ async function serverStartRun(input: any): Promise<{ agent: AgentMetadata; comma
 
 async function serverMessageRun(input: any, url: URL): Promise<{ agent: AgentMetadata; state: unknown }> {
   const meta = resolveServerTarget(url, input);
-  messageRun(meta, requiredString(input?.message, "message"));
+  messageRun(meta, requiredString(input?.message, "message"), { forceTerminal: input?.forceTerminal === true });
   return { agent: meta, state: buildRunState(meta) };
 }
 
@@ -416,6 +416,8 @@ async function serverReportRun(input: any): Promise<{ agent: AgentMetadata; stat
     needs: stringParam(input?.needs),
     resultFile: stringParam(input?.resultFile),
     summaryOnly: input?.summaryOnly === true,
+    checkpointSummary: stringParam(input?.checkpointSummary) ?? stringParam(input?.checkpoint),
+    checkpointFile: stringParam(input?.checkpointFile),
   });
   return { agent, state: buildRunState(agent) };
 }
@@ -506,6 +508,7 @@ async function serverStructuredMessage(input: any, url: URL): Promise<{ message:
   } catch (error) {
     if (type !== "broadcast") throw error;
   }
+  if (agent) assertMessageRunAllowed(agent, { forceTerminal: input?.forceTerminal === true });
   const message = appendMessageRecord({
     type: type as any,
     body,
@@ -531,7 +534,7 @@ async function serverStructuredMessage(input: any, url: URL): Promise<{ message:
       rootSessionId: agent.rootSessionId,
       workstreamId: agent.workstreamId,
     });
-    messageRun(agent, deliveredBody);
+    messageRun(agent, deliveredBody, { forceTerminal: input?.forceTerminal === true });
   }
   return { message, agent, state: agent ? buildRunState(agent) : undefined };
 }

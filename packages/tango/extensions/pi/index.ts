@@ -174,6 +174,7 @@ function statusIcon(status?: string): string {
   switch (status) {
     case "done": return "✓";
     case "running": return "⏳";
+    case "idle": return "○";
     case "error": return "✗";
     case "blocked": return "◐";
     case "stopped": return "■";
@@ -186,6 +187,7 @@ function statusColor(status?: string): "success" | "warning" | "error" | "muted"
     case "done": return "success";
     case "running":
     case "blocked": return "warning";
+    case "idle": return "success";
     case "error": return "error";
     default: return "muted";
   }
@@ -241,7 +243,7 @@ function formatTokens(total: unknown): string | undefined {
 function agentRuntime(agent: any): string | undefined {
   const start = Date.parse(agent?.createdAt ?? agent?.metrics?.startedAt ?? "");
   if (!Number.isFinite(start)) return undefined;
-  const end = ["done", "blocked", "error", "stopped"].includes(agent.status) ? Date.parse(agent?.updatedAt ?? "") : Date.now();
+  const end = ["done", "blocked", "idle", "error", "stopped"].includes(agent.status) ? Date.parse(agent?.updatedAt ?? "") : Date.now();
   return formatDuration((Number.isFinite(end) ? end : Date.now()) - start);
 }
 
@@ -444,10 +446,11 @@ async function updateFooterStatus(ctx: any, signal?: AbortSignal) {
     footerUpdateSkipUntil = 0;
     const agents = result.json?.agents ?? [];
     const running = agents.filter((a: any) => a.status === "running").length;
+    const idle = agents.filter((a: any) => a.status === "idle").length;
     const done = agents.filter((a: any) => a.status === "done").length;
     const tools = agents.reduce((sum: number, a: any) => sum + (typeof a.metrics?.toolCalls === "number" ? a.metrics.toolCalls : 0), 0);
     const tokens = agents.reduce((sum: number, a: any) => sum + (typeof a.metrics?.tokens?.total === "number" ? a.metrics.tokens.total : 0), 0);
-    const suffix = [`${running} running`, `${done} done`, tools ? `${tools} tools` : "", tokens ? formatTokens(tokens) : ""].filter(Boolean).join(" · ");
+    const suffix = [`${running} running`, idle ? `${idle} idle` : "", `${done} done`, tools ? `${tools} tools` : "", tokens ? formatTokens(tokens) : ""].filter(Boolean).join(" · ");
     ctx.ui.setStatus("tango", ctx.ui.theme.fg("dim", `Tango: ${suffix}`));
   } catch {
     footerUpdateFailures += 1;
@@ -565,7 +568,8 @@ function inboxWakeText(item: any): string {
 
 function inboxNotifyLevel(item: any): NotifyLevel {
   if (item.type === "error" || item.type === "offline") return "error";
-  if (item.type === "blocked" || item.type === "stalled" || item.urgent) return "warning";
+  if (item.type === "blocked" || item.urgent) return "warning";
+  if (item.type === "stalled") return "info";
   if (item.type === "result") return "success";
   return "info";
 }
@@ -712,7 +716,7 @@ function hasUnreadResult(item: any): boolean {
 }
 
 function isLiveVisible(item: any, now = Date.now()): boolean {
-  if (["running", "created", "blocked", "stalled", "offline", "error"].includes(item.status)) return true;
+  if (["running", "created", "idle", "blocked", "stalled", "offline", "error"].includes(item.status)) return true;
   if (hasUnreadResult(item)) return true;
   const updated = Date.parse(item.updatedAt ?? "");
   if (!Number.isFinite(updated)) return false;
@@ -1061,7 +1065,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "tango_message",
     label: "Tango Message",
-    description: "Send a follow-up message to an interactive Tango agent. Wraps `tango message ... --json`.",
+    description: "Send a follow-up message to a non-terminal interactive Tango agent. Terminal done/error/stopped runs reject messages by default; use a new reusable idle session/task instead."
     parameters: Type.Object({
       name: Type.Optional(Type.String()),
       runId: Type.Optional(Type.String({ description: "Stable Tango run ID. Preferred when known." })),
@@ -1110,13 +1114,15 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "tango_report",
     label: "Tango Report",
-    description: "Report this Tango agent's state. Wraps `tango report ... --json`.",
+    description: "Report this Tango agent's state. `done` terminalizes the run/session; reusable interactive agents should use checkpoints while working and `idle` when a task is complete but the session should remain retaskable.",
     parameters: Type.Object({
-      state: StringEnum(["running", "blocked", "done", "error", "stopped"] as const),
+      state: StringEnum(["running", "idle", "blocked", "done", "error", "stopped"] as const),
       message: Type.Optional(Type.String()),
       needs: Type.Optional(Type.String({ description: "Needed parent action for blocked/error statuses, e.g. decision, input, credentials, review, intervention." })),
-      resultFile: Type.Optional(Type.String({ description: "Path to a full deliverable to copy into result.md when state is done. Required for interactive agents. The status message remains only a short operational summary." })),
-      summaryOnly: Type.Optional(Type.Boolean({ description: "Explicitly complete without a result.md deliverable. Only valid with state=done for agents started with noResultRequired/no-result-required." })),
+      resultFile: Type.Optional(Type.String({ description: "Path to a full deliverable to copy into result.md when state is done or idle. Use idle for reusable interactive task completion without closing the session." })),
+      summaryOnly: Type.Optional(Type.Boolean({ description: "Explicitly complete without a result.md deliverable. Only valid with state=done or state=idle for agents started with noResultRequired/no-result-required." })),
+      checkpoint: Type.Optional(Type.String({ description: "Durable non-terminal checkpoint summary. Typically use with state=running." })),
+      checkpointFile: Type.Optional(Type.String({ description: "Path to a checkpoint body/file to surface in tango activity without finalizing a result." })),
       runDir: Type.Optional(Type.String({ description: "Optional run directory; defaults to TANGO_RUN_DIR." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
@@ -1125,6 +1131,8 @@ export default function (pi: ExtensionAPI) {
       if (params.needs) args.push("--needs", params.needs);
       if (params.resultFile) args.push("--result-file", params.resultFile);
       if (params.summaryOnly) args.push("--summary-only");
+      if (params.checkpoint) args.push("--checkpoint", params.checkpoint);
+      if (params.checkpointFile) args.push("--checkpoint-file", params.checkpointFile);
       if (params.runDir) args.push("--run-dir", params.runDir);
       args.push("--json");
       const out = toolResult(await runTango(args, signal));

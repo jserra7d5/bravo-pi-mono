@@ -7,6 +7,7 @@ import { isTerminalStatus, reconcileAgentLifecycle } from "./lifecycle.js";
 import { assessResultDeliverable, validateResultContent } from "./result.js";
 import { getRecipientContext, markLatestDoneHandled, markResultHandled, readAllAttentionRecords } from "./attention.js";
 import { derivedAttentionState, readInboxItems } from "./inbox.js";
+import { latestCheckpoint, readCheckpointBody, readCheckpoints, writeCheckpoint } from "./checkpoints.js";
 import type { AgentMetadata, AgentStatus, ActivityEvent, ActivitySummary, RunState } from "./types.js";
 
 export interface TargetRef {
@@ -52,7 +53,7 @@ export function buildRunState(meta: AgentMetadata): RunState {
   const refreshed = withRunMetrics(refreshRunStatus(meta));
   const assessment = assessResultDeliverable(refreshed);
   const interactiveAlive = refreshed.mode === "interactive" && tmuxAlive(refreshed.tmuxSocket, refreshed.tmuxSession);
-  const oneshotTracked = refreshed.mode === "oneshot" && (refreshed.pid || refreshed.supervisorPid);
+  const oneshotTracked = refreshed.mode === "oneshot" && !!(refreshed.pid || refreshed.supervisorPid);
   const processState = interactiveAlive
     ? "running"
     : refreshed.status === "stopped"
@@ -63,6 +64,8 @@ export function buildRunState(meta: AgentMetadata): RunState {
           ? "running"
           : "unknown";
   const activity = summarizeActivity(refreshed);
+  const checkpoints = activity.checkpoints;
+  const sessionLive = interactiveAlive || (refreshed.mode === "oneshot" && oneshotTracked && !isTerminalStatus(refreshed.status));
   return {
     schemaVersion: 1,
     identity: {
@@ -116,6 +119,23 @@ export function buildRunState(meta: AgentMetadata): RunState {
     },
     activity,
     attention: summarizeAttention(refreshed),
+    checkpoints,
+    session: {
+      live: sessionLive,
+      state: refreshed.status === "stopped"
+        ? "stopped"
+        : isTerminalStatus(refreshed.status)
+          ? "closed"
+          : refreshed.status === "idle"
+            ? "idle"
+          : interactiveAlive || (refreshed.mode === "oneshot" && oneshotTracked)
+            ? "live"
+            : refreshed.status === "created"
+              ? "starting"
+              : "unknown",
+      messageable: refreshed.mode === "interactive" && !isTerminalStatus(refreshed.status) && interactiveAlive,
+      reusable: refreshed.mode === "interactive" && !isTerminalStatus(refreshed.status) && (refreshed.reusable !== false),
+    },
     metrics: refreshed.metrics,
     next: nextAction(refreshed, assessment),
   };
@@ -125,29 +145,52 @@ export function readActivity(meta: AgentMetadata, options: { lines?: number; raw
   const lines = Math.max(1, Math.min(options.lines ?? 200, 5000));
   const rawText = readRawActivity(meta, lines);
   const events = normalizeActivity(rawText, meta);
-  if (options.events) return { text: events.map(renderActivityEvent).join("\n"), events, summary: summarizeActivity(meta) };
-  if (options.raw) return { text: rawText, events, summary: summarizeActivity(meta) };
-  return { text: events.map(renderActivityEvent).join("\n"), events, summary: summarizeActivity(meta) };
+  const summary = summarizeActivity(meta);
+  if (options.events) return { text: events.map(renderActivityEvent).join("\n"), events, summary };
+  if (options.raw) return { text: rawText, events, summary };
+  const checkpointText = renderCheckpointActivity(meta);
+  const activityText = events.map(renderActivityEvent).join("\n");
+  const text = [checkpointText, activityText].filter(Boolean).join("\n\n");
+  return { text, events, summary };
 }
 
-export function reportRun(runDir: string, state: AgentStatus, summary: string, options: { needs?: string; resultFile?: string; summaryOnly?: boolean; cwd?: string } = {}): AgentMetadata {
+export function reportRun(runDir: string, state: AgentStatus, summary: string, options: { needs?: string; resultFile?: string; summaryOnly?: boolean; cwd?: string; checkpointSummary?: string; checkpointFile?: string } = {}): AgentMetadata {
   if (!isAgentStatus(state)) throw new Error(`Invalid status: ${state}`);
   if (options.resultFile && options.summaryOnly) throw new Error("Use either --result-file or --summary-only/--no-result, not both.");
-  if (options.resultFile && state !== "done") throw new Error("--result-file is only valid with `tango report done`.");
-  if (options.summaryOnly && state !== "done") throw new Error("--summary-only/--no-result is only valid with `tango report done`.");
+  const resultState = state === "done" || state === "idle";
+  if (options.resultFile && !resultState) throw new Error("--result-file is only valid with `tango report done` or reusable `tango report idle`.");
+  if (options.summaryOnly && !resultState) throw new Error("--summary-only/--no-result is only valid with `tango report done` or reusable `tango report idle`.");
+  if ((options.checkpointSummary || options.checkpointFile) && isTerminalStatus(state)) throw new Error("--checkpoint/--checkpoint-file cannot be used with terminal reports.");
+  if (state === "idle") {
+    const current = readMetadata(runDir);
+    if (current.mode !== "interactive") throw new Error("`tango report idle` is only valid for reusable interactive agents.");
+  }
   if (state === "done") enforceDoneResultPolicy(runDir, { resultFile: options.resultFile, summaryOnly: !!options.summaryOnly });
   if (options.resultFile) finalizeResultFileBeforeDone(runDir, options.resultFile);
   else if (state === "done" && options.summaryOnly) markSummaryOnlyResult(runDir);
+  else if (state === "idle" && options.summaryOnly) markSummaryOnlyResult(runDir);
   else if (state === "done") captureCandidateResult(runDir);
   if (state === "done") captureInteractiveTranscript(runDir);
   const meta = transitionStatus(runDir, state, summary, { needs: options.needs });
-  meta.lastReportAt = new Date().toISOString();
+  const now = new Date().toISOString();
+  meta.lastReportAt = now;
+  if (options.checkpointSummary || options.checkpointFile) {
+    const checkpoint = writeCheckpoint(meta, { summary: options.checkpointSummary || summary, checkpointFile: options.checkpointFile });
+    meta.lastCheckpointAt = checkpoint.createdAt;
+  }
   writeMetadata(meta);
   return meta;
 }
 
-export function messageRun(meta: AgentMetadata, message: string): void {
+export function assertMessageRunAllowed(meta: AgentMetadata, options: { forceTerminal?: boolean } = {}): void {
   if (meta.mode !== "interactive") throw new Error(`Agent ${meta.name} is not interactive (mode=${meta.mode}). Message only works with interactive agents.`);
+  if (isTerminalStatus(meta.status) && !options.forceTerminal) {
+    throw new Error(`terminal_run: Run ${meta.name} is terminal (${meta.status}); messages are not retasks. Start a new run or use a reusable interactive idle/task-turn session. Pass --force-terminal only for raw tmux debugging.`);
+  }
+}
+
+export function messageRun(meta: AgentMetadata, message: string, options: { forceTerminal?: boolean } = {}): void {
+  assertMessageRunAllowed(meta, options);
   sendTmux(meta.tmuxSocket, meta.tmuxSession, message);
 }
 
@@ -244,15 +287,25 @@ function summarizeAttention(meta: AgentMetadata) {
 }
 
 function summarizeActivity(meta: AgentMetadata): ActivitySummary {
-  const sources = ["final-pane.log", "tmux.log", "output.log", "result.md"].filter((file) => existsSync(join(meta.runDir, file)));
+  const checkpoints = readCheckpoints(meta.runDir);
+  const sources = ["checkpoints.jsonl", "final-pane.log", "tmux.log", "output.log", "result.md"].filter((file) => existsSync(join(meta.runDir, file)));
   const latest = sources.map((file) => ({ file, mtime: statSync(join(meta.runDir, file)).mtimeMs })).sort((a, b) => b.mtime - a.mtime)[0];
   return {
     available: sources.length > 0 || (meta.mode === "interactive" && tmuxAlive(meta.tmuxSocket, meta.tmuxSession)),
     sources,
     latestSource: latest?.file,
     updatedAt: latest ? new Date(latest.mtime).toISOString() : undefined,
-    recommended: "tango activity",
+    recommended: checkpoints.length ? "tango checkpoint" : "tango activity",
+    checkpoints: checkpoints.length ? { count: checkpoints.length, latest: checkpoints[checkpoints.length - 1] } : undefined,
   };
+}
+
+function renderCheckpointActivity(meta: AgentMetadata): string {
+  const checkpoint = latestCheckpoint(meta.runDir);
+  if (!checkpoint) return "";
+  const body = readCheckpointBody(checkpoint).trim();
+  const header = `[checkpoint] ${checkpoint.summary} (${checkpoint.createdAt})`;
+  return body && body !== checkpoint.summary ? `${header}\n${body}` : header;
 }
 
 function readRawActivity(meta: AgentMetadata, lines: number): string {
@@ -427,7 +480,7 @@ function tailFileByLines(path: string, lines: number, maxBytes = 512 * 1024): st
 }
 
 function isAgentStatus(value: string): value is AgentStatus {
-  return ["created", "running", "blocked", "done", "error", "stopped"].includes(value);
+  return ["created", "running", "idle", "blocked", "done", "error", "stopped"].includes(value);
 }
 
 function isFinalStatus(status: AgentStatus): boolean {

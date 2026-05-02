@@ -3,9 +3,11 @@ import { dirname, join, resolve } from "node:path";
 import { dataRoot } from "./paths.js";
 import { listMetadata } from "./metadata.js";
 import { assessResultDeliverable } from "./result.js";
+import { checkpointStoreMtime } from "./checkpoints.js";
+import { tmuxAlive } from "./runtime/tmux.js";
 import type { AgentMetadata } from "./types.js";
 
-export type InboxType = "ask" | "update" | "result" | "blocked" | "stalled" | "offline" | "broadcast" | "error";
+export type InboxType = "ask" | "update" | "result" | "checkpoint" | "blocked" | "stalled" | "offline" | "broadcast" | "error";
 export type InboxState = "unread" | "read" | "handled" | "dismissed";
 
 export interface InboxRecipient {
@@ -171,8 +173,29 @@ function attentionVersion(meta: AgentMetadata, type: InboxType): string {
 }
 
 function ageMs(iso?: string): number {
-  const time = Date.parse(iso ?? "");
-  return Number.isFinite(time) ? Date.now() - time : 0;
+  if (!iso) return Number.POSITIVE_INFINITY;
+  const time = Date.parse(iso);
+  return Number.isFinite(time) ? Date.now() - time : Number.POSITIVE_INFINITY;
+}
+
+function latestIso(...values: (string | undefined)[]): string | undefined {
+  const latest = values
+    .map((value) => value ? Date.parse(value) : Number.NaN)
+    .filter(Number.isFinite)
+    .sort((a, b) => b - a)[0];
+  return latest ? new Date(latest).toISOString() : undefined;
+}
+
+function mtimeIso(ms?: number): string | undefined {
+  return ms === undefined ? undefined : new Date(ms).toISOString();
+}
+
+function runOwnedLogMtime(runDir: string): number | undefined {
+  const mtimes = ["tmux.log", "final-pane.log", "output.log", "stderr.log"]
+    .map((file) => join(runDir, file))
+    .filter(existsSync)
+    .map((path) => statSync(path).mtimeMs);
+  return mtimes.length ? Math.max(...mtimes) : undefined;
 }
 
 function processAlive(pid?: number): boolean | undefined {
@@ -186,11 +209,17 @@ function processAlive(pid?: number): boolean | undefined {
 }
 
 export function derivedAttentionState(meta: AgentMetadata): "stalled" | "offline" | undefined {
-  if (meta.status !== "running" && meta.status !== "created") return undefined;
+  if (meta.status !== "running" && meta.status !== "created" && meta.status !== "idle") return undefined;
+  if (meta.mode === "interactive") {
+    if (!tmuxAlive(meta.tmuxSocket, meta.tmuxSession)) return "offline";
+    // Live tmux sessions can be drafting without metrics/tool heartbeats. Treat them as messageable/quiet,
+    // not warning-level stalled, until a stronger heartbeat model exists.
+    return undefined;
+  }
   const alive = processAlive(meta.pid) ?? processAlive(meta.supervisorPid);
   if (alive === false) return "offline";
-  const lastActivityAt = meta.metrics?.updatedAt ?? meta.lastReportAt ?? meta.updatedAt;
-  if (ageMs(lastActivityAt) > 5 * 60_000) return "stalled";
+  const lastActivityAt = latestIso(meta.metrics?.updatedAt, meta.lastCheckpointAt, meta.lastReportAt, meta.updatedAt, mtimeIso(checkpointStoreMtime(meta.runDir)), mtimeIso(runOwnedLogMtime(meta.runDir)));
+  if (ageMs(lastActivityAt) > 15 * 60_000) return "stalled";
   return undefined;
 }
 

@@ -56,7 +56,7 @@ const HISTORICAL_HOURS = 168; // 7 days
 export function classifyAgent(meta: AgentMetadata, now = Date.now()): AgentBucket {
   // N-0011 TODO: durable attention classification may override status-derived
   if (meta.status === "blocked" || meta.status === "error" || meta.needs) return "attention";
-  if (meta.status === "running" || meta.status === "created") return "active";
+  if (meta.status === "running" || meta.status === "created" || meta.status === "idle") return "active";
 
   const updated = Date.parse(meta.updatedAt || meta.createdAt);
   if (!Number.isFinite(updated)) return "legacy";

@@ -1,5 +1,5 @@
 export type AgentMode = "oneshot" | "interactive";
-export type AgentStatus = "created" | "running" | "done" | "error" | "blocked" | "stopped" | "unknown";
+export type AgentStatus = "created" | "running" | "idle" | "done" | "error" | "blocked" | "stopped" | "unknown";
 export type OrchestrationPolicy = "none" | "cli" | "tools" | "auto";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type ResultParser = "pi-json" | "claude-stream-json" | "plain";
@@ -41,12 +41,30 @@ export interface ActivityEvent {
   text: string;
 }
 
+export interface CheckpointRecord {
+  schemaVersion: 1;
+  checkpointId: string;
+  runId?: string;
+  runDir: string;
+  turnId?: string;
+  summary: string;
+  body?: string;
+  path?: string;
+  source: "inline" | "file" | "artifact";
+  createdAt: string;
+  sizeBytes: number;
+}
+
 export interface ActivitySummary {
   available: boolean;
   sources?: string[];
   latestSource?: string;
   updatedAt?: string;
   recommended: string;
+  checkpoints?: {
+    count: number;
+    latest?: CheckpointRecord;
+  };
 }
 
 export interface AttentionSummary {
@@ -118,6 +136,16 @@ export interface RunState {
   };
   activity: ActivitySummary;
   attention: AttentionSummary;
+  checkpoints?: {
+    count: number;
+    latest?: CheckpointRecord;
+  };
+  session?: {
+    live: boolean;
+    state: "starting" | "live" | "idle" | "offline" | "stopped" | "closed" | "unknown";
+    messageable: boolean;
+    reusable: boolean;
+  };
   metrics?: AgentMetricsSnapshot;
   next: NextAction;
 }
@@ -210,6 +238,10 @@ export interface AgentMetadata {
   resultRequired?: boolean;
   resultIssue?: string;
   lastReportAt?: string;
+  lastCheckpointAt?: string;
+  reusable?: boolean;
+  idleSince?: string;
+  currentTurnId?: string;
   metrics?: AgentMetricsSnapshot;
 }
 
