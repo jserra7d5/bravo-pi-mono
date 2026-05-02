@@ -70,7 +70,12 @@ set -e
 if [ -n "\${TANGO_REAL_HOME:-}" ]; then
   export HOME="$TANGO_REAL_HOME"
 fi
-exec "\${BASH:-bash}" "$@"
+if [ "$#" -gt 0 ]; then
+  cmd="$1"
+  shift
+  exec "\${BASH:-bash}" -c "$cmd" -- "$@"
+fi
+exec "\${BASH:-bash}"
 `, "utf8");
   chmodSync(wrapper, 0o755);
 }
