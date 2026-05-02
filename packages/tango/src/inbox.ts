@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { dataRoot } from "./paths.js";
 import { listMetadata } from "./metadata.js";
@@ -78,14 +78,51 @@ function id(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+let inboxCache: { path: string; size: number; mtimeMs: number; items: InboxItem[] } | undefined;
+
 function appendJsonl(path: string, value: unknown): void {
   ensureStore(path);
   writeFileSync(path, `${JSON.stringify(value)}\n`, { encoding: "utf8", flag: "a", mode: 0o600 });
+  if (path === inboxStorePath() && isInboxItem(value)) {
+    const stat = existsSync(path) ? statInbox(path) : undefined;
+    const items = inboxCache?.path === path ? [...inboxCache.items] : readInboxItemsUncached(path);
+    const index = items.findIndex((item) => item.inboxId === value.inboxId);
+    if (index >= 0) items[index] = value;
+    else items.push(value);
+    items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    if (stat) inboxCache = { path, size: stat.size, mtimeMs: stat.mtimeMs, items };
+  } else if (path === inboxStorePath()) {
+    inboxCache = undefined;
+  }
+}
+
+function isInboxItem(value: unknown): value is InboxItem {
+  return !!(value && typeof value === "object" && (value as any).schemaVersion === 1 && typeof (value as any).inboxId === "string");
 }
 
 export function readInboxItems(): InboxItem[] {
   const path = inboxStorePath();
   if (!existsSync(path)) return [];
+  const stat = statInbox(path);
+  if (inboxCache && inboxCache.path === path && inboxCache.size === stat.size && inboxCache.mtimeMs === stat.mtimeMs) return [...inboxCache.items];
+  const items = readInboxItemsUncached(path);
+  const compacted = maybeCompactInboxStore(path, stat, items);
+  inboxCache = { path, size: compacted.size, mtimeMs: compacted.mtimeMs, items };
+  return [...items];
+}
+
+function statInbox(path: string): { size: number; mtimeMs: number } {
+  const stat = statSync(path);
+  return { size: stat.size, mtimeMs: stat.mtimeMs };
+}
+
+function maybeCompactInboxStore(path: string, stat: { size: number; mtimeMs: number }, items: InboxItem[]): { size: number; mtimeMs: number } {
+  if (stat.size < 10 * 1024 * 1024) return stat;
+  writeFileSync(path, items.map((item) => JSON.stringify(item)).join("\n") + (items.length ? "\n" : ""), { encoding: "utf8", mode: 0o600 });
+  return statInbox(path);
+}
+
+function readInboxItemsUncached(path: string): InboxItem[] {
   const byId = new Map<string, InboxItem>();
   for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -221,12 +258,55 @@ export function filterInboxItems(items: InboxItem[], scope: InboxRecipient = {})
 export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem[] {
   const activeDedupeKeys = new Set<string>();
   const syncedRunDirs = new Set(agents.map((agent) => resolve(agent.runDir)));
+  const items = readInboxItems();
+  const byDedupe = new Map(items.map((item) => [item.dedupeKey, item]));
+  const byId = new Map(items.map((item) => [item.inboxId, item]));
+  const upsertSyncedInboxItem = (input: Omit<InboxItem, "schemaVersion" | "inboxId" | "state" | "createdAt" | "updatedAt"> & { state?: InboxState; inboxId?: string }): InboxItem => {
+    const now = new Date().toISOString();
+    const existing = byDedupe.get(input.dedupeKey);
+    const item: InboxItem = existing ? {
+      ...existing,
+      ...input,
+      schemaVersion: 1,
+      inboxId: existing.inboxId,
+      state: existing.state,
+      createdAt: existing.createdAt,
+      updatedAt: now,
+    } : {
+      ...input,
+      schemaVersion: 1,
+      inboxId: input.inboxId ?? id("in"),
+      state: input.state ?? "unread",
+      createdAt: now,
+      updatedAt: now,
+      readAt: null,
+      handledAt: null,
+    };
+    appendJsonl(inboxStorePath(), item);
+    byDedupe.set(item.dedupeKey, item);
+    byId.set(item.inboxId, item);
+    return item;
+  };
+  const markSyncedInboxItem = (item: InboxItem, state: InboxState): InboxItem => {
+    const now = new Date().toISOString();
+    const next: InboxItem = {
+      ...item,
+      state,
+      updatedAt: now,
+      readAt: state === "read" || state === "handled" ? (item.readAt ?? now) : item.readAt,
+      handledAt: state === "handled" ? now : item.handledAt,
+    };
+    appendJsonl(inboxStorePath(), next);
+    byDedupe.set(next.dedupeKey, next);
+    byId.set(next.inboxId, next);
+    return next;
+  };
   for (const meta of agents) {
     const source: InboxSource = { runId: meta.runId, runDir: meta.runDir, agentName: meta.name };
     if (meta.status === "blocked") {
       const key = dedupeKey("blocked", meta, attentionVersion(meta, "blocked"));
       activeDedupeKeys.add(key);
-      upsertInboxItem({
+      upsertSyncedInboxItem({
         type: "blocked",
         recipient: recipientFor(meta),
         source,
@@ -239,7 +319,7 @@ export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem
     if (derived) {
       const key = dedupeKey(derived, meta, attentionVersion(meta, derived));
       activeDedupeKeys.add(key);
-      upsertInboxItem({
+      upsertSyncedInboxItem({
         type: derived,
         recipient: recipientFor(meta),
         source,
@@ -252,7 +332,7 @@ export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem
     if (meta.status === "error") {
       const key = dedupeKey("error", meta, attentionVersion(meta, "error"));
       activeDedupeKeys.add(key);
-      upsertInboxItem({
+      upsertSyncedInboxItem({
         type: "error",
         recipient: recipientFor(meta),
         source,
@@ -266,7 +346,7 @@ export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem
     if (assessment.resultReady) {
       const key = dedupeKey("result", meta, meta.resultFinalizedAt ?? meta.resultSummaryOnlyAt ?? "ready");
       activeDedupeKeys.add(key);
-      upsertInboxItem({
+      upsertSyncedInboxItem({
         type: "result",
         recipient: recipientFor(meta),
         source,
@@ -282,13 +362,13 @@ export function syncInboxFromAgents(agents = listMetadata(undefined)): InboxItem
       });
     }
   }
-  for (const item of readInboxItems()) {
+  for (const item of byId.values()) {
     if (!["blocked", "stalled", "offline", "error"].includes(item.type)) continue;
     if (item.state === "handled" || item.state === "dismissed") continue;
     if (!syncedRunDirs.has(resolve(item.source.runDir))) continue;
-    if (!activeDedupeKeys.has(item.dedupeKey)) markInboxItem(item.inboxId, "handled");
+    if (!activeDedupeKeys.has(item.dedupeKey)) markSyncedInboxItem(item, "handled");
   }
-  return readInboxItems();
+  return Array.from(byId.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 function isUnresolved(item: InboxItem): boolean {

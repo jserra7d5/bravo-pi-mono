@@ -174,11 +174,7 @@ export async function startTangoServer(options: TangoServerOptions = {}): Promis
   const retireInterval = setInterval(() => {
     if (!existsSync(serverDiscoveryPath())) {
       missingDiscoveryChecks += 1;
-      if (missingDiscoveryChecks >= 3) {
-        mkdirSync(serverDir(), { recursive: true });
-        writeFileSync(serverDiscoveryPath(), `${JSON.stringify(discovery, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-        missingDiscoveryChecks = 0;
-      }
+      if (missingDiscoveryChecks >= 3) shutdown();
       return;
     }
     missingDiscoveryChecks = 0;
@@ -265,7 +261,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
       return true;
     });
     const includeAll = url.searchParams.get("include") === "all" || url.searchParams.get("all") === "true";
-    const inbox = filterInboxItems(syncInboxFromAgents(scopedAgents), scope).filter((item) => includeAll || (item.state !== "handled" && item.state !== "dismissed"));
+    const inbox = filterInboxItems(cachedSyncInboxFromAgents(scopedAgents), scope).filter((item) => includeAll || (item.state !== "handled" && item.state !== "dismissed"));
     return sendJson(res, 200, { ok: true, schemaVersion: 1, inbox });
   }
   if (req.method === "POST" && url.pathname.startsWith("/api/v1/inbox/")) return sendJson(res, 200, { ok: true, schemaVersion: 1, item: await serverInboxAction(req, url) });
@@ -286,7 +282,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: { h
     if (parts.length === 6 && parts[5] === "inbox") {
       const rootSessionId = parts[4];
       const includeAll = url.searchParams.get("include") === "all" || url.searchParams.get("all") === "true";
-      const inbox = filterInboxItems(syncInboxFromAgents(), { rootSessionId }).filter((item) => includeAll || (item.state !== "handled" && item.state !== "dismissed"));
+      const inbox = filterInboxItems(cachedSyncInboxFromAgents(), { rootSessionId }).filter((item) => includeAll || (item.state !== "handled" && item.state !== "dismissed"));
       return sendJson(res, 200, { ok: true, schemaVersion: 1, inbox });
     }
     if (parts.length === 6 && parts[5] === "agents") {
@@ -338,6 +334,18 @@ function broadcastSse(clients: Set<ServerResponse>, name: string, payload: unkno
   const eventId = typeof payload === "object" && payload && "eventId" in payload ? String((payload as any).eventId) : `sse_${Date.now()}`;
   const text = `id: ${eventId}\nevent: ${name}\ndata: ${JSON.stringify(payload)}\n\n`;
   for (const client of clients) client.write(text);
+}
+
+let inboxSyncCache: { key: string; at: number; items: ReturnType<typeof syncInboxFromAgents> } | undefined;
+
+function cachedSyncInboxFromAgents(agents?: AgentMetadata[]): ReturnType<typeof syncInboxFromAgents> {
+  const source = agents ?? listMetadata(undefined);
+  const key = source.map((agent) => [agent.runDir, agent.status, agent.summary ?? "", agent.needs ?? "", agent.updatedAt ?? "", agent.resultFinalizedAt ?? "", agent.resultSummaryOnlyAt ?? ""].join("|")).join("\n");
+  const now = Date.now();
+  if (inboxSyncCache && inboxSyncCache.key === key && now - inboxSyncCache.at < 5_000) return inboxSyncCache.items;
+  const items = syncInboxFromAgents(source);
+  inboxSyncCache = { key, at: now, items };
+  return items;
 }
 
 function listAgents(cwd?: string): Array<AgentMetadata & { metrics?: unknown; attachCommand?: string; activityCommand: string; resultCommand: string }> {

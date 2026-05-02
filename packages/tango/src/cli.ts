@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { connect } from "node:net";
 import { homedir } from "node:os";
@@ -177,7 +177,7 @@ async function main() {
       case "children": return await cmdChildren(parsed, cwd, json);
       case "follow": return await cmdFollow(parsed, cwd, json);
       case "wait": return await cmdWait(parsed, cwd, json);
-      case "doctor": return cmdDoctor(parsed, cwd, json);
+      case "doctor": return await cmdDoctor(parsed, cwd, json);
       case "metrics": return cmdMetrics(parsed, json);
       case "artifact": return await cmdArtifact(parsed, cwd, json);
       case "reconcile": return cmdReconcile(parsed, cwd, json);
@@ -311,13 +311,20 @@ async function ensureServer(): Promise<NonNullable<ReturnType<typeof readServerD
   const lockPath = `${serverDiscoveryPath()}.start.lock`;
   const existing = readServerDiscovery();
   if (existing) {
-    const health = await serverHealth(existing);
-    if (serverHealthSupportsRunApi(health)) {
-      rmSync(lockPath, { force: true });
-      return existing;
+    const existingDeadline = Date.now() + 15_000;
+    let lastHealth: any;
+    while (Date.now() < existingDeadline) {
+      lastHealth = await serverHealth(existing);
+      if (serverHealthSupportsRunApi(lastHealth)) {
+        rmSync(lockPath, { force: true });
+        return existing;
+      }
+      if (lastHealth?.ok === true) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    if (process.env.TANGO_SERVER_URL) throw new Error(health?.ok === true ? "Configured Tango server is not compatible with this Tango CLI." : "Configured Tango server is not reachable.");
-    if (health?.ok === true) rmSync(serverDiscoveryPath(), { force: true });
+    if (process.env.TANGO_SERVER_URL) throw new Error(lastHealth?.ok === true ? "Configured Tango server is not compatible with this Tango CLI." : "Configured Tango server is not reachable.");
+    if (lastHealth?.ok === true) rmSync(serverDiscoveryPath(), { force: true });
+    else throw new Error(`Discovered Tango server at ${existing.url} did not answer health checks; refusing to autostart a duplicate while PID ${existing.pid} is alive. Run \`tango doctor server\` or stop the stale server.`);
   }
   if (process.env.TANGO_SERVER_URL) throw new Error("Configured Tango server is not reachable.");
   const preferredPort = preferredServerPort();
@@ -430,7 +437,7 @@ async function serverHealth(discovery: ServerDiscovery): Promise<any> {
   if (discovery.token) headers.authorization = `Bearer ${discovery.token}`;
   try {
     const healthUrl = new URL("/api/v1/health", discovery.url);
-    const res = await fetch(healthUrl, { headers, signal: AbortSignal.timeout(1000) });
+    const res = await fetch(healthUrl, { headers, signal: AbortSignal.timeout(3000) });
     if (!res.ok) return { ok: false };
     return await res.json().catch(() => ({ ok: false }));
   } catch {
@@ -899,9 +906,10 @@ async function cmdWait(parsed: Parsed, cwd: string, json: boolean) {
   if (result.timedOut) process.exitCode = 1;
 }
 
-function cmdDoctor(parsed: Parsed, cwd: string, json: boolean) {
+async function cmdDoctor(parsed: Parsed, cwd: string, json: boolean) {
   const [sub] = parsed.positionals;
-  if (sub !== "events") throw new Error("Usage: tango doctor events");
+  if (sub === "server") return await cmdDoctorServer(json);
+  if (sub !== "events") throw new Error("Usage: tango doctor events|server");
   const event: TangoEvent = {
     schemaVersion: 1,
     eventId: `te_doctor_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -920,6 +928,69 @@ function cmdDoctor(parsed: Parsed, cwd: string, json: boolean) {
   };
   appendEvent(event);
   if (json) printJson({ ok: true, event }); else console.log(`emitted ${event.eventId}`);
+}
+
+async function cmdDoctorServer(json: boolean) {
+  const discovery = readRawServerDiscovery();
+  const health = discovery ? await serverHealth(discovery) : undefined;
+  const lock = readServerStartLock();
+  const serverProcesses = serverProcessesForDataRoot(dataRoot());
+  const healthy = serverHealthSupportsRunApi(health) && (!health?.dataRoot || resolve(health.dataRoot) === dataRoot());
+  const issues: string[] = [];
+  if (!discovery) issues.push("No server discovery file found.");
+  else if (!processAlive(discovery.pid)) issues.push(`Discovery PID ${discovery.pid} is not alive.`);
+  if (discovery && !healthy) issues.push(health?.ok === true ? "Discovered server is not compatible with this CLI/dataRoot." : "Discovered server did not answer health checks.");
+  if (lock?.stale) issues.push("Server start lock appears stale.");
+  if (serverProcesses.length > 1) issues.push(`Multiple Tango server processes found for this TANGO_HOME: ${serverProcesses.map((p) => p.pid).join(", ")}.`);
+  const recommendation = issues.length === 0 ? "Server discovery looks healthy." : "Inspect or clean up stale server processes/locks, then rerun an active Tango command to autostart one canonical server.";
+  const result = { ok: issues.length === 0, dataRoot: dataRoot(), discovery, health, lock, serverProcesses, issues, recommendation };
+  if (json) return printJson(result);
+  console.log(`TANGO_HOME: ${result.dataRoot}`);
+  console.log(`discovery: ${discovery ? `${discovery.url} pid=${discovery.pid}` : "missing"}`);
+  console.log(`health: ${healthy ? "ok" : "not healthy"}`);
+  console.log(`start lock: ${lock ? `${lock.path} pid=${lock.pid ?? "?"}${lock.stale ? " stale" : ""}` : "none"}`);
+  console.log(`server processes: ${serverProcesses.length ? serverProcesses.map((p) => `${p.pid} ${p.cmd}`).join("\n  ") : "none"}`);
+  if (issues.length) console.log(`issues:\n  ${issues.join("\n  ")}`);
+  console.log(`recommendation: ${recommendation}`);
+}
+
+function readRawServerDiscovery(): ServerDiscovery | undefined {
+  try {
+    if (!existsSync(serverDiscoveryPath())) return undefined;
+    return JSON.parse(readFileSync(serverDiscoveryPath(), "utf8")) as ServerDiscovery;
+  } catch { return undefined; }
+}
+
+function readServerStartLock(): { path: string; pid?: number; mtimeMs: number; stale: boolean } | undefined {
+  const path = `${serverDiscoveryPath()}.start.lock`;
+  try {
+    const stat = statSync(path);
+    const [pidText] = readFileSync(path, "utf8").split(/\r?\n/);
+    const pid = Number(pidText);
+    const hasPid = Number.isInteger(pid) && pid > 0;
+    return { path, ...(hasPid ? { pid } : {}), mtimeMs: stat.mtimeMs, stale: (hasPid && !processAlive(pid)) || Date.now() - stat.mtimeMs > 15_000 };
+  } catch { return undefined; }
+}
+
+function serverProcessesForDataRoot(root: string): Array<{ pid: number; cmd: string }> {
+  if (!existsSync("/proc")) return [];
+  const processes: Array<{ pid: number; cmd: string }> = [];
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const cmdlineRaw = readFileSync(join("/proc", entry, "cmdline"), "utf8");
+      const argv = cmdlineRaw.split("\0").filter(Boolean);
+      const cliIndex = argv.findIndex((arg) => arg.endsWith("/cli.js") || arg.endsWith("cli.js"));
+      if (cliIndex < 0 || argv[cliIndex + 1] !== "server") continue;
+      const cmd = argv.join(" ");
+      const env = readFileSync(join("/proc", entry, "environ"), "utf8").split("\0");
+      const tangoHome = env.find((item) => item.startsWith("TANGO_HOME="))?.slice("TANGO_HOME=".length);
+      const home = env.find((item) => item.startsWith("HOME="))?.slice("HOME=".length);
+      const processRoot = tangoHome || (home ? join(home, ".tango") : undefined);
+      if (processRoot && resolve(processRoot) === root) processes.push({ pid: Number(entry), cmd });
+    } catch {}
+  }
+  return processes.sort((a, b) => a.pid - b.pid);
 }
 
 function childTree(parent: AgentMetadata): any[] {
@@ -1190,7 +1261,8 @@ function refreshStatus(meta: AgentMetadata): AgentMetadata {
 
 function help() {
   console.log(`tango - native/tmux agent orchestration\n\nUsage:\n  tango server [--host 127.0.0.1] [--port 43117] [--token TOKEN]
-  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango ps [--json] [--all]\n  tango inspect [name] [--run-id <id>] [--run-dir <dir>] [--json]\n  tango activity [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json] [--raw] [--peek]\n  tango follow <name> --until terminal|result-resolved|attention [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango wait <targets...> [--run-id <id>] [--run-dir <dir>] --until terminal|result-ready|attention [--mode any|all] [--timeout seconds] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango report <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango doctor events [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <target>|--run-id <id>|--run-dir <dir>|--unread|--inbox <id> [--peek] [--watch] [--timeout seconds] [--json]\n  tango board [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--all] [--json]\n  tango inbox read|handled|dismiss <inbox-id> [--json]\n  tango recover --run-dir <dir> [--json]\n  tango roles list|show <name>\n\nRemoved active protocol commands fail fast: tango status, tango look, tango list, tango collect-results.\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized and summary-only results handled so duplicate completion notifications are suppressed.\n`);
+  tango server url\n  tango start <name> --role <role> [--harness pi|claude|gemini|generic] [--mode oneshot|interactive] [--model MODEL] [--thinking off|minimal|low|medium|high|xhigh] [--effort low|medium|high|xhigh|max] [--dry-run] [--no-result-required] [task...]\n  tango ps [--json] [--all]\n  tango inspect [name] [--run-id <id>] [--run-dir <dir>] [--json]\n  tango activity [name] [--run-id <id>] [--run-dir <dir>] [--lines N] [--json] [--raw] [--peek]\n  tango follow <name> --until terminal|result-resolved|attention [--run-id <id>] [--run-dir <dir>] [--timeout seconds] [--json]\n  tango wait <targets...> [--run-id <id>] [--run-dir <dir>] --until terminal|result-ready|attention [--mode any|all] [--timeout seconds] [--json]\n  tango attach [name] [--run-id <id>] [--run-dir <dir>]\n  tango message <name> [--run-id <id>] [--run-dir <dir>] <message>\n  tango stop <name> [--run-id <id>] [--run-dir <dir>]\n  tango delete <name> [--run-id <id>] [--run-dir <dir>]\n  tango report <state> [message] [--needs kind] [--result-file path|--summary-only]\n  tango watch [--json] [--all] [--from-start]\n  tango children [parent-name] [--run-id <id>] [--run-dir <dir>] [--tree] [--json]\n  tango doctor events [--json]
+  tango doctor server [--json]\n  tango metrics update --run-dir <dir> --payload <json> [--json]\n  tango artifact publish <path> [--title title] [--entry file] [--mime type] [--json]\n  tango artifact list [--json]\n  tango artifact revoke <artifact-id> [--json]\n  tango reconcile [--json] [--all] [--children]\n  tango result <target>|--run-id <id>|--run-dir <dir>|--unread|--inbox <id> [--peek] [--watch] [--timeout seconds] [--json]\n  tango board [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--json]\n  tango inbox [--root-session-id id|--workstream-id id|--run-id id|--run-dir dir] [--all] [--json]\n  tango inbox read|handled|dismiss <inbox-id> [--json]\n  tango recover --run-dir <dir> [--json]\n  tango roles list|show <name>\n\nRemoved active protocol commands fail fast: tango status, tango look, tango list, tango collect-results.\n\nNotes:\n  Final statuses (done, error, stopped) are immutable; duplicate done is only accepted as an exact no-op.\n  Blocked agents can be moved back to running after the blocker is resolved.\n  tango result marks finalized and summary-only results handled so duplicate completion notifications are suppressed.\n`);
 }
 
 main();

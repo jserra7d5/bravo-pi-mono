@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +22,40 @@ function runCli(args: string[], env: NodeJS.ProcessEnv = {}, cwd = process.cwd()
     env: { ...process.env, ...env },
     encoding: "utf8",
   });
+}
+
+function runCliAsync(args: string[], env: NodeJS.ProcessEnv = {}, cwd = process.cwd()): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      cwd,
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+function serverProcessesForHome(home: string): number[] {
+  const procRoot = "/proc";
+  if (!existsSync(procRoot)) return [];
+  const pids: number[] = [];
+  for (const entry of readdirSync(procRoot)) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const argv = readFileSync(join(procRoot, entry, "cmdline"), "utf8").split("\0").filter(Boolean);
+      const cliIndex = argv.findIndex((arg) => arg.endsWith("/cli.js") || arg.endsWith("cli.js"));
+      if (cliIndex < 0 || argv[cliIndex + 1] !== "server") continue;
+      const environ = readFileSync(join(procRoot, entry, "environ"), "utf8");
+      if (environ.split("\0").includes(`TANGO_HOME=${home}`)) pids.push(Number(entry));
+    } catch {}
+  }
+  return pids;
 }
 
 function makeMeta(options: { name: string; runDir: string; cwd: string; mode: "oneshot" | "interactive"; status?: string; task: string; summary?: string; resultFinalizedAt?: string; resultRequired?: boolean }) {
@@ -77,6 +111,23 @@ describe("rollout compatibility", () => {
       assert.match(discovery.url, /^http:\/\/127\.0\.0\.1:\d+$/);
       assert.notStrictEqual(discovery.url, "http://127.0.0.1:43117");
       assert.strictEqual(discovery.dataRoot, home);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent discovery-backed autostart to one server", async () => {
+    const home = tempHome();
+    try {
+      const env = { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "", TANGO_SERVER_PORT: "0" };
+      const results = await Promise.all(Array.from({ length: 8 }, () => runCliAsync(["ps", "--json"], env)));
+      for (const result of results) {
+        assert.strictEqual(result.status, 0, result.stderr);
+        assert.deepStrictEqual(JSON.parse(result.stdout), { ok: true, total: 0, returned: 0, truncated: false, counts: {}, agents: [] });
+      }
+      const discovery = JSON.parse(readFileSync(join(home, "server", "server.json"), "utf8"));
+      assert.strictEqual(discovery.dataRoot, home);
+      assert.deepStrictEqual(serverProcessesForHome(home), [discovery.pid]);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -156,8 +207,8 @@ describe("rollout compatibility", () => {
       mkdirSync(join(home, "server"), { recursive: true });
       writeFileSync(join(home, "server", "server.json"), JSON.stringify({ schemaVersion: 1, url: `http://127.0.0.1:${stalePort}`, pid: process.pid, startedAt: "stale" }));
 
-      const result = runCli(["ps", "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
-      assert.strictEqual(result.status, 0, result.stderr);
+      const result = await runCliAsync(["ps", "--json"], { TANGO_HOME: home, TANGO_SERVER_URL: "", TANGO_SERVER_TOKEN: "" }, cwd);
+      assert.strictEqual(result.status, 0, result.stderr || result.stdout);
       assert.deepStrictEqual(JSON.parse(result.stdout), { ok: true, total: 0, returned: 0, truncated: false, counts: {}, agents: [] });
       const discovery = JSON.parse(readFileSync(join(home, "server", "server.json"), "utf8"));
       assert.notStrictEqual(discovery.url, `http://127.0.0.1:${stalePort}`);
