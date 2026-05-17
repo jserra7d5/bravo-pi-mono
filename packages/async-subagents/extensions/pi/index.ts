@@ -1,6 +1,7 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { acquireRootSessionLease } from "../../src/leases.js";
+import { NAME_PACKS, readNamePackSelection, writeNamePackSelection, type NamePackId } from "../../src/namePacks.js";
 import { createRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import type { RootSessionIdentity } from "../../src/types.js";
@@ -67,6 +68,39 @@ function pollAndSendWakeups(pi: ExtensionAPI, ctx: ExtensionContext): void {
   for (const delivery of pollWakeups({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, ownerId: OWNER_ID })) {
     sendWakeup(pi, delivery.message);
   }
+}
+
+function isNamePackId(value: string): value is NamePackId {
+  return Object.hasOwn(NAME_PACKS, value);
+}
+
+function namePackSummary(cwd: string): string {
+  const store = new RunStore({ cwd });
+  const selection = readNamePackSelection(store.runRoot);
+  const packs = selection.availablePacks.map((pack) => pack.id).join(", ");
+  return `Current subagent name pack: ${selection.activePack}\nAvailable: ${packs}`;
+}
+
+function registerNamePackCommand(pi: ExtensionAPI): void {
+  pi.registerCommand("subagent-names", {
+    description: "Inspect or change the display-name pack used for future async subagents.",
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const cwd = cwdOf(ctx);
+      const pack = args.trim();
+      if (!pack || pack === "status" || pack === "list") {
+        ctx.ui.notify(namePackSummary(cwd), "info");
+        return;
+      }
+      if (!isNamePackId(pack)) {
+        ctx.ui.notify(`Unknown subagent name pack: ${pack}\n${namePackSummary(cwd)}`, "error");
+        return;
+      }
+      const store = new RunStore({ cwd });
+      writeNamePackSelection(store.runRoot, pack);
+      ctx.ui.notify(`Subagent name pack set to: ${pack}`, "info");
+      if (currentCtx) refreshUi(currentCtx);
+    },
+  });
 }
 
 function startTimers(pi: ExtensionAPI, ctx: ExtensionContext): void {
@@ -138,4 +172,5 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   });
 
   registerSubagentTools(pi, runtime);
+  registerNamePackCommand(pi);
 }
