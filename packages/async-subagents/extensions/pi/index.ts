@@ -6,6 +6,7 @@ import { createRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import type { RootSessionIdentity } from "../../src/types.js";
 import { updateLiveWidget } from "./liveWidget.js";
+import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessage, type WakeupMessage } from "./renderers.js";
 import { updateStatusLine } from "./statusLine.js";
 import { registerSubagentTools, type ToolRuntime } from "./tools.js";
@@ -169,6 +170,10 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     stopTimers(currentCtx);
+  });
+
+  pi.on("before_agent_start", async (event) => {
+    return { systemPrompt: appendAsyncSubagentsPrompt(event.systemPrompt) };
   });
 
   registerSubagentTools(pi, runtime);

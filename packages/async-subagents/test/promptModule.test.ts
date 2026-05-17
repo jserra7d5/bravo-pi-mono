@@ -1,0 +1,16 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { ASYNC_SUBAGENTS_PROMPT_MODULE, appendAsyncSubagentsPrompt } from "../extensions/pi/promptModule.js";
+
+test("async subagents prompt module establishes neutral lifecycle rules", () => {
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /first-party interface/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /@DisplayName/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /Do not hard-code or assume particular subagent types/);
+  assert.doesNotMatch(ASYNC_SUBAGENTS_PROMPT_MODULE, /\b(worker|reviewer|scout|fast-worker)\b/);
+});
+
+test("appendAsyncSubagentsPrompt appends once", () => {
+  const prompt = appendAsyncSubagentsPrompt("Base prompt");
+  assert.match(prompt, /^Base prompt\n\n## Async Subagents/);
+  assert.equal(appendAsyncSubagentsPrompt(prompt), prompt);
+});

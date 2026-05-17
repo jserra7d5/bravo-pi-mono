@@ -31,6 +31,32 @@ function color(theme: TextTheme | undefined, name: string, value: string): strin
   return theme?.fg ? theme.fg(name, value) : value;
 }
 
+function mention(displayName: string | undefined, fallback: string, theme?: TextTheme): string {
+  const label = displayName ? `@${displayName}` : fallback;
+  return color(theme, "agentMention", label);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function knownDisplayNames(details: Record<string, unknown>): string[] {
+  const names: string[] = [];
+  if (typeof details.displayName === "string" && details.displayName) names.push(details.displayName);
+  if (Array.isArray(details.results)) {
+    for (const result of details.results) {
+      if (isRecord(result) && typeof result.displayName === "string" && result.displayName) names.push(result.displayName);
+    }
+  }
+  return [...new Set(names)].sort((a, b) => b.length - a.length);
+}
+
+function colorKnownMentions(text: string, displayNames: string[], theme?: TextTheme): string {
+  if (!theme?.fg || !displayNames.length) return text;
+  const pattern = new RegExp(`@(${displayNames.map(escapeRegExp).join("|")})(?=$|[\\s.,;:!?\\])}])`, "g");
+  return text.replace(pattern, (value) => color(theme, "agentMention", value));
+}
+
 function safeWidth(width: unknown): number {
   return typeof width === "number" && Number.isFinite(width) && width > 0 ? Math.floor(width) : 80;
 }
@@ -132,22 +158,24 @@ function since(iso: string | undefined, now = Date.now()): string | undefined {
 export function formatRunRow(row: RunSummaryRow, theme?: TextTheme): string {
   const status = humanState(row.state);
   const summary = preview(row.needs ?? row.summary ?? row.event?.summary ?? row.result?.summary, 72);
-  const displayName = row.displayName ?? row.agentName;
+  const displayName = mention(row.displayName, row.agentName, theme);
   const activity = since(row.lastActivityAt ?? row.updatedAt);
   const duration = typeof row.result?.durationMs === "number" ? compactDuration(row.result.durationMs) : undefined;
   const timing = duration ? `in ${duration}` : activity ? `${activity} ago` : "";
-  const head = `${stateGlyph(row.state, row.resultReady || Boolean(row.result))} ${displayName} ${row.agentName} ${status}`;
-  return `${color(theme, "accent", head)}${timing ? color(theme, "dim", ` ${timing}`) : ""}${summary ? color(theme, "muted", ` - ${summary}`) : ""}`;
+  const glyph = color(theme, "accent", stateGlyph(row.state, row.resultReady || Boolean(row.result)));
+  const kind = color(theme, "accent", row.agentName);
+  const state = color(theme, "accent", status);
+  return `${glyph} ${displayName} ${kind} ${state}${timing ? color(theme, "dim", ` ${timing}`) : ""}${summary ? color(theme, "muted", ` - ${summary}`) : ""}`;
 }
 
 export function summarizeStartResult(result: SubagentStartResult): string {
   const action = result.waited ? "started and waited" : "started";
-  const label = result.displayName ? `${result.displayName} (${result.agentName})` : result.agentName;
+  const label = result.displayName ? `@${result.displayName} (${result.agentName})` : result.agentName;
   return `Subagent ${result.runId} ${action}: ${label} (${result.state})`;
 }
 
-function formatResultSummary(result: RunResult): string {
-  const label = result.displayName ? `${result.displayName} ${result.agentName}` : result.agentName;
+function formatResultSummary(result: RunResult, theme?: TextTheme): string {
+  const label = result.displayName ? `${mention(result.displayName, result.agentName, theme)} ${result.agentName}` : result.agentName;
   const duration = typeof result.durationMs === "number" ? ` in ${compactDuration(result.durationMs)}` : "";
   const summary = result.summary ? ` - ${preview(result.summary, 96)}` : "";
   return `${label} ${humanState(result.state)}${duration}${summary}`;
@@ -156,7 +184,7 @@ function formatResultSummary(result: RunResult): string {
 export function summarizeWaitResult(result: SubagentWaitResult): string {
   if (result.state === "timeout") return `No subagent updates before timeout (${result.remainingRunIds.length} remaining)`;
   if (result.results.length) {
-    const shown = result.results.slice(0, 2).map(formatResultSummary).join("; ");
+    const shown = result.results.slice(0, 2).map((readyResult) => formatResultSummary(readyResult)).join("; ");
     const more = result.results.length > 2 ? `; +${result.results.length - 2} more` : "";
     return `Subagent wait: ${result.results.length} result${result.results.length === 1 ? "" : "s"} - ${shown}${more}`;
   }
@@ -196,14 +224,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object";
 }
 
-function resultBodyLines(details: Record<string, unknown>, expanded: boolean): string[] {
+function resultBodyLines(details: Record<string, unknown>, expanded: boolean, theme?: TextTheme): string[] {
   if (!expanded) return [];
   if (typeof details.body === "string" && details.body.trim()) return ["", details.body];
   if (!Array.isArray(details.results)) return [];
   return details.results.flatMap((result) => {
     if (!isRecord(result) || typeof result.body !== "string" || !result.body.trim()) return [];
     const agent = typeof result.agentName === "string" ? result.agentName : "subagent";
-    const label = typeof result.displayName === "string" ? `${result.displayName} ${agent}` : agent;
+    const label = typeof result.displayName === "string" ? `${mention(result.displayName, agent, theme)} ${agent}` : agent;
     return ["", `${label}:`, result.body];
   });
 }
@@ -214,7 +242,9 @@ export function renderSubagentToolResult(result: unknown, options?: RenderOption
   const details = data.details ?? {};
   const text = data.content?.[0]?.text;
   const summary = typeof details.summary === "string" ? details.summary : text;
-  const lines = [color(theme, "muted", summary ?? JSON.stringify(details)), ...resultBodyLines(details, Boolean(options?.expanded))];
+  const displayNames = knownDisplayNames(details);
+  const renderedSummary = colorKnownMentions(summary ?? JSON.stringify(details), displayNames, theme);
+  const lines = [color(theme, "muted", renderedSummary), ...resultBodyLines(details, Boolean(options?.expanded), theme)];
   return lines.join("\n");
 }
 
@@ -227,8 +257,11 @@ export function renderSubagentToolResultComponent(result: unknown, options?: Ren
 }
 
 export function renderSubagentWakeMessage(message: WakeupMessage, options?: RenderOptions, theme?: TextTheme): string {
+  const title = message.result?.displayName
+    ? `${mention(message.result.displayName, message.title, theme)} ${message.result.agentName ?? "subagent"}`
+    : message.title;
   const lines = [
-    `${color(theme, "accent", stateGlyph(message.state, Boolean(message.result)))} ${color(theme, "toolTitle", message.title)} ${color(theme, "dim", message.runId)}`,
+    `${color(theme, "accent", stateGlyph(message.state, Boolean(message.result)))} ${color(theme, "toolTitle", title)} ${color(theme, "dim", message.runId)}`,
   ];
   const summary = preview(message.summary ?? message.result?.summary ?? message.event?.summary, 120);
   if (summary) lines.push(color(theme, "muted", summary));

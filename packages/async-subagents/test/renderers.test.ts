@@ -17,7 +17,7 @@ test("formatRunRow renders compact result-ready rows", () => {
   };
 
   const rendered = formatRunRow(row);
-  assert.match(rendered, /Rex scout done/);
+  assert.match(rendered, /@Rex scout done/);
   assert.doesNotMatch(rendered, /run_test/);
 });
 
@@ -56,7 +56,7 @@ test("tool result renderer shows terminal bodies in expanded mode", () => {
   );
 
   const rendered = waited.render(100).join("\n");
-  assert.match(rendered, /Fives reviewer:/);
+  assert.match(rendered, /@Fives reviewer:/);
   assert.match(rendered, /Reviewer found path safety gaps/);
 });
 
@@ -85,4 +85,39 @@ test("wait and wake-up renderers keep summaries concise", () => {
     }),
     /Subagent result: scout/,
   );
+});
+
+test("result summaries do not duplicate agent name when displayName is missing", () => {
+  const waited: SubagentWaitResult = {
+    state: "ready",
+    mode: "race",
+    readyRunIds: ["run_a"],
+    events: [],
+    results: [
+      {
+        schemaVersion: 1,
+        runId: "run_a",
+        parentRunId: "root_a",
+        agentName: "scout",
+        contextPolicy: "fresh",
+        sessionPolicy: "record",
+        state: "completed",
+        success: true,
+        createdAt: "2026-05-14T00:00:01.000Z",
+        durationMs: 1000,
+        summary: "Done",
+        body: "Done",
+        artifacts: [],
+        error: null,
+      },
+    ],
+    statuses: [],
+    cursors: {},
+    remainingRunIds: [],
+    timedOut: false,
+    next: [],
+  };
+
+  assert.match(summarizeWaitResult(waited), /scout done/);
+  assert.doesNotMatch(summarizeWaitResult(waited), /scout scout/);
 });

@@ -56,7 +56,7 @@ test("live widget sorts active and waiting rows before terminal rows, prunes old
 
   assert.equal(lines.length, 7);
   assert.match(lines[1], /Work4|Wait/);
-  assert.match(body, /Done scout done/);
+  assert.match(body, /@Done scout done/);
   assert.doesNotMatch(body, /OldDone/);
   assert.doesNotMatch(body, /run_/);
   assert.match(lines.at(-1) ?? "", /^\+1 more$/);
