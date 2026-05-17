@@ -10,6 +10,7 @@ export interface GoalTaskView {
 	id: string;
 	title: string;
 	status?: string;
+	receipt?: string | null;
 }
 
 export interface GoalStateView {
@@ -77,6 +78,7 @@ function normalizeTask(value: unknown): GoalTaskView | undefined {
 		id,
 		title: asString(value.title, id),
 		status: typeof value.status === "string" ? value.status : undefined,
+		receipt: typeof value.receipt === "string" ? value.receipt : null,
 	};
 }
 
@@ -134,7 +136,7 @@ export function renderStatusLine(snapshot?: HudSnapshot): string | undefined {
 	const { state } = snapshot;
 	const done = state.progress?.completed_tasks ?? 0;
 	const total = state.progress?.total_tasks ?? state.tasks.length;
-	const judge = state.judge?.active ? "active" : (state.judge?.last_verdict ?? "none");
+	const judge = judgeStatus(state);
 	return `Goal: ${state.goal.title} ${done}/${total} Judge: ${judge}`;
 }
 
@@ -146,7 +148,7 @@ export function renderHud(snapshot?: HudSnapshot): string[] {
 	const percent = total > 0 ? Math.round((done / total) * 100) : 0;
 	const active = state.tasks.find((task) => task.id === state.active_task);
 	const taskTitle = active?.title ?? state.active_task ?? "none";
-	const judge = state.judge?.active ? "active" : (state.judge?.last_verdict ?? "none");
+	const judge = judgeStatus(state);
 	return [
 		`GOAL  ${state.goal.title}`,
 		`STATE ${state.goal.status}`,
@@ -154,6 +156,12 @@ export function renderHud(snapshot?: HudSnapshot): string[] {
 		`DONE  ${done}/${total} [${progressBar(done, total)}] ${percent}%`,
 		`JUDGE ${judge}`,
 	];
+}
+
+function judgeStatus(state: GoalStateView): string {
+	const active = state.tasks.find((task) => task.id === state.active_task);
+	if (active?.status === "awaiting_judge") return "awaiting";
+	return state.judge?.active ? "active" : (state.judge?.last_verdict ?? "none");
 }
 
 export async function readGoalState(goalPath: string): Promise<GoalStateView | undefined> {

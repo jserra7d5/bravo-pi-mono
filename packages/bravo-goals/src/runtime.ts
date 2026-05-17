@@ -98,6 +98,7 @@ export async function recoverActiveGoalsIndex(workspaceRoot: string): Promise<Ac
 
 export function renderWorkerPrompt(state: GoalState, goalDir: string): string {
 	const task = state.tasks.find((candidate) => candidate.id === state.active_task) ?? null;
+	const receiptPath = task ? (task.receipt ?? `receipts/${task.id}-worker.md`) : null;
 	return [
 		`You are working on Bravo goal ${state.goal.id}.`,
 		"",
@@ -108,7 +109,8 @@ export function renderWorkerPrompt(state: GoalState, goalDir: string): string {
 		`4. ${join(goalDir, "resume.md")}`,
 		"",
 		task ? `Active task: ${task.id} - ${task.title}` : "No active task is selected in state.yaml.",
-		"Write a concrete worker receipt before claiming task completion.",
+		receiptPath ? `Expected worker receipt: ${receiptPath}` : "No active task receipt path is available.",
+		receiptPath ? `When complete, write that receipt and call judge_event with event: task.receipt_ready and receipt_path: ${receiptPath}. Do not edit state.yaml manually for the receipt-ready transition.` : "Write a concrete worker receipt before claiming task completion.",
 	].join("\n");
 }
 

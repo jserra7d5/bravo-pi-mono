@@ -126,9 +126,16 @@ async function detachActiveGoal(root: string, goalId: string, sessionId?: string
 	});
 }
 
+function expectedWorkerReceiptPath(goal: GoalRecord): string | null {
+	const active = goal.state.tasks.find((task) => task.id === goal.state.active_task);
+	if (!active) return null;
+	return active.receipt ?? `receipts/${active.id}-worker.md`;
+}
+
 function activeTaskPrompt(goal: GoalRecord): string {
 	const active = goal.state.tasks.find((task) => task.id === goal.state.active_task);
 	const task = active ? `${active.id}: ${active.title}` : "no active task";
+	const receiptPath = expectedWorkerReceiptPath(goal);
 	return `You are working on Bravo goal "${goal.state.goal.title}" (${goal.id}).
 
 Read these files before acting:
@@ -138,8 +145,9 @@ Read these files before acting:
 4. ${relPath(process.cwd(), join(goal.path, "resume.md"))}
 
 Active task: ${task}
+${receiptPath ? `Expected worker receipt: ${receiptPath}` : "No active task receipt path is available."}
 
-Continue the active task from state.yaml. When the task is complete, write the worker receipt requested by the goal state and stop for Judge verification.`;
+Continue the active task from state.yaml. When the task is complete, write the worker receipt at the expected path, then call judge_event with event: task.receipt_ready and receipt_path: ${receiptPath ?? "<worker receipt path>"}. Do not edit state.yaml manually for the receipt-ready transition.`;
 }
 
 function restartPrompt(goal: GoalRecord): string {
@@ -162,6 +170,9 @@ Refresh ${relPath(process.cwd(), join(goal.path, "resume.md"))} with the current
 
 function controllerResumeSnapshot(goal: GoalRecord, reason: string | null): string {
 	const active = goal.state.tasks.find((task) => task.id === goal.state.active_task);
+	// Intentional: resume.md records the pre-pause snapshot. When pausing an active
+	// goal this says "Goal status: active" so the next worker can see what was
+	// interrupted, while state.yaml remains the authoritative current status.
 	return [
 		`# Resume: ${goal.state.goal.title}`,
 		"",
@@ -270,6 +281,8 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 			const sessionState = state.session as Record<string, unknown> | undefined;
 			if (goalState) goalState.status = "active";
 			if (sessionState) sessionState.attached_pi_session_id = sessionId;
+			// Intentional: keep pause.paused_at/pause_reason as last-pause audit metadata
+			// after resume; current lifecycle is represented by goal.status/session/index.
 		});
 		await writeActiveGoal(root, {
 			goal_id: goal.id,
