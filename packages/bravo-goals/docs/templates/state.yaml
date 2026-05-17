@@ -1,0 +1,51 @@
+schema_version: 1
+goal:
+  id: "{{goal_id}}"
+  title: "{{title}}"
+  status: draft
+  created_at: ""
+  updated_at: ""
+repos: []
+session:
+  attached_pi_session_id: null
+  current_worker_turn_id: null
+  current_judge_run_id: null
+active_task: null
+tasks: []
+judge:
+  last_verdict: none
+  last_receipt: null
+  active: false
+progress:
+  completed_tasks: 0
+  total_tasks: 0
+pause:
+  paused_at: null
+  pause_reason: null
+  resume_context: resume.md
+phase_boundary:
+  default_after_judge_pass: fresh_session
+  after_judge_fail: carry
+  before_final_audit: fresh_session
+  experimental_flags:
+    allow_per_task_boundary: true
+    allow_runtime_override: true
+    auto_select_from_context_switch_severity: false
+  compact_custom_instructions: null
+  last_boundary_at: null
+  last_boundary_mode: null
+  last_boundary_reason: null
+final_audit:
+  status: pending
+  receipt: null
+  judge_run_id: null
+user_verification:
+  status: pending
+  verified_at: null
+  verified_by: null
+  note: null
+archive:
+  archived_at: null
+  archived_path: null
+  forced: false
+  reason: null

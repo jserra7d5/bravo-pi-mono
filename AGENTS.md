@@ -8,6 +8,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `packages/tango/` contains the Tango CLI, runtime, roles, prompt includes, skills, and Pi extension wrapper. Tango includes harnesses for Pi, Claude Code, Gemini CLI, and generic shell agents.
 - `packages/loom/` contains the Loom CLI for durable recursive work graphs, context, inboxes, and Tango-compatible coordination.
 - `packages/async-subagents/` contains the Pi-only async subagent primitive: markdown agent definitions, durable run files, parent Pi tools, child-control extension, and terminal status/wake-up UI.
+- `packages/bravo-goals/` contains the Bravo Goals CLI and Pi extension for workspace-level `.bravo/` goal workspaces, task receipts, phase boundaries, terminal HUD status, and Judge run contracts.
 - `packages/caveman/` contains the Pi extension for session-scoped terse response mode (`/caveman`, `/normal`).
 - `docs/specs/` contains design specs. Each spec should live under a slug directory, e.g. `docs/specs/tango-v1/design.md`.
 - Package-specific source, docs, roles, includes, and extensions should live inside the relevant package directory.
@@ -30,6 +31,8 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `npm run check` — type-check all workspaces with check scripts.
 - `npm run build --workspace @bravo/tango` — rebuild Tango after source or extension changes.
 - `npm run build --workspace @bravo/loom` — rebuild Loom after source changes.
+- `npm run check --workspace @bravo/goals` — type-check the Bravo Goals package.
+- `npm test --workspace @bravo/goals` — build and run Bravo Goals contract tests.
 - `npm run check --workspace @bravo/async-subagents` — type-check the async subagents package.
 - `npm test --workspace @bravo/async-subagents` — build and run async subagents tests.
 - `npm run check --workspace @bravo/caveman` — type-check the Caveman Pi extension.

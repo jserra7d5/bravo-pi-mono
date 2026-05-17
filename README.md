@@ -7,6 +7,7 @@ Personal pi/agent tooling monorepo.
 - `packages/tango` — CLI-first native/tmux agent orchestrator with Pi, Claude Code, and generic harnesses.
 - `packages/loom` — CLI-first durable recursive work graph for research, design, planning, decisions, inboxes, and Tango-compatible agent coordination.
 - `packages/async-subagents` — Pi-only async subagent primitive with durable run files and parent/child tools.
+- `packages/bravo-goals` — Pi-first durable goal workspaces with task receipts, phase boundaries, HUD status, and Judge contracts.
 - `packages/caveman` — Pi extension for session-scoped terse response mode.
 
 ## Tango quick start
@@ -24,6 +25,22 @@ npm link
 pi install /home/joe/Documents/projects/bravo-pi-mono/packages/async-subagents
 pi install /home/joe/Documents/projects/bravo-pi-mono/packages/caveman
 ```
+
+## Bravo Goals quick start
+
+```bash
+npm run build --workspace @bravo/goals
+npm test --workspace @bravo/goals
+
+bravo-goals init --workspace-root ~/Documents/Quantiiv
+bravo-goals prep durable-resume-loop --workspace-root ~/Documents/Quantiiv
+bravo-goals check durable-resume-loop --workspace-root ~/Documents/Quantiiv
+```
+
+Bravo Goals stores named goal workspaces under `.bravo/goals/` above repo
+folders. The Pi extension exposes `/goal` lifecycle commands and a terminal HUD,
+while the CLI owns durable filesystem checks, archive gates, and Judge run
+contracts.
 
 Basic commands:
 
@@ -67,3 +84,4 @@ Design/spec docs:
 - `docs/specs/tango-v1/design-v1.1.md` / `plan-v1.1.md` — tool-first Pi UX and CLI-first core follow-up
 - `docs/specs/loom-v1/` — Loom v1 durable graph design, contracts, operations, testing, and implementation plan
 - `docs/specs/loom-agent-workflows/design.md` / `plan.md` — Loom prompt templates, skills, Tango role integration, worktree conventions, and root delegation guidance
+- `docs/specs/bravo-goals-v1/` — Bravo Goals v1 design, contracts, runtime research, Judge runtime research, and implementation plan

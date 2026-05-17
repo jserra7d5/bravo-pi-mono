@@ -1,0 +1,31 @@
+{
+  "name": "@bravo/goals",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi-first durable goal workspaces, task receipts, and Judge verification.",
+  "keywords": ["pi-package"],
+  "bin": {
+    "bravo-goals": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions/pi"]
+  }
+}
