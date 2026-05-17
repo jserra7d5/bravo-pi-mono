@@ -59,7 +59,7 @@ test("chooses explicit phase boundary flag", () => {
 	assert.equal(testables.boundaryFromFlags(parsed.flags), "fresh_session");
 });
 
-test("worker prompt names receipt path and judge_event call", () => {
+test("worker prompt names receipt path, schema, and task_receipt_ready call", () => {
 	const prompt = testables.activeTaskPrompt({
 		id: "prompt-goal",
 		path: "/workspace/.bravo/goals/prompt-goal",
@@ -70,13 +70,32 @@ test("worker prompt names receipt path and judge_event call", () => {
 			progress: { completed_tasks: 0, total_tasks: 1 },
 		},
 	});
-	assert.match(prompt, /Expected worker receipt: receipts\/custom-worker\.md/);
-	assert.match(prompt, /judge_event with event: task\.receipt_ready and receipt_path: receipts\/custom-worker\.md/);
+	assert.match(prompt, /Expected worker receipt path for task_receipt_ready: receipts\/custom-worker\.md/);
+	assert.match(prompt, /Write the receipt file at: \/workspace\/\.bravo\/goals\/prompt-goal\/receipts\/custom-worker\.md/);
+	assert.match(prompt, /Do not create receipts under the repo directory/);
+	assert.match(prompt, /type: worker/);
+	assert.match(prompt, /task_id: task-one/);
+	assert.match(prompt, /task_receipt_ready with goal_id: prompt-goal and receipt_path: receipts\/custom-worker\.md/);
+	assert.doesNotMatch(prompt, /judge_finish|judge_event/);
 	assert.match(prompt, /Do not edit state\.yaml manually/);
 });
 
-test("judge_event task.receipt_ready persists active task awaiting Judge", async () => {
-	const root = await mkdtemp(join(tmpdir(), "bravo-goals-judge-event-"));
+test("no-task prompt does not mention task_receipt_ready", () => {
+	const prompt = testables.activeTaskPrompt({
+		id: "prompt-no-task",
+		path: "/workspace/.bravo/goals/prompt-no-task",
+		state: {
+			goal: { id: "prompt-no-task", title: "Prompt No Task", status: "active" },
+			active_task: null,
+			tasks: [],
+			progress: { completed_tasks: 0, total_tasks: 0 },
+		},
+	});
+	assert.doesNotMatch(prompt, /task_receipt_ready/);
+});
+
+test("task_receipt_ready persists active task awaiting Judge and creates Judge run", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-task-receipt-ready-"));
 	const { goalPath } = await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "receipt-goal", tasks: [{ id: "task-one", title: "Task One" }] });
 	const state = await readGoalState(goalPath);
 	state.goal.status = "active";
@@ -91,18 +110,138 @@ test("judge_event task.receipt_ready persists active task awaiting Judge", async
 	});
 	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
 
-	const tool = registeredJudgeEventTool();
+	const tool = registeredTaskReceiptReadyTool();
 	const result = await tool.execute("call_1", {
 		goal_id: "receipt-goal",
-		event: "task.receipt_ready",
 		receipt_path: "receipts/task-one-worker.md",
 	}, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_receipt" } });
 
 	const next = await readGoalState(goalPath);
 	assert.equal(next.tasks[0]?.status, "awaiting_judge");
 	assert.equal(next.tasks[0]?.receipt, "receipts/task-one-worker.md");
+	assert.equal(next.session.current_judge_run_id, result.details.judge_run_id);
 	assert.equal(next.goal.status, "active");
-	assert.match(result.content[0].text, /awaiting Judge/);
+	assert.equal(result.details.status, "awaiting_judge");
+	assert.equal(result.details.goal_id, "receipt-goal");
+	assert.equal(result.details.task_id, "task-one");
+	assert.equal(result.details.receipt_path, "receipts/task-one-worker.md");
+	assert.match(result.details.judge_run_id, /^judge_/);
+	assert.equal(result.details.judge_receipt_path, ".bravo/goals/receipt-goal/receipts/task-one-judge.md");
+	assert.equal(result.details.next_action, "judge_pending_launch");
+	assert.match(await readFile(join(root, result.details.judge_run_path), "utf8"), /"worker_receipt_path"/);
+	assert.match(result.content[0].text, /Task receipt ready/);
+});
+
+test("task_receipt_ready uses default active task receipt path", async () => {
+	const { root, goalPath } = await createActiveReceiptGoal("default-receipt", "pi_default");
+	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
+
+	const tool = registeredTaskReceiptReadyTool();
+	const result = await tool.execute("call_1", {
+		goal_id: "default-receipt",
+	}, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_default" } });
+
+	const next = await readGoalState(goalPath);
+	assert.equal(next.tasks[0]?.status, "awaiting_judge");
+	assert.equal(next.tasks[0]?.receipt, "receipts/task-one-worker.md");
+	assert.equal(result.details.receipt_path, "receipts/task-one-worker.md");
+	assert.match(result.details.judge_run_id, /^judge_/);
+});
+
+test("task_receipt_ready rejects malformed, empty, and directory worker receipts without mutation", async () => {
+	const cases: { name: string; write: (goalPath: string) => Promise<string>; message: RegExp }[] = [
+		{
+			name: "empty",
+			write: async (goalPath) => {
+				await writeFile(join(goalPath, "receipts", "empty-worker.md"), "");
+				return "receipts/empty-worker.md";
+			},
+			message: /empty/,
+		},
+		{
+			name: "malformed",
+			write: async (goalPath) => {
+				await writeFile(join(goalPath, "receipts", "malformed-worker.md"), "# no frontmatter\n");
+				return "receipts/malformed-worker.md";
+			},
+			message: /YAML frontmatter/,
+		},
+		{
+			name: "wrong-task",
+			write: async (goalPath) => {
+				await writeFile(join(goalPath, "receipts", "wrong-worker.md"), workerReceipt("other-task"));
+				return "receipts/wrong-worker.md";
+			},
+			message: /task_id must match active task/,
+		},
+		{
+			name: "directory",
+			write: async (goalPath) => {
+				await mkdir(join(goalPath, "receipts", "dir-worker.md"));
+				return "receipts/dir-worker.md";
+			},
+			message: /regular file/,
+		},
+	];
+
+	for (const receiptCase of cases) {
+		const goalId = `bad-${receiptCase.name}`;
+		const sessionId = `pi_${receiptCase.name}`;
+		const { root, goalPath } = await createActiveReceiptGoal(goalId, sessionId);
+		const receiptPath = await receiptCase.write(goalPath);
+		const tool = registeredTaskReceiptReadyTool();
+		await assert.rejects(
+			() => tool.execute("call_1", { goal_id: goalId, receipt_path: receiptPath }, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => sessionId } }),
+			receiptCase.message,
+		);
+		const next = await readGoalState(goalPath);
+		assert.equal(next.tasks[0]?.status, "active");
+		assert.equal(next.session.current_judge_run_id, null);
+	}
+});
+
+test("task_receipt_ready does not mutate state when Judge run creation fails", async () => {
+	const { root, goalPath } = await createActiveReceiptGoal("judge-create-fails", "pi_create_fail");
+	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
+	await writeFile(join(goalPath, "judge"), "not a directory");
+
+	const tool = registeredTaskReceiptReadyTool();
+	await assert.rejects(
+		() => tool.execute("call_1", { goal_id: "judge-create-fails", receipt_path: "receipts/task-one-worker.md" }, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_create_fail" } }),
+		/ENOTDIR|EEXIST/,
+	);
+	const next = await readGoalState(goalPath);
+	assert.equal(next.tasks[0]?.status, "active");
+	assert.equal(next.tasks[0]?.receipt, null);
+	assert.equal(next.session.current_judge_run_id, null);
+});
+
+test("judge_event task.receipt_ready remains compatible", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-judge-event-"));
+	const { goalPath } = await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "compat-receipt-goal", tasks: [{ id: "task-one", title: "Task One" }] });
+	const state = await readGoalState(goalPath);
+	state.goal.status = "active";
+	state.session.attached_pi_session_id = "pi_receipt";
+	await writeGoalState(goalPath, state);
+	await upsertActiveGoal(root, {
+		goal_id: "compat-receipt-goal",
+		path: ".bravo/goals/compat-receipt-goal",
+		pi_session_id: "pi_receipt",
+		status: "active",
+		active_task: "task-one",
+	});
+	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
+
+	const tool = registeredJudgeEventTool();
+	const result = await tool.execute("call_1", {
+		goal_id: "compat-receipt-goal",
+		event: "task.receipt_ready",
+		receipt_path: "receipts/task-one-worker.md",
+	}, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_receipt" } });
+
+	const next = await readGoalState(goalPath);
+	assert.equal(next.tasks[0]?.status, "awaiting_judge");
+	assert.equal(result.details.next_action, "judge_pending_launch");
 });
 
 test("judge_event task.receipt_ready rejects absolute receipt paths outside workspace without mutation or event", async () => {
@@ -346,6 +485,20 @@ test("HUD reports awaiting Judge for awaiting_judge active task", () => {
 	assert.equal(renderHud(awaiting)[4], "JUDGE awaiting");
 });
 
+test("judge_finish outside Judge run teaches workers to use task_receipt_ready", async () => {
+	const tool = registeredJudgeFinishTool();
+	const previousRunDir = process.env.BRAVO_JUDGE_RUN_DIR;
+	delete process.env.BRAVO_JUDGE_RUN_DIR;
+	try {
+		await assert.rejects(
+			() => tool.execute("call_1", { goal_id: "worker-goal", verdict: "pass", receipt_path: "receipts/task-one-judge.md" }, undefined, undefined, {}),
+			/task_receipt_ready/,
+		);
+	} finally {
+		if (previousRunDir !== undefined) process.env.BRAVO_JUDGE_RUN_DIR = previousRunDir;
+	}
+});
+
 test("HUD discovers ancestor workspace and does not fall back to unrelated active goal", async () => {
 	const root = await mkdtemp(join(tmpdir(), "bravo-goals-hud-"));
 	const nested = join(root, "repo", "src");
@@ -376,15 +529,44 @@ test("HUD discovers ancestor workspace and does not fall back to unrelated activ
 	assert.equal(unmatched, undefined);
 });
 
+async function createActiveReceiptGoal(goalId: string, sessionId: string): Promise<{ root: string; goalPath: string }> {
+	const root = await mkdtemp(join(tmpdir(), `bravo-goals-${goalId}-`));
+	const { goalPath } = await scaffoldGoalWorkspace({ workspaceRoot: root, goalId, tasks: [{ id: "task-one", title: "Task One" }] });
+	const state = await readGoalState(goalPath);
+	state.goal.status = "active";
+	state.session.attached_pi_session_id = sessionId;
+	await writeGoalState(goalPath, state);
+	await upsertActiveGoal(root, {
+		goal_id: goalId,
+		path: `.bravo/goals/${goalId}`,
+		pi_session_id: sessionId,
+		status: "active",
+		active_task: "task-one",
+	});
+	return { root, goalPath };
+}
+
+function registeredTaskReceiptReadyTool(): { execute: (...args: any[]) => Promise<any> } {
+	return registeredTool("task_receipt_ready");
+}
+
 function registeredJudgeEventTool(): { execute: (...args: any[]) => Promise<any> } {
-	let judgeEvent: { name: string; execute: (...args: any[]) => Promise<any> } | undefined;
+	return registeredTool("judge_event");
+}
+
+function registeredJudgeFinishTool(): { execute: (...args: any[]) => Promise<any> } {
+	return registeredTool("judge_finish");
+}
+
+function registeredTool(name: string): { execute: (...args: any[]) => Promise<any> } {
+	let matched: { name: string; execute: (...args: any[]) => Promise<any> } | undefined;
 	registerJudgeControlTools({
 		registerTool(tool: { name: string; execute: (...args: any[]) => Promise<any> }) {
-			if (tool.name === "judge_event") judgeEvent = tool;
+			if (tool.name === name) matched = tool;
 		},
 	} as any);
-	assert.ok(judgeEvent);
-	return judgeEvent;
+	assert.ok(matched);
+	return matched;
 }
 
 function workerReceipt(taskId: string): string {

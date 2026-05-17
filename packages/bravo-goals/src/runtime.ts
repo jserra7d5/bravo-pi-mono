@@ -99,6 +99,7 @@ export async function recoverActiveGoalsIndex(workspaceRoot: string): Promise<Ac
 export function renderWorkerPrompt(state: GoalState, goalDir: string): string {
 	const task = state.tasks.find((candidate) => candidate.id === state.active_task) ?? null;
 	const receiptPath = task ? (task.receipt ?? `receipts/${task.id}-worker.md`) : null;
+	const receiptFullPath = receiptPath ? join(goalDir, receiptPath) : null;
 	return [
 		`You are working on Bravo goal ${state.goal.id}.`,
 		"",
@@ -109,12 +110,32 @@ export function renderWorkerPrompt(state: GoalState, goalDir: string): string {
 		`4. ${join(goalDir, "resume.md")}`,
 		"",
 		task ? `Active task: ${task.id} - ${task.title}` : "No active task is selected in state.yaml.",
-		receiptPath ? `Expected worker receipt: ${receiptPath}` : "No active task receipt path is available.",
-		receiptPath ? `When complete, write that receipt and call judge_event with event: task.receipt_ready and receipt_path: ${receiptPath}. Do not edit state.yaml manually for the receipt-ready transition.` : "Write a concrete worker receipt before claiming task completion.",
+		receiptPath && receiptFullPath ? `Expected worker receipt path for task_receipt_ready: ${receiptPath}\nWrite the receipt file at: ${receiptFullPath}` : "No active task receipt path is available.",
+		receiptPath && receiptFullPath ? `When complete, write the receipt file at the full path above with this exact YAML-frontmatter shape, then Markdown details after the closing ---:\n\n${renderWorkerReceiptTemplate(task?.id ?? "<task-id>")}\n\nThen call task_receipt_ready with goal_id: ${state.goal.id} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory. Do not edit state.yaml manually for the receipt-ready transition.` : "Continue from state.yaml. There is no active task receipt path available.",
 	].join("\n");
 }
 
+function renderWorkerReceiptTemplate(taskId: string): string {
+	return `---
+schema_version: 1
+type: worker
+task_id: ${taskId}
+status: complete
+created_at: "<ISO-8601 timestamp>"
+files_changed: []
+commands: []
+claims:
+  - claim: "<what was completed>"
+    evidence:
+      - "<file or command evidence>"
+remaining_risk: []
+---`;
+}
+
 export function renderRestartPrompt(state: GoalState, goalDir: string): string {
+	const task = state.tasks.find((candidate) => candidate.id === state.active_task) ?? null;
+	const receiptPath = task ? (task.receipt ?? `receipts/${task.id}-worker.md`) : null;
+	const receiptFullPath = receiptPath ? join(goalDir, receiptPath) : null;
 	return [
 		"You are resuming a Bravo goal in a fresh Pi session.",
 		"",
@@ -125,6 +146,7 @@ export function renderRestartPrompt(state: GoalState, goalDir: string): string {
 		`4. ${join(goalDir, "resume.md")}`,
 		"",
 		"Then continue the active task from state.yaml.",
+		receiptPath && receiptFullPath ? `When complete, write the worker receipt file at ${receiptFullPath} with this frontmatter shape:\n\n${renderWorkerReceiptTemplate(task?.id ?? "<task-id>")}\n\nThen call task_receipt_ready with goal_id: ${state.goal.id} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory.` : "There is no active task receipt path available.",
 		"Do not redo completed tasks unless the state or Judge receipt says evidence is weak.",
 	].join("\n");
 }

@@ -136,6 +136,7 @@ function activeTaskPrompt(goal: GoalRecord): string {
 	const active = goal.state.tasks.find((task) => task.id === goal.state.active_task);
 	const task = active ? `${active.id}: ${active.title}` : "no active task";
 	const receiptPath = expectedWorkerReceiptPath(goal);
+	const receiptFullPath = receiptPath ? join(goal.path, receiptPath) : null;
 	return `You are working on Bravo goal "${goal.state.goal.title}" (${goal.id}).
 
 Read these files before acting:
@@ -145,12 +146,32 @@ Read these files before acting:
 4. ${relPath(process.cwd(), join(goal.path, "resume.md"))}
 
 Active task: ${task}
-${receiptPath ? `Expected worker receipt: ${receiptPath}` : "No active task receipt path is available."}
+${receiptPath && receiptFullPath ? `Expected worker receipt path for task_receipt_ready: ${receiptPath}\nWrite the receipt file at: ${receiptFullPath}` : "No active task receipt path is available."}
 
-Continue the active task from state.yaml. When the task is complete, write the worker receipt at the expected path, then call judge_event with event: task.receipt_ready and receipt_path: ${receiptPath ?? "<worker receipt path>"}. Do not edit state.yaml manually for the receipt-ready transition.`;
+${receiptPath && receiptFullPath ? `Continue the active task from state.yaml. When complete, write the worker receipt file at the full path above using this exact YAML-frontmatter shape, then Markdown details after the closing ---:\n\n${workerReceiptTemplate(active?.id ?? "<task-id>")}\n\nThen call task_receipt_ready with goal_id: ${goal.id} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory. Do not edit state.yaml manually for the receipt-ready transition.` : "Continue from state.yaml. There is no active task receipt path available."}`;
+}
+
+function workerReceiptTemplate(taskId: string): string {
+	return `---
+schema_version: 1
+type: worker
+task_id: ${taskId}
+status: complete
+created_at: "<ISO-8601 timestamp>"
+files_changed: []
+commands: []
+claims:
+  - claim: "<what was completed>"
+    evidence:
+      - "<file or command evidence>"
+remaining_risk: []
+---`;
 }
 
 function restartPrompt(goal: GoalRecord): string {
+	const active = goal.state.tasks.find((task) => task.id === goal.state.active_task);
+	const receiptPath = expectedWorkerReceiptPath(goal);
+	const receiptFullPath = receiptPath ? join(goal.path, receiptPath) : null;
 	return `You are resuming a Bravo goal in a fresh Pi session.
 
 Read these files before acting:
@@ -159,7 +180,7 @@ Read these files before acting:
 3. ${relPath(process.cwd(), join(goal.path, "state.yaml"))}
 4. ${relPath(process.cwd(), join(goal.path, "resume.md"))}
 
-Then continue the active task from state.yaml.`;
+Then continue the active task from state.yaml.${receiptPath && receiptFullPath ? ` When complete, write the worker receipt file at ${receiptFullPath} using this frontmatter shape:\n\n${workerReceiptTemplate(active?.id ?? "<task-id>")}\n\nThen call task_receipt_ready with goal_id: ${goal.id} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory.` : " There is no active task receipt path available."}`;
 }
 
 function checkpointPrompt(goal: GoalRecord): string {

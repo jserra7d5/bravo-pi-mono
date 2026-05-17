@@ -1,9 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { constants } from "node:fs";
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, readFile, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { Type } from "typebox";
-import { updateJudgeRunStatus, writeJudgeVerdict, type JudgeRunConfig, type JudgeVerdictFile } from "../../src/judge-runner.js";
+import { parse as parseYaml } from "yaml";
+import { createJudgeRun, updateJudgeRunStatus, writeJudgeVerdict, type JudgeRunConfig, type JudgeVerdictFile } from "../../src/judge-runner.js";
 import { readActiveGoalsIndex, readGoalState, writeGoalState } from "../../src/runtime.js";
 import { markWorkerReceiptReady } from "../../src/state.js";
 import { discoverWorkspaceRoot } from "../../src/workspace.js";
@@ -29,6 +30,13 @@ const JudgeFinishParams = Type.Object({
 	summary: Type.Optional(Type.String({ description: "Short Judge result summary." })),
 });
 
+const TaskReceiptReadyParams = Type.Object({
+	goal_id: Type.String({ description: "Bravo goal id." }),
+	receipt_path: Type.Optional(Type.String({ description: "Worker receipt path under receipts/. Defaults to the active task receipt path." })),
+	summary: Type.Optional(Type.String({ description: "Short worker completion summary." })),
+	note: Type.Optional(Type.String({ description: "Short worker completion note." })),
+});
+
 interface ToolContextLike {
 	cwd?: string;
 	shutdown?: () => void;
@@ -39,6 +47,27 @@ interface ToolContextLike {
 
 export function registerJudgeControlTools(pi: ExtensionAPI): void {
 	if (typeof pi.registerTool !== "function") return;
+
+	pi.registerTool({
+		name: "task_receipt_ready",
+		label: "Task receipt ready",
+		description: "Signal that the active Bravo task worker receipt exists and the task is ready for Judge review.",
+		parameters: TaskReceiptReadyParams,
+		async execute(_toolCallId, params, _span, _toolCall, ctx?: ToolContextLike) {
+			const result = await persistWorkerReceiptReady(params, ctx);
+			await appendJudgeControlEvent({
+				type: "task.receipt_ready",
+				goal_id: params.goal_id,
+				run_id: result.judgeRunId,
+				receipt_path: result.receiptPath,
+				task_id: result.taskId,
+				task_status: "awaiting_judge",
+				note: params.note ?? params.summary,
+				at: new Date().toISOString(),
+			});
+			return taskReceiptReadyResponse(params.goal_id, result);
+		},
+	});
 
 	pi.registerTool({
 		name: "judge_event",
@@ -65,22 +94,14 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 			await appendJudgeControlEvent({
 				type: params.event,
 				goal_id: params.goal_id,
-				run_id: params.run_id,
+				run_id: result.judgeRunId,
 				receipt_path: result.receiptPath,
 				task_id: result.taskId,
 				task_status: "awaiting_judge",
 				note: params.note,
 				at: new Date().toISOString(),
 			});
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Worker receipt ready for ${params.goal_id}/${result.taskId}; task is awaiting Judge. Receipt: ${result.receiptPath}`,
-					},
-				],
-				details: { ...params, task_id: result.taskId, receipt_path: result.receiptPath, task_status: "awaiting_judge" },
-			};
+			return taskReceiptReadyResponse(params.goal_id, result);
 		},
 	});
 
@@ -91,7 +112,7 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 		parameters: JudgeFinishParams,
 		async execute(_toolCallId, params, _span, _toolCall, ctx?: ToolContextLike) {
 			const runDir = process.env.BRAVO_JUDGE_RUN_DIR;
-			if (!runDir) throw new Error("BRAVO_JUDGE_RUN_DIR is required for judge_finish persistence.");
+			if (!runDir) throw new Error("judge_finish is only for isolated Bravo Judge sessions (BRAVO_JUDGE_RUN_DIR is not set). Normal worker agents should write the worker receipt, then call task_receipt_ready with goal_id and receipt_path instead.");
 			const run = JSON.parse(await readFile(join(runDir, "run.json"), "utf8")) as JudgeRunConfig;
 			const verdict: JudgeVerdictFile = {
 				schema_version: 1,
@@ -124,22 +145,31 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 	});
 }
 
-async function persistWorkerReceiptReady(params: { goal_id: string; receipt_path?: string }, ctx?: ToolContextLike): Promise<{ taskId: string; receiptPath: string }> {
+interface ReceiptReadyResult {
+	taskId: string;
+	receiptPath: string;
+	judgeRunId: string;
+	judgeRunPath: string;
+	judgeReceiptPath: string;
+	nextAction: "judge_pending_launch";
+}
+
+async function persistWorkerReceiptReady(params: { goal_id: string; receipt_path?: string }, ctx?: ToolContextLike): Promise<ReceiptReadyResult> {
 	const workspaceRoot = await discoverWorkspaceRoot(ctx?.cwd ?? process.cwd());
 	if (!workspaceRoot) {
-		throw new Error("No Bravo workspace found for task.receipt_ready.");
+		throw new Error("ContextError: No Bravo workspace found for task_receipt_ready. Run it from inside the Bravo workspace attached to this Pi session.");
 	}
 	const index = await readActiveGoalsIndex(workspaceRoot);
 	const sessionId = ctx?.sessionManager?.getSessionId?.();
 	if (!sessionId) {
-		throw new Error("task.receipt_ready requires a current Pi session id.");
+		throw new Error("ContextError: task_receipt_ready requires a current Pi session id. Resume/start the goal in this Pi session, then retry.");
 	}
 	const entry = index.active_goals.find((candidate) => (
 		candidate.goal_id === params.goal_id
 		&& candidate.pi_session_id === sessionId
 	));
 	if (!entry) {
-		throw new Error(`No attached active Bravo goal found for ${params.goal_id} in current Pi session ${sessionId}.`);
+		throw new Error(`ContextError: No attached active Bravo goal found for ${params.goal_id} in current Pi session ${sessionId}. Use /goal start or /goal resume for this goal, then call task_receipt_ready.`);
 	}
 	const goalDir = resolveActiveGoalDir(workspaceRoot, entry.path, params.goal_id);
 	const state = await readGoalState(goalDir);
@@ -147,22 +177,62 @@ async function persistWorkerReceiptReady(params: { goal_id: string; receipt_path
 		throw new Error(`Attached goal state mismatch: expected ${params.goal_id}, found ${state.goal.id}.`);
 	}
 	if (state.session.attached_pi_session_id !== sessionId) {
-		throw new Error(`Goal ${params.goal_id} is not attached to current Pi session ${sessionId}; state has ${state.session.attached_pi_session_id ?? "no attached session"}.`);
+		throw new Error(`ContextError: Goal ${params.goal_id} is not attached to current Pi session ${sessionId}; state has ${state.session.attached_pi_session_id ?? "no attached session"}. Use /goal resume to attach the authoritative goal state, then retry task_receipt_ready.`);
 	}
 	const task = state.active_task ? state.tasks.find((candidate) => candidate.id === state.active_task) : null;
 	if (!task) {
-		throw new Error(`Goal ${params.goal_id} has no active task for task.receipt_ready.`);
+		throw new Error(`Goal ${params.goal_id} has no active task for task_receipt_ready.`);
 	}
 	if (task.status !== "active") {
-		throw new Error(`Task ${task.id} must be active before task.receipt_ready; current status is ${task.status}.`);
+		throw new Error(`Task ${task.id} must be active before task_receipt_ready; current status is ${task.status}.`);
 	}
-	const receiptPath = params.receipt_path ?? task.receipt ?? null;
-	if (!receiptPath) {
-		throw new Error(`task.receipt_ready requires receipt_path for task ${task.id}.`);
-	}
-	const validatedReceiptPath = await requireReceiptExists(goalDir, receiptPath);
-	await writeGoalState(goalDir, markWorkerReceiptReady(state, task.id, validatedReceiptPath).state);
-	return { taskId: task.id, receiptPath: validatedReceiptPath };
+	const receiptPath = params.receipt_path ?? task.receipt ?? canonicalWorkerReceiptPath(task.id);
+	const validatedReceiptPath = await validateWorkerReceipt(goalDir, receiptPath, task.id);
+	const judgeReceiptPath = `.bravo/goals/${params.goal_id}/receipts/${task.id}-judge.md`;
+	const judgeRun = await createJudgeRun({
+		workspaceRoot,
+		goalId: params.goal_id,
+		taskId: task.id,
+		workerReceiptPath: `.bravo/goals/${params.goal_id}/${validatedReceiptPath}`,
+		judgeReceiptPath,
+		cwd: ctx?.cwd ?? workspaceRoot,
+	});
+	const readyState = markWorkerReceiptReady(state, task.id, validatedReceiptPath).state;
+	await writeGoalState(goalDir, {
+		...readyState,
+		session: { ...readyState.session, current_judge_run_id: judgeRun.runId },
+	});
+	return {
+		taskId: task.id,
+		receiptPath: validatedReceiptPath,
+		judgeRunId: judgeRun.runId,
+		judgeRunPath: relative(workspaceRoot, judgeRun.runPath),
+		judgeReceiptPath,
+		nextAction: "judge_pending_launch",
+	};
+}
+
+function taskReceiptReadyResponse(goalId: string, result: ReceiptReadyResult): { content: { type: "text"; text: string }[]; details: Record<string, unknown> } {
+	return {
+		content: [{
+			type: "text",
+			text: `Task receipt ready: ${goalId}/${result.taskId} is awaiting Judge. Receipt: ${result.receiptPath}. Judge run: ${result.judgeRunId}. Next action: ${result.nextAction}.`,
+		}],
+		details: {
+			status: "awaiting_judge",
+			goal_id: goalId,
+			task_id: result.taskId,
+			receipt_path: result.receiptPath,
+			judge_run_id: result.judgeRunId,
+			judge_run_path: result.judgeRunPath,
+			judge_receipt_path: result.judgeReceiptPath,
+			next_action: result.nextAction,
+		},
+	};
+}
+
+function canonicalWorkerReceiptPath(taskId: string): string {
+	return `receipts/${taskId}-worker.md`;
 }
 
 function resolveActiveGoalDir(workspaceRoot: string, entryPath: string, goalId: string): string {
@@ -179,7 +249,7 @@ function resolveActiveGoalDir(workspaceRoot: string, entryPath: string, goalId: 
 	return goalDir;
 }
 
-async function requireReceiptExists(goalDir: string, receiptPath: string): Promise<string> {
+async function validateWorkerReceipt(goalDir: string, receiptPath: string, taskId: string): Promise<string> {
 	const normalizedReceiptPath = normalizeReceiptPath(receiptPath);
 	const resolved = resolve(goalDir, normalizedReceiptPath);
 	assertContained(join(goalDir, "receipts"), resolved, `Worker receipt path escapes goal receipts: ${receiptPath}`);
@@ -188,7 +258,42 @@ async function requireReceiptExists(goalDir: string, receiptPath: string): Promi
 	} catch {
 		throw new Error(`Worker receipt not found: ${receiptPath}`);
 	}
+	const receiptStat = await stat(resolved);
+	if (!receiptStat.isFile()) {
+		throw new Error(`Worker receipt must be a regular file: ${receiptPath}`);
+	}
+	const content = await readFile(resolved, "utf8");
+	validateWorkerReceiptFrontmatter(content, taskId, receiptPath);
 	return normalizedReceiptPath;
+}
+
+function validateWorkerReceiptFrontmatter(content: string, taskId: string, receiptPath: string): void {
+	if (!content.trim()) {
+		throw new Error(`Worker receipt is empty: ${receiptPath}`);
+	}
+	const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+	if (!match) {
+		throw new Error(`Worker receipt must start with YAML frontmatter: ${receiptPath}`);
+	}
+	let frontmatter: unknown;
+	try {
+		frontmatter = parseYaml(match[1] ?? "");
+	} catch (error) {
+		throw new Error(`Worker receipt frontmatter is malformed: ${receiptPath}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (!frontmatter || typeof frontmatter !== "object" || Array.isArray(frontmatter)) {
+		throw new Error(`Worker receipt frontmatter is empty or malformed: ${receiptPath}`);
+	}
+	const data = frontmatter as Record<string, unknown>;
+	if (data.type !== "worker") {
+		throw new Error(`Worker receipt frontmatter type must be worker: ${receiptPath}`);
+	}
+	if (data.task_id !== taskId) {
+		throw new Error(`Worker receipt frontmatter task_id must match active task ${taskId}: ${receiptPath}`);
+	}
+	if (data.status !== "complete" && data.status !== "ready") {
+		throw new Error(`Worker receipt frontmatter status must be complete or ready: ${receiptPath}`);
+	}
 }
 
 function normalizeReceiptPath(receiptPath: string): string {
