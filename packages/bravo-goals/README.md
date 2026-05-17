@@ -18,9 +18,9 @@ Bravo Goals stores goal state above repos under a workspace `.bravo/` directory:
   archived/goals/
 ```
 
-The package is CLI-first with a thin Pi extension wrapper. The durable filesystem
-is the source of truth; the Pi HUD and session prompts are projections over that
-state.
+The durable filesystem is the source of truth; the Pi HUD and session prompts
+are projections over that state. The Pi extension exposes the primary workflow
+through `/goal` slash commands.
 
 ## CLI
 
@@ -60,6 +60,16 @@ Install or load the package as a Pi extension, then use:
 
 The extension renders a footer status and a below-editor HUD from
 `state.yaml` plus `.bravo/runtime/active-goals.yaml`.
+
+`/goal prep` is interactive. It creates a draft goal workspace, then queues a
+prep prompt so the agent can work with you to clarify the problem, fill
+`goal.md` and `context.md`, and write the initial task queue into `state.yaml`.
+It does not attach the session or start implementation; use `/goal start` after
+the draft goal is ready.
+
+Prep agents should call the native `validate_goal_state` Pi tool after editing
+`state.yaml`. The tool validates the state shape and returns a compact issue
+list without mutating goal state.
 
 ## Judge Contract
 

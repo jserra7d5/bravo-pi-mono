@@ -292,6 +292,27 @@ export interface FailureCardOpts {
   suggestion?: string;
 }
 
+export interface ValidateGoalStateCallOpts {
+  goal_id: string;
+  goal_title?: string;
+}
+
+export interface ValidateGoalStateIssue {
+  severity: "error" | "warning";
+  code: string;
+  message: string;
+  path?: string;
+}
+
+export interface ValidateGoalStateResultOpts {
+  goal_id: string;
+  goal_title?: string;
+  state_path: string;
+  ok: boolean;
+  issue_count: number;
+  issues: ValidateGoalStateIssue[];
+}
+
 // ─── task_receipt_ready ────────────────────────────────────────────────────
 
 export function renderTaskReceiptReadyCall(opts: TaskReceiptReadyCallOpts, width: number): string[] {
@@ -492,6 +513,59 @@ export function renderJudgeFinishResult(opts: JudgeFinishResultOpts, width: numb
     out.push(labelRow(ch, theme.bar, "next", `${naColor}${opts.next_action}${ANSI.reset}`));
   }
   if (w >= 56) out.push(slugFooter(ch, theme.bar, opts.goal_id, w - 8));
+  out.push(ch.bot());
+  return out;
+}
+
+// ─── validate_goal_state ─────────────────────────────────────────────────
+
+export function renderValidateGoalStateCall(opts: ValidateGoalStateCallOpts, width: number): string[] {
+  const w = safeWidth(width);
+  const ch = chrome(w);
+  const out: string[] = [];
+  const bar = idBar(opts.goal_id);
+  const title = opts.goal_title ?? opts.goal_id;
+  out.push(ch.topTitled(
+    toolTitleContent(opts.goal_id, title, "validate_goal_state", w),
+    badge({ glyph: "◐", color: ANSI.cyan, label: "checking" }),
+  ));
+  out.push(labelRow(ch, bar, "goal", `${ANSI.white}${opts.goal_id}${ANSI.reset}`));
+  if (w >= 56) out.push(slugFooter(ch, bar, opts.goal_id, w - 8));
+  out.push(ch.bot());
+  return out;
+}
+
+export function renderValidateGoalStateResult(opts: ValidateGoalStateResultOpts, width: number): string[] {
+  const w = safeWidth(width);
+  const ch = chrome(w);
+  const out: string[] = [];
+  const bar = opts.ok ? idBar(opts.goal_id) : `${ANSI.red}▌${ANSI.reset}`;
+  const title = opts.goal_title ?? opts.goal_id;
+  const titleBudget = Math.max(1, titleMaxFor(w) - 2);
+  const titleColor = opts.ok ? identityColor(opts.goal_id) : ANSI.red;
+  const titleStr = `${titleColor}${ANSI.bold}# ${shortTitle(title, titleBudget)}${ANSI.reset}`;
+  out.push(ch.topTitled(
+    `${bar} ${titleStr} ${ANSI.gray}·${ANSI.reset} ${ANSI.dim}validate_goal_state${ANSI.reset}`,
+    opts.ok
+      ? badge({ glyph: "✓", color: ANSI.green, label: "valid" })
+      : badge({ glyph: "✗", color: ANSI.red, label: "invalid", bold: true }),
+  ));
+  const valueMax = w - 4 - 10;
+  out.push(labelRow(ch, bar, "state", `${ANSI.cyan}${truncPath(opts.state_path, valueMax)}${ANSI.reset}`));
+  if (!opts.ok) {
+    out.push(labelRow(ch, bar, "issues", `${ANSI.red}${opts.issue_count}${ANSI.reset}`));
+    const shown = opts.issues.slice(0, w >= 96 ? 4 : 2);
+    for (const issue of shown) {
+      const location = issue.path ? `${issue.path} ` : "";
+      const text = `${location}${issue.code}: ${issue.message}`;
+      const color = issue.severity === "error" ? ANSI.red : ANSI.amber;
+      out.push(labelRow(ch, bar, issue.severity, `${color}${truncAnsi(text, valueMax)}${ANSI.reset}`));
+    }
+    if (opts.issue_count > shown.length && w >= 56) {
+      out.push(labelRow(ch, bar, "more", `${ANSI.dim}${opts.issue_count - shown.length} additional issue(s)${ANSI.reset}`));
+    }
+  }
+  if (w >= 56) out.push(slugFooter(ch, bar, opts.goal_id, w - 8));
   out.push(ch.bot());
   return out;
 }

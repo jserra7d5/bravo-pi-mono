@@ -17,6 +17,7 @@ import {
 	renderJudgeFinishResult,
 	renderTaskReceiptReadyCall,
 	renderTaskReceiptReadyResult,
+	textBlock,
 	type JudgeVerdictKind,
 	type TextRenderable,
 } from "./renderers.js";
@@ -81,13 +82,14 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 			return taskReceiptReadyResponse(params.goal_id, result, result.title);
 		},
 		renderCall(args: unknown): TextRenderable {
-			const params = args as { goal_id: string; receipt_path?: string; summary?: string };
-			const title = resolveGoalTitleSync(params.goal_id);
+			const params = isRecord(args) ? args : {};
+			const goalId = extractStringOrUndefined(params.goal_id) ?? "unknown";
+			const title = resolveGoalTitleSync(goalId);
 			return chromeRenderable((width) => renderTaskReceiptReadyCall({
-				goal_id: params.goal_id,
+				goal_id: goalId,
 				goal_title: title,
-				receipt_path: params.receipt_path,
-				summary: params.summary,
+				receipt_path: extractStringOrUndefined(params.receipt_path),
+				summary: extractStringOrUndefined(params.summary),
 			}, width));
 		},
 		renderResult(result: unknown, _options, _theme, context): TextRenderable {
@@ -132,13 +134,14 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 			return taskReceiptReadyResponse(params.goal_id, result, result.title);
 		},
 		renderCall(args: unknown): TextRenderable {
-			const params = args as { goal_id: string; event: string; note?: string };
-			const title = resolveGoalTitleSync(params.goal_id);
+			const params = isRecord(args) ? args : {};
+			const goalId = extractStringOrUndefined(params.goal_id) ?? "unknown";
+			const title = resolveGoalTitleSync(goalId);
 			return chromeRenderable((width) => renderJudgeEventCall({
-				goal_id: params.goal_id,
+				goal_id: goalId,
 				goal_title: title,
-				event: params.event,
-				note: params.note,
+				event: extractStringOrUndefined(params.event) ?? "unknown",
+				note: extractStringOrUndefined(params.note),
 			}, width));
 		},
 		renderResult(result: unknown, _options, _theme, context): TextRenderable {
@@ -189,13 +192,15 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 			};
 		},
 		renderCall(args: unknown): TextRenderable {
-			const params = args as { goal_id: string; run_id?: string; verdict?: JudgeVerdictKind };
-			const title = resolveGoalTitleSync(params.goal_id);
+			const params = isRecord(args) ? args : {};
+			const goalId = extractStringOrUndefined(params.goal_id) ?? "unknown";
+			const title = resolveGoalTitleSync(goalId);
+			const verdict = isJudgeVerdictKind(params.verdict) ? params.verdict : undefined;
 			return chromeRenderable((width) => renderJudgeFinishCall({
-				goal_id: params.goal_id,
+				goal_id: goalId,
 				goal_title: title,
-				run_id: params.run_id,
-				verdict: params.verdict,
+				run_id: extractStringOrUndefined(params.run_id),
+				verdict,
 			}, width));
 		},
 		renderResult(result: unknown, _options, _theme, context): TextRenderable {
@@ -218,6 +223,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function extractStringOrUndefined(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
+}
+
+function isJudgeVerdictKind(value: unknown): value is JudgeVerdictKind {
+	return value === "pass" || value === "fail" || value === "needs_more_evidence" || value === "blocked";
 }
 
 // Map an execute() return into the right card based on the tool name. The
@@ -248,12 +257,28 @@ export function renderToolResultComponent(rawResult: unknown, toolName: string, 
 	}
 
 	if (toolName === "task_receipt_ready") {
+		const taskId = extractStringOrUndefined(details.task_id);
+		const receiptPath = extractStringOrUndefined(details.receipt_path);
+		const judgeRunId = extractStringOrUndefined(details.judge_run_id);
+		if (!taskId || !receiptPath || !judgeRunId) {
+			const fallbackText = result.content?.[0]?.text ?? "task_receipt_ready did not return success details.";
+			const looksLikeError = /error|ContextError|failed/i.test(fallbackText);
+			if (looksLikeError) {
+				return chromeRenderable((width) => renderFailureCard({
+					goal_id: goalId || "unknown",
+					goal_title: title,
+					tool: toolName,
+					error: fallbackText,
+				}, width));
+			}
+			return textBlock([fallbackText]);
+		}
 		return chromeRenderable((width) => renderTaskReceiptReadyResult({
 			goal_id: goalId,
 			goal_title: title,
-			task_id: extractStringOrUndefined(details.task_id) ?? "",
-			receipt_path: extractStringOrUndefined(details.receipt_path) ?? "",
-			judge_run_id: extractStringOrUndefined(details.judge_run_id) ?? "",
+			task_id: taskId,
+			receipt_path: receiptPath,
+			judge_run_id: judgeRunId,
 			judge_run_path: extractStringOrUndefined(details.judge_run_path),
 			judge_receipt_path: extractStringOrUndefined(details.judge_receipt_path),
 			next_action: extractStringOrUndefined(details.next_action),

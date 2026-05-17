@@ -14,6 +14,8 @@ import {
 	renderJudgeFinishResult,
 	renderTaskReceiptReadyCall,
 	renderTaskReceiptReadyResult,
+	renderValidateGoalStateCall,
+	renderValidateGoalStateResult,
 	titleMaxFor,
 	truncAnsi,
 	visWidth,
@@ -280,6 +282,43 @@ test("renderFailureCard uses red bar and the failing tool's name", () => {
 	const plain = lines.map(stripAnsi).join("\n");
 	assert.match(plain, /ContextError/);
 	assert.match(plain, /\/goal resume/);
+});
+
+test("validate_goal_state call renders as a checking card", () => {
+	const lines = renderValidateGoalStateCall(FIXTURES.cardGrammar, 96);
+	const plain = lines.map(stripAnsi).join("\n");
+	assert.match(plain, /validate_goal_state/);
+	assert.match(plain, /checking/);
+	assert.match(plain, /goal\s+2026-q2-bravo-tool-card-grammar/);
+});
+
+test("validate_goal_state result renders valid and invalid cards", () => {
+	const valid = renderValidateGoalStateResult({
+		...FIXTURES.cardGrammar,
+		state_path: ".bravo/goals/2026-q2-bravo-tool-card-grammar/state.yaml",
+		ok: true,
+		issue_count: 0,
+		issues: [],
+	}, 96).map(stripAnsi).join("\n");
+	assert.match(valid, /validate_goal_state/);
+	assert.match(valid, /valid/);
+	assert.match(valid, /state\s+\.bravo\/goals/);
+
+	const invalidLines = renderValidateGoalStateResult({
+		...FIXTURES.cardGrammar,
+		state_path: ".bravo/goals/2026-q2-bravo-tool-card-grammar/state.yaml",
+		ok: false,
+		issue_count: 2,
+		issues: [
+			{ severity: "error", code: "TASK_KIND_INVALID", message: "Task kind must be work.", path: "tasks[0].kind" },
+			{ severity: "error", code: "TASK_VERIFY_INVALID", message: "Task verify must be a list.", path: "tasks[0].verify" },
+		],
+	}, 96);
+	const invalid = invalidLines.map(stripAnsi).join("\n");
+	assert.match(invalid, /invalid/);
+	assert.match(invalid, /issues\s+2/);
+	assert.match(invalid, /TASK_KIND_INVALID/);
+	assert.ok(invalidLines.some((line) => line.includes(ANSI_RED)), "invalid card uses red emphasis");
 });
 
 test("slug footer appears as the last row before the bottom border at widths >= 56", () => {

@@ -42,6 +42,19 @@ interface ReplacementSession {
 	};
 }
 
+const C = {
+	reset: "\x1b[0m",
+	bold: "\x1b[1m",
+	cyan: "\x1b[38;2;126;212;201m",
+	gold: "\x1b[38;2;229;181;72m",
+	sky: "\x1b[38;2;174;215;255m",
+	amber: "\x1b[38;2;229;181;72m",
+	text: "\x1b[38;2;220;220;221m",
+	muted: "\x1b[38;2;120;120;128m",
+	ok: "\x1b[38;2;126;201;145m",
+	bad: "\x1b[38;2;232;111;111m",
+};
+
 function parseArgs(args: string): ParsedArgs {
 	const tokens = args.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => {
 		if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
@@ -86,9 +99,9 @@ const GOAL_COMMAND_HELP: GoalCommandHelp[] = [
 	{
 		name: "prep",
 		usage: "/goal prep <goal-id> [--title <title>]",
-		when: "Create a draft goal workspace with goal.md, context.md, state.yaml, resume.md, receipts/, and artifacts/.",
+		when: "Create a draft goal workspace and start an interactive prep conversation to define context and tasks.",
 		args: ["goal-id: required slug for the new goal under .bravo/goals/."],
-		flags: ["--title <title>: human-readable goal title. Defaults to a title generated from the id."],
+		flags: ["--title <title>: human-readable working title. The prep agent may refine it with you."],
 	},
 	{
 		name: "start",
@@ -170,20 +183,63 @@ function renderGoalHelp(commandName?: string): string {
 			return `Unknown /goal command: ${commandName}\n\n${renderGoalHelp()}`;
 		}
 		return [
-			command.usage,
+			renderUsage(command.usage),
 			"",
-			command.when,
-			command.args?.length ? ["", "Arguments:", ...command.args.map((arg) => `  ${arg}`)].join("\n") : null,
-			command.flags?.length ? ["", "Flags:", ...command.flags.map((flag) => `  ${flag}`)].join("\n") : null,
+			`${C.text}${command.when}${C.reset}`,
+			command.args?.length ? ["", sectionTitle("Arguments"), ...command.args.map((arg) => `  ${renderHelpDetail(arg)}`)].join("\n") : null,
+			command.flags?.length ? ["", sectionTitle("Flags"), ...command.flags.map((flag) => `  ${renderHelpDetail(flag)}`)].join("\n") : null,
 		].filter((line): line is string => line !== null).join("\n");
 	}
 	return [
-		"Bravo Goals commands:",
+		`${C.bold}${C.gold}Bravo Goals commands${C.reset}`,
 		"",
-		...GOAL_COMMAND_HELP.map((command) => `  ${command.usage}\n    ${command.when}`),
+		...GOAL_COMMAND_HELP.map((command) => `  ${renderUsage(command.usage)}\n    ${C.text}${command.when}${C.reset}`),
 		"",
-		"Use /goal help <subcommand> for arguments and flags.",
+		`${C.muted}Use ${renderUsage("/goal help <subcommand>")} ${C.muted}for arguments and flags.${C.reset}`,
 	].join("\n");
+}
+
+function sectionTitle(label: string): string {
+	return `${C.bold}${C.gold}${label}${C.reset}`;
+}
+
+function renderUsage(usage: string): string {
+	const [base, subcommand, ...rest] = usage.split(" ");
+	return [
+		base === "/goal" ? `${C.bold}${C.cyan}${base}${C.reset}` : base,
+		subcommand ? `${C.bold}${C.gold}${subcommand}${C.reset}` : null,
+		...rest.map((part) => renderUsageToken(part)),
+	].filter((part): part is string => part !== null).join(" ");
+}
+
+function renderUsageToken(part: string): string {
+	if (part === "|") return `${C.muted}|${C.reset}`;
+	const open = part.startsWith("[") ? `${C.muted}[${C.reset}` : "";
+	const close = part.endsWith("]") ? `${C.muted}]${C.reset}` : "";
+	const core = part.replace(/^\[/, "").replace(/\]$/, "");
+	return `${open}${renderCoreToken(core)}${close}`;
+}
+
+function renderCoreToken(token: string): string {
+	if (token.startsWith("--")) return `${C.amber}${token}${C.reset}`;
+	if (token.startsWith("<") && token.endsWith(">")) return `${C.sky}${token}${C.reset}`;
+	if (token.length > 0) return `${C.sky}${token}${C.reset}`;
+	return "";
+}
+
+function renderHelpDetail(detail: string): string {
+	return detail
+		.replace(/^([^:]+):/, (_match, label: string) => `${renderUsageToken(label)}${C.muted}:${C.reset}`)
+		.replace(/--[a-z-]+/g, (flag) => `${C.amber}${flag}${C.reset}`)
+		.replace(/<[^>]+>/g, (arg) => `${C.sky}${arg}${C.reset}`);
+}
+
+function renderNotice(label: string, detail?: string): string {
+	return `${C.bold}${C.gold}${label}${C.reset}${detail ? ` ${C.text}${detail}${C.reset}` : ""}`;
+}
+
+function renderSuccess(label: string, detail?: string): string {
+	return `${C.bold}${C.ok}${label}${C.reset}${detail ? ` ${C.text}${detail}${C.reset}` : ""}`;
 }
 
 async function checkWorkspace(root: string): Promise<string[]> {
@@ -200,13 +256,13 @@ async function checkWorkspace(root: string): Promise<string[]> {
 async function notifyGoalCheck(ctx: ExtensionCommandContext, root: string, goal: GoalRecord): Promise<void> {
 	const result = await checkGoal({ goalPath: goal.path });
 	if (result.issues.length === 0) {
-		ctx.ui.notify(`Bravo goal check passed: ${goal.id}`, "info");
+		ctx.ui.notify(renderSuccess("Bravo goal check passed", goal.id), "info");
 		return;
 	}
 	const lines = [
-		`Bravo goal check ${result.ok ? "passed with warnings" : "failed"}: ${goal.id}`,
+		result.ok ? renderNotice("Bravo goal check passed with warnings", goal.id) : `${C.bold}${C.bad}Bravo goal check failed${C.reset} ${C.text}${goal.id}${C.reset}`,
 		"",
-		...result.issues.map((issue) => `${issue.severity}\t${issue.code}\t${issue.path ?? relPath(root, goal.path)}\t${issue.message}`),
+		...result.issues.map((issue) => `${issue.severity === "error" ? C.bad : C.amber}${issue.severity}${C.reset}\t${C.gold}${issue.code}${C.reset}\t${C.sky}${issue.path ?? relPath(root, goal.path)}${C.reset}\t${C.text}${issue.message}${C.reset}`),
 	];
 	ctx.ui.notify(lines.join("\n"), result.ok ? "warning" : "error");
 }
@@ -339,6 +395,31 @@ function checkpointPrompt(goal: GoalRecord): string {
 Refresh ${relPath(process.cwd(), join(goal.path, "resume.md"))} with the current durable resume context for the active task. Do not mark the goal complete unless state.yaml and receipts already prove completion.`;
 }
 
+function prepPrompt(goal: { id: string; path: string; title: string }): string {
+	return `Prepare Bravo goal "${goal.title}" (${goal.id}).
+
+This is an interactive goal-definition flow, not active implementation.
+
+Work with the user to clarify:
+1. The problem and desired outcome.
+2. Concrete success criteria and non-goals.
+3. Relevant repos/files/commands/background context.
+4. A small initial task queue with verifiable expected outputs.
+5. The verification plan for each task and the final acceptance bar.
+
+Durable files to update:
+1. ${relPath(process.cwd(), join(goal.path, "goal.md"))}
+2. ${relPath(process.cwd(), join(goal.path, "context.md"))}
+3. ${relPath(process.cwd(), join(goal.path, "state.yaml"))}
+4. ${relPath(process.cwd(), join(goal.path, "resume.md"))}
+
+Keep goal.status as draft while preparing. When the goal definition is ready, update state.yaml with worker tasks. Use status active for the first task, queued for later tasks, active_task set to the first task id, and progress.total_tasks matching the task count.
+
+After editing state.yaml, call validate_goal_state with goal_id: ${goal.id}. Fix any reported issues before you tell the user the goal is ready.
+
+Do not start implementation. Do not write worker receipts. Do not call task_receipt_ready. When prep is complete, tell the user to run /goal start ${goal.id}.`;
+}
+
 function controllerResumeSnapshot(goal: GoalRecord, reason: string | null): string {
 	const active = goal.state.tasks.find((task) => task.id === goal.state.active_task);
 	// Intentional: resume.md records the pre-pause snapshot. When pausing an active
@@ -437,7 +518,7 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 	if (subcommand === "init") {
 		const explicitRoot = typeof parsed.flags.get("workspace-root") === "string" ? parsed.flags.get("workspace-root") as string : null;
 		const paths = await initBravoWorkspace({ root: explicitRoot ?? ctx.cwd });
-		ctx.ui.notify(`Initialized Bravo workspace: ${paths.bravo}`, "info");
+		ctx.ui.notify(renderSuccess("Initialized Bravo workspace", paths.bravo), "info");
 		await runtime.refresh(ctx);
 		return;
 	}
@@ -453,19 +534,24 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 			goalId: goalArg,
 			title: typeof parsed.flags.get("title") === "string" ? parsed.flags.get("title") as string : undefined,
 		});
-		ctx.ui.notify(`Prepared Bravo goal: ${relPath(root, result.goalPath)}`, "info");
+		ctx.ui.notify(renderSuccess("Prepared Bravo goal", relPath(root, result.goalPath)), "info");
 		await runtime.refresh(ctx);
+		await queuePrompt(pi, prepPrompt({
+			id: result.state.goal.id,
+			title: result.state.goal.title,
+			path: result.goalPath,
+		}));
 		return;
 	}
 
 	if (subcommand === "status") {
 		const goal = await resolveGoal(root, goalArg, sessionId);
 		if (!goal) {
-			ctx.ui.notify("No Bravo goal is attached to this session.", "info");
+			ctx.ui.notify(renderNotice("No Bravo goal is attached to this session."), "info");
 			clearHud(ctx);
 			return;
 		}
-		ctx.ui.notify(`${goal.state.goal.title}: ${goal.state.goal.status}`, "info");
+		ctx.ui.notify(renderNotice(goal.state.goal.title, goal.state.goal.status), "info");
 		await runtime.refresh(ctx);
 		return;
 	}
@@ -502,13 +588,13 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 		}
 		const missing = await checkWorkspace(root);
 		if (missing.length === 0) {
-			ctx.ui.notify(`Bravo workspace check passed: ${root}`, "info");
+			ctx.ui.notify(renderSuccess("Bravo workspace check passed", root), "info");
 			return;
 		}
 		ctx.ui.notify([
-			`Bravo workspace check failed: ${root}`,
+			`${C.bold}${C.bad}Bravo workspace check failed${C.reset} ${C.text}${root}${C.reset}`,
 			"",
-			...missing.map((path) => `error\tworkspace.missing_path\t${path}\trequired workspace path is missing`),
+			...missing.map((path) => `${C.bad}error${C.reset}\t${C.gold}workspace.missing_path${C.reset}\t${C.sky}${path}${C.reset}\t${C.text}required workspace path is missing${C.reset}`),
 		].join("\n"), "error");
 		return;
 	}
@@ -573,7 +659,7 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 			note: typeof parsed.flags.get("note") === "string" ? parsed.flags.get("note") as string : null,
 		});
 		await runtime.refresh(ctx);
-		ctx.ui.notify(`Verified Bravo goal: ${goal.id}`, "info");
+		ctx.ui.notify(renderSuccess("Verified Bravo goal", goal.id), "info");
 		return;
 	}
 
@@ -583,7 +669,7 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 			reason: typeof parsed.flags.get("reason") === "string" ? parsed.flags.get("reason") as string : null,
 		});
 		clearHud(ctx);
-		ctx.ui.notify(`Archived Bravo goal: ${goal.id} -> ${relPath(root, result.archivedPath)}`, "info");
+		ctx.ui.notify(renderSuccess("Archived Bravo goal", `${goal.id} -> ${relPath(root, result.archivedPath)}`), "info");
 		return;
 	}
 

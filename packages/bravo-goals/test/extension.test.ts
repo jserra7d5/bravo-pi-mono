@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { renderHud, renderStatusLine, snapshotForSession, type HudSnapshot } from "../extensions/pi/hud.js";
 import { testables } from "../extensions/pi/commands.js";
+import { registerGoalValidationTools } from "../extensions/pi/goal-validation.js";
 import { registerJudgeControlTools } from "../extensions/pi/judge-control.js";
 import { scaffoldGoalWorkspace } from "../src/workspace.js";
-import { readGoalState, upsertActiveGoal, writeGoalState } from "../src/runtime.js";
+import { readActiveGoalsIndex, readGoalState, upsertActiveGoal, writeGoalState } from "../src/runtime.js";
 
 const snapshot: HudSnapshot = {
 	goalPath: "/workspace/.bravo/goals/durable-resume-loop",
@@ -80,8 +81,10 @@ test("/goal help renders command usage without a Bravo workspace", async () => {
 	} as any);
 
 	assert.equal(notifications.length, 1);
-	assert.match(notifications[0]!, /\/goal next \[goal-id\] \[--carry \| --compact \| --fresh\]/);
-	assert.match(notifications[0]!, /--fresh: start a replacement Pi session/);
+	const plain = stripAnsi(notifications[0]!);
+	assert.match(plain, /\/goal next \[goal-id\] \[--carry \| --compact \| --fresh\]/);
+	assert.match(plain, /--fresh: start a replacement Pi session/);
+	assert.match(notifications[0]!, /\x1b\[/);
 });
 
 test("/goal init creates Bravo workspace from Pi command context", async () => {
@@ -98,7 +101,7 @@ test("/goal init creates Bravo workspace from Pi command context", async () => {
 	await access(join(root, ".bravo", "goals"));
 	await access(join(root, ".bravo", "runtime"));
 	assert.equal(refreshes, 1);
-	assert.match(notifications[0] ?? "", /Initialized Bravo workspace:/);
+	assert.match(stripAnsi(notifications[0] ?? ""), /Initialized Bravo workspace .*\.bravo/);
 });
 
 test("/goal prep creates a draft goal workspace from Pi command context", async () => {
@@ -110,8 +113,9 @@ test("/goal prep creates a draft goal workspace from Pi command context", async 
 	} as any);
 
 	const notifications: string[] = [];
+	const queuedPrompts: string[] = [];
 	let refreshes = 0;
-	await testables.handleGoal({} as any, { refresh: async () => { refreshes += 1; } }, 'prep pi-smoke --title "Pi Smoke Goal"', {
+	await testables.handleGoal({ sendUserMessage: (prompt: string) => queuedPrompts.push(prompt) } as any, { refresh: async () => { refreshes += 1; } }, 'prep pi-smoke --title "Pi Smoke Goal"', {
 		cwd: root,
 		ui: { notify: (message: string) => notifications.push(message) },
 		sessionManager: { getSessionId: () => "pi_prep" },
@@ -126,8 +130,16 @@ test("/goal prep creates a draft goal workspace from Pi command context", async 
 	await access(join(goalDir, "artifacts"));
 	const state = await readGoalState(goalDir);
 	assert.equal(state.goal.title, "Pi Smoke Goal");
+	assert.equal(state.goal.status, "draft");
+	assert.equal(state.active_task, null);
+	assert.deepEqual(state.tasks, []);
 	assert.equal(refreshes, 1);
-	assert.match(notifications[0] ?? "", /Prepared Bravo goal: \.bravo\/goals\/pi-smoke/);
+	assert.match(stripAnsi(notifications[0] ?? ""), /Prepared Bravo goal \.bravo\/goals\/pi-smoke/);
+	assert.equal(queuedPrompts.length, 1);
+	assert.match(queuedPrompts[0]!, /interactive goal-definition flow/);
+	assert.match(queuedPrompts[0]!, /validate_goal_state/);
+	assert.match(queuedPrompts[0]!, /Do not start implementation/);
+	assert.match(queuedPrompts[0]!, /\/goal start pi-smoke/);
 });
 
 test("/goal check validates explicit goals from Pi command context", async () => {
@@ -143,7 +155,73 @@ test("/goal check validates explicit goals from Pi command context", async () =>
 	} as any);
 
 	assert.equal(refreshes, 1);
-	assert.match(notifications[0] ?? "", /Bravo goal check passed: check-me/);
+	assert.match(stripAnsi(notifications[0] ?? ""), /Bravo goal check passed check-me/);
+});
+
+test("/goal next supports carry, compact, and fresh handoff modes from Pi slash commands", async () => {
+	const carry = await createPassedBoundaryGoal("handoff-carry", "carry");
+	const carryPrompts: string[] = [];
+	let carryRefreshes = 0;
+	await testables.handleGoal({ sendUserMessage: (prompt: string) => carryPrompts.push(prompt) } as any, { refresh: async () => { carryRefreshes += 1; } }, "next handoff-carry --carry", {
+		cwd: carry.root,
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => "pi_handoff" },
+	} as any);
+	const carryState = await readGoalState(carry.goalPath);
+	assert.equal(carryState.phase_boundary.last_boundary_mode, "carry");
+	assert.equal(carryPrompts.length, 1);
+	assert.match(carryPrompts[0]!, /Active task: task-two/);
+	assert.equal(carryRefreshes, 1);
+
+	const compact = await createPassedBoundaryGoal("handoff-compact", "compact");
+	const compactPrompts: string[] = [];
+	let compactRefreshes = 0;
+	let compactInstructions = "";
+	await testables.handleGoal({ sendUserMessage: (prompt: string) => compactPrompts.push(prompt) } as any, { refresh: async () => { compactRefreshes += 1; } }, "next handoff-compact --compact", {
+		cwd: compact.root,
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => "pi_handoff" },
+		compact(options: { customInstructions: string; onComplete: () => void }) {
+			compactInstructions = options.customInstructions;
+			options.onComplete();
+		},
+	} as any);
+	const compactState = await readGoalState(compact.goalPath);
+	assert.equal(compactState.phase_boundary.last_boundary_mode, "compact");
+	assert.match(compactInstructions, /Preserve the Bravo goal context/);
+	assert.equal(compactPrompts.length, 1);
+	assert.match(compactPrompts[0]!, /Active task: task-two/);
+	assert.equal(compactRefreshes, 1);
+
+	const fresh = await createPassedBoundaryGoal("handoff-fresh", "fresh_session");
+	const replacementPrompts: string[] = [];
+	let freshRefreshes = 0;
+	let waited = false;
+	let newSessionCalled = false;
+	await testables.handleGoal({ sendUserMessage: () => { throw new Error("fresh should use replacement session"); } } as any, { refresh: async () => { freshRefreshes += 1; } }, "next handoff-fresh --fresh", {
+		cwd: fresh.root,
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => "pi_handoff", getSessionFile: () => "/tmp/pi_handoff.json" },
+		waitForIdle: async () => { waited = true; },
+		newSession: async (options: { parentSession?: string; withSession: (replacement: any) => Promise<void> }) => {
+			newSessionCalled = true;
+			assert.equal(options.parentSession, "/tmp/pi_handoff.json");
+			await options.withSession({
+				sessionManager: { getSessionId: () => "pi_replacement" },
+				sendUserMessage: async (prompt: string) => { replacementPrompts.push(prompt); },
+			});
+		},
+	} as any);
+	const freshState = await readGoalState(fresh.goalPath);
+	const freshIndex = await readActiveGoalsIndex(fresh.root);
+	assert.equal(freshState.phase_boundary.last_boundary_mode, "fresh_session");
+	assert.equal(freshState.session.attached_pi_session_id, "pi_replacement");
+	assert.equal(freshIndex.active_goals.find((entry) => entry.goal_id === "handoff-fresh")?.pi_session_id, "pi_replacement");
+	assert.equal(waited, true);
+	assert.equal(newSessionCalled, true);
+	assert.equal(replacementPrompts.length, 1);
+	assert.match(replacementPrompts[0]!, /fresh Pi session/);
+	assert.equal(freshRefreshes, 0);
 });
 
 test("worker prompt names receipt path, schema, and task_receipt_ready call", () => {
@@ -221,6 +299,13 @@ test("task_receipt_ready persists active task awaiting Judge and creates Judge r
 	assert.equal(result.details.next_action, "judge_pending_launch");
 	assert.match(await readFile(join(root, result.details.judge_run_path), "utf8"), /"worker_receipt_path"/);
 	assert.match(result.content[0].text, /Task receipt ready/);
+});
+
+test("judge-control tool call renderers tolerate missing Pi args", () => {
+	for (const tool of [registeredTaskReceiptReadyTool(), registeredJudgeEventTool(), registeredJudgeFinishTool()]) {
+		const rendered = tool.renderCall?.(undefined).render(96).join("\n") ?? "";
+		assert.match(stripAnsi(rendered), /unknown/);
+	}
 });
 
 test("task_receipt_ready uses default active task receipt path", async () => {
@@ -595,6 +680,39 @@ test("judge_finish outside Judge run teaches workers to use task_receipt_ready",
 	}
 });
 
+test("validate_goal_state reports valid state for an explicit goal", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-validate-state-"));
+	const { goalPath } = await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "state-ok", tasks: [{ id: "task-one", title: "Task One" }] });
+	const state = await readGoalState(goalPath);
+	state.goal.status = "draft";
+	await writeGoalState(goalPath, state);
+
+	const tool = registeredValidateGoalStateTool();
+	const result = await tool.execute("call_1", { goal_id: "state-ok" }, undefined, undefined, { cwd: root });
+
+	assert.equal(result.details.ok, true);
+	assert.equal(result.details.goal_id, "state-ok");
+	assert.equal(result.details.state_path, ".bravo/goals/state-ok/state.yaml");
+	assert.deepEqual(result.details.issues, []);
+	assert.match(result.content[0].text, /Goal state valid/);
+});
+
+test("validate_goal_state returns actionable issues without mutating invalid state", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-validate-state-bad-"));
+	const { goalPath } = await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "state-bad" });
+	await writeFile(join(goalPath, "state.yaml"), "schema_version: 1\ngoal:\n  id: state-bad\n");
+
+	const tool = registeredValidateGoalStateTool();
+	const result = await tool.execute("call_1", { goal_id: "state-bad" }, undefined, undefined, { cwd: root });
+
+	assert.equal(result.details.ok, false);
+	assert.equal(result.details.goal_id, "state-bad");
+	assert.ok(result.details.issue_count > 0);
+	assert.match(result.content[0].text, /Goal state invalid/);
+	assert.match(result.content[0].text, /STATE_MISSING_KEY|STRING_REQUIRED/);
+	assert.match(await readFile(join(goalPath, "state.yaml"), "utf8"), /schema_version: 1/);
+});
+
 test("HUD discovers ancestor workspace and does not fall back to unrelated active goal", async () => {
 	const root = await mkdtemp(join(tmpdir(), "bravo-goals-hud-"));
 	const nested = join(root, "repo", "src");
@@ -642,22 +760,74 @@ async function createActiveReceiptGoal(goalId: string, sessionId: string): Promi
 	return { root, goalPath };
 }
 
-function registeredTaskReceiptReadyTool(): { execute: (...args: any[]) => Promise<any> } {
+async function createPassedBoundaryGoal(goalId: string, mode: "carry" | "compact" | "fresh_session"): Promise<{ root: string; goalPath: string }> {
+	const root = await mkdtemp(join(tmpdir(), `bravo-goals-${goalId}-`));
+	const { goalPath } = await scaffoldGoalWorkspace({
+		workspaceRoot: root,
+		goalId,
+		tasks: [
+			{ id: "task-one", title: "Complete first task", boundary_after_pass: mode },
+			{ id: "task-two", title: "Continue second task" },
+		],
+	});
+	const state = await readGoalState(goalPath);
+	state.goal.status = "active";
+	state.session.attached_pi_session_id = "pi_handoff";
+	state.tasks[0] = {
+		...state.tasks[0]!,
+		status: "done",
+		receipt: "receipts/task-one-worker.md",
+		judge_receipt: "receipts/task-one-judge.md",
+	};
+	state.tasks[1] = { ...state.tasks[1]!, status: "active" };
+	state.active_task = "task-two";
+	state.progress = { completed_tasks: 1, total_tasks: 2 };
+	state.judge.last_verdict = "pass";
+	state.judge.last_receipt = "receipts/task-one-judge.md";
+	await writeGoalState(goalPath, state);
+	await upsertActiveGoal(root, {
+		goal_id: goalId,
+		path: `.bravo/goals/${goalId}`,
+		pi_session_id: "pi_handoff",
+		status: "active",
+		active_task: "task-two",
+	});
+	return { root, goalPath };
+}
+
+function registeredTaskReceiptReadyTool(): RegisteredTestTool {
 	return registeredTool("task_receipt_ready");
 }
 
-function registeredJudgeEventTool(): { execute: (...args: any[]) => Promise<any> } {
+function registeredJudgeEventTool(): RegisteredTestTool {
 	return registeredTool("judge_event");
 }
 
-function registeredJudgeFinishTool(): { execute: (...args: any[]) => Promise<any> } {
+function registeredJudgeFinishTool(): RegisteredTestTool {
 	return registeredTool("judge_finish");
 }
 
-function registeredTool(name: string): { execute: (...args: any[]) => Promise<any> } {
-	let matched: { name: string; execute: (...args: any[]) => Promise<any> } | undefined;
+interface RegisteredTestTool {
+	name?: string;
+	execute: (...args: any[]) => Promise<any>;
+	renderCall?: (args: unknown) => { render(width: number): string[] };
+}
+
+function registeredValidateGoalStateTool(): RegisteredTestTool {
+	let matched: RegisteredTestTool | undefined;
+	registerGoalValidationTools({
+		registerTool(tool: RegisteredTestTool & { name: string }) {
+			if (tool.name === "validate_goal_state") matched = tool;
+		},
+	} as any);
+	assert.ok(matched);
+	return matched;
+}
+
+function registeredTool(name: string): RegisteredTestTool {
+	let matched: RegisteredTestTool | undefined;
 	registerJudgeControlTools({
-		registerTool(tool: { name: string; execute: (...args: any[]) => Promise<any> }) {
+		registerTool(tool: RegisteredTestTool & { name: string }) {
 			if (tool.name === name) matched = tool;
 		},
 	} as any);
@@ -685,4 +855,8 @@ remaining_risk: []
 
 Done.
 `;
+}
+
+function stripAnsi(value: string): string {
+	return value.replace(/\x1b\[[0-9;]*m/g, "");
 }

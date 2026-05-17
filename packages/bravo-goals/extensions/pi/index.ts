@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerGoalCommands } from "./commands.js";
+import { registerGoalValidationTools } from "./goal-validation.js";
 import { clearHud, updateHud } from "./hud.js";
 import { registerJudgeControlTools } from "./judge-control.js";
 
@@ -50,6 +51,7 @@ export default function bravoGoalsPiExtension(pi: ExtensionAPI): void {
 			await refresh(ctx);
 		},
 	});
+	registerGoalValidationTools(pi);
 	registerJudgeControlTools(pi);
 
 	pi.on("session_start", async (_event, ctx) => {

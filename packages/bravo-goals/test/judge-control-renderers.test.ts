@@ -164,6 +164,36 @@ test("renderToolResultComponent renders failure card when task_receipt_ready ret
 	assert.ok(!plain.includes("unknown"), "goal_id falls back to args, not the literal 'unknown'");
 });
 
+test("renderToolResultComponent treats missing task_receipt_ready success details as failure", () => {
+	const renderable = renderToolResultComponent(
+		{
+			content: [{ type: "text", text: "ContextError: goal not attached" }],
+			details: {},
+		},
+		"task_receipt_ready",
+		{ goal_id: "g-missing-details", receipt_path: "receipts/x.md" },
+	);
+	const lines = renderable.render(96);
+	const plain = lines.map(stripAnsi).join("\n");
+	assert.match(plain, /error/);
+	assert.match(plain, /ContextError/);
+	assert.doesNotMatch(plain, /accepted/);
+	assert.match(plain, /g-missing-details/);
+});
+
+test("renderToolResultComponent falls back to plain text for non-error task_receipt_ready without details", () => {
+	const renderable = renderToolResultComponent(
+		{
+			content: [{ type: "text", text: "Still waiting for tool details." }],
+			details: {},
+		},
+		"task_receipt_ready",
+		{ goal_id: "g-pending" },
+	);
+	const lines = renderable.render(96);
+	assert.deepEqual(lines, ["Still waiting for tool details."]);
+});
+
 test("renderToolResultComponent renders failure card with 'unknown' when args are absent", () => {
 	const renderable = renderToolResultComponent(
 		{
