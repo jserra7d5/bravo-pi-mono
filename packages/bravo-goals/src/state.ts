@@ -68,7 +68,7 @@ export function createGoalState(options: CreateGoalStateOptions): GoalState {
 			resume_context: "resume.md",
 		},
 		phase_boundary: {
-			default_after_judge_pass: "fresh_session",
+			default_after_judge_pass: "carry",
 			after_judge_fail: "carry",
 			before_final_audit: "fresh_session",
 			experimental_flags: {

@@ -177,6 +177,8 @@ const GOAL_COMMAND_HELP: GoalCommandHelp[] = [
 	},
 ];
 
+const GOAL_COMMAND_NAMES = new Set(GOAL_COMMAND_HELP.map((command) => command.name));
+
 function renderGoalHelp(commandName?: string): string {
 	if (commandName) {
 		const command = GOAL_COMMAND_HELP.find((candidate) => candidate.name === commandName);
@@ -533,6 +535,11 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 		return;
 	}
 
+	if (!GOAL_COMMAND_NAMES.has(subcommand)) {
+		ctx.ui.notify(renderGoalHelp(subcommand), "error");
+		return;
+	}
+
 	if (subcommand === "init") {
 		const explicitRoot = typeof parsed.flags.get("workspace-root") === "string" ? parsed.flags.get("workspace-root") as string : null;
 		const paths = await initBravoWorkspace({ root: explicitRoot ?? ctx.cwd });
@@ -688,6 +695,15 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 	}
 
 	if (subcommand === "archive") {
+		const archiveState = await readYaml(join(goal.path, "state.yaml")) as GoalState;
+		const attachedSessionId = archiveState.session?.attached_pi_session_id ?? null;
+		if (attachedSessionId && sessionId && attachedSessionId === sessionId) {
+			await updateGoalState(goal.path, (state) => {
+				const sessionState = state.session as Record<string, unknown> | undefined;
+				if (sessionState) sessionState.attached_pi_session_id = null;
+			});
+			await detachActiveGoal(root, goal.id, sessionId);
+		}
 		const result = await archiveGoal(root, goal.path, {
 			force: parsed.flags.has("force"),
 			reason: typeof parsed.flags.get("reason") === "string" ? parsed.flags.get("reason") as string : null,

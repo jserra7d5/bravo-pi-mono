@@ -20,7 +20,7 @@ test("init and prep scaffold durable goal workspace", async () => {
 	}
 	const state = await readGoalState(join(root, ".bravo", "goals", "durable-resume-loop"));
 	assert.equal(state.goal.status, "draft");
-	assert.equal(state.phase_boundary.default_after_judge_pass, "fresh_session");
+	assert.equal(state.phase_boundary.default_after_judge_pass, "carry");
 });
 
 test("check rejects done tasks with missing receipts", async () => {

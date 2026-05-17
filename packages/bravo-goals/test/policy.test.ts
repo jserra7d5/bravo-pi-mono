@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDefaultGoalPolicy, decideBash, decidePath, readGoalPolicy } from "../src/policy.js";
+import { createDefaultGoalPolicy, decideBash, decidePath, readGoalPolicy, type GoalPolicy } from "../src/policy.js";
 
 test("goal policy is controller-owned and blocks protected Bravo mutation paths", async () => {
 	const root = await mkdtemp(join(tmpdir(), "bravo-policy-"));
@@ -37,5 +37,15 @@ test("goal policy blocks outside-workspace writes and destructive bash", async (
 	assert.equal(decideBash(policy, "npm test --workspace @bravo/goals").allowed, true);
 	assert.equal(decideBash(policy, "rm -rf .bravo").allowed, false);
 	assert.equal(decideBash(policy, "git reset --hard").allowed, false);
-	assert.equal(decideBash(policy, "echo hi > file.txt").allowed, false);
+	assertBashBlockedByDenyPattern(policy, "echo hi > file.txt");
+	assertBashBlockedByDenyPattern(policy, "cat > package.json <<'EOF'\n{\"type\":\"module\"}\nEOF");
+	assertBashBlockedByDenyPattern(policy, "mkdir -p test && cat > package.json <<'EOF'\n{}\nEOF");
+	assertBashBlockedByDenyPattern(policy, "printf hi | tee file.txt");
+	assertBashBlockedByDenyPattern(policy, "tee file.txt");
 });
+
+function assertBashBlockedByDenyPattern(policy: GoalPolicy, command: string): void {
+	const decision = decideBash(policy, command);
+	assert.equal(decision.allowed, false);
+	assert.match(decision.reason, /blocked by Bravo policy/);
+}

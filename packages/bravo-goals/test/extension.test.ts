@@ -9,6 +9,7 @@ import { registerGoalValidationTools } from "../extensions/pi/goal-validation.js
 import { registerJudgeControlTools } from "../extensions/pi/judge-control.js";
 import { scaffoldGoalWorkspace } from "../src/workspace.js";
 import { readActiveGoalsIndex, readGoalState, upsertActiveGoal, writeGoalState } from "../src/runtime.js";
+import { createJudgeRun, updateJudgeRunStatus, writeJudgeVerdict, type JudgeVerdictFile } from "../src/judge-runner.js";
 
 const snapshot: HudSnapshot = {
 	goalPath: "/workspace/.bravo/goals/durable-resume-loop",
@@ -87,6 +88,24 @@ test("/goal help renders command usage without a Bravo workspace", async () => {
 	assert.match(notifications[0]!, /\x1b\[/);
 });
 
+test("/goal unknown subcommand renders help without a Bravo workspace", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-unknown-"));
+	const notifications: string[] = [];
+	let refreshes = 0;
+	await testables.handleGoal({} as any, { refresh: async () => { refreshes += 1; } }, "frobnicate", {
+		cwd: root,
+		ui: { notify: (message: string) => notifications.push(message) },
+		sessionManager: { getSessionId: () => "pi_unknown" },
+	} as any);
+
+	assert.equal(refreshes, 0);
+	assert.equal(notifications.length, 1);
+	const plain = stripAnsi(notifications[0]!);
+	assert.match(plain, /Unknown \/goal command: frobnicate/);
+	assert.match(plain, /Bravo Goals commands/);
+	assert.doesNotMatch(plain, /No Bravo workspace found/);
+});
+
 test("/goal init creates Bravo workspace from Pi command context", async () => {
 	const root = await mkdtemp(join(tmpdir(), "bravo-goals-init-"));
 	const notifications: string[] = [];
@@ -156,6 +175,41 @@ test("/goal check validates explicit goals from Pi command context", async () =>
 
 	assert.equal(refreshes, 1);
 	assert.match(stripAnsi(notifications[0] ?? ""), /Bravo goal check passed check-me/);
+});
+
+test("/goal archive detaches the current verified session before archiving", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-archive-current-"));
+	const sessionId = "pi_archive_current";
+	const { goalPath } = await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "archive-current" });
+	const state = await readGoalState(goalPath);
+	state.goal.status = "done";
+	state.session.attached_pi_session_id = sessionId;
+	state.final_audit.status = "passed";
+	state.final_audit.receipt = ".bravo/goals/archive-current/receipts/final-audit.md";
+	state.final_audit.judge_run_id = "judge_final";
+	state.user_verification.status = "verified";
+	state.user_verification.verified_at = "2026-05-17T07:00:00.000Z";
+	await writeGoalState(goalPath, state);
+	await writeFinalJudgeRun(root, "archive-current");
+	await upsertActiveGoal(root, {
+		goal_id: "archive-current",
+		path: ".bravo/goals/archive-current",
+		pi_session_id: sessionId,
+		status: "done",
+		active_task: null,
+	});
+	const notifications: string[] = [];
+
+	await testables.handleGoal({} as any, { refresh: async () => {} }, "archive archive-current", {
+		cwd: root,
+		ui: { notify: (message: string) => notifications.push(message), setStatus: () => {}, setWidget: () => {} },
+		sessionManager: { getSessionId: () => sessionId },
+	} as any);
+
+	const active = await readActiveGoalsIndex(root);
+	assert.deepEqual(active.active_goals, []);
+	assert.match(stripAnsi(notifications[0] ?? ""), /Archived Bravo goal/);
+	await access(join(root, ".bravo", "archived", "goals"));
 });
 
 test("/goal next supports carry, compact, and fresh handoff modes from Pi slash commands", async () => {
@@ -905,6 +959,49 @@ function registeredTool(name: string, api: Record<string, unknown> = {}): Regist
 	} as any);
 	assert.ok(matched);
 	return matched;
+}
+
+async function writeFinalJudgeRun(root: string, goalId: string): Promise<void> {
+	const run = await createJudgeRun({
+		workspaceRoot: root,
+		goalId,
+		taskId: "final",
+		finalAudit: true,
+		judgeReceiptPath: `.bravo/goals/${goalId}/receipts/final-audit.md`,
+		runId: "final",
+	});
+	const verdict: JudgeVerdictFile = {
+		schema_version: 1,
+		run_id: "judge_final",
+		goal_id: goalId,
+		task_id: "final",
+		final_audit: true,
+		verdict: "pass",
+		receipt_path: `.bravo/goals/${goalId}/receipts/final-audit.md`,
+		evidence_checked: [],
+		commands_run: [],
+		inspection_helpers: [],
+		missing_or_weak_evidence: [],
+		recommendation: "advance_task",
+		created_at: "2026-05-17T07:00:00.000Z",
+	};
+	await writeJudgeVerdict(run.runDir, verdict, `---
+schema_version: 1
+type: judge
+run_id: judge_final
+task_id: final
+verdict: pass
+created_at: "2026-05-17T07:00:00.000Z"
+verdict_path: ".bravo/runs/judge_final/verdict.json"
+receipt_path: ".bravo/goals/${goalId}/receipts/final-audit.md"
+commands: []
+inspection_helpers: []
+claims_checked: []
+---
+
+# Final Audit
+`);
+	await updateJudgeRunStatus(run.runDir, "succeeded", { at: "2026-05-17T07:00:01.000Z" });
 }
 
 function workerReceipt(taskId: string): string {

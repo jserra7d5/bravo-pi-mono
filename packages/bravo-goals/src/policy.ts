@@ -64,7 +64,12 @@ export async function createDefaultGoalPolicy(options: {
 		bash: {
 			mode: "constrained",
 			allow_prefixes: ["npm test", "npm run", "npm --prefix ", "node --check ", "git diff", "git status", "rg ", "sed -n ", "ls", "pwd", "cat ", "find ", "date "],
-			deny_patterns: ["\\brm\\b", "\\bgit\\s+(add|commit|checkout|reset|clean|rm|mv|merge|rebase)\\b", "\\|\\s*(tee|xargs)"],
+			deny_patterns: [
+				"\\brm\\b",
+				"\\bgit\\s+(add|commit|checkout|reset|clean|rm|mv|merge|rebase)\\b",
+				"(^|[\\s;&|()])(?:\\d+)?(?:>>?|<<?|<<<|<>|>&|<&)",
+				"(^|[\\s;&|()])(tee|xargs)\\b",
+			],
 		},
 	};
 	await writeGoalPolicy(policyPath, policy);

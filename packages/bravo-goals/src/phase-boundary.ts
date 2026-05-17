@@ -19,7 +19,7 @@ export interface BoundarySelectionOptions {
 	packageDefault?: Exclude<BoundaryMode, "inherit">;
 }
 
-const DEFAULT_BOUNDARY: Exclude<BoundaryMode, "inherit"> = "fresh_session";
+const DEFAULT_BOUNDARY: Exclude<BoundaryMode, "inherit"> = "carry";
 
 export function normalizeBoundaryMode(value: string | null | undefined): Exclude<BoundaryMode, "inherit"> | null {
 	if (value === "carry" || value === "compact" || value === "fresh_session") {
