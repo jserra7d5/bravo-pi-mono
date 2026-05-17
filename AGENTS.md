@@ -17,6 +17,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - Keep reusable design decisions in specs before implementing larger changes.
 - Prefer CLI-first tools that can be used by humans and agents.
 - Pi integrations should be thin adapters over reusable CLIs, not the only implementation surface.
+- For Pi integration/extension API reference, consult `/home/joe/Documents/misc/pi-mono` and `/home/joe/Documents/misc/pi-mono/AGENTS.md`.
 - Do not modify upstream pi source for package/extension work; use pi runtime extension/package mechanisms.
 - Async subagents are intentionally Pi-only and async-first in v1. Keep parent-child messaging, wait/result semantics, prompt isolation, and durable run files simple; do not reintroduce Tango-style chains, DAGs, peer intercom, worktree orchestration, or cross-harness adapters.
 - Treat project-local executable extension code as trusted-code only.
