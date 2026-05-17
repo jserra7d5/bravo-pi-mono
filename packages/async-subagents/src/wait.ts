@@ -50,7 +50,7 @@ export function waitOnce(store: RunStore, input: WaitInput): SubagentWaitResult 
   const cursors: WaitCursorMap = {};
   const events: RunEvent[] = [];
   const results: RunResult[] = [];
-  const statuses: Array<{ runId: string; state: RunState; summary?: string }> = [];
+  const statuses: Array<{ runId: string; state: RunState; summary?: string; displayName?: string; namePack?: string }> = [];
   const readyRunIds = new Set<string>();
   const includeResult = input.includeResult !== false;
 
@@ -73,7 +73,7 @@ export function waitOnce(store: RunStore, input: WaitInput): SubagentWaitResult 
     }
     if (input.includeStatus !== false) {
       const status = store.readStatus(runId);
-      statuses.push({ runId: status.runId, state: status.state, summary: status.summary });
+      statuses.push({ runId: status.runId, state: status.state, summary: status.summary, displayName: status.displayName, namePack: status.namePack });
     }
     if (mode === "race" && readyRunIds.size > 0) break;
   }

@@ -6,6 +6,7 @@ import { resolveAgentDefinition } from "./agentDefinitions.js";
 import { buildPiCommand, childControlEventTool, childControlExtensionPath, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
 import { assemblePrompt } from "./promptAssembly.js";
 import { finalizeTerminalRun } from "./lifecycle.js";
+import { assignDisplayName } from "./namePacks.js";
 import { branchPiSession, type BranchPiSession, type ParentPiSessionRef } from "./piSession.js";
 import { createRootSession, readRootSession } from "./rootSession.js";
 import { RunStore } from "./runStore.js";
@@ -29,6 +30,7 @@ export interface StartFakeImmediateInput extends SupervisorFakeInput {
 
 export interface StartSubagentInput {
   agent: string;
+  name?: string;
   task: string;
   cwd?: string;
   runRoot?: string;
@@ -153,6 +155,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     contextPolicy: requestedContextPolicy,
     sessionPolicy: requestedSessionPolicy,
   });
+  const display = assignDisplayName({ runRoot: store.runRoot, requestedName: input.name });
   let contextPolicy = requestedContextPolicy;
   const sessionPolicy = requestedSessionPolicy;
   const requestedPiSessionPath = sessionPolicy === "record" ? paths.requestedPiSessionPath : undefined;
@@ -170,6 +173,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     parentRunId: root.parentRunId,
     rootRunId: root.rootRunId,
     rootSessionId: root.rootSessionId,
+    displayName: display.displayName,
+    namePack: display.namePack,
     agentName: definition.name,
     agentSource: definition.source,
     definitionPath: definition.definitionPath,
@@ -204,6 +209,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       runId,
       runDir: paths.runDir,
       agentName: definition.name,
+      displayName: display.displayName,
+      namePack: display.namePack,
       state: result.state,
       started: false,
       waited: false,
@@ -359,6 +366,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     runId,
     runDir: paths.runDir,
     agentName: definition.name,
+    displayName: display.displayName,
+    namePack: display.namePack,
     state: status.state,
     started: status.state === "running" || terminal,
     waited: Boolean(waitResult),

@@ -9,6 +9,8 @@ export function createInitialStatus(input: {
   parentRunId: string;
   rootRunId?: string;
   rootSessionId?: string;
+  displayName?: string;
+  namePack?: string;
   agentName: string;
   agentSource: AgentDefinitionSource;
   definitionPath: string;
@@ -35,6 +37,8 @@ export function createInitialStatus(input: {
     parentRunId: input.parentRunId,
     rootRunId: input.rootRunId,
     rootSessionId: input.rootSessionId,
+    displayName: input.displayName,
+    namePack: input.namePack,
     agent: {
       name: input.agentName,
       source: input.agentSource,

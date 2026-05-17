@@ -7,6 +7,7 @@ import { buildSubagentTools } from "../extensions/pi/tools.js";
 import { createRunResult } from "../src/result.js";
 import { createRootSession } from "../src/rootSession.js";
 import { RunStore } from "../src/runStore.js";
+import { startSubagent } from "../src/start.js";
 import { createInitialStatus } from "../src/status.js";
 import type { RootSessionIdentity } from "../src/types.js";
 
@@ -141,4 +142,62 @@ test("subagent_status reports result and status mismatches", async () => {
   assert.equal(result.isError, undefined);
   const row = (result.details.rows as Array<{ diagnostics?: string[] }>)[0];
   assert.ok(row?.diagnostics?.includes("result exists but status is non-terminal"));
+});
+
+test("subagent_name_pack inspects and changes the active pack for future runs", async () => {
+  const w = workspace();
+  const built = tools(w.identity);
+
+  const initial = await built.subagent_name_pack.execute("call", {}, undefined, undefined, { cwd: w.root });
+  assert.equal(initial.details.activePack, "default");
+
+  const changed = await built.subagent_name_pack.execute("call", { pack: "clones" }, undefined, undefined, { cwd: w.root });
+  assert.equal(changed.details.activePack, "clones");
+
+  const store = new RunStore({ cwd: w.root });
+  const started = await startSubagent({
+    agent: "scout",
+    task: "Use clone name",
+    cwd: w.root,
+    runRoot: store.runRoot,
+    parentRunId: w.identity.parentRunId,
+    fake: { mode: "immediate", body: "Done" },
+  });
+  assert.equal(started.displayName, "Rex");
+  assert.equal(started.agentName, "scout");
+});
+
+test("subagent_wait returns usable result bodies with truncation metadata", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const status = store.readStatus(w.runId);
+  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", body: "0123456789abcdef" }));
+  store.writeStatus({ ...status, state: "completed", resultReady: true });
+
+  const built = tools(w.identity);
+  const result = await built.subagent_wait.execute("call", { runIds: [w.runId], until: "result", maxBytes: 8 }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, undefined);
+  const ready = (result.details.results as Array<{ body?: string; bodyTruncation?: { truncated?: boolean; originalBytes?: number; returnedBytes?: number; maxBytes?: number } }>)[0];
+  assert.equal(ready.body, "01234...");
+  assert.equal(ready.bodyTruncation?.truncated, true);
+  assert.equal(ready.bodyTruncation?.originalBytes, 16);
+  assert.equal(ready.bodyTruncation?.returnedBytes, 8);
+  assert.equal(ready.bodyTruncation?.maxBytes, 8);
+});
+
+test("subagent_result returns body with truncation metadata", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const status = store.readStatus(w.runId);
+  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", body: "0123456789abcdef" }));
+  store.writeStatus({ ...status, state: "completed", resultReady: true });
+
+  const built = tools(w.identity);
+  const result = await built.subagent_result.execute("call", { runId: w.runId, maxBytes: 8 }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.details.body, "01234...");
+  assert.deepEqual((result.details.bodyTruncation as { truncated?: boolean; returnedBytes?: number; maxBytes?: number }).truncated, true);
+  assert.equal((result.details.bodyTruncation as { returnedBytes?: number }).returnedBytes, 8);
 });

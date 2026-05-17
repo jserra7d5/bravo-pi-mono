@@ -7,6 +7,8 @@ export function createRunResult(input: {
   runId: string;
   parentRunId: string;
   agentName: string;
+  displayName?: string;
+  namePack?: string;
   contextPolicy?: ContextPolicy;
   sessionPolicy?: SessionPolicy;
   piSessionPath?: string;
@@ -27,6 +29,8 @@ export function createRunResult(input: {
     runId: input.runId,
     parentRunId: input.parentRunId,
     agentName: input.agentName,
+    displayName: input.displayName,
+    namePack: input.namePack,
     contextPolicy: input.contextPolicy ?? "fresh",
     sessionPolicy: input.sessionPolicy ?? "record",
     piSessionPath: input.piSessionPath,

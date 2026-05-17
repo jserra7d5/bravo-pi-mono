@@ -76,6 +76,8 @@ export interface RunStatus {
   parentRunId: string;
   rootRunId?: string;
   rootSessionId?: string;
+  displayName?: string;
+  namePack?: string;
   agent: {
     name: string;
     source: AgentDefinitionSource;
@@ -143,6 +145,8 @@ export interface RunResult {
   runId: string;
   parentRunId: string;
   agentName: string;
+  displayName?: string;
+  namePack?: string;
   contextPolicy: ContextPolicy;
   sessionPolicy: SessionPolicy;
   piSessionPath?: string;
@@ -240,6 +244,8 @@ export interface SubagentStartResult {
   runId: string;
   runDir: string;
   agentName: string;
+  displayName?: string;
+  namePack?: string;
   state: RunState;
   started: boolean;
   waited: boolean;
@@ -257,7 +263,7 @@ export interface SubagentWaitResult {
   readyRunIds: string[];
   events: RunEvent[];
   results: RunResult[];
-  statuses: Array<Pick<RunStatus, "runId" | "state" | "summary">>;
+  statuses: Array<Pick<RunStatus, "runId" | "state" | "summary" | "displayName" | "namePack">>;
   cursors: WaitCursorMap;
   remainingRunIds: string[];
   timedOut: boolean;

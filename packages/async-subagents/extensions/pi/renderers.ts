@@ -82,20 +82,84 @@ export function stateGlyph(state: string | undefined, resultReady = false): stri
   }
 }
 
+function humanState(state: string | undefined): string {
+  switch (state) {
+    case "created":
+    case "queued":
+      return "starting";
+    case "running":
+      return "working";
+    case "idle":
+      return "idle";
+    case "waiting_for_input":
+      return "waiting";
+    case "blocked":
+      return "blocked";
+    case "stalled":
+      return "stalled";
+    case "paused":
+      return "paused";
+    case "completed":
+      return "done";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    case "expired":
+      return "expired";
+    default:
+      return state ?? "unknown";
+  }
+}
+
+function compactDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+function since(iso: string | undefined, now = Date.now()): string | undefined {
+  if (!iso) return undefined;
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return undefined;
+  return compactDuration(now - time);
+}
+
 export function formatRunRow(row: RunSummaryRow, theme?: TextTheme): string {
-  const status = row.resultReady || row.result ? "result" : row.state;
+  const status = humanState(row.state);
   const summary = preview(row.needs ?? row.summary ?? row.event?.summary ?? row.result?.summary, 72);
-  const head = `${stateGlyph(row.state, row.resultReady || Boolean(row.result))} ${row.agentName} ${status}`;
-  return `${color(theme, "accent", head)} ${color(theme, "dim", row.runId)}${summary ? color(theme, "muted", ` - ${summary}`) : ""}`;
+  const displayName = row.displayName ?? row.agentName;
+  const activity = since(row.lastActivityAt ?? row.updatedAt);
+  const duration = typeof row.result?.durationMs === "number" ? compactDuration(row.result.durationMs) : undefined;
+  const timing = duration ? `in ${duration}` : activity ? `${activity} ago` : "";
+  const head = `${stateGlyph(row.state, row.resultReady || Boolean(row.result))} ${displayName} ${row.agentName} ${status}`;
+  return `${color(theme, "accent", head)}${timing ? color(theme, "dim", ` ${timing}`) : ""}${summary ? color(theme, "muted", ` - ${summary}`) : ""}`;
 }
 
 export function summarizeStartResult(result: SubagentStartResult): string {
   const action = result.waited ? "started and waited" : "started";
-  return `Subagent ${result.runId} ${action}: ${result.agentName} (${result.state})`;
+  const label = result.displayName ? `${result.displayName} (${result.agentName})` : result.agentName;
+  return `Subagent ${result.runId} ${action}: ${label} (${result.state})`;
+}
+
+function formatResultSummary(result: RunResult): string {
+  const label = result.displayName ? `${result.displayName} ${result.agentName}` : result.agentName;
+  const duration = typeof result.durationMs === "number" ? ` in ${compactDuration(result.durationMs)}` : "";
+  const summary = result.summary ? ` - ${preview(result.summary, 96)}` : "";
+  return `${label} ${humanState(result.state)}${duration}${summary}`;
 }
 
 export function summarizeWaitResult(result: SubagentWaitResult): string {
   if (result.state === "timeout") return `No subagent updates before timeout (${result.remainingRunIds.length} remaining)`;
+  if (result.results.length) {
+    const shown = result.results.slice(0, 2).map(formatResultSummary).join("; ");
+    const more = result.results.length > 2 ? `; +${result.results.length - 2} more` : "";
+    return `Subagent wait: ${result.results.length} result${result.results.length === 1 ? "" : "s"} - ${shown}${more}`;
+  }
   const parts = [
     `${result.readyRunIds.length} ready`,
     result.results.length ? `${result.results.length} result` : "",
@@ -111,7 +175,7 @@ export function summarizeMessageResult(result: SubagentMessageResult): string {
 
 export function summarizeRunResult(result: RunResult | undefined, runId: string): string {
   if (!result) return `Result not ready for ${runId}`;
-  return `Subagent ${runId} result: ${result.state}${result.summary ? ` - ${preview(result.summary, 96)}` : ""}`;
+  return `Subagent result: ${formatResultSummary(result)}`;
 }
 
 export function summarizeStatusRows(rows: Array<Pick<RunStatus, "runId" | "state" | "summary">>): string {
@@ -138,9 +202,9 @@ function resultBodyLines(details: Record<string, unknown>, expanded: boolean): s
   if (!Array.isArray(details.results)) return [];
   return details.results.flatMap((result) => {
     if (!isRecord(result) || typeof result.body !== "string" || !result.body.trim()) return [];
-    const label = typeof result.agentName === "string" ? result.agentName : "subagent";
-    const runId = typeof result.runId === "string" ? ` ${result.runId}` : "";
-    return ["", `${label}${runId}:`, result.body];
+    const agent = typeof result.agentName === "string" ? result.agentName : "subagent";
+    const label = typeof result.displayName === "string" ? `${result.displayName} ${agent}` : agent;
+    return ["", `${label}:`, result.body];
   });
 }
 

@@ -19,7 +19,7 @@ const Attachment = Type.Object({
 export const subagentStartSchema = Type.Object({
   agent: Type.String({ description: "Agent definition name, such as scout, reviewer, or worker." }),
   task: Type.String({ description: "Bounded task for the child agent." }),
-  name: Type.Optional(Type.String({ description: "Human-readable run name. Stored only as display metadata in v1." })),
+  name: Type.Optional(Type.String({ description: "Human-readable run display name. Defaults to the active name pack." })),
   mode: Type.Optional(StringEnum(["async", "sync"] as const, { default: "async" })),
   wait: Type.Optional(StringEnum(["none", "interesting", "terminal", "result"] as const, { default: "none" })),
   cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current Pi session cwd." })),
@@ -45,6 +45,7 @@ export const subagentWaitSchema = Type.Object({
   includeStatus: Type.Optional(Type.Boolean({ default: true })),
   includeResult: Type.Optional(Type.Boolean({ default: true })),
   maxEvents: Type.Optional(Type.Number({ description: "Maximum events returned in details." })),
+  maxBytes: Type.Optional(Type.Number({ description: "Maximum bytes per result body returned in details." })),
 });
 
 export const subagentMessageSchema = Type.Object({
@@ -79,6 +80,10 @@ export const subagentResultSchema = Type.Object({
   includeBody: Type.Optional(Type.Boolean({ default: true })),
   includeArtifacts: Type.Optional(Type.Boolean({ default: true })),
   maxBytes: Type.Optional(Type.Number({ description: "Maximum result body bytes returned in details." })),
+});
+
+export const subagentNamePackSchema = Type.Object({
+  pack: Type.Optional(StringEnum(["default", "clones", "ct"] as const, { description: "Set the active display-name pack for future runs." })),
 });
 
 export const subagentStatusSchema = Type.Object({

@@ -77,6 +77,35 @@ test("startSubagent drives a detached fake child lifecycle", async () => {
   assert.equal(store.readResult(started.runId)?.piSessionPath, join(started.runDir, "pi-session", "session.jsonl"));
 });
 
+test("startSubagent assigns and persists display names separately from agent type", async () => {
+  const w = workspace();
+  const first = await startSubagent({
+    agent: "scout",
+    task: "Named by pack",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    fake: { mode: "immediate", body: "Done" },
+  });
+  const second = await startSubagent({
+    agent: "scout",
+    name: "Human Lead",
+    task: "Explicit name",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    fake: { mode: "immediate", body: "Done" },
+  });
+
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  assert.equal(first.agentName, "scout");
+  assert.equal(first.displayName, "Alex");
+  assert.equal(store.readStatus(first.runId).displayName, "Alex");
+  assert.equal(store.readResult(first.runId)?.displayName, "Alex");
+  assert.equal(second.displayName, "Human Lead");
+  assert.equal(store.readStatus(second.runId).agent.name, "scout");
+});
+
 test("startSubagent can explicitly opt out of Pi session recording", async () => {
   const w = workspace();
   const started = await startSubagent({

@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createRunEvent } from "../../src/events.js";
 import { appendJsonl, readJsonl } from "../../src/jsonl.js";
 import { createInboxMessage, sendSubagentMessage, waitForMessageAck } from "../../src/message.js";
+import { NAME_PACKS, readNamePackSelection, writeNamePackSelection, type NamePackId } from "../../src/namePacks.js";
 import { readSubagentResult } from "../../src/result.js";
 import { createRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
@@ -19,6 +20,7 @@ import {
   subagentContinueSchema,
   subagentInterruptSchema,
   subagentMessageSchema,
+  subagentNamePackSchema,
   subagentResultSchema,
   subagentStartSchema,
   subagentStatusSchema,
@@ -149,11 +151,46 @@ async function waitForMessageAckFromParams(store: RunStore, params: Record<strin
   return waitForMessageAck(store, { runId, messageId, timeoutMs: 2_000 });
 }
 
-function compactResultBody(body: string | undefined, maxBytes: number): string | undefined {
-  if (!body) return body;
+function truncateUtf8WithMarker(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const marker = "...";
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  if (maxBytes <= markerBytes) return marker.slice(0, maxBytes);
+  const prefixBudget = maxBytes - markerBytes;
+  let used = 0;
+  let prefix = "";
+  for (const char of value) {
+    const bytes = Buffer.byteLength(char, "utf8");
+    if (used + bytes > prefixBudget) break;
+    prefix += char;
+    used += bytes;
+  }
+  return `${prefix}${marker}`;
+}
+
+function shapeResultBody(body: string | undefined, maxBytes: number, includeBody: boolean): { body?: string; bodyTruncation: Record<string, unknown> } {
+  if (!includeBody) return { body: undefined, bodyTruncation: { included: false } };
+  if (!body) return { body, bodyTruncation: { included: true, truncated: false, originalBytes: 0, returnedBytes: 0, maxBytes } };
   const buffer = Buffer.from(body, "utf8");
-  if (buffer.length <= maxBytes) return body;
-  return `${buffer.subarray(0, maxBytes).toString("utf8")}...`;
+  if (buffer.length <= maxBytes) {
+    return { body, bodyTruncation: { included: true, truncated: false, originalBytes: buffer.length, returnedBytes: buffer.length, maxBytes } };
+  }
+  const compacted = truncateUtf8WithMarker(body, maxBytes);
+  return {
+    body: compacted,
+    bodyTruncation: {
+      included: true,
+      truncated: true,
+      originalBytes: buffer.length,
+      returnedBytes: Buffer.byteLength(compacted, "utf8"),
+      maxBytes,
+    },
+  };
+}
+
+function shapeResult(result: RunResult, maxBytes: number, includeBody = true): RunResult & { bodyTruncation: Record<string, unknown> } {
+  const body = shapeResultBody(result.body, maxBytes, includeBody);
+  return { ...result, body: body.body, bodyTruncation: body.bodyTruncation };
 }
 
 function compactEvents(events: unknown[], maxEvents: number): unknown[] {
@@ -296,6 +333,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
             ASYNC_SUBAGENTS_ROOT_SESSION_ID: root.rootSessionId,
             ASYNC_SUBAGENTS_PARENT_RUN_ID: root.parentRunId,
           },
+          name: typeof params.name === "string" ? params.name : undefined,
         });
         writeDeliverySubscription(storeFor(cwd), {
           schemaVersion: SCHEMA_VERSION,
@@ -322,6 +360,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const parentRunId = typeof params.parentRunId === "string" ? params.parentRunId : root.parentRunId;
         const runIds = defaultRunIds(store, parentRunId, params);
         const maxEvents = typeof params.maxEvents === "number" ? params.maxEvents : 20;
+        const maxBytes = typeof params.maxBytes === "number" ? params.maxBytes : 64_000;
+        const includeResult = params.includeResult !== false;
         const result = await waitSubagents(store, {
           runIds,
           parentRunId,
@@ -331,13 +371,17 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           since: typeof params.since === "object" && params.since ? (params.since as WaitCursorMap) : undefined,
           timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : 300_000,
           includeStatus: params.includeStatus !== false,
-          includeResult: params.includeResult !== false,
+          includeResult,
         });
         for (const event of result.events) markWakeupKeyHandled(store, parentRunId, eventDeliveryKey(event));
         for (const readyResult of result.results) markWakeupKeyHandled(store, parentRunId, resultDeliveryKey(readyResult.runId, readyResult));
         result.events = compactEvents(result.events, maxEvents) as typeof result.events;
+        const details = {
+          ...result,
+          results: result.results.map((readyResult) => shapeResult(readyResult, maxBytes, includeResult)),
+        };
         await runtime.afterMutation?.(ctx, cwd, root);
-        return response(summarizeWaitResult(result), result as unknown as Record<string, unknown>);
+        return response(summarizeWaitResult(result), details as unknown as Record<string, unknown>);
       },
       renderCall: renderSubagentToolCallComponent,
       renderResult: renderSubagentToolResultComponent,
@@ -467,10 +511,12 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         markWakeupHandled(store, root.parentRunId, runId);
         const includeBody = params.includeBody !== false;
         const includeArtifacts = params.includeArtifacts !== false;
-        const maxBytes = typeof params.maxBytes === "number" ? params.maxBytes : 16_000;
+        const maxBytes = typeof params.maxBytes === "number" ? params.maxBytes : 64_000;
+        const body = shapeResultBody(result.body, maxBytes, includeBody);
         const details = {
           ...result,
-          body: includeBody ? compactResultBody(result.body, maxBytes) : undefined,
+          body: body.body,
+          bodyTruncation: body.bodyTruncation,
           artifacts: includeArtifacts ? result.artifacts : undefined,
           runDir,
           piSessionPath: result.piSessionPath,
@@ -482,6 +528,27 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         };
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(summarizeRunResult(result, runId), details as Record<string, unknown>);
+      },
+      renderCall: renderSubagentToolCallComponent,
+      renderResult: renderSubagentToolResultComponent,
+    },
+    {
+      name: "subagent_name_pack",
+      label: "Subagent Name Pack",
+      description: "Inspect or change the active display-name pack used for future subagent runs.",
+      parameters: subagentNamePackSchema,
+      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
+        const cwd = ctxCwd(ctx);
+        const root = rootFor(runtime, cwd);
+        const store = storeFor(cwd);
+        const pack = typeof params.pack === "string" ? params.pack : undefined;
+        if (pack && !Object.hasOwn(NAME_PACKS, pack)) return response(`Unknown subagent name pack: ${pack}`, { code: "UNKNOWN_NAME_PACK", pack }, true);
+        const selection = pack ? writeNamePackSelection(store.runRoot, pack as NamePackId) : readNamePackSelection(store.runRoot);
+        await runtime.afterMutation?.(ctx, cwd, root);
+        return response(`Subagent name pack: ${selection.activePack}`, {
+          ...selection,
+          changed: Boolean(pack),
+        } as unknown as Record<string, unknown>);
       },
       renderCall: renderSubagentToolCallComponent,
       renderResult: renderSubagentToolResultComponent,
@@ -505,6 +572,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
             return [{
               runId: status.runId,
               state: status.state,
+              displayName: status.displayName,
+              namePack: status.namePack,
               agentName: status.agent.name,
               summary: preview(status.summary, 120),
               cwd: status.cwd,

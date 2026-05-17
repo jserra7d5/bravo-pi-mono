@@ -17,7 +17,7 @@ export function renderStatusLine(input?: StatusLineInput): string | undefined {
   const blocked = snapshot.blockedRunIds.length;
   const results = snapshot.resultReadyRunIds.length;
   if (!active && !blocked && !results) return undefined;
-  return `Subagents: ${active} active - ${blocked} blocked - ${results} result`;
+  return `Subagents: ${active} running - ${blocked} waiting - ${results} finished`;
 }
 
 export function updateStatusLine(ctx: unknown, input: StatusLineInput): void {

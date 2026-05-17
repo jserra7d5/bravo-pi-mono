@@ -8,6 +8,7 @@ test("formatRunRow renders compact result-ready rows", () => {
   const row: RunSummaryRow = {
     runId: "run_test",
     runDir: "/tmp/run_test",
+    displayName: "Rex",
     agentName: "scout",
     state: "completed",
     summary: "Completed a long reconnaissance task with useful findings",
@@ -16,8 +17,8 @@ test("formatRunRow renders compact result-ready rows", () => {
   };
 
   const rendered = formatRunRow(row);
-  assert.match(rendered, /scout result/);
-  assert.match(rendered, /run_test/);
+  assert.match(rendered, /Rex scout done/);
+  assert.doesNotMatch(rendered, /run_test/);
 });
 
 test("tool renderer components implement Pi TUI render contract", () => {
@@ -34,6 +35,9 @@ test("tool renderer components implement Pi TUI render contract", () => {
 });
 
 test("tool result renderer shows terminal bodies in expanded mode", () => {
+  const compact = renderSubagentToolResultComponent({ details: { summary: "Subagent run_a result: completed", body: "Full reviewer findings" } });
+  assert.doesNotMatch(compact.render(100).join("\n"), /Full reviewer findings/);
+
   const direct = renderSubagentToolResultComponent(
     { details: { summary: "Subagent run_a result: completed", body: "Full reviewer findings" } },
     { expanded: true },
@@ -45,14 +49,14 @@ test("tool result renderer shows terminal bodies in expanded mode", () => {
     {
       details: {
         summary: "Subagent wait: 1 ready, 1 result",
-        results: [{ runId: "run_a", agentName: "reviewer", body: "Reviewer found path safety gaps" }],
+        results: [{ runId: "run_a", displayName: "Fives", agentName: "reviewer", body: "Reviewer found path safety gaps" }],
       },
     },
     { expanded: true },
   );
 
   const rendered = waited.render(100).join("\n");
-  assert.match(rendered, /reviewer run_a:/);
+  assert.match(rendered, /Fives reviewer:/);
   assert.match(rendered, /Reviewer found path safety gaps/);
 });
 

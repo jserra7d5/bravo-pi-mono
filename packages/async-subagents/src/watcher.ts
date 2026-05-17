@@ -6,6 +6,8 @@ export interface RunSummaryRow {
   runId: string;
   runDir: string;
   agentName: string;
+  displayName?: string;
+  namePack?: string;
   state: RunState;
   summary?: string;
   needs?: string | null;
@@ -64,6 +66,8 @@ export function readWatcherSnapshot(store: RunStore, input: ReadWatcherSnapshotI
         runId: record.runId,
         runDir: record.runDir,
         agentName: status.agent.name,
+        displayName: status.displayName,
+        namePack: status.namePack,
         state: status.state,
         summary: status.summary,
         needs: status.needs,
