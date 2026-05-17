@@ -2,11 +2,15 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { constants, readFileSync, statSync } from "node:fs";
 import { access, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { spawn } from "node:child_process";
 import { Type } from "typebox";
 import { parse as parseYaml } from "yaml";
+import { runAutonomousJudge, type AutonomousJudgeOutcome } from "./judge-launcher.js";
 import { createJudgeRun, updateJudgeRunStatus, writeJudgeVerdict, type JudgeRunConfig, type JudgeVerdictFile } from "../../src/judge-runner.js";
 import { readActiveGoalsIndex, readGoalState, writeGoalState } from "../../src/runtime.js";
-import { markWorkerReceiptReady } from "../../src/state.js";
+import { markJudgeStarted, markWorkerReceiptReady } from "../../src/state.js";
+import { markBoundaryApplied, renderCompactInstructions, selectNextBoundary, type BoundarySelection } from "../../src/phase-boundary.js";
+import type { GoalState, GoalTask } from "../../src/types.js";
 import { discoverWorkspaceRoot } from "../../src/workspace.js";
 import {
 	chromeRenderable,
@@ -41,6 +45,24 @@ const JudgeFinishParams = Type.Object({
 	]),
 	receipt_path: Type.String({ description: "Path to the Judge receipt." }),
 	summary: Type.Optional(Type.String({ description: "Short Judge result summary." })),
+	evidence_checked: Type.Optional(Type.Array(Type.String({ description: "Concrete evidence checked by the Judge." }))),
+	commands_run: Type.Optional(Type.Array(Type.String({ description: "Commands run through judge_bash or intentionally empty." }))),
+	inspection_helpers: Type.Optional(Type.Array(Type.String({ description: "Helper review lanes or inspection methods used." }))),
+	missing_or_weak_evidence: Type.Optional(Type.Array(Type.String({ description: "Missing or weak evidence found by the Judge." }))),
+	recommendation: Type.Optional(Type.String({ description: "Recommended next lifecycle action." })),
+	follow_up_tasks: Type.Optional(Type.Array(Type.Object({
+		id: Type.Optional(Type.String({ description: "Optional stable task id." })),
+		title: Type.String({ description: "Follow-up remediation task title." }),
+		verify: Type.Optional(Type.Array(Type.String({ description: "Verification step for the follow-up task." }))),
+		expected_output: Type.Optional(Type.Array(Type.String({ description: "Expected output for the follow-up task." }))),
+		context_switch_severity: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")])),
+	}, { description: "Federal Judge follow-up remediation task." }))),
+});
+
+const JudgeBashParams = Type.Object({
+	command: Type.String({ description: "Shell command for a Bravo Judge verification step. Must be evidence-gathering only; do not edit files." }),
+	cwd: Type.Optional(Type.String({ description: "Optional workspace-relative working directory. Defaults to the Judge run cwd." })),
+	timeout_ms: Type.Optional(Type.Number({ description: "Optional timeout in milliseconds. Defaults to 120000." })),
 });
 
 const TaskReceiptReadyParams = Type.Object({
@@ -52,7 +74,9 @@ const TaskReceiptReadyParams = Type.Object({
 
 interface ToolContextLike {
 	cwd?: string;
+	compact?: (options?: { customInstructions?: string; onComplete?: () => void }) => void;
 	shutdown?: () => void;
+	model?: unknown;
 	sessionManager?: {
 		getSessionId?: () => string;
 	};
@@ -69,17 +93,30 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 		renderShell: "self",
 		async execute(_toolCallId, params, _span, _toolCall, ctx?: ToolContextLike) {
 			const result = await persistWorkerReceiptReady(params, ctx);
+			const judgeOutcome = await runAutonomousJudge({
+				workspaceRoot: result.workspaceRoot,
+				goalDir: result.goalDir,
+				goalId: params.goal_id,
+				taskId: result.taskId,
+				runDir: result.judgeRunDir,
+				runId: result.judgeRunId,
+				judgeReceiptPath: result.judgeReceiptPath,
+				model: ctx?.model,
+				timeoutMs: 900000,
+				maxAttempts: 3,
+			});
 			await appendJudgeControlEvent({
 				type: "task.receipt_ready",
 				goal_id: params.goal_id,
 				run_id: result.judgeRunId,
 				receipt_path: result.receiptPath,
 				task_id: result.taskId,
-				task_status: "awaiting_judge",
+				task_status: judgeOutcome.taskStatus,
 				note: params.note ?? params.summary,
 				at: new Date().toISOString(),
 			});
-			return taskReceiptReadyResponse(params.goal_id, result, result.title);
+			await queueAfterJudge(pi, result, judgeOutcome, ctx);
+			return taskReceiptReadyResponse(params.goal_id, result, result.title, judgeOutcome);
 		},
 		renderCall(args: unknown): TextRenderable {
 			const params = isRecord(args) ? args : {};
@@ -167,11 +204,12 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 				final_audit: run.final_audit,
 				verdict: params.verdict,
 				receipt_path: params.receipt_path,
-				evidence_checked: [],
-				commands_run: [],
-				inspection_helpers: [],
-				missing_or_weak_evidence: [],
-				recommendation: params.verdict === "pass" ? "advance_task" : "return_to_worker",
+				evidence_checked: params.evidence_checked ?? [],
+				commands_run: params.commands_run ?? [],
+				inspection_helpers: params.inspection_helpers ?? [],
+				missing_or_weak_evidence: params.missing_or_weak_evidence ?? [],
+				recommendation: params.recommendation ?? (params.verdict === "pass" ? "advance_task" : "return_to_worker"),
+				follow_up_tasks: params.follow_up_tasks,
 				created_at: new Date().toISOString(),
 			};
 			await writeJudgeVerdict(runDir, verdict, renderJudgeReceipt(verdict, params.summary));
@@ -205,6 +243,40 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 		},
 		renderResult(result: unknown, _options, _theme, context): TextRenderable {
 			return renderToolResultComponent(result, "judge_finish", context?.args);
+		},
+	});
+
+	pi.registerTool({
+		name: "judge_bash",
+		label: "Judge bash",
+		description: "Run evidence-gathering shell commands inside an isolated Bravo Judge session. Use only for verification; implementation and file mutation are blocked by policy.",
+		parameters: JudgeBashParams,
+		async execute(_toolCallId, params) {
+			const runDir = process.env.BRAVO_JUDGE_RUN_DIR;
+			if (!runDir) throw new Error("judge_bash is only available inside isolated Bravo Judge sessions.");
+			const run = JSON.parse(await readFile(join(runDir, "run.json"), "utf8")) as JudgeRunConfig;
+			if (looksMutatingCommand(params.command)) {
+				throw new Error(`judge_bash blocked mutating command: ${params.command}`);
+			}
+			const cwd = params.cwd ? resolve(run.workspace_root, params.cwd) : run.cwd;
+			const output = await runJudgeBash(params.command, cwd, params.timeout_ms ?? 120000);
+			await writeFile(join(runDir, "events.jsonl"), `${JSON.stringify({
+				type: "judge.command",
+				run_id: run.run_id,
+				command: params.command,
+				code: output.code,
+				at: new Date().toISOString(),
+			})}\n`, { flag: "a" });
+			return {
+				content: [{ type: "text", text: [
+					`exit_code: ${output.code}`,
+					"stdout:",
+					output.stdout,
+					"stderr:",
+					output.stderr,
+				].join("\n") }],
+				details: output,
+			};
 		},
 	});
 }
@@ -383,9 +455,12 @@ interface ReceiptReadyResult {
 	taskId: string;
 	receiptPath: string;
 	judgeRunId: string;
+	judgeRunDir: string;
 	judgeRunPath: string;
 	judgeReceiptPath: string;
-	nextAction: "judge_pending_launch";
+	workspaceRoot: string;
+	goalDir: string;
+	nextAction: "judge_running";
 	title: string;
 }
 
@@ -432,7 +507,7 @@ async function persistWorkerReceiptReady(params: { goal_id: string; receipt_path
 		judgeReceiptPath,
 		cwd: ctx?.cwd ?? workspaceRoot,
 	});
-	const readyState = markWorkerReceiptReady(state, task.id, validatedReceiptPath).state;
+	const readyState = markJudgeStarted(markWorkerReceiptReady(state, task.id, validatedReceiptPath).state, task.id, judgeRun.runId).state;
 	await writeGoalState(goalDir, {
 		...readyState,
 		session: { ...readyState.session, current_judge_run_id: judgeRun.runId },
@@ -441,31 +516,122 @@ async function persistWorkerReceiptReady(params: { goal_id: string; receipt_path
 		taskId: task.id,
 		receiptPath: validatedReceiptPath,
 		judgeRunId: judgeRun.runId,
+		judgeRunDir: judgeRun.runDir,
 		judgeRunPath: relative(workspaceRoot, judgeRun.runPath),
 		judgeReceiptPath,
-		nextAction: "judge_pending_launch",
+		workspaceRoot,
+		goalDir,
+		nextAction: "judge_running",
 		title: state.goal.title,
 	};
 }
 
-function taskReceiptReadyResponse(goalId: string, result: ReceiptReadyResult, title?: string): { content: { type: "text"; text: string }[]; details: Record<string, unknown> } {
+function taskReceiptReadyResponse(goalId: string, result: ReceiptReadyResult, title: string | undefined, judgeOutcome?: AutonomousJudgeOutcome): { content: { type: "text"; text: string }[]; details: Record<string, unknown> } {
+	const finalAuditText = judgeOutcome?.finalAudit
+		? ` Federal Judge: ${judgeOutcome.finalAudit.verdict} (${judgeOutcome.finalAudit.runId}). Follow-up tasks: ${judgeOutcome.finalAudit.followUpTasksAdded}.`
+		: "";
+	const verdictText = judgeOutcome ? ` Judge verdict: ${judgeOutcome.verdict}. Attempts: ${judgeOutcome.attempts}.${finalAuditText} Next action: ${judgeOutcome.nextAction}.` : "";
 	return {
 		content: [{
 			type: "text",
-			text: `Task receipt ready: ${goalId}/${result.taskId} is awaiting Judge. Receipt: ${result.receiptPath}. Judge run: ${result.judgeRunId}. Next action: ${result.nextAction}.`,
+			text: `Task receipt ready: ${goalId}/${result.taskId} entered Judge review. Receipt: ${result.receiptPath}. Judge run: ${result.judgeRunId}.${verdictText}`,
 		}],
 		details: {
-			status: "awaiting_judge",
+			status: judgeOutcome?.taskStatus ?? "judging",
 			goal_id: goalId,
 			task_id: result.taskId,
 			receipt_path: result.receiptPath,
 			judge_run_id: result.judgeRunId,
 			judge_run_path: result.judgeRunPath,
 			judge_receipt_path: result.judgeReceiptPath,
-			next_action: result.nextAction,
+			judge_verdict: judgeOutcome?.verdict,
+			judge_attempts: judgeOutcome?.attempts,
+			final_audit_verdict: judgeOutcome?.finalAudit?.verdict,
+			final_audit_attempts: judgeOutcome?.finalAudit?.attempts,
+			final_audit_run_id: judgeOutcome?.finalAudit?.runId,
+			final_audit_receipt_path: judgeOutcome?.finalAudit?.judgeReceiptPath,
+			final_audit_follow_up_tasks_added: judgeOutcome?.finalAudit?.followUpTasksAdded,
+			next_action: judgeOutcome?.nextAction ?? result.nextAction,
 			title: title ?? result.title,
 		},
 	};
+}
+
+async function queueAfterJudge(pi: ExtensionAPI, result: ReceiptReadyResult, outcome: AutonomousJudgeOutcome, ctx?: ToolContextLike): Promise<void> {
+	if (outcome.nextAction === "blocked") return;
+	const state = await readGoalState(result.goalDir);
+	if (outcome.nextAction === "human_verification") {
+		pi.sendMessage?.({
+			customType: "bravo-goal-federal-judge-ready",
+			display: true,
+			content: `Bravo goal "${state.goal.title}" (${state.goal.id}) completed all worker tasks and passed Federal Judge review.\n\nFederal Judge receipt: ${state.final_audit.receipt ?? outcome.finalAudit?.judgeReceiptPath ?? "the goal receipts directory"}\n\nHuman verification is now available with /goal verify ${state.goal.id}.`,
+			details: {
+				goal_id: state.goal.id,
+				goal_title: state.goal.title,
+				federal_judge_receipt: state.final_audit.receipt ?? outcome.finalAudit?.judgeReceiptPath,
+				next_action: "human_verification",
+			},
+		});
+		return;
+	}
+	if (typeof pi.sendUserMessage !== "function") return;
+	const active = state.active_task ? state.tasks.find((task) => task.id === state.active_task) : null;
+	if (!active) {
+		pi.sendUserMessage(`Bravo goal ${state.goal.id} has no active worker task after Judge verdict ${outcome.verdict}. Check final audit status and continue only if the durable state requires more work.`, { deliverAs: "followUp" });
+		return;
+	}
+	const completedTask = state.tasks.find((task) => task.id === result.taskId) ?? null;
+	const selection = selectNextBoundary(state, completedTask);
+	const stateWithBoundary = markBoundaryApplied(state, selection);
+	await writeGoalState(result.goalDir, stateWithBoundary);
+	if (selection.mode === "compact" && typeof ctx?.compact === "function") {
+		ctx.compact({
+			customInstructions: renderCompactInstructions(stateWithBoundary),
+			onComplete: () => {
+				pi.sendUserMessage(renderHandoffContinuationPrompt(result.goalDir, stateWithBoundary, active, selection), { deliverAs: "followUp" });
+			},
+		});
+		return;
+	}
+	const prompt = selection.mode === "carry"
+		? renderCarryContinuationPrompt(result.goalDir, stateWithBoundary, active)
+		: renderHandoffContinuationPrompt(result.goalDir, stateWithBoundary, active, selection);
+	pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+}
+
+function renderCarryContinuationPrompt(goalDir: string, state: GoalState, active: GoalTask): string {
+	const receiptPath = active.receipt ?? canonicalWorkerReceiptPath(active.id);
+	return `Continue Bravo goal "${state.goal.title}" (${state.goal.id}) in the current session.
+
+No handoff or compaction occurred. Keep using the context already in this session; consult state.yaml or receipts only if you need to confirm the durable task boundary.
+
+Active task: ${active.id}: ${active.title}
+Expected worker receipt path for task_receipt_ready: ${receiptPath}
+Write the receipt file at: ${join(goalDir, receiptPath)}
+
+When complete, write the worker receipt and call task_receipt_ready with goal_id: ${state.goal.id} and receipt_path: ${receiptPath}.`;
+}
+
+function renderHandoffContinuationPrompt(goalDir: string, state: GoalState, active: GoalTask, selection: BoundarySelection): string {
+	const receiptPath = active.receipt ?? canonicalWorkerReceiptPath(active.id);
+	const modeLine = selection.mode === "fresh_session"
+		? "Fresh-session handoff was selected, but autonomous tool context cannot replace the Pi session; continue from durable files in this session."
+		: "Compaction handoff completed; use the compacted summary plus durable files as the source of truth.";
+	return `Continue Bravo goal "${state.goal.title}" (${state.goal.id}).
+
+${modeLine}
+
+Read these files before acting:
+1. ${relative(process.cwd(), join(goalDir, "goal.md"))}
+2. ${relative(process.cwd(), join(goalDir, "context.md"))}
+3. ${relative(process.cwd(), join(goalDir, "state.yaml"))}
+4. ${relative(process.cwd(), join(goalDir, "resume.md"))}
+
+Active task: ${active.id}: ${active.title}
+Expected worker receipt path for task_receipt_ready: ${receiptPath}
+Write the receipt file at: ${join(goalDir, receiptPath)}
+
+Continue from state.yaml. When complete, write the worker receipt and call task_receipt_ready with goal_id: ${state.goal.id} and receipt_path: ${receiptPath}.`;
 }
 
 function canonicalWorkerReceiptPath(taskId: string): string {
@@ -553,6 +719,27 @@ function assertContained(root: string, candidate: string, message: string): void
 	throw new Error(message);
 }
 
+function looksMutatingCommand(command: string): boolean {
+	return /(^|\s)(rm|mv|cp|chmod|chown|truncate|tee|sed\s+-i|perl\s+-pi)\b/.test(command)
+		|| /\bgit\s+(add|commit|checkout|reset|clean|rm|mv|merge|rebase)\b/.test(command)
+		|| />/.test(command);
+}
+
+function runJudgeBash(command: string, cwd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; code: number | null }> {
+	return new Promise((resolvePromise) => {
+		const child = spawn("bash", ["-lc", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		let stderr = "";
+		const timeout = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
+		child.stdout?.on("data", (data) => { stdout += data.toString(); });
+		child.stderr?.on("data", (data) => { stderr += data.toString(); });
+		child.on("close", (code) => {
+			clearTimeout(timeout);
+			resolvePromise({ stdout, stderr, code });
+		});
+	});
+}
+
 async function appendJudgeControlEvent(event: Record<string, unknown>): Promise<void> {
 	const runDir = process.env.BRAVO_JUDGE_RUN_DIR;
 	if (!runDir) return;
@@ -560,6 +747,12 @@ async function appendJudgeControlEvent(event: Record<string, unknown>): Promise<
 }
 
 function renderJudgeReceipt(verdict: JudgeVerdictFile, summary?: string): string {
+	const title = verdict.final_audit ? "Federal Judge Receipt" : "Judge Receipt";
+	const commands = renderYamlList(verdict.commands_run);
+	const helpers = renderYamlList(verdict.inspection_helpers);
+	const claims = renderYamlList(verdict.evidence_checked);
+	const missing = renderYamlList(verdict.missing_or_weak_evidence);
+	const followUps = renderFollowUpTasks(verdict.follow_up_tasks);
 	return `---
 schema_version: 1
 type: judge
@@ -569,13 +762,25 @@ verdict: ${verdict.verdict}
 created_at: "${verdict.created_at}"
 verdict_path: ".bravo/runs/${verdict.run_id}/verdict.json"
 receipt_path: "${verdict.receipt_path}"
-commands: []
-inspection_helpers: []
-claims_checked: []
+commands:${commands}
+inspection_helpers:${helpers}
+claims_checked:${claims}
+missing_or_weak_evidence:${missing}
 ---
 
-# Judge Receipt
+# ${title}
 
 ${summary ?? "Judge finished through judge_finish."}
+${followUps}
 `;
+}
+
+function renderYamlList(values: unknown[]): string {
+	if (!values.length) return " []";
+	return `\n${values.map((value) => `  - ${JSON.stringify(String(value))}`).join("\n")}`;
+}
+
+function renderFollowUpTasks(tasks: JudgeVerdictFile["follow_up_tasks"]): string {
+	if (!tasks?.length) return "";
+	return `\n\n## Federal Judge Follow-up Tasks\n\n${tasks.map((task, index) => `${index + 1}. ${task.title}`).join("\n")}\n`;
 }

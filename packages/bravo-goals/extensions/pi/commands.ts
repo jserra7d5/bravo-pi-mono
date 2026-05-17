@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import YAML from "yaml";
 import { archiveGoal } from "../../src/archive.js";
 import { checkGoal } from "../../src/checker.js";
+import { createDefaultGoalPolicy } from "../../src/policy.js";
 import { exists as pathExists, recordUserVerification } from "../../src/runtime.js";
 import { bravoWorkspacePaths, discoverWorkspaceRoot, initBravoWorkspace, scaffoldGoalWorkspace } from "../../src/workspace.js";
 import { markBoundaryApplied, normalizeBoundaryMode, selectNextBoundary } from "../../src/phase-boundary.js";
@@ -357,6 +358,23 @@ ${receiptPath && receiptFullPath ? `Expected worker receipt path for task_receip
 ${receiptPath && receiptFullPath ? `Continue the active task from state.yaml. When complete, write the worker receipt file at the full path above using this exact YAML-frontmatter shape, then Markdown details after the closing ---:\n\n${workerReceiptTemplate(active?.id ?? "<task-id>")}\n\nThen call task_receipt_ready with goal_id: ${goal.id} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory. Do not edit state.yaml manually for the receipt-ready transition.` : "Continue from state.yaml. There is no active task receipt path available."}`;
 }
 
+function carryTaskPrompt(goal: GoalRecord, intro = "Continue in this same Pi session."): string {
+	const active = goal.state.tasks.find((task) => task.id === goal.state.active_task);
+	const task = active ? `${active.id}: ${active.title}` : "no active task";
+	const receiptPath = expectedWorkerReceiptPath(goal);
+	const receiptFullPath = receiptPath ? join(goal.path, receiptPath) : null;
+	return `Continue Bravo goal "${goal.state.goal.title}" (${goal.id}).
+
+${intro}
+Keep using the context already in this conversation. Consult state.yaml or receipts only if your current context conflicts with this task capsule or you need exact durable evidence.
+
+Task capsule:
+- Active task: ${task}
+${receiptPath && receiptFullPath ? `- Expected worker receipt path for task_receipt_ready: ${receiptPath}\n- Write the receipt file at: ${receiptFullPath}` : "- No active task receipt path is available."}
+
+${receiptPath && receiptFullPath ? `When complete, write the worker receipt file at the full path above using this exact YAML-frontmatter shape, then Markdown details after the closing ---:\n\n${workerReceiptTemplate(active?.id ?? "<task-id>")}\n\nThen call task_receipt_ready with goal_id: ${goal.id} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory. Do not edit state.yaml manually for the receipt-ready transition.` : "There is no active task receipt path available."}`;
+}
+
 function workerReceiptTemplate(taskId: string): string {
 	return `---
 schema_version: 1
@@ -498,11 +516,11 @@ async function runBoundary(root: string, pi: ExtensionAPI, ctx: ExtensionCommand
 	if (mode === "compact") {
 		ctx.compact({
 			customInstructions: compactInstructions(goal),
-			onComplete: () => queuePrompt(pi, activeTaskPrompt(goal)),
+			onComplete: () => queuePrompt(pi, carryTaskPrompt(goal, "Compaction completed. Use the compacted summary plus this task capsule as your working context.")),
 		});
 		return "continued";
 	}
-	await queuePrompt(pi, activeTaskPrompt(goal));
+	await queuePrompt(pi, carryTaskPrompt(goal));
 	return "continued";
 }
 
@@ -573,6 +591,12 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 			pi_session_id: sessionId,
 			status: "active",
 			active_task: goal.state.active_task,
+		});
+		await createDefaultGoalPolicy({
+			workspaceRoot: root,
+			goalId: goal.id,
+			activeTaskId: goal.state.active_task,
+			mode: "worker",
 		});
 		await runtime.refresh(ctx);
 		await queuePrompt(pi, subcommand === "resume" ? restartPrompt(goal) : activeTaskPrompt(goal));

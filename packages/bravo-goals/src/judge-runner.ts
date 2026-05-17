@@ -69,6 +69,13 @@ export interface JudgeVerdictFile {
 	inspection_helpers: unknown[];
 	missing_or_weak_evidence: unknown[];
 	recommendation: string;
+	follow_up_tasks?: Array<{
+		id?: string;
+		title: string;
+		verify?: string[];
+		expected_output?: string[];
+		context_switch_severity?: "low" | "medium" | "high";
+	}>;
 	created_at: string;
 }
 
@@ -322,11 +329,20 @@ function defaultJudgeSystemPrompt(config: JudgeRunConfig): string {
 	const unsafeLine = config.command_policy.unsafe_raw_bash
 		? "WARNING: raw bash is enabled for this run. Every command must be recorded in verdict.json and the Judge receipt."
 		: "Use judge_bash for command execution. Raw bash is not allowed.";
+	const roleLine = config.final_audit
+		? "You are the Bravo Goals Federal Judge. Review the whole goal like an integrated PR review before human verification."
+		: "You are the Bravo Goals task Judge.";
+	const followUpLine = config.final_audit
+		? "If the integrated implementation does not accomplish the goal in spirit, include follow_up_tasks in verdict.json with actionable remediation tasks."
+		: "If the task is incomplete, return it to the worker with concrete missing evidence.";
 	return [
-		"You are the Bravo Goals Judge.",
-		"Verify the worker receipt against the task, goal criteria, and concrete evidence.",
+		roleLine,
+		config.final_audit
+			? "Verify all task receipts, Judge receipts, implementation changes, tests, and architectural fit against the goal and context."
+			: "Verify the worker receipt against the task, goal criteria, and concrete evidence.",
 		"Do not perform implementation work.",
 		"Write a machine verdict and a Markdown Judge receipt that agree.",
+		followUpLine,
 		unsafeLine,
 		"Final assistant prose is supplemental only; verdict.json is authoritative."
 	].join("\n");
@@ -339,6 +355,9 @@ function defaultJudgeTaskPrompt(config: JudgeRunConfig): string {
 		`Task: ${config.task_id}`,
 		`Worker receipt: ${config.worker_receipt_path ?? "(final audit or none)"}`,
 		`Judge receipt: ${config.judge_receipt_path}`,
+		config.final_audit
+			? "Federal Judge scope: holistic goal review across all task receipts, code changes, tests, integration behavior, and architectural smells."
+			: "Task Judge scope: verify this task receipt only.",
 		`Allowed tools: ${config.allowed_tools.join(", ")}`,
 		`Command policy: ${config.command_policy.mode}, unsafe_raw_bash=${String(config.command_policy.unsafe_raw_bash)}`
 	].join("\n");

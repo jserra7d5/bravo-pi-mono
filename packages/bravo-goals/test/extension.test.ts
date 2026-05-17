@@ -171,6 +171,8 @@ test("/goal next supports carry, compact, and fresh handoff modes from Pi slash 
 	assert.equal(carryState.phase_boundary.last_boundary_mode, "carry");
 	assert.equal(carryPrompts.length, 1);
 	assert.match(carryPrompts[0]!, /Active task: task-two/);
+	assert.match(carryPrompts[0]!, /same Pi session/);
+	assert.doesNotMatch(carryPrompts[0]!, /Read these files before acting/);
 	assert.equal(carryRefreshes, 1);
 
 	const compact = await createPassedBoundaryGoal("handoff-compact", "compact");
@@ -191,6 +193,8 @@ test("/goal next supports carry, compact, and fresh handoff modes from Pi slash 
 	assert.match(compactInstructions, /Preserve the Bravo goal context/);
 	assert.equal(compactPrompts.length, 1);
 	assert.match(compactPrompts[0]!, /Active task: task-two/);
+	assert.match(compactPrompts[0]!, /Compaction completed/);
+	assert.doesNotMatch(compactPrompts[0]!, /Read these files before acting/);
 	assert.equal(compactRefreshes, 1);
 
 	const fresh = await createPassedBoundaryGoal("handoff-fresh", "fresh_session");
@@ -263,7 +267,7 @@ test("no-task prompt does not mention task_receipt_ready", () => {
 	assert.doesNotMatch(prompt, /task_receipt_ready/);
 });
 
-test("task_receipt_ready persists active task awaiting Judge and creates Judge run", async () => {
+test("task_receipt_ready runs Judge autonomously and applies a passing verdict", async () => {
 	const root = await mkdtemp(join(tmpdir(), "bravo-goals-task-receipt-ready-"));
 	const { goalPath } = await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "receipt-goal", tasks: [{ id: "task-one", title: "Task One" }] });
 	const state = await readGoalState(goalPath);
@@ -280,25 +284,92 @@ test("task_receipt_ready persists active task awaiting Judge and creates Judge r
 	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
 
 	const tool = registeredTaskReceiptReadyTool();
-	const result = await tool.execute("call_1", {
+	const result = await withFakeJudge("pass", () => tool.execute("call_1", {
 		goal_id: "receipt-goal",
 		receipt_path: "receipts/task-one-worker.md",
-	}, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_receipt" } });
+	}, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_receipt" } }));
 
 	const next = await readGoalState(goalPath);
-	assert.equal(next.tasks[0]?.status, "awaiting_judge");
+	assert.equal(next.tasks[0]?.status, "done");
 	assert.equal(next.tasks[0]?.receipt, "receipts/task-one-worker.md");
-	assert.equal(next.session.current_judge_run_id, result.details.judge_run_id);
-	assert.equal(next.goal.status, "active");
-	assert.equal(result.details.status, "awaiting_judge");
+	assert.equal(next.tasks[0]?.judge_receipt, ".bravo/goals/receipt-goal/receipts/task-one-judge.md");
+	assert.equal(next.session.current_judge_run_id, null);
+	assert.equal(next.goal.status, "done");
+	assert.equal(next.final_audit.status, "passed");
+	assert.equal(next.final_audit.receipt, ".bravo/goals/receipt-goal/receipts/final-audit.md");
+	assert.match(next.final_audit.judge_run_id ?? "", /^judge_/);
+	assert.equal(result.details.status, "done");
 	assert.equal(result.details.goal_id, "receipt-goal");
 	assert.equal(result.details.task_id, "task-one");
 	assert.equal(result.details.receipt_path, "receipts/task-one-worker.md");
 	assert.match(result.details.judge_run_id, /^judge_/);
 	assert.equal(result.details.judge_receipt_path, ".bravo/goals/receipt-goal/receipts/task-one-judge.md");
-	assert.equal(result.details.next_action, "judge_pending_launch");
+	assert.equal(result.details.judge_verdict, "pass");
+	assert.equal(result.details.final_audit_verdict, "pass");
+	assert.equal(result.details.final_audit_receipt_path, ".bravo/goals/receipt-goal/receipts/final-audit.md");
+	assert.equal(result.details.next_action, "human_verification");
 	assert.match(await readFile(join(root, result.details.judge_run_path), "utf8"), /"worker_receipt_path"/);
 	assert.match(result.content[0].text, /Task receipt ready/);
+});
+
+test("Federal Judge pass announces human verification without queuing worker slash-command instructions", async () => {
+	const { root, goalPath } = await createActiveReceiptGoal("federal-pass", "pi_federal_pass");
+	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
+	const queuedPrompts: string[] = [];
+	const customMessages: string[] = [];
+
+	const tool = registeredTaskReceiptReadyTool({
+		sendUserMessage: (prompt: string) => queuedPrompts.push(prompt),
+		sendMessage: (message: { content?: string }) => customMessages.push(message.content ?? ""),
+	});
+	const result = await withFakeJudge("pass", () => tool.execute("call_1", {
+		goal_id: "federal-pass",
+	}, undefined, undefined, {
+		cwd: root,
+		sessionManager: { getSessionId: () => "pi_federal_pass" },
+	}));
+
+	const next = await readGoalState(goalPath);
+	assert.equal(next.goal.status, "done");
+	assert.equal(next.final_audit.status, "passed");
+	assert.equal(result.details.next_action, "human_verification");
+	assert.equal(queuedPrompts.length, 0);
+	assert.equal(customMessages.length, 1);
+	assert.match(customMessages[0]!, /Federal Judge review/);
+	assert.match(customMessages[0]!, /Human verification is now available/);
+	assert.doesNotMatch(customMessages[0]!, /bash|bravo goal verify|bravo-goals verify/);
+});
+
+test("Federal Judge failure appends remediation tasks and keeps autonomous goal active", async () => {
+	const { root, goalPath } = await createActiveReceiptGoal("federal-fail", "pi_federal_fail");
+	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
+	const queuedPrompts: string[] = [];
+
+	const tool = registeredTaskReceiptReadyTool({
+		sendUserMessage: (prompt: string) => queuedPrompts.push(prompt),
+	});
+	const result = await withFakeJudges("pass", "fail", () => tool.execute("call_1", {
+		goal_id: "federal-fail",
+	}, undefined, undefined, {
+		cwd: root,
+		sessionManager: { getSessionId: () => "pi_federal_fail" },
+	}));
+
+	const next = await readGoalState(goalPath);
+	assert.equal(next.goal.status, "active");
+	assert.equal(next.final_audit.status, "failed");
+	assert.equal(next.progress.total_tasks, 2);
+	assert.equal(next.progress.completed_tasks, 1);
+	assert.equal(next.active_task, "federal-remediation-2");
+	const followUp = next.tasks.find((task) => task.id === "federal-remediation-2");
+	assert.ok(followUp);
+	assert.equal(followUp.status, "active");
+	assert.match(followUp.title, /Federal Judge/);
+	assert.equal(result.details.next_action, "continue");
+	assert.equal(result.details.final_audit_verdict, "fail");
+	assert.equal(result.details.final_audit_follow_up_tasks_added, 1);
+	assert.ok(queuedPrompts.length >= 1);
+	assert.match(queuedPrompts.at(-1) ?? "", /federal-remediation-2/);
 });
 
 test("judge-control tool call renderers tolerate missing Pi args", () => {
@@ -313,12 +384,12 @@ test("task_receipt_ready uses default active task receipt path", async () => {
 	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
 
 	const tool = registeredTaskReceiptReadyTool();
-	const result = await tool.execute("call_1", {
+	const result = await withFakeJudge("pass", () => tool.execute("call_1", {
 		goal_id: "default-receipt",
-	}, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_default" } });
+	}, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_default" } }));
 
 	const next = await readGoalState(goalPath);
-	assert.equal(next.tasks[0]?.status, "awaiting_judge");
+	assert.equal(next.tasks[0]?.status, "done");
 	assert.equal(next.tasks[0]?.receipt, "receipts/task-one-worker.md");
 	assert.equal(result.details.receipt_path, "receipts/task-one-worker.md");
 	assert.match(result.details.judge_run_id, /^judge_/);
@@ -416,8 +487,8 @@ test("judge_event task.receipt_ready remains compatible", async () => {
 	}, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_receipt" } });
 
 	const next = await readGoalState(goalPath);
-	assert.equal(next.tasks[0]?.status, "awaiting_judge");
-	assert.equal(result.details.next_action, "judge_pending_launch");
+	assert.equal(next.tasks[0]?.status, "judging");
+	assert.equal(result.details.next_action, "judge_running");
 });
 
 test("judge_event task.receipt_ready rejects absolute receipt paths outside workspace without mutation or event", async () => {
@@ -795,8 +866,8 @@ async function createPassedBoundaryGoal(goalId: string, mode: "carry" | "compact
 	return { root, goalPath };
 }
 
-function registeredTaskReceiptReadyTool(): RegisteredTestTool {
-	return registeredTool("task_receipt_ready");
+function registeredTaskReceiptReadyTool(api: Record<string, unknown> = {}): RegisteredTestTool {
+	return registeredTool("task_receipt_ready", api);
 }
 
 function registeredJudgeEventTool(): RegisteredTestTool {
@@ -824,9 +895,10 @@ function registeredValidateGoalStateTool(): RegisteredTestTool {
 	return matched;
 }
 
-function registeredTool(name: string): RegisteredTestTool {
+function registeredTool(name: string, api: Record<string, unknown> = {}): RegisteredTestTool {
 	let matched: RegisteredTestTool | undefined;
 	registerJudgeControlTools({
+		...api,
 		registerTool(tool: RegisteredTestTool & { name: string }) {
 			if (tool.name === name) matched = tool;
 		},
@@ -855,6 +927,26 @@ remaining_risk: []
 
 Done.
 `;
+}
+
+async function withFakeJudge<T>(verdict: "pass" | "fail" | "needs_more_evidence" | "blocked", fn: () => Promise<T>): Promise<T> {
+	return withFakeJudges(verdict, undefined, fn);
+}
+
+async function withFakeJudges<T>(taskVerdict: "pass" | "fail" | "needs_more_evidence" | "blocked", federalVerdict: "pass" | "fail" | "needs_more_evidence" | "blocked" | undefined, fn: () => Promise<T>): Promise<T> {
+	const previous = process.env.BRAVO_GOALS_FAKE_JUDGE_VERDICT;
+	const previousFederal = process.env.BRAVO_GOALS_FAKE_FEDERAL_JUDGE_VERDICT;
+	process.env.BRAVO_GOALS_FAKE_JUDGE_VERDICT = taskVerdict;
+	if (federalVerdict === undefined) delete process.env.BRAVO_GOALS_FAKE_FEDERAL_JUDGE_VERDICT;
+	else process.env.BRAVO_GOALS_FAKE_FEDERAL_JUDGE_VERDICT = federalVerdict;
+	try {
+		return await fn();
+	} finally {
+		if (previous === undefined) delete process.env.BRAVO_GOALS_FAKE_JUDGE_VERDICT;
+		else process.env.BRAVO_GOALS_FAKE_JUDGE_VERDICT = previous;
+		if (previousFederal === undefined) delete process.env.BRAVO_GOALS_FAKE_FEDERAL_JUDGE_VERDICT;
+		else process.env.BRAVO_GOALS_FAKE_FEDERAL_JUDGE_VERDICT = previousFederal;
+	}
 }
 
 function stripAnsi(value: string): string {
