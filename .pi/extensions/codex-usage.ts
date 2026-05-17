@@ -1,7 +1,24 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { Model } from "@mariozechner/pi-ai";
+// Bravo footer redesign for pi-coding-agent.
+//
+// Takes over the entire pi footer via pi.ui.setFooter() and renders a two-line
+// layout with a colored context bar, cost, and inline mini-bars for Codex
+// rate-limit windows (when on a Codex model). Replaces the built-in
+// "↑↓R$ ctx% (provider) model • thinking" footer.
+//
+// The Codex rate-limit fetching logic is preserved from the previous
+// setStatus()-based version; only the rendering path changed.
 
-const STATUS_KEY = "codex-usage";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	ReadonlyFooterDataProvider,
+	Theme,
+} from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
+import type { Component, TUI } from "@earendil-works/pi-tui";
+
+// ── codex usage fetch (preserved from previous version) ────────────────────
+
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 const MIN_REFRESH_MS = 30 * 1000;
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -123,7 +140,12 @@ function parseWindow(label: UsageWindow["label"], value: unknown): UsageWindow |
 		const resetAfterSeconds = firstNumber(record, ["reset_after_seconds", "resetAfterSeconds"]);
 		if (resetAfterSeconds !== undefined) resetAt = Date.now() + resetAfterSeconds * 1000;
 	}
-	const windowSeconds = firstNumber(record, ["limit_window_seconds", "limitWindowSeconds", "window_seconds", "windowSeconds"]);
+	const windowSeconds = firstNumber(record, [
+		"limit_window_seconds",
+		"limitWindowSeconds",
+		"window_seconds",
+		"windowSeconds",
+	]);
 
 	if (remainingPercent === undefined && resetAt === undefined) return undefined;
 	return {
@@ -169,8 +191,10 @@ function findNamedWindow(payload: unknown, name: UsageWindow["label"], seen = ne
 function parseUsage(payload: unknown): CodexUsage | undefined {
 	const record = asRecord(payload);
 	const rateLimit = asRecord(record?.rate_limit);
-	const usage = {
-		primary: parseWindow("primary", rateLimit?.primary_window ?? rateLimit?.primaryWindow) ?? findNamedWindow(payload, "primary"),
+	const usage: CodexUsage = {
+		primary:
+			parseWindow("primary", rateLimit?.primary_window ?? rateLimit?.primaryWindow) ??
+			findNamedWindow(payload, "primary"),
 		secondary:
 			parseWindow("secondary", rateLimit?.secondary_window ?? rateLimit?.secondaryWindow) ??
 			findNamedWindow(payload, "secondary"),
@@ -191,42 +215,11 @@ function formatReset(resetAt: number | undefined, now = Date.now()): string | un
 	return remainingHours > 0 ? `${days}d${remainingHours}h` : `${days}d`;
 }
 
-function formatDuration(seconds: number | undefined, fallback: string): string {
-	if (!seconds || seconds <= 0) return fallback;
-	const minutes = Math.ceil(seconds / 60);
-	if (minutes < 60) return `${minutes}m`;
-	const hours = Math.ceil(minutes / 60);
-	if (hours < 24) return `${hours}h`;
-	const days = Math.ceil(hours / 24);
-	return days === 7 ? "wk" : `${days}d`;
-}
-
-function formatWindow(window: UsageWindow | undefined): string | undefined {
-	if (!window) return undefined;
-	const prefix = formatDuration(window.windowSeconds, window.label === "primary" ? "5h" : "wk");
-	const percent = window.remainingPercent === undefined ? "?" : `${Math.round(window.remainingPercent)}%`;
-	const reset = formatReset(window.resetAt);
-	return `(${[prefix, percent, reset].filter(Boolean).join(" | ")})`;
-}
-
-function formatUsage(usage: CodexUsage | undefined): string | undefined {
-	if (!usage) return "Codex usage ?";
-	const parts = [formatWindow(usage.primary), formatWindow(usage.secondary)].filter(Boolean);
-	return parts.length > 0 ? `Codex ${parts.join(" ")}` : "Codex usage ?";
-}
-
-async function fetchCodexUsage(ctx: ExtensionContext): Promise<string | undefined> {
-	if (!ctx.hasUI) return undefined;
-	if (!isCodexModel(ctx.model)) {
-		ctx.ui.setStatus(STATUS_KEY, undefined);
-		return undefined;
-	}
+async function fetchCodexUsage(ctx: ExtensionContext): Promise<CodexUsage | undefined> {
+	if (!isCodexModel(ctx.model)) return undefined;
 
 	const token = await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
-	if (!token) {
-		ctx.ui.setStatus(STATUS_KEY, undefined);
-		return undefined;
-	}
+	if (!token) return undefined;
 
 	const accountId = getAccountId(token);
 	const headers: Record<string, string> = {
@@ -237,54 +230,402 @@ async function fetchCodexUsage(ctx: ExtensionContext): Promise<string | undefine
 	if (accountId) headers["chatgpt-account-id"] = accountId;
 
 	const response = await fetch(CODEX_USAGE_URL, { headers, signal: ctx.signal });
-	if (response.status === 401 || response.status === 403 || response.status === 404) {
-		ctx.ui.setStatus(STATUS_KEY, undefined);
-		return undefined;
-	}
 	if (!response.ok) return undefined;
 
 	const payload = (await response.json()) as unknown;
-	return formatUsage(parseUsage(payload));
+	return parseUsage(payload);
 }
 
-export default function codexUsageExtension(pi: ExtensionAPI) {
+// ── rendering helpers (pure) ───────────────────────────────────────────────
+
+const R = "\x1b[0m";
+export const c = {
+	dim: "\x1b[38;2;120;120;128m",
+	muted: "\x1b[38;2;160;160;170m",
+	text: "\x1b[38;2;220;220;225m",
+	ok: "\x1b[38;2;126;201;145m",
+	warn: "\x1b[38;2;229;181;72m",
+	bad: "\x1b[38;2;232;111;111m",
+	branch: "\x1b[38;2;174;215;255m",
+	cost: "\x1b[38;2;200;220;200m",
+	sub: "\x1b[38;2;180;200;220m",
+	// Identity palette mirrors packages/async-subagents/extensions/pi/renderers.ts
+	// IDENTITY_PALETTE so a given model/agent name renders with the same hue in
+	// both the footer and the async-subagents cards.
+	id: [
+		"\x1b[38;2;229;145;91m",
+		"\x1b[38;2;199;125;186m",
+		"\x1b[38;2;123;201;123m",
+		"\x1b[38;2;111;169;217m",
+		"\x1b[38;2;155;123;217m",
+		"\x1b[38;2;91;201;181m",
+		"\x1b[38;2;217;195;111m",
+		"\x1b[38;2;217;125;125m",
+	],
+} as const;
+
+export function stripAnsi(s: string): string {
+	return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+export function visWidth(s: string): number {
+	return stripAnsi(s).length;
+}
+
+export function identitySlot(name: string): number {
+	let h = 0;
+	for (let i = 0; i < name.length; i++) h = ((h * 31) + name.charCodeAt(i)) >>> 0;
+	return h % c.id.length;
+}
+
+export function identityColor(name: string): string {
+	return c.id[identitySlot(name)];
+}
+
+export function threshold(pct: number): string {
+	if (pct >= 90) return c.bad;
+	if (pct >= 70) return c.warn;
+	if (pct >= 50) return c.text;
+	return c.dim;
+}
+
+// Codex rate-limit windows: input is REMAINING percent, so the warning
+// thresholds are inverted compared to context.
+export function codexThreshold(remainingPct: number): string {
+	if (remainingPct <= 10) return c.bad;
+	if (remainingPct <= 30) return c.warn;
+	return c.ok;
+}
+
+export function bar(pct: number, width: number, fillColor: string): string {
+	const safePct = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+	const cells = Math.max(0, Math.min(width, Math.round((safePct / 100) * width)));
+	return `${fillColor}${"▰".repeat(cells)}${c.dim}${"▱".repeat(width - cells)}${R}`;
+}
+
+export function formatTokens(n: number): string {
+	if (!Number.isFinite(n) || n < 0) return "0";
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+	if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}k`;
+	return `${Math.round(n)}`;
+}
+
+function truncMid(s: string, max: number): string {
+	if (s.length <= max) return s;
+	if (max <= 1) return s.slice(0, max);
+	const head = Math.ceil((max - 1) / 2);
+	const tail = Math.floor((max - 1) / 2);
+	return `${s.slice(0, head)}…${s.slice(-tail)}`;
+}
+
+function truncEnd(s: string, max: number): string {
+	if (s.length <= max) return s;
+	if (max <= 1) return s.slice(0, max);
+	return `${s.slice(0, max - 1)}…`;
+}
+
+// ── footer state & layout ──────────────────────────────────────────────────
+
+export interface FooterRenderState {
+	cwd: string;
+	branch: string | null;
+	sessionName: string | null;
+	model: string | null;
+	provider: string | null;
+	providerCount: number;
+	thinking: string | null;
+	ctxPct: number;
+	ctxUsed: number;
+	ctxWindow: number;
+	ctxKnown: boolean;
+	cost: number | null;
+	sub: boolean;
+	codex: {
+		primary: number | null;
+		primaryReset: string | null;
+		secondary: number | null;
+		secondaryReset: string | null;
+	} | null;
+}
+
+export interface LayoutWidths {
+	ctxBar: number;
+	codexBar: number;
+}
+
+export function pickLayoutWidths(width: number): LayoutWidths {
+	if (width >= 120) return { ctxBar: 16, codexBar: 10 };
+	if (width >= 80) return { ctxBar: 12, codexBar: 6 };
+	if (width >= 60) return { ctxBar: 8, codexBar: 4 };
+	return { ctxBar: 6, codexBar: 3 };
+}
+
+export function renderTopLine(width: number, s: FooterRenderState): string {
+	// Right side first so we know how much room is left for the left side.
+	let right: string;
+	if (s.model) {
+		const modelColor = identityColor(s.model);
+		const prov = s.providerCount > 1 && s.provider ? `${c.dim}${s.provider}${R}${c.dim} · ${R}` : "";
+		const thinkStr = s.thinking ? `${c.dim}  thinking ${R}${c.text}${s.thinking}${R}` : "";
+		right = `${prov}${modelColor}${s.model}${R}${thinkStr}`;
+	} else {
+		right = `${c.dim}no model${R}`;
+	}
+
+	const branchStr = s.branch ? ` ${c.branch}${s.branch}${R}` : "";
+	const sessStr = s.sessionName ? `${c.dim} • ${s.sessionName}${R}` : "";
+	const plainLeftLen = s.cwd.length + (s.branch ? 1 + s.branch.length : 0) + (s.sessionName ? 3 + s.sessionName.length : 0);
+
+	const availForLeft = width - visWidth(right) - 2;
+	if (plainLeftLen > availForLeft) {
+		const tail = (s.branch ? ` ${s.branch}` : "") + (s.sessionName ? ` • ${s.sessionName}` : "");
+		const cwdMax = Math.max(8, availForLeft - tail.length);
+		const truncCwd = truncMid(s.cwd, cwdMax);
+		const left = `${c.muted}${truncCwd}${R}${branchStr}${sessStr}`;
+		const pad = Math.max(2, width - visWidth(left) - visWidth(right));
+		return `${left}${" ".repeat(pad)}${right}`;
+	}
+
+	const left = `${c.muted}${s.cwd}${R}${branchStr}${sessStr}`;
+	const pad = Math.max(2, width - visWidth(left) - visWidth(right));
+	return `${left}${" ".repeat(pad)}${right}`;
+}
+
+export function ctxSegment(ctxPct: number, ctxUsed: number, ctxWindow: number, barW: number, known: boolean): string {
+	const col = threshold(ctxPct);
+	const label = `${c.dim}ctx${R}`;
+	const pctStr = known ? `${col}${ctxPct.toFixed(1)}%${R}` : `${c.dim}?%${R}`;
+	const usage = `${c.dim}${formatTokens(ctxUsed)}/${formatTokens(ctxWindow)}${R}`;
+	return `${label} ${bar(known ? ctxPct : 0, barW, col)} ${pctStr}  ${usage}`;
+}
+
+export function costSegment(cost: number | null, sub: boolean): string | null {
+	if (cost == null) return null;
+	const formatted = cost < 1 ? cost.toFixed(3) : cost.toFixed(2);
+	const dollar = `${c.cost}$${formatted}${R}`;
+	return sub ? `${dollar} ${c.sub}sub${R}` : dollar;
+}
+
+export function codexWindowSegment(
+	label: string,
+	remainingPct: number | null,
+	resetIn: string | null,
+	barW: number,
+): string | null {
+	if (remainingPct == null) return null;
+	const col = codexThreshold(remainingPct);
+	const resetStr = resetIn ? `${c.dim} in ${resetIn}${R}` : "";
+	return `${c.dim}${label}${R} ${bar(100 - remainingPct, barW, col)} ${col}${Math.round(remainingPct)}%${R}${resetStr}`;
+}
+
+export function renderStatsLine(width: number, s: FooterRenderState): string {
+	const { ctxBar, codexBar } = pickLayoutWidths(width);
+
+	const parts: string[] = [ctxSegment(s.ctxPct, s.ctxUsed, s.ctxWindow, ctxBar, s.ctxKnown)];
+	const costSeg = costSegment(s.cost, s.sub);
+	if (costSeg) parts.push(costSeg);
+
+	if (s.codex) {
+		const p = codexWindowSegment("5h", s.codex.primary, s.codex.primaryReset, codexBar);
+		const sec = codexWindowSegment("wk", s.codex.secondary, s.codex.secondaryReset, codexBar);
+		if (p) parts.push(p);
+		if (sec) parts.push(sec);
+	}
+
+	const gutter = `${c.dim}   ${R}`;
+	let line = parts.join(gutter);
+	while (visWidth(line) > width && parts.length > 1) {
+		parts.pop();
+		line = parts.join(gutter);
+	}
+	if (visWidth(line) > width) {
+		// Last resort: hard truncate the plain text.
+		const plain = stripAnsi(line);
+		line = `${c.dim}${truncEnd(plain, width)}${R}`;
+	}
+	return line;
+}
+
+export function renderFooter(state: FooterRenderState, width: number): string[] {
+	return [renderTopLine(width, state), renderStatsLine(width, state)];
+}
+
+// ── state collection from ExtensionContext ─────────────────────────────────
+
+const TERMINAL_WIDTH_FALLBACK = 80;
+
+function safeColumns(): number {
+	const cols = typeof process !== "undefined" ? process.stdout?.columns : undefined;
+	return typeof cols === "number" && cols > 0 ? cols : TERMINAL_WIDTH_FALLBACK;
+}
+
+function withTilde(p: string): string {
+	const home = process.env.HOME || process.env.USERPROFILE;
+	if (home && p.startsWith(home)) return `~${p.slice(home.length)}`;
+	return p;
+}
+
+function buildCodexState(
+	usage: CodexUsage | undefined,
+	now = Date.now(),
+): FooterRenderState["codex"] {
+	if (!usage) return null;
+	const primary = usage.primary?.remainingPercent;
+	const secondary = usage.secondary?.remainingPercent;
+	if (primary == null && secondary == null) return null;
+	return {
+		primary: primary == null ? null : primary,
+		primaryReset: usage.primary ? formatReset(usage.primary.resetAt, now) ?? null : null,
+		secondary: secondary == null ? null : secondary,
+		secondaryReset: usage.secondary ? formatReset(usage.secondary.resetAt, now) ?? null : null,
+	};
+}
+
+function collectState(
+	ctx: ExtensionContext,
+	footerData: ReadonlyFooterDataProvider,
+	thinkingLevel: string,
+	codexUsage: CodexUsage | undefined,
+): FooterRenderState {
+	let totalCost = 0;
+	for (const entry of ctx.sessionManager.getEntries()) {
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			totalCost += entry.message.usage.cost.total;
+		}
+	}
+
+	const usage = ctx.getContextUsage();
+	const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+	const ctxKnown = usage?.percent != null && usage?.tokens != null;
+	const ctxPct = usage?.percent ?? 0;
+	const ctxUsed = usage?.tokens ?? 0;
+
+	const cwd = withTilde(ctx.cwd);
+	const branch = footerData.getGitBranch();
+	const sessionName = ctx.sessionManager.getSessionName() ?? null;
+
+	const model = ctx.model?.id ?? null;
+	const provider = ctx.model?.provider ?? null;
+	const providerCount = footerData.getAvailableProviderCount();
+	const sub = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
+
+	let thinking: string | null = null;
+	if (ctx.model?.reasoning) {
+		thinking = thinkingLevel && thinkingLevel !== "off" ? thinkingLevel : null;
+	}
+
+	return {
+		cwd,
+		branch,
+		sessionName,
+		model,
+		provider,
+		providerCount,
+		thinking,
+		ctxPct,
+		ctxUsed,
+		ctxWindow: contextWindow,
+		ctxKnown,
+		cost: totalCost > 0 || sub ? totalCost : null,
+		sub,
+		codex: buildCodexState(codexUsage),
+	};
+}
+
+// ── extension entry point ──────────────────────────────────────────────────
+
+export default function codexUsageExtension(pi: ExtensionAPI): void {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let lastRefresh = 0;
 	let inFlight = false;
+	let codexUsage: CodexUsage | undefined;
+	let thinkingLevel: string = pi.getThinkingLevel?.() ?? "off";
+	let tuiRef: TUI | undefined;
+	let footerInstalled = false;
+	let unsubBranch: (() => void) | undefined;
 
-	const refresh = (ctx: ExtensionContext, force = false) => {
+	const requestRender = (): void => {
+		tuiRef?.requestRender();
+	};
+
+	const refresh = (ctx: ExtensionContext, force = false): void => {
 		if (inFlight) return;
 		const now = Date.now();
 		if (!force && now - lastRefresh < MIN_REFRESH_MS) return;
 		lastRefresh = now;
 		inFlight = true;
 		void fetchCodexUsage(ctx)
-			.then((status) => {
-				if (status && ctx.hasUI && isCodexModel(ctx.model)) ctx.ui.setStatus(STATUS_KEY, status);
+			.then((usage) => {
+				if (isCodexModel(ctx.model)) {
+					codexUsage = usage;
+				} else {
+					codexUsage = undefined;
+				}
+				requestRender();
 			})
 			.catch(() => {
-				// Intentionally silent: this is a best-effort footer indicator and must not leak auth details.
+				// Silent: best-effort indicator, must not leak auth details.
 			})
 			.finally(() => {
 				inFlight = false;
 			});
 	};
 
+	const installFooter = (ctx: ExtensionContext): void => {
+		if (footerInstalled || !ctx.hasUI) return;
+		footerInstalled = true;
+
+		ctx.ui.setFooter((tui, _theme: Theme, footerData) => {
+			tuiRef = tui;
+			if (unsubBranch) unsubBranch();
+			unsubBranch = footerData.onBranchChange(() => tui.requestRender());
+
+			const component: Component & { dispose?(): void } = {
+				render(width: number): string[] {
+					const state = collectState(ctx, footerData, thinkingLevel, codexUsage);
+					return renderFooter(state, Math.max(20, width));
+				},
+				invalidate(): void {
+					// No cached state — render rebuilds from ctx each tick.
+				},
+				dispose(): void {
+					if (unsubBranch) {
+						unsubBranch();
+						unsubBranch = undefined;
+					}
+					tuiRef = undefined;
+				},
+			};
+			return component;
+		});
+	};
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (timer) clearInterval(timer);
+		thinkingLevel = pi.getThinkingLevel?.() ?? "off";
+		installFooter(ctx);
 		refresh(ctx, true);
 		timer = setInterval(() => refresh(ctx), POLL_INTERVAL_MS);
 	});
 
 	pi.on("model_select", async (_event, ctx) => {
+		if (!isCodexModel(ctx.model)) codexUsage = undefined;
+		requestRender();
 		refresh(ctx, true);
 	});
 
+	pi.on("thinking_level_select", async (event) => {
+		thinkingLevel = event.level;
+		requestRender();
+	});
+
 	pi.on("turn_end", async (_event, ctx) => {
+		requestRender();
 		refresh(ctx);
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
+		requestRender();
 		refresh(ctx, true);
 	});
 
@@ -293,6 +634,18 @@ export default function codexUsageExtension(pi: ExtensionAPI) {
 			clearInterval(timer);
 			timer = undefined;
 		}
-		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+		if (unsubBranch) {
+			unsubBranch();
+			unsubBranch = undefined;
+		}
+		if (ctx.hasUI) {
+			try {
+				ctx.ui.setFooter(undefined);
+			} catch {
+				// session is already tearing down; ignore.
+			}
+		}
+		footerInstalled = false;
+		tuiRef = undefined;
 	});
 }
