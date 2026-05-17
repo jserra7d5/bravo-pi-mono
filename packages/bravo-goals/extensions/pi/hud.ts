@@ -348,13 +348,26 @@ interface JudgeChipInfo {
 	kind: ChipKind;
 }
 
-function deriveJudgeChip(state: GoalStateView): JudgeChipInfo {
+const JUDGE_FRAMES = ["◐", "◓", "◑", "◒"] as const;
+let judgeFrameCursor = 0;
+
+function nextJudgeFrame(): number {
+	const frame = judgeFrameCursor;
+	judgeFrameCursor = (judgeFrameCursor + 1) % JUDGE_FRAMES.length;
+	return frame;
+}
+
+export function judgeGlyphForFrame(frameIndex: number): string {
+	return JUDGE_FRAMES[((frameIndex % JUDGE_FRAMES.length) + JUDGE_FRAMES.length) % JUDGE_FRAMES.length]!;
+}
+
+function deriveJudgeChip(state: GoalStateView, frameIndex = 0): JudgeChipInfo {
 	const activeTask = state.tasks.find((t) => t.id === state.active_task);
 	const verdict = state.judge?.last_verdict;
 	const isJudgeActive = state.judge?.active === true;
 
 	if (activeTask?.status === "awaiting_judge" || activeTask?.status === "judging" || isJudgeActive) {
-		return { show: true, text: "◐ judging", kind: "active" };
+		return { show: true, text: `${judgeGlyphForFrame(frameIndex)} judging`, kind: "active" };
 	}
 	if ((verdict === "fail" || verdict === "needs_more_evidence") && activeTask) {
 		return { show: true, text: "✗ judge fail", kind: "fail" };
@@ -388,14 +401,14 @@ function deriveCaption(state: GoalStateView, gateStates: ActiveGate): string | n
 	return null;
 }
 
-function renderFull(state: GoalStateView, width: number): string[] {
+function renderFull(state: GoalStateView, width: number, frameIndex = 0): string[] {
 	const ch = mkChrome(width);
 	const done = state.progress?.completed_tasks ?? 0;
 	const total = state.progress?.total_tasks ?? state.tasks.length;
 	const percent = total > 0 ? Math.round((done / total) * 100) : 0;
 
 	const gateStates = deriveActiveGate(state);
-	const judgeChip = deriveJudgeChip(state);
+	const judgeChip = deriveJudgeChip(state, frameIndex);
 	const caption = deriveCaption(state, gateStates);
 
 	const titleText = C.bold + C.gold + state.goal.title + C.reset;
@@ -454,7 +467,7 @@ function renderFull(state: GoalStateView, width: number): string[] {
 	return lines;
 }
 
-function renderCompact(state: GoalStateView, width: number): string[] {
+function renderCompact(state: GoalStateView, width: number, frameIndex = 0): string[] {
 	const ch = mkChrome(width);
 	const gateStates = deriveActiveGate(state);
 	const caption = deriveCaption(state, gateStates);
@@ -467,23 +480,23 @@ function renderCompact(state: GoalStateView, width: number): string[] {
 	return [ch.top(), titleRow, inlineRow, ch.bot()];
 }
 
-function renderMinimal(state: GoalStateView, width: number): string[] {
+function renderMinimal(state: GoalStateView, width: number, frameIndex = 0): string[] {
 	const gateStates = deriveActiveGate(state);
 	const inner = C.bold + C.gold + state.goal.title + C.reset + " " + gatesCompact(gateStates);
 	return [truncAnsi(inner, width)];
 }
 
 /** Select and render the appropriate layout for the given terminal width. */
-export function pickLayout(state: GoalStateView, width: number): string[] {
-	if (width >= 56) return renderFull(state, width);
-	if (width >= 36) return renderCompact(state, width);
-	return renderMinimal(state, width);
+export function pickLayout(state: GoalStateView, width: number, frameIndex = 0): string[] {
+	if (width >= 56) return renderFull(state, width, frameIndex);
+	if (width >= 36) return renderCompact(state, width, frameIndex);
+	return renderMinimal(state, width, frameIndex);
 }
 
 /**
  * v2 status line:  <gold bold title>  ●◉○  <caption>
  */
-export function renderStatusLine(snapshot?: HudSnapshot): string | undefined {
+export function renderStatusLine(snapshot?: HudSnapshot, frameIndex = 0): string | undefined {
 	if (!snapshot) return undefined;
 	const { state } = snapshot;
 	const gateStates = deriveActiveGate(state);
@@ -508,14 +521,14 @@ export function renderStatusLine(snapshot?: HudSnapshot): string | undefined {
 	return `${title}  ${dots}  ${caption}`;
 }
 
-export function renderHud(snapshot?: HudSnapshot): string[] {
+export function renderHud(snapshot?: HudSnapshot, frameIndex = nextJudgeFrame()): string[] {
 	if (!snapshot) return [];
 	// Pi wraps string-array widgets in Text(line, 1, 0), leaving two cells
 	// for horizontal padding. Keep our pre-rendered lines inside that content
 	// width so box chrome does not wrap in the actual TUI.
 	const raw = process.stdout.columns ?? 66;
 	const width = Math.max(4, Math.min(96, raw - 2));
-	return pickLayout(snapshot.state, width);
+	return pickLayout(snapshot.state, width, frameIndex);
 }
 
 export async function readGoalState(goalPath: string): Promise<GoalStateView | undefined> {
@@ -556,8 +569,9 @@ export async function updateHud(ctx: ContextLike): Promise<void> {
 	const ui = ctx.ui;
 	if (!ui) return;
 	const snapshot = await snapshotForSession(ctx);
-	ui.setStatus?.(HUD_STATUS_KEY, renderStatusLine(snapshot));
-	const lines = renderHud(snapshot);
+	const frameIndex = nextJudgeFrame();
+	ui.setStatus?.(HUD_STATUS_KEY, renderStatusLine(snapshot, frameIndex));
+	const lines = renderHud(snapshot, frameIndex);
 	ui.setWidget?.(HUD_WIDGET_KEY, lines.length ? lines : undefined, { placement: "belowEditor" });
 }
 

@@ -7,6 +7,7 @@ import {
 	pickLayout,
 	renderHud,
 	renderStatusLine,
+	judgeGlyphForFrame,
 	type GoalStateView,
 	type HudSnapshot,
 } from "../extensions/pi/hud.js";
@@ -142,7 +143,7 @@ test("layout state 1: tasks in progress with judge running shows judging chip", 
 	const lines = pickLayout(snap.state, 64);
 	const joined = lines.join("\n");
 	assert.match(joined, /Test Goal/);
-	assert.match(joined, /◐ judging/);
+	assert.match(joined, /[◐◓◑◒] judging/);
 	assert.match(joined, /3\/9/);
 	// Tasks gate should be active (◉), audit and verify pending (○)
 	assert.match(joined, /tasks/);
@@ -172,6 +173,14 @@ test("layout state 2: all tasks done awaiting final audit shows audit gate activ
 	const statusLine = renderStatusLine(snap);
 	assert.ok(statusLine);
 	assert.match(statusLine, /awaiting final audit/);
+});
+
+test("judge glyph cycles deterministically by frame", () => {
+	assert.equal(judgeGlyphForFrame(0), "◐");
+	assert.equal(judgeGlyphForFrame(1), "◓");
+	assert.equal(judgeGlyphForFrame(2), "◑");
+	assert.equal(judgeGlyphForFrame(3), "◒");
+	assert.equal(judgeGlyphForFrame(4), "◐");
 });
 
 // State 3: final audit passed, awaiting /goal verify

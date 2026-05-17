@@ -663,7 +663,7 @@ test("HUD shows judging chip for awaiting_judge active task", () => {
 	const lines = renderHud(awaiting);
 	const joined = lines.join("\n");
 	// The task row should include the judging chip since status is awaiting_judge
-	assert.match(joined, /◐ judging/);
+	assert.match(joined, /[◐◓◑◒] judging/);
 });
 
 test("judge_finish outside Judge run teaches workers to use task_receipt_ready", async () => {
