@@ -5,6 +5,7 @@ import { NAME_PACKS, readNamePackSelection, writeNamePackSelection, type NamePac
 import { createRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import type { RootSessionIdentity } from "../../src/types.js";
+import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from "./compactionReminder.js";
 import { updateLiveWidget } from "./liveWidget.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessage, type WakeupMessage } from "./renderers.js";
@@ -162,6 +163,11 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
     return new Text(text, 0, 0);
   });
 
+  pi.registerMessageRenderer(ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE, (message: unknown) => {
+    const content = (message as { content?: unknown })?.content;
+    return new Text(typeof content === "string" ? content : "", 0, 0);
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     stopTimers();
     ensureRoot(cwdOf(ctx));
@@ -170,6 +176,18 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     stopTimers(currentCtx);
+  });
+
+  pi.on("session_compact", async (_event, ctx) => {
+    const cwd = cwdOf(ctx);
+    const identity = ensureRoot(cwd);
+    const message = buildCompactionReminder({
+      store: new RunStore({ cwd }),
+      parentRunId: identity.parentRunId,
+      rootSessionId: identity.rootSessionId,
+    });
+    if (!message) return;
+    pi.sendMessage(message, { deliverAs: "steer" });
   });
 
   pi.on("before_agent_start", async (event) => {
