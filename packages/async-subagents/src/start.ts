@@ -3,16 +3,16 @@ import { existsSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveAgentDefinition } from "./agentDefinitions.js";
-import { buildPiCommand, writeLaunchLog, type PiCommand } from "./piHarness.js";
+import { buildPiCommand, childControlEventTool, childControlExtensionPath, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
 import { assemblePrompt } from "./promptAssembly.js";
+import { finalizeTerminalRun } from "./lifecycle.js";
+import { branchPiSession, type BranchPiSession, type ParentPiSessionRef } from "./piSession.js";
 import { createRootSession, readRootSession } from "./rootSession.js";
 import { RunStore } from "./runStore.js";
 import { createInitialStatus } from "./status.js";
 import { runSupervisor, type SupervisorFakeInput, type SupervisorInput } from "./supervisor.js";
 import { waitSubagents } from "./wait.js";
-import type { SubagentStartResult, SubagentWaitResult, TerminalRunState } from "./types.js";
-import { createRunResult } from "./result.js";
-import { createRunEvent } from "./events.js";
+import type { ContextPolicy, SessionPolicy, SubagentStartResult, SubagentWaitResult, TerminalRunState } from "./types.js";
 
 export interface StartFakeChildInput {
   mode: "child";
@@ -41,6 +41,11 @@ export interface StartSubagentInput {
   waitUntil?: "interesting" | "terminal" | "result" | "event";
   waitTimeoutMs?: number;
   pollIntervalMs?: number;
+  context?: ContextPolicy;
+  session?: SessionPolicy;
+  allowFreshFallback?: boolean;
+  parentPiSessionRef?: ParentPiSessionRef | null;
+  branchSession?: BranchPiSession;
   piBin?: string;
   env?: Record<string, string>;
   fake?: StartFakeImmediateInput | StartFakeChildInput;
@@ -102,20 +107,16 @@ function writeSupervisorInput(runDir: string, input: SupervisorInput): string {
 }
 
 function writeLauncherFailure(store: RunStore, input: SupervisorInput, message: string): void {
-  const status = store.readStatus(input.runId);
-  const result = createRunResult({
+  finalizeTerminalRun(store, {
     runId: input.runId,
     parentRunId: input.parentRunId,
     agentName: input.agentName,
     state: "failed",
-    startedAt: status.startedAt,
+    writerRole: "launcher",
     summary: "Supervisor launch failed",
     body: message,
     error: { code: "SUPERVISOR_LAUNCH_FAILED", message },
   });
-  store.writeResult(result);
-  store.appendEvent(input.runId, createRunEvent({ sequence: 2, runId: input.runId, parentRunId: input.parentRunId, type: "result", summary: result.summary, body: result.body, wake: true }));
-  store.writeStatus({ ...status, state: "failed", resultReady: true, updatedAt: result.createdAt, summary: result.summary, error: result.error });
 }
 
 function delay(ms: number): Promise<void> {
@@ -142,12 +143,27 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   const store = new RunStore({ cwd, runRoot: input.runRoot });
   const root = resolveRootIdentity(input, cwd);
   const definition = resolveAgentDefinition(input.agent, { cwd, env: process.env });
+  const requestedContextPolicy = input.context ?? definition.context ?? "fresh";
+  const requestedSessionPolicy = input.session ?? definition.session ?? "record";
   const { runId, paths } = store.createRunDirectory({
     cwd,
     parentRunId: root.parentRunId,
     rootRunId: root.rootRunId,
     rootSessionId: root.rootSessionId,
+    contextPolicy: requestedContextPolicy,
+    sessionPolicy: requestedSessionPolicy,
   });
+  let contextPolicy = requestedContextPolicy;
+  const sessionPolicy = requestedSessionPolicy;
+  const requestedPiSessionPath = sessionPolicy === "record" ? paths.requestedPiSessionPath : undefined;
+  let piSessionPath = sessionPolicy === "record" ? paths.requestedPiSessionPath : undefined;
+  let forkSourceSessionFile: string | undefined;
+  let forkSourceLeafId: string | undefined;
+  let forkFallback: { allowed: boolean; used: boolean; reason?: string } | null = null;
+
+  const runtimeBuiltinTools = [childControlEventTool];
+  const runtimeExtensionPaths = [childControlExtensionPath];
+  const launchLogPath = join(paths.logsDir, "launch.json");
 
   const initialStatus = createInitialStatus({
     runId,
@@ -158,15 +174,103 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     agentSource: definition.source,
     definitionPath: definition.definitionPath,
     mode: definition.mode,
+    contextPolicy,
+    sessionPolicy,
+    piSessionPath,
+    requestedPiSessionPath,
+    forkFallback,
+    userBuiltinTools: definition.tools,
+    runtimeBuiltinTools,
+    runtimeExtensionPaths,
+    launchLogPath,
+    inboxPath: paths.inboxPath,
     cwd,
     state: "queued",
   });
   store.writeStatus(initialStatus);
 
+  const failBeforeLaunch = (code: string, message: string, details?: unknown): SubagentStartResult => {
+    const result = finalizeTerminalRun(store, {
+      runId,
+      parentRunId: root.parentRunId,
+      agentName: definition.name,
+      state: "failed",
+      writerRole: "launcher",
+      summary: message,
+      body: message,
+      error: { code, message, details },
+    });
+    return {
+      runId,
+      runDir: paths.runDir,
+      agentName: definition.name,
+      state: result.state,
+      started: false,
+      waited: false,
+      contextPolicy,
+      sessionPolicy,
+      piSessionPath,
+      requestedPiSessionPath,
+      next: [{ tool: "subagent_result", args: { runId } }],
+    };
+  };
+
+  if (requestedContextPolicy === "fork" && sessionPolicy !== "record") {
+    return failBeforeLaunch("INVALID_SESSION_POLICY", "context: fork requires session: record", { context: requestedContextPolicy, session: sessionPolicy });
+  }
+
+  if (requestedContextPolicy === "fork") {
+    const ref = input.parentPiSessionRef;
+    if (!ref) {
+      if (!input.allowFreshFallback) {
+        return failBeforeLaunch("PARENT_PI_SESSION_UNAVAILABLE", "context: fork requires parent Pi session file and leaf id", { allowFreshFallback: false });
+      }
+      contextPolicy = "fresh";
+      forkFallback = { allowed: true, used: true, reason: "parent Pi session reference unavailable" };
+    } else {
+      forkSourceSessionFile = ref.sessionFile;
+      forkSourceLeafId = ref.leafId;
+      try {
+        piSessionPath = (input.branchSession ?? branchPiSession)({
+          parentSessionFile: ref.sessionFile,
+          leafId: ref.leafId,
+          piSessionDir: paths.piSessionDir,
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (!input.allowFreshFallback) {
+          const failedFork = store.readStatus(runId);
+          store.writeStatus({
+            ...failedFork,
+            forkSourceSessionFile,
+            forkSourceLeafId,
+            updatedAt: new Date().toISOString(),
+          });
+          return failBeforeLaunch("PI_SESSION_BRANCH_FAILED", "failed to create branched Pi session", { reason, parentSessionFile: ref.sessionFile, leafId: ref.leafId });
+        }
+        contextPolicy = "fresh";
+        piSessionPath = requestedPiSessionPath;
+        forkFallback = { allowed: true, used: true, reason };
+      }
+    }
+    const branched = store.readStatus(runId);
+    store.writeStatus({
+      ...branched,
+      contextPolicy,
+      piSessionPath,
+      requestedPiSessionPath,
+      forkSourceSessionFile,
+      forkSourceLeafId,
+      forkFallback,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
   const prompt = assemblePrompt({
     definition,
     runPaths: paths,
     task: input.task,
+    contextPolicy,
     cwd,
     parentRunId: root.parentRunId,
     rootRunId: root.rootRunId,
@@ -180,14 +284,41 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     taskPath: prompt.taskPath,
     runDir: paths.runDir,
     cwd,
-    tools: definition.tools,
+    sessionPolicy,
+    piSessionPath,
+    requestedPiSessionPath,
+    userBuiltinTools: definition.tools,
+    runtimeBuiltinTools,
+    runtimeExtensionPaths,
     skills: prompt.skills,
     extensions: prompt.extensions,
     model: prompt.model,
+    contextPolicy,
+    forkSourceSessionFile,
+    forkSourceLeafId,
+    forkFallback,
+    rootSessionId: root.rootSessionId,
+    parentRunId: root.parentRunId,
     extraEnv: input.env,
   });
   const command = input.fake?.mode === "child" ? fakeChildCommand(input.fake, cwd) : piCommand;
-  writeLaunchLog(paths.runDir, command);
+  writeLaunchLogWithMetadata(paths.runDir, command, {
+    model: prompt.model,
+    userBuiltinTools: definition.tools,
+    runtimeBuiltinTools,
+    runtimeExtensionPaths,
+    skills: prompt.skills,
+    extensions: prompt.extensions,
+    contextPolicy,
+    sessionPolicy,
+    requestedPiSessionPath,
+    piSessionPath,
+    forkSourceSessionFile,
+    forkSourceLeafId,
+    forkFallback,
+    rootSessionId: root.rootSessionId,
+    parentRunId: root.parentRunId,
+  });
 
   const supervisorInput: SupervisorInput = {
     runId,
@@ -232,6 +363,10 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     started: status.state === "running" || terminal,
     waited: Boolean(waitResult),
     waitResult,
+    contextPolicy: status.contextPolicy,
+    sessionPolicy: status.sessionPolicy,
+    piSessionPath: status.piSessionPath,
+    requestedPiSessionPath: status.requestedPiSessionPath,
     next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [{ tool: "subagent_wait", args: { runIds: [runId] } }],
   };
 }

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { asyncSubagentsHome } from "./config.js";
 import { SubagentError } from "./errors.js";
 import { parseFrontmatter } from "./frontmatter.js";
-import type { AgentDefinitionSource, AgentMode, CwdPolicy, ResultFormat } from "./types.js";
+import type { AgentDefinitionSource, AgentMode, ContextPolicy, CwdPolicy, ResultFormat, SessionPolicy } from "./types.js";
 
 export interface MarkdownAgentDefinition {
   name?: string;
@@ -15,6 +15,8 @@ export interface MarkdownAgentDefinition {
   extensions?: string[];
   includes?: string[];
   mode?: AgentMode;
+  context?: ContextPolicy;
+  session?: SessionPolicy;
   maxRunMs?: number;
   maxSubagentDepth?: number;
   cwdPolicy?: CwdPolicy;
@@ -35,6 +37,8 @@ export interface ResolvedAgentDefinition extends MarkdownAgentDefinition {
   source: AgentDefinitionSource;
   definitionPath: string;
   mode: AgentMode;
+  context: ContextPolicy;
+  session: SessionPolicy;
   cwdPolicy: CwdPolicy;
   resultFormat: ResultFormat;
   tools: string[];
@@ -128,6 +132,8 @@ export function parseAgentDefinitionFile(path: string, source: AgentDefinitionSo
     extensions,
     includes: stringArray(parsed.data.includes, "includes", path),
     mode: assertEnum(parsed.data.mode, "mode", ["oneshot", "interactive"] as const, "oneshot", path),
+    context: assertEnum(parsed.data.context, "context", ["fresh", "fork"] as const, "fresh", path),
+    session: assertEnum(parsed.data.session, "session", ["record", "none"] as const, "record", path),
     maxRunMs: optionalNumber(parsed.data.maxRunMs, "maxRunMs", path),
     maxSubagentDepth: optionalNumber(parsed.data.maxSubagentDepth, "maxSubagentDepth", path),
     cwdPolicy: assertEnum(parsed.data.cwdPolicy, "cwdPolicy", ["inherit", "explicit", "sandbox"] as const, "inherit", path),

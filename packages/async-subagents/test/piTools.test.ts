@@ -55,10 +55,64 @@ test("subagent_message appends inbox messages and waits for child-control acknow
   const built = tools(w.identity);
   const result = await built.subagent_message.execute("call", { runId: w.runId, body: "Continue" }, undefined, undefined, { cwd: w.root });
 
-  assert.equal(result.isError, undefined);
+  assert.equal(result.isError, true);
   assert.equal(result.details.appended, true);
   assert.equal(result.details.liveDelivered, false);
   assert.equal((result.details.unsupported as { code?: string }).code, "LIVE_MESSAGE_UNSUPPORTED");
+});
+
+test("subagent_message can append without required acknowledgement", async () => {
+  const w = workspace();
+  const built = tools(w.identity);
+  const result = await built.subagent_message.execute("call", { runId: w.runId, body: "Continue", requiresAck: false }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.details.appended, true);
+  assert.equal(result.details.liveDelivered, false);
+});
+
+test("subagent_message rejects lifecycle controls", async () => {
+  const w = workspace();
+  const built = tools(w.identity);
+  const result = await built.subagent_message.execute("call", { runId: w.runId, type: "cancel", body: "Stop" }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "LIFECYCLE_MESSAGE_REJECTED");
+});
+
+test("subagent_interrupt cancel writes terminal cancelled result", async () => {
+  const w = workspace();
+  const built = tools(w.identity);
+  const result = await built.subagent_interrupt.execute("call", { runId: w.runId, action: "cancel", reason: "Wrong direction" }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.details.state, "cancelled");
+  const store = new RunStore({ cwd: w.root });
+  assert.equal(store.readStatus(w.runId).state, "cancelled");
+  assert.equal(store.readResult(w.runId)?.state, "cancelled");
+  assert.equal(store.readInbox(w.runId).records.at(-1)?.type, "cancel");
+});
+
+test("subagent_continue rejects non-paused runs", async () => {
+  const w = workspace();
+  const built = tools(w.identity);
+  const result = await built.subagent_continue.execute("call", { runId: w.runId, body: "Use the narrowed scope" }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "RUN_NOT_PAUSED");
+});
+
+test("subagent_continue records running state even when required ack fails", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const status = store.readStatus(w.runId);
+  store.writeStatus({ ...status, state: "paused", pid: process.pid, processHealth: "alive" });
+  const built = tools(w.identity);
+  const result = await built.subagent_continue.execute("call", { runId: w.runId }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.state, "running");
+  assert.equal(store.readStatus(w.runId).state, "running");
 });
 
 test("subagent_result can recover by runDir", async () => {
@@ -74,4 +128,17 @@ test("subagent_result can recover by runDir", async () => {
   assert.equal(result.isError, undefined);
   assert.equal(result.details.body, "Recovered result");
   assert.equal(result.details.runDir, runDir);
+});
+
+test("subagent_status reports result and status mismatches", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", body: "Done" }));
+
+  const built = tools(w.identity);
+  const result = await built.subagent_status.execute("call", { runIds: [w.runId] }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, undefined);
+  const row = (result.details.rows as Array<{ diagnostics?: string[] }>)[0];
+  assert.ok(row?.diagnostics?.includes("result exists but status is non-terminal"));
 });

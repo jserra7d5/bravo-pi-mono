@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { StreamMonitorManager } from "../stream/stream-manager.js";
 import { NotFoundError } from "../errors.js";

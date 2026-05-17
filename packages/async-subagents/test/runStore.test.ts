@@ -26,6 +26,8 @@ test("RunStore creates durable run layout and leaves result absent until complet
   assert.ok(existsSync(created.paths.resultPath) === false);
   assert.ok(existsSync(created.paths.artifactsDir));
   assert.ok(existsSync(created.paths.logsDir));
+  assert.ok(existsSync(created.paths.piSessionDir));
+  assert.equal(created.paths.requestedPiSessionPath, join(created.paths.runDir, "pi-session", "session.jsonl"));
   assert.equal(store.listDirectChildren("root_a").length, 1);
 });
 

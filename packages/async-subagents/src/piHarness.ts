@@ -3,6 +3,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { atomicWriteJson } from "./jsonl.js";
+import type { ContextPolicy, SessionPolicy } from "./types.js";
 
 export interface BuildPiCommandInput {
   piBin?: string;
@@ -10,10 +11,21 @@ export interface BuildPiCommandInput {
   taskPath: string;
   runDir: string;
   cwd: string;
-  tools: string[];
+  sessionPolicy: SessionPolicy;
+  piSessionPath?: string;
+  requestedPiSessionPath?: string;
+  userBuiltinTools: string[];
+  runtimeBuiltinTools?: string[];
+  runtimeExtensionPaths?: string[];
   skills: string[];
   extensions: string[];
   model?: string;
+  contextPolicy?: ContextPolicy;
+  forkSourceSessionFile?: string;
+  forkSourceLeafId?: string;
+  forkFallback?: { allowed: boolean; used: boolean; reason?: string } | null;
+  rootSessionId?: string;
+  parentRunId?: string;
   useAtFilePrompt?: boolean;
   extraEnv?: Record<string, string>;
 }
@@ -41,19 +53,23 @@ function findPackageRoot(start: string): string {
 export const childControlExtensionPath = join(findPackageRoot(here), "extensions", "child-control");
 
 export function buildPiCommand(input: BuildPiCommandInput): PiCommand {
-  const toolAllowlist = [...new Set([...input.tools, childControlEventTool])];
+  const runtimeBuiltinTools = input.runtimeBuiltinTools ?? [childControlEventTool];
+  const runtimeExtensionPaths = input.runtimeExtensionPaths ?? [childControlExtensionPath];
+  const toolAllowlist = [...new Set([...input.userBuiltinTools, ...runtimeBuiltinTools])];
   const args = [
-    "--no-session",
+    ...(input.sessionPolicy === "record" ? ["--session", input.piSessionPath ?? input.requestedPiSessionPath ?? join(input.runDir, "pi-session", "session.jsonl")] : ["--no-session"]),
     "--no-context-files",
     "--no-skills",
     "--no-prompt-templates",
     "--no-extensions",
+    "--append-system-prompt",
+    "",
     "--system-prompt",
     input.systemPath,
   ];
   args.push("--tools", toolAllowlist.join(","));
   for (const skill of input.skills) args.push("--skill", skill);
-  for (const extension of [...input.extensions, childControlExtensionPath]) args.push("-e", extension);
+  for (const extension of [...input.extensions, ...runtimeExtensionPaths]) args.push("-e", extension);
   if (input.model) args.push("--model", input.model);
   args.push("--mode", "text", "-p", input.useAtFilePrompt === false ? input.taskPath : `@${input.taskPath}`);
 
@@ -66,6 +82,10 @@ export function buildPiCommand(input: BuildPiCommandInput): PiCommand {
 }
 
 export function writeLaunchLog(runDir: string, command: PiCommand): void {
+  writeLaunchLogWithMetadata(runDir, command, {});
+}
+
+export function writeLaunchLogWithMetadata(runDir: string, command: PiCommand, metadata: Record<string, unknown>): string {
   const path = resolve(runDir, "logs", "launch.json");
   mkdirSync(dirname(path), { recursive: true });
   atomicWriteJson(path, {
@@ -74,5 +94,7 @@ export function writeLaunchLog(runDir: string, command: PiCommand): void {
     args: command.args,
     cwd: command.cwd,
     env: Object.fromEntries(Object.entries(command.env).map(([key, value]) => [key, key.includes("TOKEN") || key.includes("SECRET") ? "<redacted>" : value])),
+    ...metadata,
   });
+  return path;
 }

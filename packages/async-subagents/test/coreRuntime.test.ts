@@ -10,6 +10,7 @@ import { RunStore } from "../src/runStore.js";
 import { createRunEvent } from "../src/events.js";
 import { createInitialStatus, readSubagentStatus, updateRunStatus } from "../src/status.js";
 import { waitOnce, waitSubagents } from "../src/wait.js";
+import { finalizeTerminalRun } from "../src/lifecycle.js";
 
 function workspace() {
   const root = mkdtempSync(join(tmpdir(), "async-subagents-core-"));
@@ -60,6 +61,9 @@ test("startSubagent drives a detached fake child lifecycle", async () => {
   });
 
   assert.equal(started.agentName, "scout");
+  assert.equal(started.contextPolicy, "fresh");
+  assert.equal(started.sessionPolicy, "record");
+  assert.equal(started.piSessionPath, join(started.runDir, "pi-session", "session.jsonl"));
   assert.equal(started.waited, false);
   assert.ok(existsSync(join(started.runDir, "logs", "launch.json")));
 
@@ -69,6 +73,96 @@ test("startSubagent drives a detached fake child lifecycle", async () => {
   assert.equal(waited.results[0]?.state, "completed");
   assert.match(waited.results[0]?.body ?? "", /Fake child completed/);
   assert.equal(store.readStatus(started.runId).state, "completed");
+  assert.equal(store.readStatus(started.runId).piSessionPath, join(started.runDir, "pi-session", "session.jsonl"));
+  assert.equal(store.readResult(started.runId)?.piSessionPath, join(started.runDir, "pi-session", "session.jsonl"));
+});
+
+test("startSubagent can explicitly opt out of Pi session recording", async () => {
+  const w = workspace();
+  const started = await startSubagent({
+    agent: "scout",
+    task: "No session",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    session: "none",
+    fake: { mode: "immediate", body: "No session done" },
+  });
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  assert.equal(started.sessionPolicy, "none");
+  assert.equal(started.piSessionPath, undefined);
+  assert.equal(store.readStatus(started.runId).sessionPolicy, "none");
+  assert.equal(store.readResult(started.runId)?.sessionPolicy, "none");
+});
+
+test("context fork fails clearly without a parent Pi session reference", async () => {
+  const w = workspace();
+  const started = await startSubagent({
+    agent: "scout",
+    task: "Fork without parent",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    context: "fork",
+    fake: { mode: "immediate", body: "should not run" },
+  });
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const result = store.readResult(started.runId);
+  assert.equal(started.state, "failed");
+  assert.equal(result?.error?.code, "PARENT_PI_SESSION_UNAVAILABLE");
+});
+
+test("context fork uses branch adapter returned path as actual Pi session path", async () => {
+  const w = workspace();
+  const branchPath = join(w.root, ".subagents", "runs", "generated-fork.jsonl");
+  const calls: unknown[] = [];
+  const started = await startSubagent({
+    agent: "scout",
+    task: "Fork with branch",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    context: "fork",
+    parentPiSessionRef: { sessionFile: "/parent/session.jsonl", leafId: "leaf_1" },
+    branchSession(input) {
+      calls.push(input);
+      return branchPath;
+    },
+    fake: { mode: "immediate", body: "Forked done" },
+  });
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const status = store.readStatus(started.runId);
+  assert.equal(calls.length, 1);
+  assert.equal(status.contextPolicy, "fork");
+  assert.equal(status.forkSourceSessionFile, "/parent/session.jsonl");
+  assert.equal(status.forkSourceLeafId, "leaf_1");
+  assert.equal(status.piSessionPath, branchPath);
+  assert.equal(store.readResult(started.runId)?.piSessionPath, branchPath);
+  assert.equal(store.listDirectChildren("root_test").filter((record) => record.runId === started.runId).length, 1);
+});
+
+test("context fork only falls back to fresh when explicitly allowed", async () => {
+  const w = workspace();
+  const started = await startSubagent({
+    agent: "scout",
+    task: "Fork fallback",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    context: "fork",
+    allowFreshFallback: true,
+    parentPiSessionRef: { sessionFile: "/parent/session.jsonl", leafId: "leaf_1" },
+    branchSession() {
+      throw new Error("branch unavailable");
+    },
+    fake: { mode: "immediate", body: "Fallback done" },
+  });
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const status = store.readStatus(started.runId);
+  assert.equal(status.contextPolicy, "fresh");
+  assert.equal(status.forkFallback?.used, true);
+  assert.equal(status.piSessionPath, join(started.runDir, "pi-session", "session.jsonl"));
+  assert.equal(store.readResult(started.runId)?.forkFallback?.reason, "branch unavailable");
 });
 
 test("startSubagent wait mode uses a real default wait timeout", async () => {
@@ -111,6 +205,28 @@ test("supervisor writes result before terminal status and terminal event", async
   assert.equal(result?.body, "Immediate body");
   assert.deepEqual(events, ["started", "result", "completed"]);
   assert.ok(existsSync(join(started.runDir, "result.json")));
+});
+
+test("terminal finalization preserves an existing result when status is stale", () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const runId = createStoredRun(store, w.root, "root_test");
+  const original = createRunResult({ runId, parentRunId: "root_test", agentName: "scout", state: "cancelled", summary: "Cancelled first" });
+  store.writeResult(original);
+
+  const finalized = finalizeTerminalRun(store, {
+    runId,
+    parentRunId: "root_test",
+    agentName: "scout",
+    state: "failed",
+    writerRole: "child-runtime",
+    summary: "Late failure",
+  });
+
+  assert.equal(finalized.state, "cancelled");
+  assert.equal(finalized.createdAt, original.createdAt);
+  assert.equal(store.readStatus(runId).state, "cancelled");
+  assert.deepEqual(store.readEvents(runId).records.map((event) => event.type), []);
 });
 
 test("spawn failure still records a terminal result after creating the run directory", async () => {

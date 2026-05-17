@@ -1,5 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { acquireRootSessionLease } from "../../src/leases.js";
 import { createRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";

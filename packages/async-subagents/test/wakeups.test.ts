@@ -50,7 +50,7 @@ test("pollWakeups requires the owner lease and dedupes terminal results", () => 
   const first = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" });
   assert.equal(first.length, 1);
   assert.equal(first[0]?.runId, runId);
-  assert.match(first[0]?.deliveryKey ?? "", /^result:/);
+  assert.match(first[0]?.deliveryKey ?? "", /^terminal:/);
 
   const second = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" });
   assert.equal(second.length, 0);
@@ -90,5 +90,15 @@ test("markWakeupHandled records handled delivery metadata", () => {
   assert.equal(pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" }).length, 1);
 
   markWakeupHandled(store, "root_test", runId);
+  assert.equal(pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" }).length, 0);
+});
+
+test("markWakeupHandled suppresses terminal result before watcher delivery", () => {
+  const { root, store } = workspace();
+  const runId = createCompletedRun(store, root, "root_test");
+  acquireRootSessionLease({ cwd: root, rootSessionId: "root_test", ownerId: "owner_a", ttlMs: 10_000 });
+
+  markWakeupHandled(store, "root_test", runId);
+
   assert.equal(pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" }).length, 0);
 });

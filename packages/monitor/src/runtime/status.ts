@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { JsonlMonitorStore } from "../store/jsonl-store.js";
 import type { AttentionDelivery, MonitorRecord, MonitorResult } from "../schema/types.js";
 import { computeStatusSummary, renderMonitorStatus } from "../tui/status.js";

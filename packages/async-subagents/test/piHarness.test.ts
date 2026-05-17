@@ -11,18 +11,39 @@ test("buildPiCommand disables ambient context and allows only the control tool w
     taskPath: "/run/artifacts/task.md",
     runDir: "/run",
     cwd: "/repo",
-    tools: [],
+    sessionPolicy: "record",
+    piSessionPath: "/run/pi-session/session.jsonl",
+    requestedPiSessionPath: "/run/pi-session/session.jsonl",
+    userBuiltinTools: [],
     skills: [],
     extensions: [],
   });
   assert.equal(command.command, "pi");
-  for (const flag of ["--no-session", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-extensions", "--system-prompt", "--tools"]) {
+  for (const flag of ["--session", "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-extensions", "--append-system-prompt", "--system-prompt", "--tools"]) {
     assert.ok(command.args.includes(flag), `${flag} missing`);
   }
+  assert.deepEqual(command.args.slice(command.args.indexOf("--session"), command.args.indexOf("--session") + 2), ["--session", "/run/pi-session/session.jsonl"]);
+  assert.deepEqual(command.args.slice(command.args.indexOf("--append-system-prompt"), command.args.indexOf("--append-system-prompt") + 2), ["--append-system-prompt", ""]);
   assert.equal(command.args.includes("--no-tools"), false);
+  assert.equal(command.args.includes("--no-session"), false);
   assert.deepEqual(command.args.slice(command.args.indexOf("--tools"), command.args.indexOf("--tools") + 2), ["--tools", childControlEventTool]);
   assert.ok(command.args.includes(childControlExtensionPath));
   assert.ok(command.args.includes("@/run/artifacts/task.md"));
+});
+
+test("buildPiCommand supports explicit session opt-out", () => {
+  const command = buildPiCommand({
+    systemPath: "/run/artifacts/system.md",
+    taskPath: "/run/artifacts/task.md",
+    runDir: "/run",
+    cwd: "/repo",
+    sessionPolicy: "none",
+    userBuiltinTools: [],
+    skills: [],
+    extensions: [],
+  });
+  assert.ok(command.args.includes("--no-session"));
+  assert.equal(command.args.includes("--session"), false);
 });
 
 test("buildPiCommand passes declared tools, skills, extensions, and model explicitly", () => {
@@ -31,7 +52,11 @@ test("buildPiCommand passes declared tools, skills, extensions, and model explic
     taskPath: "/run/artifacts/task.md",
     runDir: "/run",
     cwd: "/repo",
-    tools: ["read", "grep"],
+    sessionPolicy: "record",
+    piSessionPath: "/run/pi-session/session.jsonl",
+    userBuiltinTools: ["read", "grep"],
+    runtimeBuiltinTools: [childControlEventTool],
+    runtimeExtensionPaths: [childControlExtensionPath],
     skills: ["repo-reader"],
     extensions: ["audit-extension"],
     model: "gpt-5.5",
@@ -52,7 +77,9 @@ test("writeLaunchLog redacts secret-like environment values", () => {
     taskPath: "/run/artifacts/task.md",
     runDir,
     cwd: "/repo",
-    tools: [],
+    sessionPolicy: "record",
+    piSessionPath: join(runDir, "pi-session", "session.jsonl"),
+    userBuiltinTools: [],
     skills: [],
     extensions: [],
     extraEnv: { API_TOKEN: "secret", NORMAL: "value" },

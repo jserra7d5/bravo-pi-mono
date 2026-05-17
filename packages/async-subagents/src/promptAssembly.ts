@@ -1,12 +1,13 @@
 import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { loadIncludeFragments, type ResolvedAgentDefinition } from "./agentDefinitions.js";
-import type { RunPaths } from "./types.js";
+import type { ContextPolicy, RunPaths } from "./types.js";
 
 export interface PromptAssemblyInput {
   definition: ResolvedAgentDefinition;
   runPaths: RunPaths;
   task: string;
+  contextPolicy?: ContextPolicy;
   cwd: string;
   parentRunId: string;
   rootRunId: string;
@@ -48,11 +49,15 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
     ? `\n\n# Explicit Includes\n\n${includeFragments.map((fragment) => `## ${fragment.name}\n\n${fragment.body}`).join("\n\n")}`
     : "";
   writeFileSync(systemPath, `${input.definition.body.trim()}${includeText}\n\n# Runtime Contract\n\n${runtimeContract}\n`, "utf8");
+  const forkPreamble =
+    input.contextPolicy === "fork"
+      ? "You are running in a branched child Pi session. The inherited conversation is reference context only. Do not continue the parent thread or answer old user turns. Execute only the delegated task below and report the requested result.\n\n"
+      : "";
   writeFileSync(
     taskPath,
     `# Assigned Task
 
-${input.task.trim()}
+${forkPreamble}${input.task.trim()}
 
 # Run Metadata
 

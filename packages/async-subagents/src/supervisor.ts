@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createResultEvent, createStartedEvent, createTerminalEvent } from "./events.js";
-import { createRunResult } from "./result.js";
+import { createStartedEvent } from "./events.js";
+import { finalizeTerminalRun } from "./lifecycle.js";
 import { RunStore } from "./runStore.js";
 import { updateRunStatus } from "./status.js";
 import { nowIso } from "./time.js";
@@ -50,43 +50,17 @@ async function finalizeRun(input: SupervisorInput, output: { state: TerminalRunS
   const store = new RunStore({ cwd: input.cwd, runRoot: input.runRoot });
   const status = store.readStatus(input.runId);
   const body = output.stdout?.trim() || output.stderr?.trim() || undefined;
-  const result = createRunResult({
+  return finalizeTerminalRun(store, {
     runId: input.runId,
     parentRunId: input.parentRunId,
     agentName: input.agentName,
     state: output.state,
+    writerRole: "child-runtime",
     startedAt: status.startedAt,
     summary: summaryFromOutput(body ?? "", output.state === "completed" ? "Completed" : `Run ${output.state}`),
     body,
     error: output.error ?? null,
   });
-
-  store.writeResult(result);
-  store.appendEvent(input.runId, createResultEvent({ sequence: 2, result }));
-
-  store.writeStatus(
-    updateRunStatus(status, {
-      state: output.state,
-      writerRole: "child-runtime",
-      resultReady: true,
-      lastActivityAt: result.createdAt,
-      lastEventId: "evt_000003",
-      summary: result.summary,
-      error: output.error ?? null,
-    }),
-  );
-  store.appendEvent(
-    input.runId,
-    createTerminalEvent({
-      sequence: 3,
-      runId: input.runId,
-      parentRunId: input.parentRunId,
-      state: output.state,
-      summary: result.summary,
-      error: output.error,
-    }),
-  );
-  return result;
 }
 
 export async function runSupervisor(input: SupervisorInput): Promise<RunResult> {
@@ -139,7 +113,7 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
     });
 
     const started = store.readStatus(input.runId);
-    store.writeStatus(updateRunStatus(started, { pid: child.pid, summary: child.pid ? `Running child process ${child.pid}` : "Running child process" }));
+    store.writeStatus(updateRunStatus(started, { pid: child.pid, processHealth: child.pid ? "alive" : "unknown", summary: child.pid ? `Running child process ${child.pid}` : "Running child process" }));
 
     child.stdout?.on("data", (chunk: Buffer) => {
       stdoutChunks.push(chunk);

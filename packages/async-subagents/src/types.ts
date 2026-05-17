@@ -6,7 +6,9 @@ export type RunState =
   | "created"
   | "queued"
   | "running"
+  | "idle"
   | "waiting_for_input"
+  | "paused"
   | "blocked"
   | "stalled"
   | "completed"
@@ -32,8 +34,11 @@ export type EventType =
   | "heartbeat";
 
 export type InboxMessageType = "instruction" | "answer" | "cancel" | "pause" | "resume" | "context";
+export type ParentMessageType = "instruction" | "answer" | "context";
 
 export type AgentMode = "oneshot" | "interactive";
+export type ContextPolicy = "fresh" | "fork";
+export type SessionPolicy = "record" | "none";
 export type AgentDefinitionSource = "project" | "user" | "builtin";
 export type CwdPolicy = "inherit" | "explicit" | "sandbox";
 export type ResultFormat = "text" | "json" | "files";
@@ -77,9 +82,22 @@ export interface RunStatus {
     definitionPath: string;
     mode: AgentMode;
   };
+  contextPolicy: ContextPolicy;
+  sessionPolicy: SessionPolicy;
+  piSessionPath?: string;
+  requestedPiSessionPath?: string;
+  forkSourceSessionFile?: string;
+  forkSourceLeafId?: string;
+  forkFallback?: { allowed: boolean; used: boolean; reason?: string } | null;
+  userBuiltinTools: string[];
+  runtimeBuiltinTools: string[];
+  runtimeExtensionPaths: string[];
+  launchLogPath?: string;
+  inboxPath?: string;
   state: RunState;
   writerRole?: WriterRole;
   pid?: number;
+  processHealth?: "unknown" | "alive" | "dead";
   cwd: string;
   createdAt: string;
   startedAt?: string;
@@ -125,6 +143,13 @@ export interface RunResult {
   runId: string;
   parentRunId: string;
   agentName: string;
+  contextPolicy: ContextPolicy;
+  sessionPolicy: SessionPolicy;
+  piSessionPath?: string;
+  requestedPiSessionPath?: string;
+  forkSourceSessionFile?: string;
+  forkSourceLeafId?: string;
+  forkFallback?: { allowed: boolean; used: boolean; reason?: string } | null;
   state: TerminalRunState;
   success: boolean;
   createdAt: string;
@@ -152,6 +177,9 @@ export interface RunPaths {
   resultPath: string;
   artifactsDir: string;
   logsDir: string;
+  piSessionDir: string;
+  requestedPiSessionPath: string;
+  piSessionPath: string;
 }
 
 export interface RunIndexRecord {
@@ -162,6 +190,12 @@ export interface RunIndexRecord {
   parentRunId: string;
   rootRunId?: string;
   rootSessionId?: string;
+  contextPolicy?: ContextPolicy;
+  sessionPolicy?: SessionPolicy;
+  piSessionPath?: string;
+  requestedPiSessionPath?: string;
+  forkSourceSessionFile?: string;
+  forkSourceLeafId?: string;
   createdAt: string;
 }
 
@@ -210,6 +244,10 @@ export interface SubagentStartResult {
   started: boolean;
   waited: boolean;
   waitResult?: SubagentWaitResult;
+  contextPolicy: ContextPolicy;
+  sessionPolicy: SessionPolicy;
+  piSessionPath?: string;
+  requestedPiSessionPath?: string;
   next: Array<{ tool: string; args: Record<string, unknown> }>;
 }
 

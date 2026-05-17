@@ -1,10 +1,12 @@
-import type { EventType, InboxMessageType, RunState, TerminalRunState } from "./types.js";
+import type { ContextPolicy, EventType, InboxMessageType, RunState, SessionPolicy, TerminalRunState } from "./types.js";
 
 export const RUN_STATES: RunState[] = [
   "created",
   "queued",
   "running",
+  "idle",
   "waiting_for_input",
+  "paused",
   "blocked",
   "stalled",
   "completed",
@@ -32,6 +34,9 @@ export const EVENT_TYPES: EventType[] = [
 ];
 
 export const INBOX_MESSAGE_TYPES: InboxMessageType[] = ["instruction", "answer", "cancel", "pause", "resume", "context"];
+export const PARENT_MESSAGE_TYPES = ["instruction", "answer", "context"] as const;
+export const CONTEXT_POLICIES: ContextPolicy[] = ["fresh", "fork"];
+export const SESSION_POLICIES: SessionPolicy[] = ["record", "none"];
 
 export function isTerminalRunState(state: RunState): state is TerminalRunState {
   return TERMINAL_RUN_STATES.includes(state as TerminalRunState);

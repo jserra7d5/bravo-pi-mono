@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { StringEnum } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { appendJsonl, atomicWriteJson, readJsonl } from "../../src/jsonl.js";
 import { SCHEMA_VERSION, type EventType, type InboxMessage, type RunEvent, type RunStatus } from "../../src/types.js";
@@ -77,7 +77,12 @@ function updateStatusFromEvent(state: ChildControlState, event: RunEvent): void 
 }
 
 function parentMessageText(message: InboxMessage): string {
-  const prefix = message.type === "answer" ? "Parent answered" : message.type === "cancel" ? "Parent requested cancellation" : "Parent message";
+  const prefix =
+    message.type === "answer" ? "Parent answered" :
+    message.type === "cancel" ? "Parent requested cancellation" :
+    message.type === "pause" ? "Parent paused this run" :
+    message.type === "resume" ? "Parent resumed this run" :
+    "Parent message";
   return `${prefix} (${message.messageId}, ${message.type}):\n\n${message.body}`;
 }
 

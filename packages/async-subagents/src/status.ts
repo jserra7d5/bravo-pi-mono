@@ -1,7 +1,7 @@
 import { nowIso } from "./time.js";
 import { RunStore } from "./runStore.js";
 import { isTerminalRunState } from "./schemas.js";
-import type { AgentDefinitionSource, AgentMode, RunState, RunStatus } from "./types.js";
+import type { AgentDefinitionSource, AgentMode, ContextPolicy, RunState, RunStatus, SessionPolicy } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 export function createInitialStatus(input: {
@@ -13,6 +13,18 @@ export function createInitialStatus(input: {
   agentSource: AgentDefinitionSource;
   definitionPath: string;
   mode: AgentMode;
+  contextPolicy?: ContextPolicy;
+  sessionPolicy?: SessionPolicy;
+  piSessionPath?: string;
+  requestedPiSessionPath?: string;
+  forkSourceSessionFile?: string;
+  forkSourceLeafId?: string;
+  forkFallback?: RunStatus["forkFallback"];
+  userBuiltinTools?: string[];
+  runtimeBuiltinTools?: string[];
+  runtimeExtensionPaths?: string[];
+  launchLogPath?: string;
+  inboxPath?: string;
   cwd: string;
   state?: RunState;
 }): RunStatus {
@@ -29,6 +41,18 @@ export function createInitialStatus(input: {
       definitionPath: input.definitionPath,
       mode: input.mode,
     },
+    contextPolicy: input.contextPolicy ?? "fresh",
+    sessionPolicy: input.sessionPolicy ?? "record",
+    piSessionPath: input.piSessionPath,
+    requestedPiSessionPath: input.requestedPiSessionPath,
+    forkSourceSessionFile: input.forkSourceSessionFile,
+    forkSourceLeafId: input.forkSourceLeafId,
+    forkFallback: input.forkFallback ?? null,
+    userBuiltinTools: input.userBuiltinTools ?? [],
+    runtimeBuiltinTools: input.runtimeBuiltinTools ?? [],
+    runtimeExtensionPaths: input.runtimeExtensionPaths ?? [],
+    launchLogPath: input.launchLogPath,
+    inboxPath: input.inboxPath,
     state: input.state ?? "created",
     writerRole: "launcher",
     cwd: input.cwd,

@@ -1,12 +1,19 @@
 import { durationMs, nowIso } from "./time.js";
 import { RunStore } from "./runStore.js";
-import type { ArtifactRef, RunResult, TerminalRunState } from "./types.js";
+import type { ArtifactRef, ContextPolicy, RunResult, SessionPolicy, TerminalRunState } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 export function createRunResult(input: {
   runId: string;
   parentRunId: string;
   agentName: string;
+  contextPolicy?: ContextPolicy;
+  sessionPolicy?: SessionPolicy;
+  piSessionPath?: string;
+  requestedPiSessionPath?: string;
+  forkSourceSessionFile?: string;
+  forkSourceLeafId?: string;
+  forkFallback?: RunResult["forkFallback"];
   state: TerminalRunState;
   startedAt?: string;
   summary?: string;
@@ -20,6 +27,13 @@ export function createRunResult(input: {
     runId: input.runId,
     parentRunId: input.parentRunId,
     agentName: input.agentName,
+    contextPolicy: input.contextPolicy ?? "fresh",
+    sessionPolicy: input.sessionPolicy ?? "record",
+    piSessionPath: input.piSessionPath,
+    requestedPiSessionPath: input.requestedPiSessionPath,
+    forkSourceSessionFile: input.forkSourceSessionFile,
+    forkSourceLeafId: input.forkSourceLeafId,
+    forkFallback: input.forkFallback ?? null,
     state: input.state,
     success: input.state === "completed",
     createdAt,

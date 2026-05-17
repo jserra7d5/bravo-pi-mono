@@ -61,7 +61,7 @@ function writeDeliveryState(store: RunStore, state: DeliveryState): void {
 }
 
 export function resultDeliveryKey(runId: string, result: RunResult): string {
-  return `result:${runId}:${result.createdAt}`;
+  return `terminal:${runId}:${result.createdAt}`;
 }
 
 export function eventDeliveryKey(event: RunEvent): string {
@@ -150,6 +150,8 @@ export function markWakeupKeyHandled(store: RunStore, parentRunId: string, deliv
 
 export function markWakeupHandled(store: RunStore, parentRunId: string, runId: string): void {
   const state = readDeliveryState(store, parentRunId);
+  const result = store.readResult(runId);
+  if (result) state.handled[resultDeliveryKey(runId, result)] = new Date().toISOString();
   for (const key of Object.keys(state.delivered)) {
     if (key.includes(`:${runId}:`)) state.handled[key] = new Date().toISOString();
   }

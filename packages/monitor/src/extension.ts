@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { JsonlMonitorStore } from "./store/jsonl-store.js";
 import { MonitorScheduler } from "./scheduler/scheduler.js";
 import {

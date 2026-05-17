@@ -1,6 +1,6 @@
 ---
 description: Read-only repository reconnaissance.
-model: gpt-5.4-mini
+model: openai-codex/gpt-5.4-mini
 tools: [read, grep, find, ls]
 mode: oneshot
 maxSubagentDepth: 0

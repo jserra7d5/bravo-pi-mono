@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createRunEvent } from "../../src/events.js";
 import { appendJsonl, readJsonl } from "../../src/jsonl.js";
 import { createInboxMessage, sendSubagentMessage, waitForMessageAck } from "../../src/message.js";
 import { readSubagentResult } from "../../src/result.js";
@@ -8,11 +9,15 @@ import { createRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import { isTerminalRunState } from "../../src/schemas.js";
 import { startSubagent } from "../../src/start.js";
-import { readSubagentStatus } from "../../src/status.js";
-import { SCHEMA_VERSION, type EventType, type InboxMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SubagentMessageResult, type WaitCursorMap } from "../../src/types.js";
+import { readSubagentStatus, updateRunStatus } from "../../src/status.js";
+import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult, type WaitCursorMap } from "../../src/types.js";
 import { waitSubagents } from "../../src/wait.js";
+import { finalizeTerminalRun } from "../../src/lifecycle.js";
+import { readParentPiSessionRef } from "../../src/piSession.js";
 import { eventDeliveryKey, markWakeupHandled, markWakeupKeyHandled, resultDeliveryKey, writeDeliverySubscription } from "./wakeups.js";
 import {
+  subagentContinueSchema,
+  subagentInterruptSchema,
   subagentMessageSchema,
   subagentResultSchema,
   subagentStartSchema,
@@ -155,6 +160,106 @@ function compactEvents(events: unknown[], maxEvents: number): unknown[] {
   return events.length <= maxEvents ? events : events.slice(0, maxEvents);
 }
 
+function nextEventSequence(store: RunStore, runId: string): number {
+  return store.readEvents(runId).records.length + 1;
+}
+
+function trySignal(pid: number | undefined, signal: NodeJS.Signals): { ok: boolean; error?: string } {
+  if (!pid) return { ok: false, error: "run has no recorded pid" };
+  try {
+    process.kill(pid, signal);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function processHealth(pid: number | undefined): "unknown" | "alive" | "dead" {
+  if (!pid) return "unknown";
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch {
+    return "dead";
+  }
+}
+
+function reconcileProcessHealth(store: RunStore, status: RunStatus): RunStatus {
+  const health = processHealth(status.pid);
+  if (health === status.processHealth) return status;
+  const next = updateRunStatus(status, { processHealth: health });
+  if (!isTerminalRunState(status.state) && health === "dead") {
+    const event = createRunEvent({
+      sequence: nextEventSequence(store, status.runId),
+      runId: status.runId,
+      parentRunId: status.parentRunId,
+      type: "status",
+      summary: "Recorded child process is no longer alive",
+      wake: true,
+      data: { reconciliation: "pid_dead", pid: status.pid },
+    });
+    store.appendEvent(status.runId, event);
+    store.writeStatus({ ...next, lastActivityAt: event.createdAt, lastEventId: event.eventId, summary: event.summary });
+    return { ...next, lastActivityAt: event.createdAt, lastEventId: event.eventId, summary: event.summary };
+  }
+  store.writeStatus(next);
+  return next;
+}
+
+function appendParentMessage(params: Record<string, unknown>, store: RunStore, root: RootSessionIdentity, runId: string, type: InboxMessageType, body: string): SubagentMessageResult {
+  if (typeof params.runDir === "string" && params.runDir && typeof params.runId !== "string") {
+    const message = createInboxMessage({
+      toRunId: runId,
+      fromRunId: root.parentRunId,
+      body,
+      type,
+      attachments: Array.isArray(params.attachments) ? (params.attachments as never) : undefined,
+      requiresAck: typeof params.requiresAck === "boolean" ? params.requiresAck : undefined,
+    });
+    appendJsonl(join(params.runDir, "inbox.jsonl"), message);
+    return { messageId: message.messageId, runId, appended: true, liveDelivered: false };
+  }
+  return sendSubagentMessage(store, {
+    runId,
+    fromRunId: root.parentRunId,
+    body,
+    type,
+    attachments: Array.isArray(params.attachments) ? (params.attachments as never) : undefined,
+    requiresAck: typeof params.requiresAck === "boolean" ? params.requiresAck : undefined,
+    liveTransport: "child-control",
+  });
+}
+
+async function waitForLiveAckIfNeeded(store: RunStore, params: Record<string, unknown>, status: RunStatus, result: SubagentMessageResult): Promise<SubagentMessageResult> {
+  if (isTerminalRunState(status.state)) return result;
+  const ack = await waitForMessageAckFromParams(store, params, status.runId, result.messageId);
+  if (ack) {
+    result.liveDelivered = true;
+    result.ackEventId = ack.eventId;
+    result.unsupported = undefined;
+  } else {
+    result.liveDelivered = false;
+    result.unsupported = {
+      code: "LIVE_MESSAGE_UNSUPPORTED",
+      message: "message was appended to inbox.jsonl, but the child-control extension did not acknowledge it before timeout",
+    };
+  }
+  return result;
+}
+
+function requiredAckFailed(params: Record<string, unknown>, result: SubagentMessageResult): boolean {
+  return params.requiresAck !== false && Boolean(result.unsupported);
+}
+
+function statusDiagnostics(store: RunStore, status: RunStatus): string[] {
+  const diagnostics: string[] = [];
+  const result = store.readResult(status.runId);
+  if (result && !isTerminalRunState(status.state)) diagnostics.push("result exists but status is non-terminal");
+  if (isTerminalRunState(status.state) && !result) diagnostics.push("terminal status exists but result is missing");
+  if (result && isTerminalRunState(status.state) && result.state !== status.state) diagnostics.push(`terminal status/result mismatch: status=${status.state} result=${result.state}`);
+  return diagnostics;
+}
+
 export function buildSubagentTools(runtime: ToolRuntime = {}) {
   return [
     {
@@ -168,6 +273,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const mode = params.mode === "sync" ? "sync" : "async";
         const wait = typeof params.wait === "string" ? params.wait : "none";
         const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : undefined;
+        const contextPolicy = params.context === "fork" ? "fork" : params.context === "fresh" ? "fresh" : undefined;
+        const sessionPolicy = params.session === "none" ? "none" : params.session === "record" ? "record" : undefined;
         const notifyOn = Array.isArray(params.notifyOn) ? (params.notifyOn.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined;
         const result = await startSubagent({
           agent: String(params.agent),
@@ -178,6 +285,10 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           rootSessionId: root.rootSessionId,
           depth: typeof params.maxSubagentDepth === "number" ? params.maxSubagentDepth : undefined,
           files: Array.isArray(params.files) ? params.files.filter((file): file is string => typeof file === "string") : undefined,
+          context: contextPolicy as ContextPolicy | undefined,
+          session: sessionPolicy as SessionPolicy | undefined,
+          allowFreshFallback: params.allowFreshFallback === true,
+          parentPiSessionRef: readParentPiSessionRef(ctx),
           startMode: mode === "sync" || wait !== "none" ? "wait" : "async",
           waitTimeoutMs: timeoutMs ?? (mode === "sync" || wait !== "none" ? 300_000 : 0),
           waitUntil: wait === "terminal" || wait === "result" || wait === "interesting" ? wait : mode === "sync" ? "result" : "interesting",
@@ -242,50 +353,102 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const store = storeFor(cwd);
         const status = statusFromParams(store, cwd, params);
         const runId = status.runId;
-        const type = (typeof params.type === "string" ? params.type : "instruction") as InboxMessageType;
+        const type = (typeof params.type === "string" ? params.type : "instruction") as ParentMessageType;
+        if (!["instruction", "answer", "context"].includes(type)) {
+          return response(`Use subagent_interrupt or subagent_continue for lifecycle control (${type})`, { code: "LIFECYCLE_MESSAGE_REJECTED", runId, type }, true);
+        }
         if (isTerminalRunState(status.state)) {
           return response(`Run ${runId} is terminal; message not appended`, { code: "RUN_TERMINAL", runId, state: status.state }, true);
         }
-        const result: SubagentMessageResult =
-          typeof params.runDir === "string" && params.runDir && typeof params.runId !== "string"
-            ? (() => {
-                const message = createInboxMessage({
-                  toRunId: runId,
-                  fromRunId: root.parentRunId,
-                  body: String(params.body),
-                  type,
-                  attachments: Array.isArray(params.attachments) ? (params.attachments as never) : undefined,
-                  requiresAck: typeof params.requiresAck === "boolean" ? params.requiresAck : undefined,
-                });
-                appendJsonl(join(params.runDir, "inbox.jsonl"), message);
-                return { messageId: message.messageId, runId, appended: true, liveDelivered: false };
-              })()
-            : sendSubagentMessage(store, {
-                runId,
-                fromRunId: root.parentRunId,
-                body: String(params.body),
-                type,
-                attachments: Array.isArray(params.attachments) ? (params.attachments as never) : undefined,
-                requiresAck: typeof params.requiresAck === "boolean" ? params.requiresAck : undefined,
-                liveTransport: "child-control",
-              });
-        const live = !isTerminalRunState(status.state);
-        if (live && type !== "cancel") {
-          const ack = await waitForMessageAckFromParams(store, params, runId, result.messageId);
-          if (ack) {
-            result.liveDelivered = true;
-            result.ackEventId = ack.eventId;
-            result.unsupported = undefined;
-          } else {
-            result.liveDelivered = false;
-            result.unsupported = {
-              code: "LIVE_MESSAGE_UNSUPPORTED",
-              message: "message was appended to inbox.jsonl, but the child-control extension did not acknowledge it before timeout",
-            };
-          }
+        const result = await waitForLiveAckIfNeeded(store, params, status, appendParentMessage(params, store, root, runId, type, String(params.body)));
+        if (requiredAckFailed(params, result)) {
+          await runtime.afterMutation?.(ctx, cwd, root);
+          return response(result.unsupported?.message ?? "Required child acknowledgement was not received", { ...result, status: { runId: status.runId, state: status.state } }, true);
         }
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(summarizeMessageResult(result), { ...result, status: { runId: status.runId, state: status.state } });
+      },
+      renderCall: renderSubagentToolCall,
+      renderResult: renderSubagentToolResult,
+    },
+    {
+      name: "subagent_interrupt",
+      label: "Subagent Interrupt",
+      description: "Pause or cancel an active child run with real process control where possible.",
+      parameters: subagentInterruptSchema,
+      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
+        const cwd = ctxCwd(ctx);
+        const root = rootFor(runtime, cwd);
+        const store = storeFor(cwd);
+        const status = statusFromParams(store, cwd, params);
+        const runId = status.runId;
+        const action = params.action === "cancel" ? "cancel" : "pause";
+        const reason = typeof params.reason === "string" && params.reason.trim() ? params.reason.trim() : action === "cancel" ? "Cancelled by parent" : "Paused by parent";
+        if (isTerminalRunState(status.state)) return response(`Run ${runId} is already terminal`, { code: "RUN_TERMINAL", runId, state: status.state }, true);
+
+        if (action === "pause") {
+          const signal = trySignal(status.pid, "SIGSTOP");
+          if (!signal.ok) return response(`Run ${runId} could not be paused: ${signal.error}`, { code: "PAUSE_FAILED", runId, error: signal.error }, true);
+          const event = createRunEvent({ sequence: nextEventSequence(store, runId), runId, parentRunId: status.parentRunId, type: "status", summary: reason, wake: true, data: { action: "pause", pid: status.pid } });
+          store.appendEvent(runId, event);
+          store.writeStatus(updateRunStatus(status, { state: "paused", writerRole: "parent-runtime", lastActivityAt: event.createdAt, lastEventId: event.eventId, summary: reason }));
+          appendParentMessage(params, store, root, runId, "pause", reason);
+          await runtime.afterMutation?.(ctx, cwd, root);
+          return response(`Subagent ${runId} paused`, { runId, state: "paused", pid: status.pid, event });
+        }
+
+        const requestedSignal = params.signal === "SIGKILL" ? "SIGKILL" : "SIGTERM";
+        const signal = status.pid ? trySignal(status.pid, requestedSignal) : { ok: false, error: "run has no recorded pid" };
+        const cancelError = { code: "PARENT_CANCELLED", message: reason, details: { pid: status.pid, signal: requestedSignal, signalError: signal.error } };
+        const finalized = finalizeTerminalRun(store, {
+          runId,
+          parentRunId: status.parentRunId,
+          agentName: status.agent.name,
+          state: "cancelled",
+          writerRole: "parent-runtime",
+          startedAt: status.startedAt,
+          summary: reason,
+          body: reason,
+          error: cancelError,
+        });
+        appendParentMessage(params, store, root, runId, "cancel", reason);
+        await runtime.afterMutation?.(ctx, cwd, root);
+        return response(`Subagent ${runId} cancelled`, { runId, state: "cancelled", pid: status.pid, signal: requestedSignal, signalDelivered: signal.ok, signalError: signal.error, result: finalized });
+      },
+      renderCall: renderSubagentToolCall,
+      renderResult: renderSubagentToolResult,
+    },
+    {
+      name: "subagent_continue",
+      label: "Subagent Continue",
+      description: "Resume a paused child run and optionally deliver follow-up input.",
+      parameters: subagentContinueSchema,
+      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
+        const cwd = ctxCwd(ctx);
+        const root = rootFor(runtime, cwd);
+        const store = storeFor(cwd);
+        const status = statusFromParams(store, cwd, params);
+        const runId = status.runId;
+        if (isTerminalRunState(status.state)) return response(`Run ${runId} is terminal; cannot continue`, { code: "RUN_TERMINAL", runId, state: status.state }, true);
+        if (status.state !== "paused") {
+          return response(`Run ${runId} is ${status.state}; use subagent_message for normal input`, { code: "RUN_NOT_PAUSED", runId, state: status.state }, true);
+        }
+
+        const signal = trySignal(status.pid, "SIGCONT");
+        if (!signal.ok) return response(`Run ${runId} could not be continued: ${signal.error}`, { code: "CONTINUE_FAILED", runId, error: signal.error }, true);
+        const event = createRunEvent({ sequence: nextEventSequence(store, runId), runId, parentRunId: status.parentRunId, type: "status", summary: "Continued by parent", wake: false, data: { action: "continue", pid: status.pid, signalDelivered: signal.ok } });
+        store.appendEvent(runId, event);
+        store.writeStatus(updateRunStatus(status, { state: "running", writerRole: "parent-runtime", lastActivityAt: event.createdAt, lastEventId: event.eventId, summary: "Continued by parent", needs: null }));
+        const body = typeof params.body === "string" && params.body.trim() ? params.body : "Resume work.";
+        const type = (typeof params.type === "string" ? params.type : "instruction") as ParentMessageType;
+        const messageType: InboxMessageType = !params.body ? "resume" : type;
+        const result = await waitForLiveAckIfNeeded(store, params, status, appendParentMessage(params, store, root, runId, messageType, body));
+        if (requiredAckFailed(params, result)) {
+          await runtime.afterMutation?.(ctx, cwd, root);
+          return response(result.unsupported?.message ?? "Required child acknowledgement was not received", { ...result, runId, state: "running", signalDelivered: signal.ok, event }, true);
+        }
+        await runtime.afterMutation?.(ctx, cwd, root);
+        return response(`Subagent ${runId} continued`, { ...result, runId, state: "running", signalDelivered: signal?.ok, event });
       },
       renderCall: renderSubagentToolCall,
       renderResult: renderSubagentToolResult,
@@ -310,6 +473,11 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           body: includeBody ? compactResultBody(result.body, maxBytes) : undefined,
           artifacts: includeArtifacts ? result.artifacts : undefined,
           runDir,
+          piSessionPath: result.piSessionPath,
+          requestedPiSessionPath: result.requestedPiSessionPath,
+          launchLogPath: join(runDir, "logs", "launch.json"),
+          logsDir: join(runDir, "logs"),
+          artifactsDir: join(runDir, "artifacts"),
           next: [],
         };
         await runtime.afterMutation?.(ctx, cwd, root);
@@ -332,8 +500,26 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const maxEvents = typeof params.maxEvents === "number" ? params.maxEvents : 10;
         const rows = runIds.flatMap((runId) => {
           try {
-            const status = readSubagentStatus(store, { runId });
-            return [{ runId: status.runId, state: status.state, summary: preview(status.summary, 120) }];
+            const status = reconcileProcessHealth(store, readSubagentStatus(store, { runId }));
+            const diagnostics = statusDiagnostics(store, status);
+            return [{
+              runId: status.runId,
+              state: status.state,
+              agentName: status.agent.name,
+              summary: preview(status.summary, 120),
+              cwd: status.cwd,
+              parentRunId: status.parentRunId,
+              rootSessionId: status.rootSessionId,
+              pid: status.pid,
+              processHealth: status.processHealth,
+              contextPolicy: status.contextPolicy,
+              sessionPolicy: status.sessionPolicy,
+              piSessionPath: status.piSessionPath,
+              requestedPiSessionPath: status.requestedPiSessionPath,
+              launchLogPath: status.launchLogPath,
+              resultReady: status.resultReady,
+              diagnostics,
+            }];
           } catch {
             return [];
           }

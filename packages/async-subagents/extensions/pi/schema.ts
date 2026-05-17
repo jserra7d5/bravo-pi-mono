@@ -1,6 +1,6 @@
-import { StringEnum } from "@mariozechner/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { EVENT_TYPES, INBOX_MESSAGE_TYPES } from "../../src/schemas.js";
+import { EVENT_TYPES, PARENT_MESSAGE_TYPES } from "../../src/schemas.js";
 
 export const schemaVersion = 1;
 
@@ -28,6 +28,9 @@ export const subagentStartSchema = Type.Object({
   timeoutMs: Type.Optional(Type.Number({ description: "Wait timeout for sync mode or requested wait behavior." })),
   notifyOn: Type.Optional(Type.Array(StringEnum(EVENT_TYPES as readonly string[]))),
   maxSubagentDepth: Type.Optional(Type.Number({ description: "Depth to record in the child task metadata." })),
+  context: Type.Optional(StringEnum(["fresh", "fork"] as const, { default: "fresh" })),
+  session: Type.Optional(StringEnum(["record", "none"] as const, { default: "record" })),
+  allowFreshFallback: Type.Optional(Type.Boolean({ default: false })),
 });
 
 export const subagentWaitSchema = Type.Object({
@@ -47,8 +50,25 @@ export const subagentWaitSchema = Type.Object({
 export const subagentMessageSchema = Type.Object({
   runId: Type.Optional(Type.String({ description: "Target child run id." })),
   runDir: Type.Optional(Type.String({ description: "Recovery path when the run index is unavailable." })),
-  type: Type.Optional(StringEnum(INBOX_MESSAGE_TYPES as readonly string[], { default: "instruction" })),
+  type: Type.Optional(StringEnum(PARENT_MESSAGE_TYPES, { default: "instruction" })),
   body: Type.String({ description: "Message body to append to the child inbox." }),
+  attachments: Type.Optional(Type.Array(Attachment)),
+  requiresAck: Type.Optional(Type.Boolean()),
+});
+
+export const subagentInterruptSchema = Type.Object({
+  runId: Type.Optional(Type.String({ description: "Target child run id." })),
+  runDir: Type.Optional(Type.String({ description: "Recovery path when the run index is unavailable." })),
+  action: StringEnum(["pause", "cancel"] as const),
+  reason: Type.Optional(Type.String({ description: "Reason recorded in status/events and sent to the child inbox when useful." })),
+  signal: Type.Optional(StringEnum(["SIGTERM", "SIGKILL"] as const, { default: "SIGTERM" })),
+});
+
+export const subagentContinueSchema = Type.Object({
+  runId: Type.Optional(Type.String({ description: "Target child run id." })),
+  runDir: Type.Optional(Type.String({ description: "Recovery path when the run index is unavailable." })),
+  body: Type.Optional(Type.String({ description: "Optional instruction or answer to deliver while continuing the child." })),
+  type: Type.Optional(StringEnum(PARENT_MESSAGE_TYPES, { default: "instruction" })),
   attachments: Type.Optional(Type.Array(Attachment)),
   requiresAck: Type.Optional(Type.Boolean()),
 });

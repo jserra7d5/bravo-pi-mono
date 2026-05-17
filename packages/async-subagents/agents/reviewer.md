@@ -1,6 +1,6 @@
 ---
 description: Review a bounded implementation for correctness and risk.
-model: gpt-5.5
+model: openai-codex/gpt-5.5
 tools: [read, grep, find, ls, bash]
 mode: oneshot
 maxSubagentDepth: 0

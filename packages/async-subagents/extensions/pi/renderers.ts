@@ -42,6 +42,8 @@ export function stateGlyph(state: string | undefined, resultReady = false): stri
     case "waiting_for_input":
     case "question":
       return "?";
+    case "paused":
+      return "|";
     case "blocked":
       return "!";
     case "completed":

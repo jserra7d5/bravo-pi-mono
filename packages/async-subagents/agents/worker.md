@@ -1,6 +1,6 @@
 ---
 description: Implement a bounded task in the current repository.
-model: gpt-5.5
+model: openai-codex/gpt-5.5
 tools: [read, grep, find, ls, bash, edit, write]
 mode: oneshot
 maxSubagentDepth: 0

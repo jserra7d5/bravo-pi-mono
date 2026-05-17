@@ -14,6 +14,12 @@ export interface CreateRunDirectoryInput {
   parentRunId: string;
   rootRunId?: string;
   rootSessionId?: string;
+  contextPolicy?: RunIndexRecord["contextPolicy"];
+  sessionPolicy?: RunIndexRecord["sessionPolicy"];
+  piSessionPath?: string;
+  requestedPiSessionPath?: string;
+  forkSourceSessionFile?: string;
+  forkSourceLeafId?: string;
 }
 
 export interface RunStoreOptions {
@@ -50,6 +56,9 @@ export class RunStore {
       resultPath: join(runDir, "result.json"),
       artifactsDir: join(runDir, "artifacts"),
       logsDir: join(runDir, "logs"),
+      piSessionDir: join(runDir, "pi-session"),
+      requestedPiSessionPath: join(runDir, "pi-session", "session.jsonl"),
+      piSessionPath: join(runDir, "pi-session", "session.jsonl"),
     };
   }
 
@@ -58,6 +67,7 @@ export class RunStore {
     const paths = this.pathsFor({ runDir: join(this.runRoot, runId) });
     mkdirSync(paths.artifactsDir, { recursive: true });
     mkdirSync(paths.logsDir, { recursive: true });
+    mkdirSync(paths.piSessionDir, { recursive: true });
     writeFileSync(paths.inboxPath, "", { flag: "a" });
     writeFileSync(paths.eventsPath, "", { flag: "a" });
     const record: RunIndexRecord = {
@@ -68,6 +78,12 @@ export class RunStore {
       parentRunId: input.parentRunId,
       rootRunId: input.rootRunId,
       rootSessionId: input.rootSessionId,
+      contextPolicy: input.contextPolicy,
+      sessionPolicy: input.sessionPolicy,
+      piSessionPath: input.piSessionPath ?? (input.sessionPolicy === "record" ? paths.piSessionPath : undefined),
+      requestedPiSessionPath: input.requestedPiSessionPath ?? (input.sessionPolicy === "record" ? paths.requestedPiSessionPath : undefined),
+      forkSourceSessionFile: input.forkSourceSessionFile,
+      forkSourceLeafId: input.forkSourceLeafId,
       createdAt: nowIso(),
     };
     this.appendRunIndex(record);

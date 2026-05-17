@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdirSync, appendFileSync, readFileSync, existsSync } from "node:fs";
 import type { Readable } from "node:stream";
