@@ -25,8 +25,8 @@ import {
   subagentWaitSchema,
 } from "./schema.js";
 import {
-  renderSubagentToolCall,
-  renderSubagentToolResult,
+  renderSubagentToolCallComponent,
+  renderSubagentToolResultComponent,
   summarizeMessageResult,
   summarizeRunResult,
   summarizeStartResult,
@@ -307,8 +307,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(summarizeStartResult(result), { ...result, rootSessionId: root.rootSessionId });
       },
-      renderCall: renderSubagentToolCall,
-      renderResult: renderSubagentToolResult,
+      renderCall: renderSubagentToolCallComponent,
+      renderResult: renderSubagentToolResultComponent,
     },
     {
       name: "subagent_wait",
@@ -339,8 +339,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(summarizeWaitResult(result), result as unknown as Record<string, unknown>);
       },
-      renderCall: renderSubagentToolCall,
-      renderResult: renderSubagentToolResult,
+      renderCall: renderSubagentToolCallComponent,
+      renderResult: renderSubagentToolResultComponent,
     },
     {
       name: "subagent_message",
@@ -368,8 +368,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(summarizeMessageResult(result), { ...result, status: { runId: status.runId, state: status.state } });
       },
-      renderCall: renderSubagentToolCall,
-      renderResult: renderSubagentToolResult,
+      renderCall: renderSubagentToolCallComponent,
+      renderResult: renderSubagentToolResultComponent,
     },
     {
       name: "subagent_interrupt",
@@ -415,8 +415,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(`Subagent ${runId} cancelled`, { runId, state: "cancelled", pid: status.pid, signal: requestedSignal, signalDelivered: signal.ok, signalError: signal.error, result: finalized });
       },
-      renderCall: renderSubagentToolCall,
-      renderResult: renderSubagentToolResult,
+      renderCall: renderSubagentToolCallComponent,
+      renderResult: renderSubagentToolResultComponent,
     },
     {
       name: "subagent_continue",
@@ -450,8 +450,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(`Subagent ${runId} continued`, { ...result, runId, state: "running", signalDelivered: signal?.ok, event });
       },
-      renderCall: renderSubagentToolCall,
-      renderResult: renderSubagentToolResult,
+      renderCall: renderSubagentToolCallComponent,
+      renderResult: renderSubagentToolResultComponent,
     },
     {
       name: "subagent_result",
@@ -483,8 +483,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(summarizeRunResult(result, runId), details as Record<string, unknown>);
       },
-      renderCall: renderSubagentToolCall,
-      renderResult: renderSubagentToolResult,
+      renderCall: renderSubagentToolCallComponent,
+      renderResult: renderSubagentToolResultComponent,
     },
     {
       name: "subagent_status",
@@ -542,8 +542,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         }
         return response(summarizeStatusRows(rows), details);
       },
-      renderCall: renderSubagentToolCall,
-      renderResult: renderSubagentToolResult,
+      renderCall: renderSubagentToolCallComponent,
+      renderResult: renderSubagentToolResultComponent,
     },
   ];
 }

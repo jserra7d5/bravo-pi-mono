@@ -9,6 +9,11 @@ export interface RenderOptions {
   expanded?: boolean;
 }
 
+export interface TextRenderable {
+  invalidate(): void;
+  render(width: number): string[];
+}
+
 export interface WakeupMessage {
   kind: "subagent_wakeup";
   title: string;
@@ -24,6 +29,25 @@ export interface WakeupMessage {
 
 function color(theme: TextTheme | undefined, name: string, value: string): string {
   return theme?.fg ? theme.fg(name, value) : value;
+}
+
+function safeWidth(width: unknown): number {
+  return typeof width === "number" && Number.isFinite(width) && width > 0 ? Math.floor(width) : 80;
+}
+
+function truncate(line: string, width: unknown): string {
+  const max = safeWidth(width);
+  return line.length <= max ? line : line.slice(0, Math.max(0, max - 1));
+}
+
+export function textBlock(value: string | string[]): TextRenderable {
+  const lines = Array.isArray(value) ? value : String(value).split(/\r?\n/);
+  return {
+    invalidate() {},
+    render(width: number) {
+      return lines.map((line) => truncate(line, width));
+    },
+  };
 }
 
 export function preview(value: string | undefined, max = 120): string {
@@ -112,6 +136,14 @@ export function renderSubagentToolResult(result: unknown, _options?: RenderOptio
   return color(theme, "muted", summary ?? JSON.stringify(details));
 }
 
+export function renderSubagentToolCallComponent(args: Record<string, unknown>, theme?: TextTheme): TextRenderable {
+  return textBlock(renderSubagentToolCall(args, theme));
+}
+
+export function renderSubagentToolResultComponent(result: unknown, options?: RenderOptions, theme?: TextTheme): TextRenderable {
+  return textBlock(renderSubagentToolResult(result, options, theme));
+}
+
 export function renderSubagentWakeMessage(message: WakeupMessage, options?: RenderOptions, theme?: TextTheme): string {
   const lines = [
     `${color(theme, "accent", stateGlyph(message.state, Boolean(message.result)))} ${color(theme, "toolTitle", message.title)} ${color(theme, "dim", message.runId)}`,
@@ -130,6 +162,8 @@ export function renderDetailCard(details: Record<string, unknown>, expanded = fa
 export const renderers = {
   renderSubagentToolCall,
   renderSubagentToolResult,
+  renderSubagentToolCallComponent,
+  renderSubagentToolResultComponent,
   renderSubagentWakeMessage,
   formatRunRow,
   renderDetailCard,

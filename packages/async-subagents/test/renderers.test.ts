@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatRunRow, renderSubagentWakeMessage, summarizeWaitResult } from "../extensions/pi/renderers.js";
+import { formatRunRow, renderSubagentToolCallComponent, renderSubagentToolResultComponent, renderSubagentWakeMessage, summarizeWaitResult } from "../extensions/pi/renderers.js";
 import type { SubagentWaitResult } from "../src/types.js";
 import type { RunSummaryRow } from "../src/watcher.js";
 
@@ -18,6 +18,16 @@ test("formatRunRow renders compact result-ready rows", () => {
   const rendered = formatRunRow(row);
   assert.match(rendered, /scout result/);
   assert.match(rendered, /run_test/);
+});
+
+test("tool renderer components implement Pi TUI render contract", () => {
+  const call = renderSubagentToolCallComponent({ agent: "worker", task: "fix a bug" });
+  assert.equal(typeof call.render, "function");
+  assert.match(call.render(80).join("\n"), /worker/);
+
+  const result = renderSubagentToolResultComponent({ details: { summary: "Started worker" } });
+  assert.equal(typeof result.render, "function");
+  assert.match(result.render(80).join("\n"), /Started worker/);
 });
 
 test("wait and wake-up renderers keep summaries concise", () => {
