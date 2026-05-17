@@ -124,16 +124,34 @@ export function summarizeStatusRows(rows: Array<Pick<RunStatus, "runId" | "state
 export function renderSubagentToolCall(args: Record<string, unknown>, theme?: TextTheme): string {
   const target = typeof args.runId === "string" ? args.runId : typeof args.agent === "string" ? args.agent : "subagents";
   const task = typeof args.task === "string" ? ` - ${preview(args.task, 90)}` : "";
+  if (target === "subagents" && !task) return color(theme, "toolTitle", "subagents");
   return `${color(theme, "toolTitle", "subagent")} ${color(theme, "accent", target)}${color(theme, "muted", task)}`;
 }
 
-export function renderSubagentToolResult(result: unknown, _options?: RenderOptions, theme?: TextTheme): string {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object";
+}
+
+function resultBodyLines(details: Record<string, unknown>, expanded: boolean): string[] {
+  if (!expanded) return [];
+  if (typeof details.body === "string" && details.body.trim()) return ["", details.body];
+  if (!Array.isArray(details.results)) return [];
+  return details.results.flatMap((result) => {
+    if (!isRecord(result) || typeof result.body !== "string" || !result.body.trim()) return [];
+    const label = typeof result.agentName === "string" ? result.agentName : "subagent";
+    const runId = typeof result.runId === "string" ? ` ${result.runId}` : "";
+    return ["", `${label}${runId}:`, result.body];
+  });
+}
+
+export function renderSubagentToolResult(result: unknown, options?: RenderOptions, theme?: TextTheme): string {
   if (!result || typeof result !== "object") return String(result ?? "");
   const data = result as { details?: Record<string, unknown>; content?: Array<{ text?: string }> };
   const details = data.details ?? {};
   const text = data.content?.[0]?.text;
   const summary = typeof details.summary === "string" ? details.summary : text;
-  return color(theme, "muted", summary ?? JSON.stringify(details));
+  const lines = [color(theme, "muted", summary ?? JSON.stringify(details)), ...resultBodyLines(details, Boolean(options?.expanded))];
+  return lines.join("\n");
 }
 
 export function renderSubagentToolCallComponent(args: Record<string, unknown>, theme?: TextTheme): TextRenderable {

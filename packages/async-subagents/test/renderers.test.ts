@@ -25,9 +25,35 @@ test("tool renderer components implement Pi TUI render contract", () => {
   assert.equal(typeof call.render, "function");
   assert.match(call.render(80).join("\n"), /worker/);
 
+  const defaultCall = renderSubagentToolCallComponent({});
+  assert.equal(defaultCall.render(80).join("\n"), "subagents");
+
   const result = renderSubagentToolResultComponent({ details: { summary: "Started worker" } });
   assert.equal(typeof result.render, "function");
   assert.match(result.render(80).join("\n"), /Started worker/);
+});
+
+test("tool result renderer shows terminal bodies in expanded mode", () => {
+  const direct = renderSubagentToolResultComponent(
+    { details: { summary: "Subagent run_a result: completed", body: "Full reviewer findings" } },
+    { expanded: true },
+  );
+
+  assert.match(direct.render(100).join("\n"), /Full reviewer findings/);
+
+  const waited = renderSubagentToolResultComponent(
+    {
+      details: {
+        summary: "Subagent wait: 1 ready, 1 result",
+        results: [{ runId: "run_a", agentName: "reviewer", body: "Reviewer found path safety gaps" }],
+      },
+    },
+    { expanded: true },
+  );
+
+  const rendered = waited.render(100).join("\n");
+  assert.match(rendered, /reviewer run_a:/);
+  assert.match(rendered, /Reviewer found path safety gaps/);
 });
 
 test("wait and wake-up renderers keep summaries concise", () => {
