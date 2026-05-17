@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { renderHud, renderStatusLine, snapshotForSession, type HudSnapshot } from "../extensions/pi/hud.js";
@@ -68,6 +68,82 @@ test("parses quoted command flags", () => {
 test("chooses explicit phase boundary flag", () => {
 	const parsed = testables.parseArgs("next durable-resume-loop --fresh");
 	assert.equal(testables.boundaryFromFlags(parsed.flags), "fresh_session");
+});
+
+test("/goal help renders command usage without a Bravo workspace", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-help-"));
+	const notifications: string[] = [];
+	await testables.handleGoal({} as any, { refresh: async () => {} }, "help next", {
+		cwd: root,
+		ui: { notify: (message: string) => notifications.push(message) },
+		sessionManager: { getSessionId: () => "pi_help" },
+	} as any);
+
+	assert.equal(notifications.length, 1);
+	assert.match(notifications[0]!, /\/goal next \[goal-id\] \[--carry \| --compact \| --fresh\]/);
+	assert.match(notifications[0]!, /--fresh: start a replacement Pi session/);
+});
+
+test("/goal init creates Bravo workspace from Pi command context", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-init-"));
+	const notifications: string[] = [];
+	let refreshes = 0;
+	await testables.handleGoal({} as any, { refresh: async () => { refreshes += 1; } }, "init", {
+		cwd: root,
+		ui: { notify: (message: string) => notifications.push(message) },
+		sessionManager: { getSessionId: () => "pi_init" },
+	} as any);
+
+	await access(join(root, ".bravo", "config.yaml"));
+	await access(join(root, ".bravo", "goals"));
+	await access(join(root, ".bravo", "runtime"));
+	assert.equal(refreshes, 1);
+	assert.match(notifications[0] ?? "", /Initialized Bravo workspace:/);
+});
+
+test("/goal prep creates a draft goal workspace from Pi command context", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-prep-"));
+	await testables.handleGoal({} as any, { refresh: async () => {} }, "init", {
+		cwd: root,
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => "pi_prep" },
+	} as any);
+
+	const notifications: string[] = [];
+	let refreshes = 0;
+	await testables.handleGoal({} as any, { refresh: async () => { refreshes += 1; } }, 'prep pi-smoke --title "Pi Smoke Goal"', {
+		cwd: root,
+		ui: { notify: (message: string) => notifications.push(message) },
+		sessionManager: { getSessionId: () => "pi_prep" },
+	} as any);
+
+	const goalDir = join(root, ".bravo", "goals", "pi-smoke");
+	await access(join(goalDir, "goal.md"));
+	await access(join(goalDir, "context.md"));
+	await access(join(goalDir, "state.yaml"));
+	await access(join(goalDir, "resume.md"));
+	await access(join(goalDir, "receipts"));
+	await access(join(goalDir, "artifacts"));
+	const state = await readGoalState(goalDir);
+	assert.equal(state.goal.title, "Pi Smoke Goal");
+	assert.equal(refreshes, 1);
+	assert.match(notifications[0] ?? "", /Prepared Bravo goal: \.bravo\/goals\/pi-smoke/);
+});
+
+test("/goal check validates explicit goals from Pi command context", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-check-"));
+	await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "check-me" });
+	const notifications: string[] = [];
+	let refreshes = 0;
+
+	await testables.handleGoal({} as any, { refresh: async () => { refreshes += 1; } }, "check check-me", {
+		cwd: root,
+		ui: { notify: (message: string) => notifications.push(message) },
+		sessionManager: { getSessionId: () => "pi_check" },
+	} as any);
+
+	assert.equal(refreshes, 1);
+	assert.match(notifications[0] ?? "", /Bravo goal check passed: check-me/);
 });
 
 test("worker prompt names receipt path, schema, and task_receipt_ready call", () => {

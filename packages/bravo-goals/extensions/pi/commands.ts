@@ -3,8 +3,9 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import YAML from "yaml";
 import { archiveGoal } from "../../src/archive.js";
-import { recordUserVerification } from "../../src/runtime.js";
-import { discoverWorkspaceRoot } from "../../src/workspace.js";
+import { checkGoal } from "../../src/checker.js";
+import { exists as pathExists, recordUserVerification } from "../../src/runtime.js";
+import { bravoWorkspacePaths, discoverWorkspaceRoot, initBravoWorkspace, scaffoldGoalWorkspace } from "../../src/workspace.js";
 import { markBoundaryApplied, normalizeBoundaryMode, selectNextBoundary } from "../../src/phase-boundary.js";
 import type { GoalState } from "../../src/types.js";
 import { clearHud, readActiveGoals, readGoalState, updateHud, type ActiveGoalEntry, type GoalStateView } from "./hud.js";
@@ -24,6 +25,14 @@ interface GoalRecord {
 	id: string;
 	path: string;
 	state: GoalStateView;
+}
+
+interface GoalCommandHelp {
+	name: string;
+	usage: string;
+	when: string;
+	args?: string[];
+	flags?: string[];
 }
 
 interface ReplacementSession {
@@ -59,6 +68,147 @@ function parseArgs(args: string): ParsedArgs {
 		}
 	}
 	return { positional, flags };
+}
+
+const GOAL_COMMAND_HELP: GoalCommandHelp[] = [
+	{
+		name: "help",
+		usage: "/goal help [subcommand]",
+		when: "Show Bravo Goals slash-command help. Use a subcommand for details.",
+		args: ["subcommand: optional command name, like init, start, next, or archive."],
+	},
+	{
+		name: "init",
+		usage: "/goal init [--workspace-root <path>]",
+		when: "Create the .bravo workspace directories and config before any goals exist.",
+		flags: ["--workspace-root <path>: workspace root to initialize. Defaults to the current Pi cwd."],
+	},
+	{
+		name: "prep",
+		usage: "/goal prep <goal-id> [--title <title>]",
+		when: "Create a draft goal workspace with goal.md, context.md, state.yaml, resume.md, receipts/, and artifacts/.",
+		args: ["goal-id: required slug for the new goal under .bravo/goals/."],
+		flags: ["--title <title>: human-readable goal title. Defaults to a title generated from the id."],
+	},
+	{
+		name: "start",
+		usage: "/goal start <goal-id-or-path>",
+		when: "Attach this Pi session to an existing goal and queue the active worker prompt.",
+		args: ["goal-id-or-path: goal id under .bravo/goals/ or a path to a goal directory."],
+	},
+	{
+		name: "status",
+		usage: "/goal status [goal-id]",
+		when: "Show the attached goal status, or an explicit goal status.",
+		args: ["goal-id: optional goal id. Omit it to use the goal attached to this session."],
+	},
+	{
+		name: "pause",
+		usage: "/goal pause [goal-id] [--reason <text>]",
+		when: "Write a controller resume snapshot, detach this session, and mark the goal paused.",
+		args: ["goal-id: optional goal id. Omit it to use the attached goal."],
+		flags: ["--reason <text>: stored as the pause reason in state.yaml and resume.md."],
+	},
+	{
+		name: "resume",
+		usage: "/goal resume <goal-id-or-path>",
+		when: "Reattach this Pi session to a paused or active goal and queue the restart prompt.",
+		args: ["goal-id-or-path: goal id under .bravo/goals/ or a path to a goal directory."],
+	},
+	{
+		name: "checkpoint",
+		usage: "/goal checkpoint [goal-id]",
+		when: "Ask the worker to refresh resume.md with current durable context.",
+		args: ["goal-id: optional goal id. Omit it to use the attached goal."],
+	},
+	{
+		name: "check",
+		usage: "/goal check [goal-id]",
+		when: "Validate the attached goal, an explicit goal, or the workspace structure when no goal is attached.",
+		args: ["goal-id: optional goal id. Omit it to check the attached goal or workspace."],
+	},
+	{
+		name: "next",
+		usage: "/goal next [goal-id] [--carry | --compact | --fresh]",
+		when: "Continue after a passing Judge verdict using the selected phase boundary.",
+		args: ["goal-id: optional goal id. Omit it to use the attached goal."],
+		flags: [
+			"--carry: continue in the same session.",
+			"--compact: compact first, then queue continuation.",
+			"--fresh: start a replacement Pi session.",
+		],
+	},
+	{
+		name: "compact",
+		usage: "/goal compact [goal-id]",
+		when: "Compact this session with Bravo goal context, without changing task state.",
+		args: ["goal-id: optional goal id. Omit it to use the attached goal."],
+	},
+	{
+		name: "verify",
+		usage: "/goal verify <goal-id> [--note <text>]",
+		when: "Record user verification after the final audit has passed.",
+		args: ["goal-id: required goal id."],
+		flags: ["--note <text>: optional verification note."],
+	},
+	{
+		name: "archive",
+		usage: "/goal archive <goal-id> [--force --reason <text>]",
+		when: "Move a done, final-audited, user-verified goal to .bravo/archived/goals/.",
+		args: ["goal-id: required goal id."],
+		flags: [
+			"--force: archive even when gates are not met; records forced archive state.",
+			"--reason <text>: required in practice when forcing, and useful for audit context.",
+		],
+	},
+];
+
+function renderGoalHelp(commandName?: string): string {
+	if (commandName) {
+		const command = GOAL_COMMAND_HELP.find((candidate) => candidate.name === commandName);
+		if (!command) {
+			return `Unknown /goal command: ${commandName}\n\n${renderGoalHelp()}`;
+		}
+		return [
+			command.usage,
+			"",
+			command.when,
+			command.args?.length ? ["", "Arguments:", ...command.args.map((arg) => `  ${arg}`)].join("\n") : null,
+			command.flags?.length ? ["", "Flags:", ...command.flags.map((flag) => `  ${flag}`)].join("\n") : null,
+		].filter((line): line is string => line !== null).join("\n");
+	}
+	return [
+		"Bravo Goals commands:",
+		"",
+		...GOAL_COMMAND_HELP.map((command) => `  ${command.usage}\n    ${command.when}`),
+		"",
+		"Use /goal help <subcommand> for arguments and flags.",
+	].join("\n");
+}
+
+async function checkWorkspace(root: string): Promise<string[]> {
+	const paths = bravoWorkspacePaths(root);
+	const missing: string[] = [];
+	for (const required of [paths.bravo, paths.goals, paths.archivedGoals, paths.runtime, paths.runs, paths.logs]) {
+		if (!(await pathExists(required))) {
+			missing.push(required);
+		}
+	}
+	return missing;
+}
+
+async function notifyGoalCheck(ctx: ExtensionCommandContext, root: string, goal: GoalRecord): Promise<void> {
+	const result = await checkGoal({ goalPath: goal.path });
+	if (result.issues.length === 0) {
+		ctx.ui.notify(`Bravo goal check passed: ${goal.id}`, "info");
+		return;
+	}
+	const lines = [
+		`Bravo goal check ${result.ok ? "passed with warnings" : "failed"}: ${goal.id}`,
+		"",
+		...result.issues.map((issue) => `${issue.severity}\t${issue.code}\t${issue.path ?? relPath(root, goal.path)}\t${issue.message}`),
+	];
+	ctx.ui.notify(lines.join("\n"), result.ok ? "warning" : "error");
 }
 
 function sessionIdOf(ctx: ExtensionCommandContext): string | null {
@@ -276,11 +426,37 @@ async function runBoundary(root: string, pi: ExtensionAPI, ctx: ExtensionCommand
 }
 
 async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: string, ctx: ExtensionCommandContext): Promise<void> {
-	const root = await discoverWorkspaceRoot(ctx.cwd);
-	if (!root) throw new Error("No Bravo workspace found. Run bravo-goals init at the workspace root first.");
 	const parsed = parseArgs(args);
 	const [subcommand = "status", goalArg] = parsed.positional;
+
+	if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+		ctx.ui.notify(renderGoalHelp(goalArg), "info");
+		return;
+	}
+
+	if (subcommand === "init") {
+		const explicitRoot = typeof parsed.flags.get("workspace-root") === "string" ? parsed.flags.get("workspace-root") as string : null;
+		const paths = await initBravoWorkspace({ root: explicitRoot ?? ctx.cwd });
+		ctx.ui.notify(`Initialized Bravo workspace: ${paths.bravo}`, "info");
+		await runtime.refresh(ctx);
+		return;
+	}
+
+	const root = await discoverWorkspaceRoot(ctx.cwd);
+	if (!root) throw new Error("No Bravo workspace found. Run /goal init at the workspace root first.");
 	const sessionId = sessionIdOf(ctx);
+
+	if (subcommand === "prep") {
+		if (!goalArg) throw new Error("usage: /goal prep <goal-id> [--title <title>]");
+		const result = await scaffoldGoalWorkspace({
+			workspaceRoot: root,
+			goalId: goalArg,
+			title: typeof parsed.flags.get("title") === "string" ? parsed.flags.get("title") as string : undefined,
+		});
+		ctx.ui.notify(`Prepared Bravo goal: ${relPath(root, result.goalPath)}`, "info");
+		await runtime.refresh(ctx);
+		return;
+	}
 
 	if (subcommand === "status") {
 		const goal = await resolveGoal(root, goalArg, sessionId);
@@ -314,6 +490,26 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 		});
 		await runtime.refresh(ctx);
 		await queuePrompt(pi, subcommand === "resume" ? restartPrompt(goal) : activeTaskPrompt(goal));
+		return;
+	}
+
+	if (subcommand === "check") {
+		const goal = await resolveGoal(root, goalArg, sessionId);
+		if (goal) {
+			await notifyGoalCheck(ctx, root, goal);
+			await runtime.refresh(ctx);
+			return;
+		}
+		const missing = await checkWorkspace(root);
+		if (missing.length === 0) {
+			ctx.ui.notify(`Bravo workspace check passed: ${root}`, "info");
+			return;
+		}
+		ctx.ui.notify([
+			`Bravo workspace check failed: ${root}`,
+			"",
+			...missing.map((path) => `error\tworkspace.missing_path\t${path}\trequired workspace path is missing`),
+		].join("\n"), "error");
 		return;
 	}
 
@@ -404,6 +600,8 @@ export function registerGoalCommands(pi: ExtensionAPI, runtime: CommandRuntime):
 export const testables = {
 	parseArgs,
 	boundaryFromFlags,
+	renderGoalHelp,
+	handleGoal,
 	activeTaskPrompt,
 	restartPrompt,
 	checkpointPrompt,

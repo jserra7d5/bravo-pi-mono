@@ -43,11 +43,15 @@ create a repo-local `.bravo/` from a nested cwd.
 Install or load the package as a Pi extension, then use:
 
 ```txt
+/goal help [subcommand]
+/goal init [--workspace-root <path>]
+/goal prep <goal-id> [--title "..."]
 /goal start <goal-id-or-path>
 /goal status [goal-id]
 /goal pause [goal-id]
 /goal resume <goal-id-or-path>
 /goal checkpoint [goal-id]
+/goal check [goal-id]
 /goal next [goal-id] [--carry | --compact | --fresh]
 /goal compact [goal-id]
 /goal verify <goal-id> [--note "..."]
