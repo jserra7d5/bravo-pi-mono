@@ -8,7 +8,9 @@
     "pi-package"
   ],
   "scripts": {
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js"
   },
   "dependencies": {},
   "devDependencies": {
