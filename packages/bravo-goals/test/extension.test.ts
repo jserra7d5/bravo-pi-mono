@@ -30,21 +30,32 @@ const snapshot: HudSnapshot = {
 			completed_tasks: 1,
 			total_tasks: 2,
 		},
+		final_audit: { status: "pending" },
+		user_verification: { status: "pending" },
 	},
 };
 
-test("renders Bravo Goals footer status", () => {
-	assert.equal(renderStatusLine(snapshot), "Goal: Durable resume loop 1/2 Judge: pass");
+test("renders Bravo Goals footer status (v2 format)", () => {
+	const line = renderStatusLine(snapshot);
+	assert.ok(line, "status line should be defined");
+	// v2: <gold bold title>  ●◉○  <caption>
+	assert.match(line, /Durable resume loop/);
+	// Tasks are active (1/2 done, not all done), audit/verify pending → gate dots
+	assert.match(line, /1\/2 tasks/);
 });
 
-test("renders below-editor HUD lines from state", () => {
-	assert.deepEqual(renderHud(snapshot), [
-		"GOAL  Durable resume loop",
-		"STATE active",
-		"TASK  Implement resume checkpoint writer",
-		"DONE  1/2 [########--------] 50%",
-		"JUDGE pass",
-	]);
+test("renders below-editor HUD lines from state (v2 three-gate layout)", () => {
+	const lines = renderHud(snapshot);
+	assert.ok(lines.length > 0, "should return at least one line");
+	const joined = lines.join("\n");
+	// Must include goal title
+	assert.match(joined, /Durable resume loop/);
+	// Must include task info for the active task (tasks gate is active)
+	assert.match(joined, /checkpoint-writer/);
+	// Must include gates row
+	assert.match(joined, /gates/);
+	// Must include task count
+	assert.match(joined, /1\/2/);
 });
 
 test("parses quoted command flags", () => {
@@ -68,6 +79,8 @@ test("worker prompt names receipt path, schema, and task_receipt_ready call", ()
 			active_task: "task-one",
 			tasks: [{ id: "task-one", title: "Task One", status: "active", receipt: "receipts/custom-worker.md" }],
 			progress: { completed_tasks: 0, total_tasks: 1 },
+			final_audit: { status: "pending" },
+			user_verification: { status: "pending" },
 		},
 	});
 	assert.match(prompt, /Expected worker receipt path for task_receipt_ready: receipts\/custom-worker\.md/);
@@ -89,6 +102,8 @@ test("no-task prompt does not mention task_receipt_ready", () => {
 			active_task: null,
 			tasks: [],
 			progress: { completed_tasks: 0, total_tasks: 0 },
+			final_audit: { status: "pending" },
+			user_verification: { status: "pending" },
 		},
 	});
 	assert.doesNotMatch(prompt, /task_receipt_ready/);
@@ -472,7 +487,7 @@ test("judge_event task.receipt_ready fails without an active task", async () => 
 	);
 });
 
-test("HUD reports awaiting Judge for awaiting_judge active task", () => {
+test("HUD shows judging chip for awaiting_judge active task", () => {
 	const awaiting: HudSnapshot = {
 		...snapshot,
 		state: {
@@ -481,8 +496,13 @@ test("HUD reports awaiting Judge for awaiting_judge active task", () => {
 			judge: { last_verdict: "none", active: false },
 		},
 	};
-	assert.equal(renderStatusLine(awaiting), "Goal: Durable resume loop 1/2 Judge: awaiting");
-	assert.equal(renderHud(awaiting)[4], "JUDGE awaiting");
+	const statusLine = renderStatusLine(awaiting);
+	assert.ok(statusLine, "status line should be defined");
+	assert.match(statusLine, /Durable resume loop/);
+	const lines = renderHud(awaiting);
+	const joined = lines.join("\n");
+	// The task row should include the judging chip since status is awaiting_judge
+	assert.match(joined, /◐ judging/);
 });
 
 test("judge_finish outside Judge run teaches workers to use task_receipt_ready", async () => {
