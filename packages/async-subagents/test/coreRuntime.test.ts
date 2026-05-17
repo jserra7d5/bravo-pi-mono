@@ -64,6 +64,7 @@ test("startSubagent drives a detached fake child lifecycle", async () => {
   assert.equal(started.contextPolicy, "fresh");
   assert.equal(started.sessionPolicy, "record");
   assert.equal(started.piSessionPath, join(started.runDir, "pi-session", "session.jsonl"));
+  assert.equal(started.thinkingLevel, undefined);
   assert.equal(started.waited, false);
   assert.ok(existsSync(join(started.runDir, "logs", "launch.json")));
 
@@ -74,7 +75,12 @@ test("startSubagent drives a detached fake child lifecycle", async () => {
   assert.match(waited.results[0]?.body ?? "", /Fake child completed/);
   assert.equal(store.readStatus(started.runId).state, "completed");
   assert.equal(store.readStatus(started.runId).piSessionPath, join(started.runDir, "pi-session", "session.jsonl"));
+  assert.equal(store.readStatus(started.runId).thinkingLevel, undefined);
   assert.equal(store.readResult(started.runId)?.piSessionPath, join(started.runDir, "pi-session", "session.jsonl"));
+  assert.equal(store.readResult(started.runId)?.thinkingLevel, undefined);
+  const launch = JSON.parse(readFileSync(join(started.runDir, "logs", "launch.json"), "utf8"));
+  assert.equal(launch.args.includes("--thinking"), false);
+  assert.equal(Object.hasOwn(launch, "thinkingLevel"), false);
 });
 
 test("startSubagent assigns and persists display names separately from agent type", async () => {
@@ -122,6 +128,44 @@ test("startSubagent can explicitly opt out of Pi session recording", async () =>
   assert.equal(started.piSessionPath, undefined);
   assert.equal(store.readStatus(started.runId).sessionPolicy, "none");
   assert.equal(store.readResult(started.runId)?.sessionPolicy, "none");
+});
+
+test("startSubagent applies and persists definition thinking level with start override precedence", async () => {
+  const w = workspace();
+  writeFileSync(
+    join(w.root, ".agents", "thinker.md"),
+    `---
+description: Thinking scout.
+model: openai-codex/gpt-5.5
+thinkingLevel: low
+---
+
+Thinking body.
+`,
+    "utf8",
+  );
+  const started = await startSubagent({
+    agent: "thinker",
+    task: "Use requested thinking",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    thinkingLevel: "high",
+    fake: { mode: "immediate", body: "Done" },
+  });
+
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const status = store.readStatus(started.runId);
+  const result = store.readResult(started.runId);
+  const launch = JSON.parse(readFileSync(join(started.runDir, "logs", "launch.json"), "utf8"));
+  assert.equal(started.model, "openai-codex/gpt-5.5");
+  assert.equal(started.thinkingLevel, "high");
+  assert.equal(status.model, "openai-codex/gpt-5.5");
+  assert.equal(status.thinkingLevel, "high");
+  assert.equal(result?.model, "openai-codex/gpt-5.5");
+  assert.equal(result?.thinkingLevel, "high");
+  assert.deepEqual(launch.args.slice(launch.args.indexOf("--thinking"), launch.args.indexOf("--thinking") + 2), ["--thinking", "high"]);
+  assert.equal(launch.thinkingLevel, "high");
 });
 
 test("context fork fails clearly without a parent Pi session reference", async () => {

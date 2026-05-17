@@ -1,4 +1,4 @@
-import type { ContextPolicy, EventType, InboxMessageType, RunState, SessionPolicy, TerminalRunState } from "./types.js";
+import type { ContextPolicy, EventType, InboxMessageType, RunState, SessionPolicy, TerminalRunState, ThinkingLevel } from "./types.js";
 
 export const RUN_STATES: RunState[] = [
   "created",
@@ -37,6 +37,11 @@ export const INBOX_MESSAGE_TYPES: InboxMessageType[] = ["instruction", "answer",
 export const PARENT_MESSAGE_TYPES = ["instruction", "answer", "context"] as const;
 export const CONTEXT_POLICIES: ContextPolicy[] = ["fresh", "fork"];
 export const SESSION_POLICIES: SessionPolicy[] = ["record", "none"];
+export const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+
+export function isThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === "string" && THINKING_LEVELS.includes(value as ThinkingLevel);
+}
 
 export function isTerminalRunState(state: RunState): state is TerminalRunState {
   return TERMINAL_RUN_STATES.includes(state as TerminalRunState);

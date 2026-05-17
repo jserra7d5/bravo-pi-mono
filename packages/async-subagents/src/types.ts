@@ -43,6 +43,7 @@ export type AgentDefinitionSource = "project" | "user" | "builtin";
 export type CwdPolicy = "inherit" | "explicit" | "sandbox";
 export type ResultFormat = "text" | "json" | "files";
 export type WriterRole = "launcher" | "child-runtime" | "parent-runtime";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export interface ArtifactRef {
   artifactId: string;
@@ -84,6 +85,8 @@ export interface RunStatus {
     definitionPath: string;
     mode: AgentMode;
   };
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
   contextPolicy: ContextPolicy;
   sessionPolicy: SessionPolicy;
   piSessionPath?: string;
@@ -138,6 +141,7 @@ export interface InboxMessage {
   body: string;
   attachments: AttachmentRef[];
   requiresAck: boolean;
+  thinkingLevel?: ThinkingLevel;
 }
 
 export interface RunResult {
@@ -147,6 +151,8 @@ export interface RunResult {
   agentName: string;
   displayName?: string;
   namePack?: string;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
   contextPolicy: ContextPolicy;
   sessionPolicy: SessionPolicy;
   piSessionPath?: string;
@@ -246,6 +252,8 @@ export interface SubagentStartResult {
   agentName: string;
   displayName?: string;
   namePack?: string;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
   state: RunState;
   started: boolean;
   waited: boolean;

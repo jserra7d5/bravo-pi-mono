@@ -2,7 +2,7 @@ import { newMessageId } from "./ids.js";
 import { isTerminalRunState } from "./schemas.js";
 import { nowIso } from "./time.js";
 import { RunStore } from "./runStore.js";
-import type { AttachmentRef, InboxMessage, InboxMessageType, SubagentMessageResult } from "./types.js";
+import type { AttachmentRef, InboxMessage, InboxMessageType, SubagentMessageResult, ThinkingLevel } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 export function createInboxMessage(input: {
@@ -12,6 +12,7 @@ export function createInboxMessage(input: {
   type?: InboxMessageType;
   attachments?: AttachmentRef[];
   requiresAck?: boolean;
+  thinkingLevel?: ThinkingLevel;
 }): InboxMessage {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -23,6 +24,7 @@ export function createInboxMessage(input: {
     body: input.body,
     attachments: input.attachments ?? [],
     requiresAck: input.requiresAck ?? true,
+    thinkingLevel: input.thinkingLevel,
   };
 }
 
@@ -33,6 +35,7 @@ export interface SendSubagentMessageInput {
   type?: InboxMessageType;
   attachments?: AttachmentRef[];
   requiresAck?: boolean;
+  thinkingLevel?: ThinkingLevel;
   liveTransport?: "child-control";
 }
 
@@ -73,6 +76,7 @@ export function sendSubagentMessage(store: RunStore, input: SendSubagentMessageI
     type: input.type,
     attachments: input.attachments,
     requiresAck: input.requiresAck,
+    thinkingLevel: input.thinkingLevel,
   });
   store.appendInboxMessage(input.runId, message);
 

@@ -8,7 +8,7 @@ import { NAME_PACKS, readNamePackSelection, writeNamePackSelection, type NamePac
 import { readSubagentResult } from "../../src/result.js";
 import { createRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
-import { isTerminalRunState } from "../../src/schemas.js";
+import { isTerminalRunState, isThinkingLevel } from "../../src/schemas.js";
 import { startSubagent } from "../../src/start.js";
 import { readSubagentStatus, updateRunStatus } from "../../src/status.js";
 import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult, type WaitCursorMap } from "../../src/types.js";
@@ -244,6 +244,7 @@ function reconcileProcessHealth(store: RunStore, status: RunStatus): RunStatus {
 }
 
 function appendParentMessage(params: Record<string, unknown>, store: RunStore, root: RootSessionIdentity, runId: string, type: InboxMessageType, body: string): SubagentMessageResult {
+  const thinkingLevel = isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined;
   if (typeof params.runDir === "string" && params.runDir && typeof params.runId !== "string") {
     const message = createInboxMessage({
       toRunId: runId,
@@ -252,6 +253,7 @@ function appendParentMessage(params: Record<string, unknown>, store: RunStore, r
       type,
       attachments: Array.isArray(params.attachments) ? (params.attachments as never) : undefined,
       requiresAck: typeof params.requiresAck === "boolean" ? params.requiresAck : undefined,
+      thinkingLevel,
     });
     appendJsonl(join(params.runDir, "inbox.jsonl"), message);
     return { messageId: message.messageId, runId, appended: true, liveDelivered: false };
@@ -263,6 +265,7 @@ function appendParentMessage(params: Record<string, unknown>, store: RunStore, r
     type,
     attachments: Array.isArray(params.attachments) ? (params.attachments as never) : undefined,
     requiresAck: typeof params.requiresAck === "boolean" ? params.requiresAck : undefined,
+    thinkingLevel,
     liveTransport: "child-control",
   });
 }
@@ -334,6 +337,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
             ASYNC_SUBAGENTS_PARENT_RUN_ID: root.parentRunId,
           },
           name: typeof params.name === "string" ? params.name : undefined,
+          thinkingLevel: isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined,
         });
         writeDeliverySubscription(storeFor(cwd), {
           schemaVersion: SCHEMA_VERSION,
@@ -480,19 +484,21 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
 
         const signal = trySignal(status.pid, "SIGCONT");
         if (!signal.ok) return response(`Run ${runId} could not be continued: ${signal.error}`, { code: "CONTINUE_FAILED", runId, error: signal.error }, true);
-        const event = createRunEvent({ sequence: nextEventSequence(store, runId), runId, parentRunId: status.parentRunId, type: "status", summary: "Continued by parent", wake: false, data: { action: "continue", pid: status.pid, signalDelivered: signal.ok } });
+        const thinkingLevel = isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined;
+        const selectedThinkingLevel = thinkingLevel ?? status.thinkingLevel;
+        const event = createRunEvent({ sequence: nextEventSequence(store, runId), runId, parentRunId: status.parentRunId, type: "status", summary: "Continued by parent", wake: false, data: { action: "continue", pid: status.pid, signalDelivered: signal.ok, thinkingLevel } });
         store.appendEvent(runId, event);
-        store.writeStatus(updateRunStatus(status, { state: "running", writerRole: "parent-runtime", lastActivityAt: event.createdAt, lastEventId: event.eventId, summary: "Continued by parent", needs: null }));
+        store.writeStatus(updateRunStatus(status, { state: "running", writerRole: "parent-runtime", lastActivityAt: event.createdAt, lastEventId: event.eventId, summary: "Continued by parent", needs: null, thinkingLevel: selectedThinkingLevel }));
         const body = typeof params.body === "string" && params.body.trim() ? params.body : "Resume work.";
         const type = (typeof params.type === "string" ? params.type : "instruction") as ParentMessageType;
         const messageType: InboxMessageType = !params.body ? "resume" : type;
         const result = await waitForLiveAckIfNeeded(store, params, status, appendParentMessage(params, store, root, runId, messageType, body));
         if (requiredAckFailed(params, result)) {
           await runtime.afterMutation?.(ctx, cwd, root);
-          return response(result.unsupported?.message ?? "Required child acknowledgement was not received", { ...result, runId, state: "running", signalDelivered: signal.ok, event }, true);
+          return response(result.unsupported?.message ?? "Required child acknowledgement was not received", { ...result, runId, state: "running", signalDelivered: signal.ok, event, thinkingLevel: selectedThinkingLevel }, true);
         }
         await runtime.afterMutation?.(ctx, cwd, root);
-        return response(`Subagent ${runId} continued`, { ...result, runId, state: "running", signalDelivered: signal?.ok, event });
+        return response(`Subagent ${runId} continued`, { ...result, runId, state: "running", signalDelivered: signal?.ok, event, thinkingLevel: selectedThinkingLevel });
       },
       renderCall: renderSubagentToolCallComponent,
       renderResult: renderSubagentToolResultComponent,
@@ -581,6 +587,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
               rootSessionId: status.rootSessionId,
               pid: status.pid,
               processHealth: status.processHealth,
+              model: status.model,
+              thinkingLevel: status.thinkingLevel,
               contextPolicy: status.contextPolicy,
               sessionPolicy: status.sessionPolicy,
               piSessionPath: status.piSessionPath,

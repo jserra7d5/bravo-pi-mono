@@ -1,6 +1,6 @@
 import { durationMs, nowIso } from "./time.js";
 import { RunStore } from "./runStore.js";
-import type { ArtifactRef, ContextPolicy, RunResult, SessionPolicy, TerminalRunState } from "./types.js";
+import type { ArtifactRef, ContextPolicy, RunResult, SessionPolicy, TerminalRunState, ThinkingLevel } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 export function createRunResult(input: {
@@ -9,6 +9,8 @@ export function createRunResult(input: {
   agentName: string;
   displayName?: string;
   namePack?: string;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
   contextPolicy?: ContextPolicy;
   sessionPolicy?: SessionPolicy;
   piSessionPath?: string;
@@ -31,6 +33,8 @@ export function createRunResult(input: {
     agentName: input.agentName,
     displayName: input.displayName,
     namePack: input.namePack,
+    model: input.model,
+    thinkingLevel: input.thinkingLevel,
     contextPolicy: input.contextPolicy ?? "fresh",
     sessionPolicy: input.sessionPolicy ?? "record",
     piSessionPath: input.piSessionPath,

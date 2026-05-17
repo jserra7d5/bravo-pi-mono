@@ -1,7 +1,7 @@
 import { nowIso } from "./time.js";
 import { RunStore } from "./runStore.js";
 import { isTerminalRunState } from "./schemas.js";
-import type { AgentDefinitionSource, AgentMode, ContextPolicy, RunState, RunStatus, SessionPolicy } from "./types.js";
+import type { AgentDefinitionSource, AgentMode, ContextPolicy, RunState, RunStatus, SessionPolicy, ThinkingLevel } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 export function createInitialStatus(input: {
@@ -15,6 +15,8 @@ export function createInitialStatus(input: {
   agentSource: AgentDefinitionSource;
   definitionPath: string;
   mode: AgentMode;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
   contextPolicy?: ContextPolicy;
   sessionPolicy?: SessionPolicy;
   piSessionPath?: string;
@@ -45,6 +47,8 @@ export function createInitialStatus(input: {
       definitionPath: input.definitionPath,
       mode: input.mode,
     },
+    model: input.model,
+    thinkingLevel: input.thinkingLevel,
     contextPolicy: input.contextPolicy ?? "fresh",
     sessionPolicy: input.sessionPolicy ?? "record",
     piSessionPath: input.piSessionPath,

@@ -18,6 +18,8 @@ description: Scout
 includes: [safety]
 skills: [repo-reader]
 extensions: [audit-extension]
+model: openai-codex/gpt-5.5
+thinkingLevel: high
 resultFormat: json
 ---
 
@@ -49,4 +51,6 @@ Scout system body.
   assert.match(task, /src\/api.ts/);
   assert.deepEqual(assembled.skills, ["repo-reader"]);
   assert.deepEqual(assembled.extensions, ["audit-extension"]);
+  assert.equal(assembled.model, "openai-codex/gpt-5.5");
+  assert.equal(assembled.thinkingLevel, "high");
 });

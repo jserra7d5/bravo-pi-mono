@@ -13,7 +13,7 @@ import { RunStore } from "./runStore.js";
 import { createInitialStatus } from "./status.js";
 import { runSupervisor, type SupervisorFakeInput, type SupervisorInput } from "./supervisor.js";
 import { waitSubagents } from "./wait.js";
-import type { ContextPolicy, SessionPolicy, SubagentStartResult, SubagentWaitResult, TerminalRunState } from "./types.js";
+import type { ContextPolicy, SessionPolicy, SubagentStartResult, SubagentWaitResult, TerminalRunState, ThinkingLevel } from "./types.js";
 
 export interface StartFakeChildInput {
   mode: "child";
@@ -48,6 +48,7 @@ export interface StartSubagentInput {
   allowFreshFallback?: boolean;
   parentPiSessionRef?: ParentPiSessionRef | null;
   branchSession?: BranchPiSession;
+  thinkingLevel?: ThinkingLevel;
   piBin?: string;
   env?: Record<string, string>;
   fake?: StartFakeImmediateInput | StartFakeChildInput;
@@ -145,6 +146,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   const store = new RunStore({ cwd, runRoot: input.runRoot });
   const root = resolveRootIdentity(input, cwd);
   const definition = resolveAgentDefinition(input.agent, { cwd, env: process.env });
+  const selectedThinkingLevel = input.thinkingLevel ?? definition.thinkingLevel;
   const requestedContextPolicy = input.context ?? definition.context ?? "fresh";
   const requestedSessionPolicy = input.session ?? definition.session ?? "record";
   const { runId, paths } = store.createRunDirectory({
@@ -179,6 +181,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     agentSource: definition.source,
     definitionPath: definition.definitionPath,
     mode: definition.mode,
+    model: definition.model,
+    thinkingLevel: selectedThinkingLevel,
     contextPolicy,
     sessionPolicy,
     piSessionPath,
@@ -216,6 +220,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       waited: false,
       contextPolicy,
       sessionPolicy,
+      model: definition.model,
+      thinkingLevel: selectedThinkingLevel,
       piSessionPath,
       requestedPiSessionPath,
       next: [{ tool: "subagent_result", args: { runId } }],
@@ -300,6 +306,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     skills: prompt.skills,
     extensions: prompt.extensions,
     model: prompt.model,
+    thinkingLevel: selectedThinkingLevel,
     contextPolicy,
     forkSourceSessionFile,
     forkSourceLeafId,
@@ -311,6 +318,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   const command = input.fake?.mode === "child" ? fakeChildCommand(input.fake, cwd) : piCommand;
   writeLaunchLogWithMetadata(paths.runDir, command, {
     model: prompt.model,
+    thinkingLevel: selectedThinkingLevel,
     userBuiltinTools: definition.tools,
     runtimeBuiltinTools,
     runtimeExtensionPaths,
@@ -369,6 +377,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     displayName: display.displayName,
     namePack: display.namePack,
     state: status.state,
+    model: status.model,
+    thinkingLevel: status.thinkingLevel,
     started: status.state === "running" || terminal,
     waited: Boolean(waitResult),
     waitResult,

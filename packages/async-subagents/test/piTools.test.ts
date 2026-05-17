@@ -107,13 +107,22 @@ test("subagent_continue records running state even when required ack fails", asy
   const w = workspace();
   const store = new RunStore({ cwd: w.root });
   const status = store.readStatus(w.runId);
-  store.writeStatus({ ...status, state: "paused", pid: process.pid, processHealth: "alive" });
+  store.writeStatus({ ...status, state: "paused", pid: process.pid, processHealth: "alive", thinkingLevel: "low" });
   const built = tools(w.identity);
-  const result = await built.subagent_continue.execute("call", { runId: w.runId }, undefined, undefined, { cwd: w.root });
+  const result = await built.subagent_continue.execute("call", { runId: w.runId, thinkingLevel: "high" }, undefined, undefined, { cwd: w.root });
 
   assert.equal(result.isError, true);
   assert.equal(result.details.state, "running");
+  assert.equal(result.details.thinkingLevel, "high");
   assert.equal(store.readStatus(w.runId).state, "running");
+  assert.equal(store.readStatus(w.runId).thinkingLevel, "high");
+  assert.equal(store.readInbox(w.runId).records.at(-1)?.thinkingLevel, "high");
+});
+
+test("Pi tool schemas expose thinking level controls", () => {
+  const built = buildSubagentTools();
+  assert.ok(JSON.stringify(built.find((tool) => tool.name === "subagent_start")?.parameters).includes("thinkingLevel"));
+  assert.ok(JSON.stringify(built.find((tool) => tool.name === "subagent_continue")?.parameters).includes("thinkingLevel"));
 });
 
 test("subagent_result can recover by runDir", async () => {

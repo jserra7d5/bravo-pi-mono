@@ -1,6 +1,6 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { EVENT_TYPES, PARENT_MESSAGE_TYPES } from "../../src/schemas.js";
+import { EVENT_TYPES, PARENT_MESSAGE_TYPES, THINKING_LEVELS } from "../../src/schemas.js";
 
 export const schemaVersion = 1;
 
@@ -31,6 +31,7 @@ export const subagentStartSchema = Type.Object({
   context: Type.Optional(StringEnum(["fresh", "fork"] as const, { default: "fresh" })),
   session: Type.Optional(StringEnum(["record", "none"] as const, { default: "record" })),
   allowFreshFallback: Type.Optional(Type.Boolean({ default: false })),
+  thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS, { description: "Override the agent definition default Pi thinking level for this child run." })),
 });
 
 export const subagentWaitSchema = Type.Object({
@@ -72,6 +73,7 @@ export const subagentContinueSchema = Type.Object({
   type: Type.Optional(StringEnum(PARENT_MESSAGE_TYPES, { default: "instruction" })),
   attachments: Type.Optional(Type.Array(Attachment)),
   requiresAck: Type.Optional(Type.Boolean()),
+  thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS, { description: "Set the child's Pi thinking level while resuming, if the child-control extension is active." })),
 });
 
 export const subagentResultSchema = Type.Object({

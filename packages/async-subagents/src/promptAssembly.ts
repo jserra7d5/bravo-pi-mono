@@ -22,6 +22,7 @@ export interface PromptAssemblyResult {
   skills: string[];
   extensions: string[];
   model?: string;
+  thinkingLevel?: ResolvedAgentDefinition["thinkingLevel"];
   mode: ResolvedAgentDefinition["mode"];
   maxRunMs?: number;
 }
@@ -85,6 +86,7 @@ Interactive agents should watch their inbox and acknowledge handled parent messa
     skills: input.definition.skills,
     extensions: input.definition.extensions,
     model: input.definition.model,
+    thinkingLevel: input.definition.thinkingLevel,
     mode: input.definition.mode,
     maxRunMs: input.definition.maxRunMs,
   };

@@ -4,12 +4,14 @@ import { fileURLToPath } from "node:url";
 import { asyncSubagentsHome } from "./config.js";
 import { SubagentError } from "./errors.js";
 import { parseFrontmatter } from "./frontmatter.js";
-import type { AgentDefinitionSource, AgentMode, ContextPolicy, CwdPolicy, ResultFormat, SessionPolicy } from "./types.js";
+import { THINKING_LEVELS } from "./schemas.js";
+import type { AgentDefinitionSource, AgentMode, ContextPolicy, CwdPolicy, ResultFormat, SessionPolicy, ThinkingLevel } from "./types.js";
 
 export interface MarkdownAgentDefinition {
   name?: string;
   description: string;
   model?: string;
+  thinkingLevel?: ThinkingLevel;
   tools?: string[];
   skills?: string[];
   extensions?: string[];
@@ -103,6 +105,12 @@ function assertEnum<T extends string>(value: unknown, field: string, allowed: re
   throw new SubagentError("INVALID_AGENT_DEFINITION", `${field} must be one of ${allowed.join(", ")} in ${path}`);
 }
 
+function optionalEnum<T extends string>(value: unknown, field: string, allowed: readonly T[], path: string): T | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "string" && allowed.includes(value as T)) return value as T;
+  throw new SubagentError("INVALID_AGENT_DEFINITION", `${field} must be one of ${allowed.join(", ")} in ${path}`);
+}
+
 function isPathCapability(value: string): boolean {
   return value.startsWith(".") || value.startsWith("/") || value.includes("/") || value.includes("\\");
 }
@@ -127,6 +135,7 @@ export function parseAgentDefinitionFile(path: string, source: AgentDefinitionSo
     name,
     description,
     model: optionalString(parsed.data.model, "model", path),
+    thinkingLevel: optionalEnum(parsed.data.thinkingLevel ?? parsed.data.thinking_level, "thinkingLevel", THINKING_LEVELS, path),
     tools: stringArray(parsed.data.tools, "tools", path),
     skills,
     extensions,

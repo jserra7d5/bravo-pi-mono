@@ -3,7 +3,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { atomicWriteJson } from "./jsonl.js";
-import type { ContextPolicy, SessionPolicy } from "./types.js";
+import type { ContextPolicy, SessionPolicy, ThinkingLevel } from "./types.js";
 
 export interface BuildPiCommandInput {
   piBin?: string;
@@ -20,6 +20,7 @@ export interface BuildPiCommandInput {
   skills: string[];
   extensions: string[];
   model?: string;
+  thinkingLevel?: ThinkingLevel;
   contextPolicy?: ContextPolicy;
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
@@ -71,6 +72,7 @@ export function buildPiCommand(input: BuildPiCommandInput): PiCommand {
   for (const skill of input.skills) args.push("--skill", skill);
   for (const extension of [...input.extensions, ...runtimeExtensionPaths]) args.push("-e", extension);
   if (input.model) args.push("--model", input.model);
+  if (input.thinkingLevel) args.push("--thinking", input.thinkingLevel);
   args.push("--mode", "text", "-p", input.useAtFilePrompt === false ? input.taskPath : `@${input.taskPath}`);
 
   return {

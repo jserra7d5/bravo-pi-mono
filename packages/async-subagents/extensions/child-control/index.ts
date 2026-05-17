@@ -95,8 +95,9 @@ function deliverInbox(pi: ExtensionAPI, state: ChildControlState): void {
       summary: `Received ${message.type} from parent`,
       body: message.body,
       wake: false,
-      data: { messageId: message.messageId, messageType: message.type, requiresAck: message.requiresAck },
+      data: { messageId: message.messageId, messageType: message.type, requiresAck: message.requiresAck, thinkingLevel: message.thinkingLevel },
     });
+    if (message.thinkingLevel) pi.setThinkingLevel(message.thinkingLevel);
     pi.sendUserMessage(parentMessageText(message), { deliverAs: message.type === "cancel" ? "followUp" : "steer" });
   }
 }

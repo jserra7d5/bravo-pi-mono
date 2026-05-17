@@ -29,6 +29,7 @@ test("buildPiCommand disables ambient context and allows only the control tool w
   assert.deepEqual(command.args.slice(command.args.indexOf("--tools"), command.args.indexOf("--tools") + 2), ["--tools", childControlEventTool]);
   assert.ok(command.args.includes(childControlExtensionPath));
   assert.ok(command.args.includes("@/run/artifacts/task.md"));
+  assert.equal(command.args.includes("--thinking"), false);
 });
 
 test("buildPiCommand supports explicit session opt-out", () => {
@@ -46,7 +47,7 @@ test("buildPiCommand supports explicit session opt-out", () => {
   assert.equal(command.args.includes("--session"), false);
 });
 
-test("buildPiCommand passes declared tools, skills, extensions, and model explicitly", () => {
+test("buildPiCommand passes declared tools, skills, extensions, model, and thinking level explicitly", () => {
   const command = buildPiCommand({
     systemPath: "/run/artifacts/system.md",
     taskPath: "/run/artifacts/task.md",
@@ -60,6 +61,7 @@ test("buildPiCommand passes declared tools, skills, extensions, and model explic
     skills: ["repo-reader"],
     extensions: ["audit-extension"],
     model: "gpt-5.5",
+    thinkingLevel: "high",
   });
   assert.equal(command.args.includes("--no-tools"), false);
   assert.deepEqual(command.args.slice(command.args.indexOf("--tools"), command.args.indexOf("--tools") + 2), ["--tools", `read,grep,${childControlEventTool}`]);
@@ -68,6 +70,7 @@ test("buildPiCommand passes declared tools, skills, extensions, and model explic
   assert.ok(command.args.includes("audit-extension"));
   assert.ok(command.args.includes("--model"));
   assert.ok(command.args.includes("gpt-5.5"));
+  assert.deepEqual(command.args.slice(command.args.indexOf("--thinking"), command.args.indexOf("--thinking") + 2), ["--thinking", "high"]);
 });
 
 test("writeLaunchLog redacts secret-like environment values", () => {

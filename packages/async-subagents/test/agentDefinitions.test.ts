@@ -29,6 +29,36 @@ Reviewer body.
   assert.equal(definition.resultFormat, "text");
 });
 
+test("agent parser accepts default thinking levels", () => {
+  const w = workspace();
+  const path = join(w.userHome, "agents", "thinker.md");
+  writeFileSync(path, `---
+description: Think deeply
+model: openai-codex/gpt-5.5
+thinkingLevel: high
+---
+
+Thinker body.
+`);
+  const definition = parseAgentDefinitionFile(path, "user");
+  assert.equal(definition.model, "openai-codex/gpt-5.5");
+  assert.equal(definition.thinkingLevel, "high");
+});
+
+test("agent parser accepts snake-case thinking_level alias", () => {
+  const w = workspace();
+  const path = join(w.userHome, "agents", "snake.md");
+  writeFileSync(path, `---
+description: Think with snake case
+thinking_level: medium
+---
+
+Snake body.
+`);
+  const definition = parseAgentDefinitionFile(path, "user");
+  assert.equal(definition.thinkingLevel, "medium");
+});
+
 test("discovery uses project over user over builtin precedence", () => {
   const w = workspace();
   writeFileSync(join(w.userHome, "agents", "scout.md"), `---
