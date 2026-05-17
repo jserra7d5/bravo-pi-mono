@@ -10,6 +10,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `packages/async-subagents/` contains the Pi-only async subagent primitive: markdown agent definitions, durable run files, parent Pi tools, child-control extension, and terminal status/wake-up UI.
 - `packages/bravo-goals/` contains the Bravo Goals CLI and Pi extension for workspace-level `.bravo/` goal workspaces, task receipts, phase boundaries, terminal HUD status, and Judge run contracts.
 - `packages/caveman/` contains the Pi extension for session-scoped terse response mode (`/caveman`, `/normal`).
+- `packages/showcase/` contains the Pi extension package that registers the `showcase` tool for inline TUI rendering of requested file slices.
 - `docs/specs/` contains design specs. Each spec should live under a slug directory, e.g. `docs/specs/tango-v1/design.md`.
 - Package-specific source, docs, roles, includes, and extensions should live inside the relevant package directory.
 

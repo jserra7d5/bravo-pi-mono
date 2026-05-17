@@ -1,0 +1,28 @@
+{
+  "name": "@bravo/showcase",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi extension that shows requested file slices inline without returning large content to the model.",
+  "keywords": [
+    "pi-package"
+  ],
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi"
+    ]
+  }
+}
