@@ -1,13 +1,25 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { constants } from "node:fs";
+import { constants, readFileSync, statSync } from "node:fs";
 import { access, readFile, stat, writeFile } from "node:fs/promises";
-import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { Type } from "typebox";
 import { parse as parseYaml } from "yaml";
 import { createJudgeRun, updateJudgeRunStatus, writeJudgeVerdict, type JudgeRunConfig, type JudgeVerdictFile } from "../../src/judge-runner.js";
 import { readActiveGoalsIndex, readGoalState, writeGoalState } from "../../src/runtime.js";
 import { markWorkerReceiptReady } from "../../src/state.js";
 import { discoverWorkspaceRoot } from "../../src/workspace.js";
+import {
+	chromeRenderable,
+	renderFailureCard,
+	renderJudgeEventCall,
+	renderJudgeEventResult,
+	renderJudgeFinishCall,
+	renderJudgeFinishResult,
+	renderTaskReceiptReadyCall,
+	renderTaskReceiptReadyResult,
+	type JudgeVerdictKind,
+	type TextRenderable,
+} from "./renderers.js";
 
 const JudgeEventParams = Type.Object({
 	goal_id: Type.String({ description: "Bravo goal id." }),
@@ -53,6 +65,7 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 		label: "Task receipt ready",
 		description: "Signal that the active Bravo task worker receipt exists and the task is ready for Judge review.",
 		parameters: TaskReceiptReadyParams,
+		renderShell: "self",
 		async execute(_toolCallId, params, _span, _toolCall, ctx?: ToolContextLike) {
 			const result = await persistWorkerReceiptReady(params, ctx);
 			await appendJudgeControlEvent({
@@ -65,7 +78,20 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 				note: params.note ?? params.summary,
 				at: new Date().toISOString(),
 			});
-			return taskReceiptReadyResponse(params.goal_id, result);
+			return taskReceiptReadyResponse(params.goal_id, result, result.title);
+		},
+		renderCall(args: unknown): TextRenderable {
+			const params = args as { goal_id: string; receipt_path?: string; summary?: string };
+			const title = resolveGoalTitleSync(params.goal_id);
+			return chromeRenderable((width) => renderTaskReceiptReadyCall({
+				goal_id: params.goal_id,
+				goal_title: title,
+				receipt_path: params.receipt_path,
+				summary: params.summary,
+			}, width));
+		},
+		renderResult(result: unknown, _options, _theme, context): TextRenderable {
+			return renderToolResultComponent(result, "task_receipt_ready", context?.args);
 		},
 	});
 
@@ -74,6 +100,7 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 		label: "Judge event",
 		description: "Record a Bravo Judge lifecycle event and persist supported Bravo task transitions.",
 		parameters: JudgeEventParams,
+		renderShell: "self",
 		async execute(_toolCallId, params, _span, _toolCall, ctx?: ToolContextLike) {
 			if (params.event !== "task.receipt_ready") {
 				await appendJudgeControlEvent({
@@ -84,9 +111,10 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 					note: params.note,
 					at: new Date().toISOString(),
 				});
+				const title = resolveGoalTitleSyncFromCtx(params.goal_id, ctx);
 				return {
 					content: [{ type: "text", text: `Judge event accepted: ${params.event} for ${params.goal_id}.` }],
-					details: params,
+					details: { ...params, title },
 				};
 			}
 
@@ -101,7 +129,20 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 				note: params.note,
 				at: new Date().toISOString(),
 			});
-			return taskReceiptReadyResponse(params.goal_id, result);
+			return taskReceiptReadyResponse(params.goal_id, result, result.title);
+		},
+		renderCall(args: unknown): TextRenderable {
+			const params = args as { goal_id: string; event: string; note?: string };
+			const title = resolveGoalTitleSync(params.goal_id);
+			return chromeRenderable((width) => renderJudgeEventCall({
+				goal_id: params.goal_id,
+				goal_title: title,
+				event: params.event,
+				note: params.note,
+			}, width));
+		},
+		renderResult(result: unknown, _options, _theme, context): TextRenderable {
+			return renderToolResultComponent(result, "judge_event", context?.args);
 		},
 	});
 
@@ -110,6 +151,7 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 		label: "Judge finish",
 		description: "Signal completion of a Bravo Judge run with a verdict and receipt path. This v1 Pi extension exposes the contract only.",
 		parameters: JudgeFinishParams,
+		renderShell: "self",
 		async execute(_toolCallId, params, _span, _toolCall, ctx?: ToolContextLike) {
 			const runDir = process.env.BRAVO_JUDGE_RUN_DIR;
 			if (!runDir) throw new Error("judge_finish is only for isolated Bravo Judge sessions (BRAVO_JUDGE_RUN_DIR is not set). Normal worker agents should write the worker receipt, then call task_receipt_ready with goal_id and receipt_path instead.");
@@ -132,6 +174,10 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 			await writeJudgeVerdict(runDir, verdict, renderJudgeReceipt(verdict, params.summary));
 			await updateJudgeRunStatus(runDir, params.verdict === "blocked" ? "blocked" : params.verdict === "pass" ? "succeeded" : "failed");
 			ctx?.shutdown?.();
+			// Try to read a human title — Judge sessions run in an isolated
+			// BRAVO_JUDGE_RUN_DIR so cwd lookup may miss the workspace; fall
+			// back to undefined and the renderer will show the slug.
+			const title = resolveGoalTitleSyncFromCtx(params.goal_id, ctx);
 			return {
 				content: [
 					{
@@ -139,10 +185,173 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 						text: `Judge finished for ${params.goal_id}: ${params.verdict}. Receipt: ${params.receipt_path}`,
 					},
 				],
-				details: params,
+				details: { ...params, title, next_action: verdict.recommendation },
 			};
 		},
+		renderCall(args: unknown): TextRenderable {
+			const params = args as { goal_id: string; run_id?: string; verdict?: JudgeVerdictKind };
+			const title = resolveGoalTitleSync(params.goal_id);
+			return chromeRenderable((width) => renderJudgeFinishCall({
+				goal_id: params.goal_id,
+				goal_title: title,
+				run_id: params.run_id,
+				verdict: params.verdict,
+			}, width));
+		},
+		renderResult(result: unknown, _options, _theme, context): TextRenderable {
+			return renderToolResultComponent(result, "judge_finish", context?.args);
+		},
 	});
+}
+
+// ─── render adapters ──────────────────────────────────────────────────────
+
+interface ToolExecResult {
+	content?: Array<{ type: string; text: string }>;
+	details?: Record<string, unknown>;
+	isError?: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object";
+}
+
+function extractStringOrUndefined(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+// Map an execute() return into the right card based on the tool name. The
+// tool always knows its own name — no schema sniffing required. `args` is the
+// original tool-call params (when pi supplies them via render context); used
+// as a fallback for error cards where `details` is missing.
+export function renderToolResultComponent(rawResult: unknown, toolName: string, args?: unknown): TextRenderable {
+	const result = (isRecord(rawResult) ? rawResult : {}) as ToolExecResult;
+	const details = isRecord(result.details) ? result.details : {};
+	const argRec = isRecord(args) ? args : {};
+	// Fall back to the params goal_id when execute() threw — pi error results
+	// have no details, so the failure card would otherwise lose its identity.
+	const goalId = extractStringOrUndefined(details.goal_id)
+		?? extractStringOrUndefined(argRec.goal_id)
+		?? "";
+	const title = extractStringOrUndefined(details.title)
+		?? (goalId ? resolveGoalTitleSync(goalId) : undefined);
+
+	// Error path: pi surfaces thrown errors through isError + text content.
+	if (result.isError) {
+		const errorText = result.content?.[0]?.text ?? "Tool error";
+		return chromeRenderable((width) => renderFailureCard({
+			goal_id: goalId || "unknown",
+			goal_title: title,
+			tool: toolName,
+			error: errorText,
+		}, width));
+	}
+
+	if (toolName === "task_receipt_ready") {
+		return chromeRenderable((width) => renderTaskReceiptReadyResult({
+			goal_id: goalId,
+			goal_title: title,
+			task_id: extractStringOrUndefined(details.task_id) ?? "",
+			receipt_path: extractStringOrUndefined(details.receipt_path) ?? "",
+			judge_run_id: extractStringOrUndefined(details.judge_run_id) ?? "",
+			judge_run_path: extractStringOrUndefined(details.judge_run_path),
+			judge_receipt_path: extractStringOrUndefined(details.judge_receipt_path),
+			next_action: extractStringOrUndefined(details.next_action),
+		}, width));
+	}
+
+	if (toolName === "judge_event") {
+		// judge_event for task.receipt_ready returns the same details shape
+		// as task_receipt_ready — render the receipt-ready card so the user
+		// sees the actual transition that happened.
+		if (extractStringOrUndefined(details.status) === "awaiting_judge") {
+			return chromeRenderable((width) => renderTaskReceiptReadyResult({
+				goal_id: goalId,
+				goal_title: title,
+				task_id: extractStringOrUndefined(details.task_id) ?? "",
+				receipt_path: extractStringOrUndefined(details.receipt_path) ?? "",
+				judge_run_id: extractStringOrUndefined(details.judge_run_id) ?? "",
+				judge_run_path: extractStringOrUndefined(details.judge_run_path),
+				judge_receipt_path: extractStringOrUndefined(details.judge_receipt_path),
+				next_action: extractStringOrUndefined(details.next_action),
+			}, width));
+		}
+		return chromeRenderable((width) => renderJudgeEventResult({
+			goal_id: goalId,
+			goal_title: title,
+			event: extractStringOrUndefined(details.event) ?? "",
+			run_id: extractStringOrUndefined(details.run_id),
+			receipt_path: extractStringOrUndefined(details.receipt_path),
+		}, width));
+	}
+
+	if (toolName === "judge_finish") {
+		const verdict = extractStringOrUndefined(details.verdict) as JudgeVerdictKind | undefined;
+		if (verdict) {
+			return chromeRenderable((width) => renderJudgeFinishResult({
+				goal_id: goalId,
+				goal_title: title,
+				run_id: extractStringOrUndefined(details.run_id),
+				verdict,
+				receipt_path: extractStringOrUndefined(details.receipt_path) ?? "",
+				summary: extractStringOrUndefined(details.summary),
+				next_action: extractStringOrUndefined(details.next_action),
+			}, width));
+		}
+	}
+
+	// Safety fallback: render the result text on its own (no chrome).
+	const fallbackText = result.content?.[0]?.text ?? "";
+	return chromeRenderable(() => [fallbackText]);
+}
+
+// Walk up from `start` until a `.bravo/config.yaml` is found, mirroring the
+// async `discoverWorkspaceRoot` but in sync mode. Used only by renderCall, which
+// can't await.
+export function discoverWorkspaceRootSync(start: string): string | null {
+	let current = resolve(start);
+	for (;;) {
+		try {
+			const candidate = join(current, ".bravo", "config.yaml");
+			if (statSync(candidate).isFile()) return current;
+		} catch {
+			// Continue walking up — config might be in a parent.
+		}
+		const parent = dirname(current);
+		if (parent === current) return null;
+		current = parent;
+	}
+}
+
+// Best-effort sync title resolution for renderCall. Reads the active-goals
+// index to find the goal directory, then loads state.yaml. Returns undefined
+// on any failure so the renderer falls back to the slug.
+export function resolveGoalTitleSync(goalId: string, fromCwd?: string): string | undefined {
+	try {
+		const workspaceRoot = discoverWorkspaceRootSync(fromCwd ?? process.cwd());
+		if (!workspaceRoot) return undefined;
+		const indexPath = join(workspaceRoot, ".bravo", "runtime", "active-goals.yaml");
+		let goalDir: string | undefined;
+		try {
+			const indexRaw = readFileSync(indexPath, "utf8");
+			const indexParsed = parseYaml(indexRaw) as { active_goals?: Array<{ goal_id: string; path: string }> } | null;
+			const entry = indexParsed?.active_goals?.find((candidate) => candidate.goal_id === goalId);
+			if (entry) goalDir = resolve(workspaceRoot, entry.path);
+		} catch {
+			// Index miss is fine — fall back to the conventional path below.
+		}
+		if (!goalDir) goalDir = join(workspaceRoot, ".bravo", "goals", goalId);
+		const stateRaw = readFileSync(join(goalDir, "state.yaml"), "utf8");
+		const parsed = parseYaml(stateRaw) as { goal?: { title?: string } } | null;
+		const title = parsed?.goal?.title;
+		return typeof title === "string" && title.length > 0 ? title : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function resolveGoalTitleSyncFromCtx(goalId: string, ctx?: ToolContextLike): string | undefined {
+	return resolveGoalTitleSync(goalId, ctx?.cwd);
 }
 
 interface ReceiptReadyResult {
@@ -152,6 +361,7 @@ interface ReceiptReadyResult {
 	judgeRunPath: string;
 	judgeReceiptPath: string;
 	nextAction: "judge_pending_launch";
+	title: string;
 }
 
 async function persistWorkerReceiptReady(params: { goal_id: string; receipt_path?: string }, ctx?: ToolContextLike): Promise<ReceiptReadyResult> {
@@ -209,10 +419,11 @@ async function persistWorkerReceiptReady(params: { goal_id: string; receipt_path
 		judgeRunPath: relative(workspaceRoot, judgeRun.runPath),
 		judgeReceiptPath,
 		nextAction: "judge_pending_launch",
+		title: state.goal.title,
 	};
 }
 
-function taskReceiptReadyResponse(goalId: string, result: ReceiptReadyResult): { content: { type: "text"; text: string }[]; details: Record<string, unknown> } {
+function taskReceiptReadyResponse(goalId: string, result: ReceiptReadyResult, title?: string): { content: { type: "text"; text: string }[]; details: Record<string, unknown> } {
 	return {
 		content: [{
 			type: "text",
@@ -227,6 +438,7 @@ function taskReceiptReadyResponse(goalId: string, result: ReceiptReadyResult): {
 			judge_run_path: result.judgeRunPath,
 			judge_receipt_path: result.judgeReceiptPath,
 			next_action: result.nextAction,
+			title: title ?? result.title,
 		},
 	};
 }
