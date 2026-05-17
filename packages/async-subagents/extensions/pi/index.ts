@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, type Component } from "@earendil-works/pi-tui";
 import { acquireRootSessionLease } from "../../src/leases.js";
 import { NAME_PACKS, readNamePackSelection, writeNamePackSelection, type NamePackId } from "../../src/namePacks.js";
 import { createRootSession } from "../../src/rootSession.js";
@@ -8,8 +8,7 @@ import type { RootSessionIdentity } from "../../src/types.js";
 import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from "./compactionReminder.js";
 import { updateLiveWidget } from "./liveWidget.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
-import { renderSubagentWakeMessage, type WakeupMessage } from "./renderers.js";
-import { updateStatusLine } from "./statusLine.js";
+import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
 import { registerSubagentTools, type ToolRuntime } from "./tools.js";
 import { pollWakeups } from "./wakeups.js";
 
@@ -47,7 +46,8 @@ function refreshUi(ctx: ExtensionContext): void {
   const cwd = cwdOf(ctx);
   const identity = ensureRoot(cwd);
   const store = new RunStore({ cwd });
-  updateStatusLine(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
+  // The widget is the canonical async-subagents surface; the old setStatus
+  // segment was redundant alongside the codex footer and has been removed.
   if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
 }
 
@@ -138,7 +138,6 @@ function stopTimers(ctx?: ExtensionContext): void {
   uiTimer = undefined;
   wakeupTimer = undefined;
   if (ctx) {
-    ctx.ui?.setStatus?.("async-subagents", undefined);
     ctx.ui?.setWidget?.("async-subagents-live", undefined);
   }
   currentCtx = undefined;
@@ -157,10 +156,10 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
     },
   };
 
-  pi.registerMessageRenderer("async-subagent-message", (message: unknown, options: unknown, theme: unknown) => {
+  pi.registerMessageRenderer("async-subagent-message", (message: unknown, options: unknown, theme: unknown): Component => {
     const details = (message as { details?: WakeupMessage })?.details;
-    const text = details ? renderSubagentWakeMessage(details, options as { expanded?: boolean }, theme as { fg?: (name: string, value: string) => string }) : "";
-    return new Text(text, 0, 0);
+    if (!details) return new Text("", 0, 0);
+    return renderSubagentWakeMessageComponent(details, options as { expanded?: boolean }, theme as { fg?: (name: string, value: string) => string });
   });
 
   pi.registerMessageRenderer(ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE, (message: unknown) => {

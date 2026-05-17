@@ -1,9 +1,10 @@
+import { extractCostFromSessionLogSync } from "./cost.js";
 import { createResultEvent, createTerminalEvent } from "./events.js";
 import { createRunResult } from "./result.js";
 import { RunStore } from "./runStore.js";
 import { isTerminalRunState } from "./schemas.js";
 import { updateRunStatus } from "./status.js";
-import type { RunResult, TerminalRunState, WriterRole } from "./types.js";
+import type { RunMetrics, RunResult, TerminalRunState, WriterRole } from "./types.js";
 
 export interface FinalizeTerminalRunInput {
   runId: string;
@@ -40,6 +41,13 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
     return existingResult;
   }
 
+  const costTotal = extractCostFromSessionLogSync(status.piSessionPath);
+  const baseMetrics = status.metrics;
+  const metrics: RunMetrics | undefined =
+    costTotal !== undefined || baseMetrics !== undefined
+      ? { ...(baseMetrics ?? {}), ...(costTotal !== undefined ? { cost: { total: costTotal } } : {}) }
+      : undefined;
+
   const result = createRunResult({
     runId: input.runId,
     parentRunId: input.parentRunId,
@@ -59,6 +67,7 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
     startedAt: input.startedAt ?? status.startedAt,
     summary: input.summary,
     body: input.body,
+    metrics,
     error: input.error ?? null,
   });
   store.writeResult(result);
@@ -83,6 +92,7 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
       lastActivityAt: result.createdAt,
       lastEventId: terminalEvent.eventId,
       summary: result.summary,
+      ...(metrics ? { metrics } : {}),
       error: input.error ?? null,
     }),
   );

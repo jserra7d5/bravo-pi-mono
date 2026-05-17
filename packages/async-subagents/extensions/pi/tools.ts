@@ -351,6 +351,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       },
       renderCall: renderSubagentToolCallComponent,
       renderResult: renderSubagentToolResultComponent,
+      renderShell: "self",
     },
     {
       name: "subagent_wait",
@@ -389,6 +390,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       },
       renderCall: renderSubagentToolCallComponent,
       renderResult: renderSubagentToolResultComponent,
+      renderShell: "self",
     },
     {
       name: "subagent_message",
@@ -418,6 +420,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       },
       renderCall: renderSubagentToolCallComponent,
       renderResult: renderSubagentToolResultComponent,
+      renderShell: "self",
     },
     {
       name: "subagent_interrupt",
@@ -465,6 +468,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       },
       renderCall: renderSubagentToolCallComponent,
       renderResult: renderSubagentToolResultComponent,
+      renderShell: "self",
     },
     {
       name: "subagent_continue",
@@ -502,6 +506,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       },
       renderCall: renderSubagentToolCallComponent,
       renderResult: renderSubagentToolResultComponent,
+      renderShell: "self",
     },
     {
       name: "subagent_result",
@@ -537,6 +542,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       },
       renderCall: renderSubagentToolCallComponent,
       renderResult: renderSubagentToolResultComponent,
+      renderShell: "self",
     },
     {
       name: "subagent_name_pack",
@@ -558,6 +564,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       },
       renderCall: renderSubagentToolCallComponent,
       renderResult: renderSubagentToolResultComponent,
+      renderShell: "self",
     },
     {
       name: "subagent_status",
@@ -621,6 +628,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       },
       renderCall: renderSubagentToolCallComponent,
       renderResult: renderSubagentToolResultComponent,
+      renderShell: "self",
     },
   ];
 }

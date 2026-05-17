@@ -102,3 +102,47 @@ test("markWakeupHandled suppresses terminal result before watcher delivery", () 
 
   assert.equal(pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" }).length, 0);
 });
+
+test("pollWakeups remaps a question event onto waiting_for_input so the wake card badge picks 'needs you'", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const { runId } = store.createRunDirectory({ cwd: root, parentRunId, rootSessionId: parentRunId });
+  store.writeStatus(
+    createInitialStatus({
+      runId,
+      parentRunId,
+      rootSessionId: parentRunId,
+      displayName: "blip",
+      agentName: "auditor",
+      agentSource: "builtin",
+      definitionPath: "/builtin/auditor.md",
+      mode: "oneshot",
+      cwd: root,
+      state: "waiting_for_input",
+    }),
+  );
+  store.appendEvent(runId, {
+    schemaVersion: SCHEMA_VERSION,
+    eventId: "evt_q1",
+    runId,
+    parentRunId,
+    type: "question",
+    createdAt: new Date().toISOString(),
+    summary: "Need staging credentials",
+    wake: true,
+  });
+  writeDeliverySubscription(store, {
+    schemaVersion: SCHEMA_VERSION,
+    parentRunId,
+    runId,
+    notifyOn: ["question"],
+    createdAt: new Date().toISOString(),
+  });
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(deliveries.length, 1);
+  // The crux: event.type is "question" but the wake message state is "waiting_for_input" so
+  // wake-card glyph/badge selection lights up amber instead of plain `?`.
+  assert.equal(deliveries[0]?.message.state, "waiting_for_input");
+});

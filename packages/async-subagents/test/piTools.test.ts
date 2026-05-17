@@ -125,6 +125,33 @@ test("Pi tool schemas expose thinking level controls", () => {
   assert.ok(JSON.stringify(built.find((tool) => tool.name === "subagent_continue")?.parameters).includes("thinkingLevel"));
 });
 
+test("every subagent tool opts into the self-rendered shell so card chrome sits on chat bg", () => {
+  // Without renderShell: "self" Pi wraps tool output in the pending/success/error Box. Our
+  // cards bring their own chrome; the tinted box clashes underneath. Every tool must opt in.
+  const built = buildSubagentTools();
+  assert.ok(built.length >= 7);
+  for (const tool of built) {
+    assert.equal((tool as { renderShell?: string }).renderShell, "self", `tool ${tool.name} missing renderShell: "self"`);
+  }
+});
+
+test("startSubagent surfaces agent-definition detail on the start result", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const started = await startSubagent({
+    agent: "scout",
+    task: "Probe",
+    cwd: w.root,
+    runRoot: store.runRoot,
+    parentRunId: w.identity.parentRunId,
+    fake: { mode: "immediate", body: "Done" },
+  });
+  // scout.md defines: tools: [read, grep, find, ls], maxSubagentDepth: 0
+  assert.ok(Array.isArray(started.tools) && started.tools.includes("read"));
+  assert.equal(started.maxSubagentDepth, 0);
+  assert.ok(Array.isArray(started.skills));
+});
+
 test("subagent_result can recover by runDir", async () => {
   const w = workspace();
   const store = new RunStore({ cwd: w.root });

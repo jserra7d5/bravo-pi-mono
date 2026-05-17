@@ -1,6 +1,6 @@
 import { isInterestingEvent, isTerminalRunState } from "./schemas.js";
 import { RunStore } from "./runStore.js";
-import type { EventType, RunEvent, RunIndexRecord, RunResult, RunState, RunStatus } from "./types.js";
+import type { EventType, RunEvent, RunIndexRecord, RunMetrics, RunResult, RunState, RunStatus } from "./types.js";
 
 export interface RunSummaryRow {
   runId: string;
@@ -16,6 +16,7 @@ export interface RunSummaryRow {
   lastActivityAt?: string;
   event?: RunEvent;
   result?: RunResult;
+  metrics?: RunMetrics;
 }
 
 export interface WatcherSnapshot {
@@ -76,6 +77,9 @@ export function readWatcherSnapshot(store: RunStore, input: ReadWatcherSnapshotI
         lastActivityAt: status.lastActivityAt,
         event: latestInterestingEvent(store, record.runId),
         result,
+        // Prefer terminal result metrics (final) over the live status copy; either
+        // surface may carry `cost.total`.
+        metrics: result?.metrics ?? status.metrics,
       };
       return [row];
     })

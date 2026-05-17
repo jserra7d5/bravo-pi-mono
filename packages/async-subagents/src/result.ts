@@ -1,6 +1,6 @@
 import { durationMs, nowIso } from "./time.js";
 import { RunStore } from "./runStore.js";
-import type { ArtifactRef, ContextPolicy, RunResult, SessionPolicy, TerminalRunState, ThinkingLevel } from "./types.js";
+import type { ArtifactRef, ContextPolicy, RunMetrics, RunResult, SessionPolicy, TerminalRunState, ThinkingLevel } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 export function createRunResult(input: {
@@ -23,6 +23,7 @@ export function createRunResult(input: {
   summary?: string;
   body?: string;
   artifacts?: ArtifactRef[];
+  metrics?: RunMetrics;
   error?: RunResult["error"];
 }): RunResult {
   const createdAt = nowIso();
@@ -49,6 +50,7 @@ export function createRunResult(input: {
     summary: input.summary,
     body: input.body,
     artifacts: input.artifacts ?? [],
+    metrics: input.metrics,
     error: input.error ?? null,
   };
 }

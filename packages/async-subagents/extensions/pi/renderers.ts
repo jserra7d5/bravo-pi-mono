@@ -24,46 +24,223 @@ export interface WakeupMessage {
   body?: string;
   event?: RunEvent;
   result?: RunResult;
+  status?: { agentName?: string; displayName?: string };
   next?: Array<{ tool: string; args: Record<string, unknown> }>;
 }
 
-function color(theme: TextTheme | undefined, name: string, value: string): string {
-  return theme?.fg ? theme.fg(name, value) : value;
+const ANSI = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  green: "\x1b[38;2;106;191;115m",
+  cyan: "\x1b[38;2;95;179;212m",
+  amber: "\x1b[38;2;229;156;72m",
+  red: "\x1b[38;2;220;88;88m",
+  gray: "\x1b[38;2;110;110;110m",
+  white: "\x1b[38;2;220;220;220m",
+  gold: "\x1b[38;2;229;181;72m",
+  // Mirrors the cost slot in .pi/extensions/codex-usage.ts so the
+  // async-subagents header/status reads in the same hue as the pi footer.
+  cost: "\x1b[38;2;200;220;200m",
+};
+
+// Cost is suppressed entirely under one cent — early sessions would otherwise
+// render `$0.000` and waste a header slot before any meaningful spend.
+const COST_DISPLAY_THRESHOLD = 0.01;
+
+/**
+ * Format a USD cost the same way the pi footer does: three decimals under a
+ * dollar, two decimals at or above. Returns undefined when the input is
+ * missing, non-finite, or below `COST_DISPLAY_THRESHOLD` so callers can drop
+ * the segment entirely.
+ */
+export function formatCost(total: number | undefined): string | undefined {
+  if (typeof total !== "number" || !Number.isFinite(total)) return undefined;
+  if (total < COST_DISPLAY_THRESHOLD) return undefined;
+  const formatted = total < 1 ? total.toFixed(3) : total.toFixed(2);
+  return `$${formatted}`;
 }
 
-function mention(displayName: string | undefined, fallback: string, theme?: TextTheme): string {
-  const label = displayName ? `@${displayName}` : fallback;
-  return color(theme, "agentMention", label);
+/**
+ * Build the colored "$0.42 total" header/status segment, or undefined when the
+ * cost is missing or below the display threshold. Kept here so both the widget
+ * header and status line use the same color (`ANSI.cost`) and suffix.
+ */
+export function costHeaderSegment(total: number | undefined): string | undefined {
+  const formatted = formatCost(total);
+  if (!formatted) return undefined;
+  return `${ANSI.cost}${formatted} total${ANSI.reset}`;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const IDENTITY_PALETTE = [
+  "\x1b[38;2;229;145;91m",
+  "\x1b[38;2;199;125;186m",
+  "\x1b[38;2;123;201;123m",
+  "\x1b[38;2;111;169;217m",
+  "\x1b[38;2;155;123;217m",
+  "\x1b[38;2;91;201;181m",
+  "\x1b[38;2;217;195;111m",
+  "\x1b[38;2;217;125;125m",
+];
+
+export function identitySlot(name: string): number {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = ((h * 31) + name.charCodeAt(i)) >>> 0;
+  return h % IDENTITY_PALETTE.length;
 }
 
-function knownDisplayNames(details: Record<string, unknown>): string[] {
-  const names: string[] = [];
-  if (typeof details.displayName === "string" && details.displayName) names.push(details.displayName);
-  if (Array.isArray(details.results)) {
-    for (const result of details.results) {
-      if (isRecord(result) && typeof result.displayName === "string" && result.displayName) names.push(result.displayName);
+export function identityColor(name: string): string {
+  return IDENTITY_PALETTE[identitySlot(name)];
+}
+
+export function idBar(name: string, opts: { dim?: boolean; override?: string } = {}): string {
+  if (opts.override) return opts.override + "▌" + ANSI.reset;
+  return (opts.dim ? ANSI.dim : "") + identityColor(name) + "▌" + ANSI.reset;
+}
+
+export function idMention(name: string, opts: { bold?: boolean; dim?: boolean } = {}): string {
+  const bold = opts.bold ? ANSI.bold : "";
+  const dim = opts.dim ? ANSI.dim : "";
+  return dim + identityColor(name) + bold + "@" + name + ANSI.reset;
+}
+
+// Width calculation that handles ANSI escapes and wide unicode (CJK, emoji).
+export function visWidth(str: string): number {
+  const stripped = str.replace(/\x1b\[[0-9;]*m/g, "");
+  let w = 0;
+  for (const ch of stripped) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp === 0x200d || (cp >= 0xfe00 && cp <= 0xfe0f)) continue;
+    if (
+      cp >= 0x1100 && (
+        cp <= 0x115f ||
+        (cp >= 0x2e80 && cp <= 0x303e) ||
+        (cp >= 0x3041 && cp <= 0x33ff) ||
+        (cp >= 0x3400 && cp <= 0x4dbf) ||
+        (cp >= 0x4e00 && cp <= 0x9fff) ||
+        (cp >= 0xac00 && cp <= 0xd7a3) ||
+        (cp >= 0x1f300 && cp <= 0x1faff)
+      )
+    ) {
+      w += 2;
+    } else {
+      w += 1;
     }
   }
-  return [...new Set(names)].sort((a, b) => b.length - a.length);
+  return w;
 }
 
-function colorKnownMentions(text: string, displayNames: string[], theme?: TextTheme): string {
-  if (!theme?.fg || !displayNames.length) return text;
-  const pattern = new RegExp(`@(${displayNames.map(escapeRegExp).join("|")})(?=$|[\\s.,;:!?\\])}])`, "g");
-  return text.replace(pattern, (value) => color(theme, "agentMention", value));
+// Truncate with ellipsis honoring ANSI escapes and cell widths. Always closes with reset.
+export function truncAnsi(str: string, maxCells: number): string {
+  if (visWidth(str) <= maxCells) return str;
+  if (maxCells <= 1) return "…" + ANSI.reset;
+  let out = "";
+  let cells = 0;
+  let i = 0;
+  const limit = maxCells - 1;
+  while (i < str.length) {
+    if (str.charCodeAt(i) === 0x1b && str[i + 1] === "[") {
+      const end = str.indexOf("m", i);
+      if (end === -1) break;
+      out += str.slice(i, end + 1);
+      i = end + 1;
+      continue;
+    }
+    const cp = str.codePointAt(i);
+    if (cp === undefined) break;
+    const ch = String.fromCodePoint(cp);
+    const w = visWidth(ch);
+    if (cells + w > limit) break;
+    out += ch;
+    cells += w;
+    i += ch.length;
+  }
+  return out + "…" + ANSI.reset;
+}
+
+export interface Chrome {
+  top(): string;
+  bot(): string;
+  topTitled(title: string, badge?: string): string;
+  row(content: string): string;
+  rowBar(bar: string, content: string): string;
+  rowRight(left: string, right: string): string;
+  emptyRow(): string;
+}
+
+export function chrome(width: number): Chrome {
+  const top = () => ANSI.gray + "╭" + "─".repeat(Math.max(0, width - 2)) + "╮" + ANSI.reset;
+  const bot = () => ANSI.gray + "╰" + "─".repeat(Math.max(0, width - 2)) + "╯" + ANSI.reset;
+  const topTitled = (titleContent: string, badgeContent?: string) => {
+    const left = "╭─ " + titleContent + " ";
+    const wL = visWidth(left);
+    const tryRight = badgeContent ? " " + badgeContent + " ─╮" : "╮";
+    const wR = visWidth(tryRight);
+    const slack = width - wL - wR;
+    const right = slack >= 2 ? tryRight : "╮";
+    const wRFinal = visWidth(right);
+    const dashes = Math.max(2, width - wL - wRFinal);
+    return ANSI.gray + left + "─".repeat(dashes) + right + ANSI.reset;
+  };
+  const row = (content: string) => {
+    const final = truncAnsi(content, width - 4);
+    const inner = " " + final + " ";
+    const pad = Math.max(0, width - 2 - visWidth(inner));
+    return ANSI.gray + "│" + ANSI.reset + inner + " ".repeat(pad) + ANSI.gray + "│" + ANSI.reset;
+  };
+  const rowBar = (bar: string, content: string) => {
+    const final = truncAnsi(content, width - 4);
+    const inner = " " + final + " ";
+    const pad = Math.max(0, width - 2 - visWidth(inner));
+    return bar + inner + " ".repeat(pad) + ANSI.gray + "│" + ANSI.reset;
+  };
+  const rowRight = (left: string, right: string) => {
+    const innerR = right + " ";
+    const wR = visWidth(innerR);
+    const maxLeft = Math.max(1, width - 2 - 1 - wR - 1);
+    const truncLeft = truncAnsi(left, maxLeft);
+    const innerL = " " + truncLeft;
+    const used = visWidth(innerL) + visWidth(innerR);
+    const pad = Math.max(1, width - 2 - used);
+    return ANSI.gray + "│" + ANSI.reset + innerL + " ".repeat(pad) + innerR + ANSI.gray + "│" + ANSI.reset;
+  };
+  const emptyRow = () => row("");
+  return { top, bot, topTitled, row, rowBar, rowRight, emptyRow };
+}
+
+export interface StateGlyph {
+  g: string;
+  color: string;
+  label: string;
+}
+
+// New glyph + color table per design decision #2. The return shape grew (label added)
+// for card badges; the .g field preserves the single-char glyph for plain text.
+export function stateGlyph(state: string | undefined, resultReady = false): StateGlyph {
+  if (resultReady && (state === "completed" || state === undefined)) {
+    return { g: "★", color: ANSI.gold, label: "result ready" };
+  }
+  switch (state) {
+    case "running": return { g: "◐", color: ANSI.cyan, label: "working" };
+    case "queued":
+    case "created": return { g: "○", color: ANSI.gray, label: "starting" };
+    case "idle": return { g: "○", color: ANSI.gray, label: "idle" };
+    case "waiting_for_input":
+    case "question": return { g: "?", color: ANSI.amber, label: "needs you" };
+    case "blocked": return { g: "⚠", color: ANSI.red, label: "blocked" };
+    case "paused": return { g: "⏸", color: ANSI.gray, label: "paused" };
+    case "stalled": return { g: "◌", color: ANSI.amber, label: "stalled" };
+    case "completed": return { g: "✓", color: ANSI.green, label: "done" };
+    case "result_ready": return { g: "★", color: ANSI.gold, label: "result ready" };
+    case "failed": return { g: "✗", color: ANSI.red, label: "failed" };
+    case "cancelled": return { g: "⊘", color: ANSI.gray, label: "cancelled" };
+    case "expired": return { g: "⊘", color: ANSI.gray, label: "expired" };
+    default: return { g: "·", color: ANSI.gray, label: state ?? "unknown" };
+  }
 }
 
 function safeWidth(width: unknown): number {
   return typeof width === "number" && Number.isFinite(width) && width > 0 ? Math.floor(width) : 80;
-}
-
-function truncate(line: string, width: unknown): string {
-  const max = safeWidth(width);
-  return line.length <= max ? line : line.slice(0, Math.max(0, max - 1));
 }
 
 export function textBlock(value: string | string[]): TextRenderable {
@@ -71,7 +248,22 @@ export function textBlock(value: string | string[]): TextRenderable {
   return {
     invalidate() {},
     render(width: number) {
-      return lines.map((line) => truncate(line, width));
+      const max = safeWidth(width);
+      return lines.map((line) => (visWidth(line) <= max ? line : truncAnsi(line, max)));
+    },
+  };
+}
+
+// Build a TextRenderable from a card-building function that takes the render
+// width. This lets the card adapt to the actual terminal width when Pi asks
+// for layout. The builder MUST return lines that are exactly `width` cells wide.
+export function chromeRenderable(build: (width: number) => string[]): TextRenderable {
+  return {
+    invalidate() {},
+    render(width: number) {
+      const w = Math.max(32, Math.min(96, safeWidth(width)));
+      const lines = build(w);
+      return lines.map((line) => (visWidth(line) <= w ? line : truncAnsi(line, w)));
     },
   };
 }
@@ -80,62 +272,6 @@ export function preview(value: string | undefined, max = 120): string {
   if (!value) return "";
   const singleLine = value.replace(/\s+/g, " ").trim();
   return singleLine.length <= max ? singleLine : `${singleLine.slice(0, Math.max(0, max - 1))}...`;
-}
-
-export function stateGlyph(state: string | undefined, resultReady = false): string {
-  if (resultReady) return "*";
-  switch (state) {
-    case "running":
-    case "queued":
-    case "created":
-      return "~";
-    case "waiting_for_input":
-    case "question":
-      return "?";
-    case "paused":
-      return "|";
-    case "blocked":
-      return "!";
-    case "completed":
-      return "+";
-    case "failed":
-      return "x";
-    case "cancelled":
-    case "expired":
-      return "-";
-    default:
-      return "-";
-  }
-}
-
-function humanState(state: string | undefined): string {
-  switch (state) {
-    case "created":
-    case "queued":
-      return "starting";
-    case "running":
-      return "working";
-    case "idle":
-      return "idle";
-    case "waiting_for_input":
-      return "waiting";
-    case "blocked":
-      return "blocked";
-    case "stalled":
-      return "stalled";
-    case "paused":
-      return "paused";
-    case "completed":
-      return "done";
-    case "failed":
-      return "failed";
-    case "cancelled":
-      return "cancelled";
-    case "expired":
-      return "expired";
-    default:
-      return state ?? "unknown";
-  }
 }
 
 function compactDuration(ms: number): string {
@@ -155,18 +291,570 @@ function since(iso: string | undefined, now = Date.now()): string | undefined {
   return compactDuration(now - time);
 }
 
-export function formatRunRow(row: RunSummaryRow, theme?: TextTheme): string {
-  const status = humanState(row.state);
-  const summary = preview(row.needs ?? row.summary ?? row.event?.summary ?? row.result?.summary, 72);
-  const displayName = mention(row.displayName, row.agentName, theme);
-  const activity = since(row.lastActivityAt ?? row.updatedAt);
-  const duration = typeof row.result?.durationMs === "number" ? compactDuration(row.result.durationMs) : undefined;
-  const timing = duration ? `in ${duration}` : activity ? `${activity} ago` : "";
-  const glyph = color(theme, "accent", stateGlyph(row.state, row.resultReady || Boolean(row.result)));
-  const kind = color(theme, "accent", row.agentName);
-  const state = color(theme, "accent", status);
-  return `${glyph} ${displayName} ${kind} ${state}${timing ? color(theme, "dim", ` ${timing}`) : ""}${summary ? color(theme, "muted", ` - ${summary}`) : ""}`;
+// Cap visible cells of a display name so wide names don't destroy widget alignment.
+const NAME_CAP_CELLS = 16;
+
+function capName(name: string, cells = NAME_CAP_CELLS): string {
+  return visWidth(name) <= cells ? name : truncAnsi(name, cells).replace(ANSI.reset, "");
 }
+
+function isUrgentState(state: string | undefined): boolean {
+  return state === "waiting_for_input" || state === "blocked";
+}
+
+function isDoneState(state: string | undefined): boolean {
+  return state === "completed" || state === "cancelled" || state === "expired";
+}
+
+export type WidgetLayout = "full" | "no-role" | "minimal";
+
+export function pickWidgetLayout(width: number): WidgetLayout {
+  if (width >= 70) return "full";
+  if (width >= 54) return "no-role";
+  return "minimal";
+}
+
+export interface WidgetRowInput {
+  displayName: string;
+  role: string;
+  state: string;
+  summary: string;
+  age?: string;
+  urgent?: boolean;
+  done?: boolean;
+}
+
+export function renderWidgetRow(width: number, ch: Chrome, r: WidgetRowInput): string {
+  const layout = pickWidgetLayout(width);
+  const gl = stateGlyph(r.state);
+  const urgent = Boolean(r.urgent) || isUrgentState(r.state);
+  const done = Boolean(r.done) || isDoneState(r.state);
+  const cappedName = capName(r.displayName);
+
+  const bar = urgent
+    ? idBar(cappedName, { override: ANSI.amber })
+    : done
+      ? idBar(cappedName, { dim: true })
+      : idBar(cappedName);
+
+  const name = urgent
+    ? idMention(cappedName, { bold: true })
+    : done
+      ? idMention(cappedName, { dim: true })
+      : idMention(cappedName);
+
+  const role = done ? ANSI.dim + r.role + ANSI.reset : ANSI.white + r.role + ANSI.reset;
+  const glyph = gl.color + (urgent ? ANSI.bold : "") + gl.g + ANSI.reset;
+  const summary = urgent
+    ? ANSI.white + r.summary + ANSI.reset
+    : done
+      ? ANSI.dim + r.summary + ANSI.reset
+      : ANSI.gray + r.summary + ANSI.reset;
+  const age = r.age ? ANSI.dim + "· " + r.age + ANSI.reset : "";
+
+  if (layout === "full") {
+    const namePart = name + "  " + role;
+    const COL = 22;
+    const padCol = " ".repeat(Math.max(1, COL - visWidth(namePart)));
+    return ch.rowBar(bar, namePart + padCol + glyph + " " + summary + (age ? "  " + age : ""));
+  }
+  if (layout === "no-role") {
+    const COL = 12;
+    const padCol = " ".repeat(Math.max(1, COL - visWidth(name)));
+    return ch.rowBar(bar, name + padCol + glyph + " " + summary + (age ? "  " + age : ""));
+  }
+  return ch.rowBar(bar, name + " " + glyph + " " + summary);
+}
+
+export interface WidgetCardInput {
+  width: number;
+  rows: WidgetRowInput[];
+  maxRows?: number;
+  // Cumulative cost across every row the widget is rendering (active +
+  // terminal). When set and >= the display threshold, surfaces as the
+  // right-most header segment; dropped first on width overflow.
+  totalCost?: number;
+}
+
+// True when topTitled can fit the badge at this width. Mirrors the slack math
+// in `chrome().topTitled` — kept in sync so the header can decide whether to
+// drop the cost segment before falling back.
+function headerBadgeFits(width: number, title: string, badge: string): boolean {
+  const left = "╭─ " + title + " ";
+  const right = " " + badge + " ─╮";
+  return visWidth(left) + visWidth(right) <= width;
+}
+
+export function renderWidgetCard(input: WidgetCardInput): string[] {
+  const width = input.width;
+  const ch = chrome(width);
+  const activeCount = input.rows.filter((r) => !(r.done || isDoneState(r.state))).length;
+  const urgentCount = input.rows.filter((r) => r.urgent || isUrgentState(r.state)).length;
+  const readyCount = input.rows.filter((r) => r.state === "completed" || r.state === "result_ready").length;
+  const baseSegments = [
+    activeCount ? `${ANSI.cyan}${activeCount} active${ANSI.reset}` : "",
+    urgentCount ? `${ANSI.amber}${urgentCount} need you${ANSI.reset}` : "",
+    readyCount ? `${ANSI.gold}${readyCount} ready${ANSI.reset}` : "",
+  ].filter(Boolean);
+  const costSegment = costHeaderSegment(input.totalCost);
+  const sep = `${ANSI.gray} · ${ANSI.reset}`;
+  const title = `${ANSI.bold}subagents${ANSI.reset}`;
+  const headerRightWithCost = [...baseSegments, ...(costSegment ? [costSegment] : [])].join(sep);
+  const headerRightBase = baseSegments.join(sep);
+  // Cost is lowest priority — drop it first if the header can't fit the full
+  // badge. Anything else (the active/needs/ready counts) stays.
+  const headerRight = costSegment && !headerBadgeFits(width, title, headerRightWithCost)
+    ? headerRightBase
+    : headerRightWithCost;
+  const out: string[] = [ch.topTitled(title, headerRight || undefined)];
+  const visibleRows = input.rows.slice(0, input.maxRows ?? input.rows.length);
+  for (const r of visibleRows) out.push(renderWidgetRow(width, ch, r));
+  const hidden = input.rows.length - visibleRows.length;
+  if (hidden > 0) {
+    const hiddenUrgent = input.rows.slice(visibleRows.length).filter((r) => r.urgent || isUrgentState(r.state)).length;
+    const tail = hiddenUrgent
+      ? `${ANSI.gray}+${hidden} more${ANSI.reset} ${ANSI.gray}·${ANSI.reset} ${ANSI.amber}${hiddenUrgent} need you${ANSI.reset}`
+      : `${ANSI.gray}+${hidden} more${ANSI.reset}`;
+    out.push(ch.row(tail));
+  }
+  out.push(ch.bot());
+  return out;
+}
+
+export function widgetRowFromSummary(row: RunSummaryRow, now = Date.now()): WidgetRowInput {
+  const summaryText = preview(row.needs ?? row.summary ?? row.event?.summary ?? row.result?.summary, 96);
+  const age = (() => {
+    if (typeof row.result?.durationMs === "number") return compactDuration(row.result.durationMs);
+    return since(row.lastActivityAt ?? row.updatedAt, now);
+  })();
+  return {
+    displayName: row.displayName ?? row.agentName,
+    role: row.agentName,
+    state: row.state,
+    summary: summaryText,
+    age,
+    urgent: isUrgentState(row.state),
+    done: isDoneState(row.state),
+  };
+}
+
+// Plain-text fallback rendering for non-widget contexts (logs, narrow terminals,
+// transcript text-mode messages). Mirrors the widget row content but skips chrome.
+export function formatRunRow(row: RunSummaryRow): string {
+  const input = widgetRowFromSummary(row);
+  const gl = stateGlyph(input.state);
+  const urgent = Boolean(input.urgent);
+  const done = Boolean(input.done);
+  const name = urgent
+    ? idMention(input.displayName, { bold: true })
+    : done
+      ? idMention(input.displayName, { dim: true })
+      : idMention(input.displayName);
+  const glyph = gl.color + (urgent ? ANSI.bold : "") + gl.g + ANSI.reset;
+  const role = done ? ANSI.dim + input.role + ANSI.reset : ANSI.white + input.role + ANSI.reset;
+  const state = gl.color + gl.label + ANSI.reset;
+  const summary = input.summary
+    ? (urgent ? ANSI.white : done ? ANSI.dim : ANSI.gray) + " - " + input.summary + ANSI.reset
+    : "";
+  const age = input.age ? ANSI.dim + " " + input.age + ANSI.reset : "";
+  return `${glyph} ${name} ${role} ${state}${age}${summary}`;
+}
+
+// ----------------------------------------------------------------------------
+// Cards: launch / result / wake
+// ----------------------------------------------------------------------------
+
+const DEFAULT_CARD_WIDTH = 72;
+
+function cardWidth(opts?: { width?: number }): number {
+  if (opts?.width && opts.width > 20) return Math.min(96, Math.floor(opts.width));
+  const term = typeof process !== "undefined" ? process.stdout?.columns : undefined;
+  const raw = typeof term === "number" && term > 0 ? term : DEFAULT_CARD_WIDTH;
+  return Math.max(32, Math.min(96, raw));
+}
+
+function affordanceChip(text: string): string {
+  return ANSI.gray + "[ " + ANSI.reset + ANSI.white + text + ANSI.reset + ANSI.gray + " ]" + ANSI.reset;
+}
+
+function packAffordances(width: number, ch: Chrome, affordances: string[]): string[] {
+  const rendered = affordances.map(affordanceChip);
+  const sep = "   ";
+  const maxRowWidth = width - 4;
+  const out: string[] = [];
+  let current = "";
+  for (const a of rendered) {
+    const candidate = current ? current + sep + a : a;
+    if (visWidth(candidate) <= maxRowWidth) {
+      current = candidate;
+    } else {
+      if (current) out.push(ch.row(current));
+      current = a;
+    }
+  }
+  if (current) out.push(ch.row(current));
+  return out;
+}
+
+export interface LaunchCardInput {
+  width?: number;
+  displayName: string;
+  role: string;
+  state?: string;
+  task?: string;
+  model?: string;
+  thinking?: string;
+  skills?: string[];
+  tools?: string[];
+  budget?: string;
+  context?: string;
+}
+
+export function renderLaunchCard(input: LaunchCardInput): string[] {
+  const width = cardWidth(input);
+  const ch = chrome(width);
+  const gl = stateGlyph(input.state ?? "queued");
+  const titleContent = `${idBar(input.displayName)} ${idMention(input.displayName)} ${ANSI.gray}·${ANSI.reset} ${ANSI.white}${input.role}${ANSI.reset}`;
+  const badge = `${gl.color}${gl.g} ${gl.label}${ANSI.reset}`;
+  const out: string[] = [ch.topTitled(titleContent, badge)];
+  const label = (s: string) => ANSI.dim + s.padEnd(10) + ANSI.reset;
+  if (input.task) out.push(ch.row(label("task") + ANSI.white + input.task + ANSI.reset));
+  if (input.model) {
+    const modelLine = ANSI.white + input.model + ANSI.reset
+      + (input.thinking ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}thinking${ANSI.reset} ${ANSI.cyan}${input.thinking}${ANSI.reset}` : "");
+    out.push(ch.row(label("model") + modelLine));
+  }
+  if (input.skills?.length) {
+    out.push(ch.row(label("skills") + input.skills.map((s) => ANSI.cyan + s + ANSI.reset).join(ANSI.gray + " · " + ANSI.reset)));
+  }
+  if (input.tools?.length) {
+    out.push(ch.row(label("tools") + input.tools.map((t) => ANSI.white + t + ANSI.reset).join(ANSI.gray + " · " + ANSI.reset)));
+  }
+  if (input.budget) out.push(ch.row(label("budget") + ANSI.white + input.budget + ANSI.reset));
+  if (input.context) out.push(ch.row(label("context") + ANSI.white + input.context + ANSI.reset));
+  out.push(ch.bot());
+  return out;
+}
+
+export interface ResultCardInput {
+  width?: number;
+  displayName: string;
+  role: string;
+  state: string;
+  duration?: string;
+  summary?: string;
+  body?: string;
+  metrics?: string;
+  artifacts?: string[];
+}
+
+export function renderResultCard(input: ResultCardInput): string[] {
+  const width = cardWidth(input);
+  const ch = chrome(width);
+  const gl = stateGlyph(input.state);
+  const isDone = input.state === "completed";
+  const titleContent = `${idBar(input.displayName)} ${idMention(input.displayName)} ${ANSI.gray}·${ANSI.reset} ${ANSI.white}${input.role}${ANSI.reset}`;
+  const badge = `${gl.color}${gl.g} ${isDone ? "done" : gl.label}${ANSI.reset}${input.duration ? ANSI.gray + " · " + ANSI.reset + ANSI.dim + input.duration + ANSI.reset : ""}`;
+  const out: string[] = [ch.topTitled(titleContent, badge)];
+  if (input.summary) {
+    out.push(ch.row(ANSI.dim + "summary" + ANSI.reset));
+    for (const line of input.summary.split("\n")) out.push(ch.row(ANSI.white + line + ANSI.reset));
+  }
+  if (input.body) {
+    out.push(ch.row(""));
+    for (const line of input.body.split("\n")) out.push(ch.row(ANSI.white + line + ANSI.reset));
+  }
+  if (input.metrics) {
+    out.push(ch.row(""));
+    out.push(ch.row(ANSI.dim + "metrics    " + ANSI.reset + ANSI.white + input.metrics + ANSI.reset));
+  }
+  if (input.artifacts?.length) {
+    out.push(ch.row(ANSI.dim + "artifacts  " + ANSI.reset + input.artifacts.map((a) => ANSI.cyan + a + ANSI.reset).join(ANSI.gray + " · " + ANSI.reset)));
+  }
+  out.push(ch.bot());
+  return out;
+}
+
+export interface WakeCardInput {
+  width?: number;
+  displayName: string;
+  role: string;
+  kind: string;
+  badge?: string;
+  headline?: string;
+  body?: string;
+  affordances?: string[];
+}
+
+export function renderWakeCard(input: WakeCardInput): string[] {
+  const width = cardWidth(input);
+  const ch = chrome(width);
+  const gl = stateGlyph(input.kind);
+  const isUrgent = input.kind === "waiting_for_input" || input.kind === "blocked" || input.kind === "failed";
+  const titleContent = `${idBar(input.displayName)} ${idMention(input.displayName, { bold: true })} ${ANSI.gray}·${ANSI.reset} ${ANSI.white}${input.role}${ANSI.reset}`;
+  const badgeText = input.badge ?? gl.label;
+  const badge = `${gl.color}${isUrgent ? ANSI.bold : ""}${gl.g} ${badgeText}${ANSI.reset}`;
+  const out: string[] = [ch.topTitled(titleContent, badge)];
+  if (input.headline) out.push(ch.row(ANSI.bold + (isUrgent ? gl.color : ANSI.white) + input.headline + ANSI.reset));
+  if (input.body) {
+    out.push(ch.row(""));
+    for (const line of input.body.split("\n")) out.push(ch.row(ANSI.white + line + ANSI.reset));
+  }
+  if (input.affordances?.length) {
+    out.push(ch.row(""));
+    out.push(...packAffordances(width, ch, input.affordances));
+  }
+  out.push(ch.bot());
+  return out;
+}
+
+// ----------------------------------------------------------------------------
+// Card adapters: turn tool args / wake payloads into card props.
+// ----------------------------------------------------------------------------
+
+function describeBudget(args: Record<string, unknown>): string | undefined {
+  const parts: string[] = [];
+  if (typeof args.timeoutMs === "number") parts.push(`${compactDuration(args.timeoutMs)} max`);
+  if (typeof args.maxSubagentDepth === "number") parts.push(`depth ${args.maxSubagentDepth}`);
+  if (!parts.length) return undefined;
+  return parts.join(" · ");
+}
+
+function describeContext(args: Record<string, unknown>): string | undefined {
+  const ctx = typeof args.context === "string" ? args.context : undefined;
+  if (ctx === "fork") return "forked from this session";
+  if (ctx === "fresh") return "fresh session";
+  return undefined;
+}
+
+function describeAffordances(kind: string | undefined): string[] {
+  switch (kind) {
+    case "waiting_for_input":
+    case "question": return ["reply", "wait", "dismiss"];
+    case "blocked": return ["recheck", "skip", "dismiss"];
+    case "failed": return ["retry", "dismiss"];
+    case "completed":
+    case "result_ready": return ["view", "continue"];
+    case "cancelled":
+    case "expired": return ["dismiss"];
+    default: return [];
+  }
+}
+
+function deriveWakeKind(state: string | undefined, hasResult: boolean): string {
+  if (state === "waiting_for_input" || state === "blocked" || state === "failed" || state === "cancelled" || state === "expired") return state;
+  if (state === "completed" || hasResult) return "completed";
+  if (state === "paused") return "paused";
+  return state ?? "running";
+}
+
+function deriveWakeBadge(kind: string): string {
+  switch (kind) {
+    case "waiting_for_input":
+    case "question": return "needs you";
+    case "blocked": return "blocked";
+    case "failed": return "failed";
+    case "completed": return "result ready";
+    case "result_ready": return "result ready";
+    case "cancelled": return "cancelled";
+    case "expired": return "expired";
+    case "paused": return "paused";
+    default: return kind;
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Tool call / result renderers
+// ----------------------------------------------------------------------------
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object";
+}
+
+function renderLaunchCardFromArgs(args: Record<string, unknown>, width?: number): string[] {
+  const agent = typeof args.agent === "string" ? args.agent : "subagent";
+  const displayName = typeof args.name === "string" && args.name ? args.name : agent;
+  const task = typeof args.task === "string" ? args.task : undefined;
+  const thinking = typeof args.thinkingLevel === "string" ? args.thinkingLevel : undefined;
+  const tools = Array.isArray(args.tools) ? args.tools.filter((t): t is string => typeof t === "string") : undefined;
+  return renderLaunchCard({
+    width,
+    displayName,
+    role: agent,
+    state: "queued",
+    task,
+    thinking,
+    tools,
+    budget: describeBudget(args),
+    context: describeContext(args),
+  });
+}
+
+function renderStartResultCard(details: Record<string, unknown>, width?: number): string[] | undefined {
+  const runId = typeof details.runId === "string" ? details.runId : undefined;
+  const agentName = typeof details.agentName === "string" ? details.agentName : undefined;
+  if (!agentName) return undefined;
+  const displayName = typeof details.displayName === "string" && details.displayName ? details.displayName : (runId ?? agentName);
+  const model = typeof details.model === "string" ? details.model : undefined;
+  const thinking = typeof details.thinkingLevel === "string" ? details.thinkingLevel : undefined;
+  const contextPolicy = typeof details.contextPolicy === "string" ? details.contextPolicy : undefined;
+  const state = typeof details.state === "string" ? details.state : "queued";
+  const skills = Array.isArray(details.skills) ? details.skills.filter((s): s is string => typeof s === "string") : undefined;
+  const tools = Array.isArray(details.tools) ? details.tools.filter((t): t is string => typeof t === "string") : undefined;
+  const maxRunMs = typeof details.maxRunMs === "number" ? details.maxRunMs : undefined;
+  const maxSubagentDepth = typeof details.maxSubagentDepth === "number" ? details.maxSubagentDepth : undefined;
+  const budgetParts: string[] = [];
+  if (maxRunMs) budgetParts.push(`${compactDuration(maxRunMs)} max`);
+  if (maxSubagentDepth) budgetParts.push(`depth ${maxSubagentDepth}`);
+  const budget = budgetParts.length ? budgetParts.join(" · ") : undefined;
+  return renderLaunchCard({
+    width,
+    displayName,
+    role: agentName,
+    state,
+    model,
+    thinking,
+    skills: skills?.length ? skills : undefined,
+    tools: tools?.length ? tools : undefined,
+    budget,
+    context: contextPolicy === "fork" ? "forked from this session" : contextPolicy === "fresh" ? "fresh session" : undefined,
+  });
+}
+
+function renderTerminalResultCardFromDetails(result: Record<string, unknown>, width?: number): string[] | undefined {
+  const agentName = typeof result.agentName === "string" ? result.agentName : undefined;
+  if (!agentName) return undefined;
+  const displayName = typeof result.displayName === "string" && result.displayName ? result.displayName : agentName;
+  const state = typeof result.state === "string" ? result.state : "completed";
+  const durationMs = typeof result.durationMs === "number" ? result.durationMs : undefined;
+  const summary = typeof result.summary === "string" ? result.summary : undefined;
+  const body = typeof result.body === "string" && result.body.trim() ? result.body : undefined;
+  const metrics = (() => {
+    const m = isRecord(result.metrics) ? result.metrics : undefined;
+    if (!m) return undefined;
+    const tokens = isRecord(m.tokens) ? m.tokens : undefined;
+    const tokenInput = typeof tokens?.input === "number" ? `${tokens.input} in` : undefined;
+    const tokenOutput = typeof tokens?.output === "number" ? `${tokens.output} out` : undefined;
+    const toolCalls = typeof m.toolCalls === "number" ? `${m.toolCalls} tool calls` : undefined;
+    const parts = [tokenInput, tokenOutput, toolCalls].filter(Boolean);
+    return parts.length ? parts.join(" · ") : undefined;
+  })();
+  const artifacts = Array.isArray(result.artifacts)
+    ? result.artifacts.flatMap((a) => (isRecord(a) && typeof a.path === "string" ? [a.path] : []))
+    : undefined;
+  return renderResultCard({
+    width,
+    displayName,
+    role: agentName,
+    state,
+    duration: durationMs !== undefined ? compactDuration(durationMs) : undefined,
+    summary,
+    body,
+    metrics,
+    artifacts,
+  });
+}
+
+export function renderSubagentToolCall(args: Record<string, unknown>, theme?: TextTheme): string {
+  // Plain-text fallback used by transcript text-mode and tests. Components use the
+  // card path below.
+  const target = typeof args.runId === "string" ? args.runId : typeof args.agent === "string" ? args.agent : "subagents";
+  const task = typeof args.task === "string" ? ` - ${preview(args.task, 90)}` : "";
+  const accent = (v: string) => (theme?.fg ? theme.fg("accent", v) : v);
+  const muted = (v: string) => (theme?.fg ? theme.fg("muted", v) : v);
+  const title = theme?.fg ? theme.fg("toolTitle", "subagent") : "subagent";
+  if (target === "subagents" && !task) return theme?.fg ? theme.fg("toolTitle", "subagents") : "subagents";
+  return `${title} ${accent(target)}${muted(task)}`;
+}
+
+export function renderSubagentToolCallComponent(args: Record<string, unknown>, theme?: TextTheme): TextRenderable {
+  if (typeof args.agent === "string") {
+    return chromeRenderable((width) => renderLaunchCardFromArgs(args, width));
+  }
+  return textBlock(renderSubagentToolCall(args, theme));
+}
+
+function resultBodyLines(details: Record<string, unknown>, expanded: boolean): string[] {
+  if (!expanded) return [];
+  if (typeof details.body === "string" && details.body.trim()) return ["", details.body];
+  if (!Array.isArray(details.results)) return [];
+  return details.results.flatMap((result) => {
+    if (!isRecord(result) || typeof result.body !== "string" || !result.body.trim()) return [];
+    const agent = typeof result.agentName === "string" ? result.agentName : "subagent";
+    const displayName = typeof result.displayName === "string" ? result.displayName : agent;
+    return ["", `${idMention(displayName)} ${agent}:`, result.body];
+  });
+}
+
+export function renderSubagentToolResult(result: unknown, options?: RenderOptions, theme?: TextTheme): string {
+  if (!result || typeof result !== "object") return String(result ?? "");
+  const data = result as { details?: Record<string, unknown>; content?: Array<{ text?: string }> };
+  const details = data.details ?? {};
+  const text = data.content?.[0]?.text;
+  const summary = typeof details.summary === "string" ? details.summary : text;
+  const muted = (v: string) => (theme?.fg ? theme.fg("muted", v) : v);
+  const lines = [muted(summary ?? JSON.stringify(details)), ...resultBodyLines(details, Boolean(options?.expanded))];
+  return lines.join("\n");
+}
+
+export function renderSubagentToolResultComponent(result: unknown, options?: RenderOptions, theme?: TextTheme): TextRenderable {
+  if (result && typeof result === "object") {
+    const data = result as { details?: Record<string, unknown> };
+    const details = data.details ?? {};
+    // Terminal child result emitted by subagent_result tool — render the result card.
+    if (typeof details.agentName === "string" && typeof details.state === "string" && (details.state === "completed" || details.state === "failed" || details.state === "cancelled" || details.state === "expired") && typeof details.success === "boolean") {
+      return chromeRenderable((width) => renderTerminalResultCardFromDetails(details, width) ?? [renderSubagentToolResult(result, options, theme)]);
+    }
+    // SubagentStartResult — render the launch card.
+    if (typeof details.runId === "string" && typeof details.agentName === "string" && typeof details.started === "boolean") {
+      return chromeRenderable((width) => renderStartResultCard(details, width) ?? [renderSubagentToolResult(result, options, theme)]);
+    }
+  }
+  return textBlock(renderSubagentToolResult(result, options, theme));
+}
+
+// ----------------------------------------------------------------------------
+// Wake messages
+// ----------------------------------------------------------------------------
+
+function wakeCardInputFor(message: WakeupMessage, options?: RenderOptions): WakeCardInput {
+  const hasResult = Boolean(message.result);
+  const kind = deriveWakeKind(message.state, hasResult);
+  const result = message.result;
+  const status = message.status;
+  const agentName = result?.agentName ?? status?.agentName ?? message.title;
+  const displayName = result?.displayName ?? status?.displayName ?? agentName;
+  const summaryText = message.summary ?? message.result?.summary ?? message.event?.summary;
+  const headline = summaryText ? preview(summaryText, 96) : undefined;
+  const body = (() => {
+    if (options?.expanded && message.body) return message.body;
+    if (message.event?.body) return preview(message.event.body, 400);
+    if (message.result?.body) return preview(message.result.body, 400);
+    return undefined;
+  })();
+  return {
+    displayName,
+    role: agentName,
+    kind,
+    badge: deriveWakeBadge(kind),
+    headline,
+    body,
+    affordances: describeAffordances(kind),
+  };
+}
+
+export function renderSubagentWakeMessage(message: WakeupMessage, options?: RenderOptions, _theme?: TextTheme): string {
+  return renderWakeCard(wakeCardInputFor(message, options)).join("\n");
+}
+
+export function renderSubagentWakeMessageComponent(message: WakeupMessage, options?: RenderOptions, _theme?: TextTheme): TextRenderable {
+  const input = wakeCardInputFor(message, options);
+  return chromeRenderable((width) => renderWakeCard({ ...input, width }));
+}
+
+// ----------------------------------------------------------------------------
+// Summaries (plain-text, used by tool-call response text and notifications)
+// ----------------------------------------------------------------------------
 
 export function summarizeStartResult(result: SubagentStartResult): string {
   const action = result.waited ? "started and waited" : "started";
@@ -174,11 +862,11 @@ export function summarizeStartResult(result: SubagentStartResult): string {
   return `Subagent ${result.runId} ${action}: ${label} (${result.state})`;
 }
 
-function formatResultSummary(result: RunResult, theme?: TextTheme): string {
-  const label = result.displayName ? `${mention(result.displayName, result.agentName, theme)} ${result.agentName}` : result.agentName;
+function formatResultSummary(result: RunResult): string {
+  const label = result.displayName ? `@${result.displayName} ${result.agentName}` : result.agentName;
   const duration = typeof result.durationMs === "number" ? ` in ${compactDuration(result.durationMs)}` : "";
   const summary = result.summary ? ` - ${preview(result.summary, 96)}` : "";
-  return `${label} ${humanState(result.state)}${duration}${summary}`;
+  return `${label} ${stateGlyph(result.state).label}${duration}${summary}`;
 }
 
 export function summarizeWaitResult(result: SubagentWaitResult): string {
@@ -213,73 +901,3 @@ export function summarizeStatusRows(rows: Array<Pick<RunStatus, "runId" | "state
   return `Subagent status: ${active} active, ${results} terminal, ${rows.length} total`;
 }
 
-export function renderSubagentToolCall(args: Record<string, unknown>, theme?: TextTheme): string {
-  const target = typeof args.runId === "string" ? args.runId : typeof args.agent === "string" ? args.agent : "subagents";
-  const task = typeof args.task === "string" ? ` - ${preview(args.task, 90)}` : "";
-  if (target === "subagents" && !task) return color(theme, "toolTitle", "subagents");
-  return `${color(theme, "toolTitle", "subagent")} ${color(theme, "accent", target)}${color(theme, "muted", task)}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object";
-}
-
-function resultBodyLines(details: Record<string, unknown>, expanded: boolean, theme?: TextTheme): string[] {
-  if (!expanded) return [];
-  if (typeof details.body === "string" && details.body.trim()) return ["", details.body];
-  if (!Array.isArray(details.results)) return [];
-  return details.results.flatMap((result) => {
-    if (!isRecord(result) || typeof result.body !== "string" || !result.body.trim()) return [];
-    const agent = typeof result.agentName === "string" ? result.agentName : "subagent";
-    const label = typeof result.displayName === "string" ? `${mention(result.displayName, agent, theme)} ${agent}` : agent;
-    return ["", `${label}:`, result.body];
-  });
-}
-
-export function renderSubagentToolResult(result: unknown, options?: RenderOptions, theme?: TextTheme): string {
-  if (!result || typeof result !== "object") return String(result ?? "");
-  const data = result as { details?: Record<string, unknown>; content?: Array<{ text?: string }> };
-  const details = data.details ?? {};
-  const text = data.content?.[0]?.text;
-  const summary = typeof details.summary === "string" ? details.summary : text;
-  const displayNames = knownDisplayNames(details);
-  const renderedSummary = colorKnownMentions(summary ?? JSON.stringify(details), displayNames, theme);
-  const lines = [color(theme, "muted", renderedSummary), ...resultBodyLines(details, Boolean(options?.expanded), theme)];
-  return lines.join("\n");
-}
-
-export function renderSubagentToolCallComponent(args: Record<string, unknown>, theme?: TextTheme): TextRenderable {
-  return textBlock(renderSubagentToolCall(args, theme));
-}
-
-export function renderSubagentToolResultComponent(result: unknown, options?: RenderOptions, theme?: TextTheme): TextRenderable {
-  return textBlock(renderSubagentToolResult(result, options, theme));
-}
-
-export function renderSubagentWakeMessage(message: WakeupMessage, options?: RenderOptions, theme?: TextTheme): string {
-  const title = message.result?.displayName
-    ? `${mention(message.result.displayName, message.title, theme)} ${message.result.agentName ?? "subagent"}`
-    : message.title;
-  const lines = [
-    `${color(theme, "accent", stateGlyph(message.state, Boolean(message.result)))} ${color(theme, "toolTitle", title)} ${color(theme, "dim", message.runId)}`,
-  ];
-  const summary = preview(message.summary ?? message.result?.summary ?? message.event?.summary, 120);
-  if (summary) lines.push(color(theme, "muted", summary));
-  if (options?.expanded && message.body) lines.push(preview(message.body, 500));
-  return lines.join("\n");
-}
-
-export function renderDetailCard(details: Record<string, unknown>, expanded = false): string {
-  const keys = expanded ? Object.keys(details) : Object.keys(details).slice(0, 8);
-  return keys.map((key) => `${key}: ${JSON.stringify(details[key])}`).join("\n");
-}
-
-export const renderers = {
-  renderSubagentToolCall,
-  renderSubagentToolResult,
-  renderSubagentToolCallComponent,
-  renderSubagentToolResultComponent,
-  renderSubagentWakeMessage,
-  formatRunRow,
-  renderDetailCard,
-};

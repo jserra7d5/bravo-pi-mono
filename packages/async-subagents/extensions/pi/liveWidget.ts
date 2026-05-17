@@ -1,6 +1,6 @@
 import { RunStore } from "../../src/runStore.js";
 import { readWatcherSnapshot, type RunSummaryRow } from "../../src/watcher.js";
-import { formatRunRow, type TextTheme } from "./renderers.js";
+import { renderWidgetCard, widgetRowFromSummary, type WidgetRowInput } from "./renderers.js";
 
 export interface LiveWidgetInput {
   store: RunStore;
@@ -8,6 +8,11 @@ export interface LiveWidgetInput {
   rootSessionId?: string;
   maxRows?: number;
   terminalCompletedVisibleMs?: number;
+  // Optional explicit width — when omitted (the production path), pi tells the
+  // widget its real container width via the Component.render(width) callback.
+  // This is required: pi's widget container is narrower than the full terminal,
+  // so picking `process.stdout.columns` would overflow and wrap the chrome.
+  width?: number;
 }
 
 const TERMINAL_STATES = new Set(["completed", "failed", "cancelled", "expired"]);
@@ -30,10 +35,20 @@ function rowPriority(row: RunSummaryRow): number {
   return 2;
 }
 
-export function renderLiveWidget(input: LiveWidgetInput, theme?: TextTheme): string[] {
-  const maxRows = input.maxRows ?? 5;
-  const now = Date.now();
-  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 5 * 60_000;
+// Clamp into the chrome's supported range. The lower bound is the smallest
+// width the card layout (`pickWidgetLayout`) can still draw legibly; the upper
+// bound keeps very wide containers from stretching the card across the screen.
+function clampWidth(width: number): number {
+  if (!Number.isFinite(width) || width <= 0) return 64;
+  return Math.max(28, Math.min(96, Math.floor(width)));
+}
+
+interface BuildResult {
+  rows: RunSummaryRow[];
+  totalCost: number | undefined;
+}
+
+function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVisibleMs: number): BuildResult {
   const snapshot = readWatcherSnapshot(input.store, {
     parentRunId: input.parentRunId,
     rootSessionId: input.rootSessionId,
@@ -41,19 +56,83 @@ export function renderLiveWidget(input: LiveWidgetInput, theme?: TextTheme): str
   const rows = snapshot.rows
     .filter((row) => visible(row, now, terminalCompletedVisibleMs))
     .sort((a, b) => rowPriority(a) - rowPriority(b) || b.updatedAt.localeCompare(a.updatedAt));
+  let total = 0;
+  let any = false;
+  for (const row of rows) {
+    const cost = row.metrics?.cost?.total;
+    if (typeof cost === "number" && Number.isFinite(cost)) {
+      total += cost;
+      any = true;
+    }
+  }
+  return { rows, totalCost: any ? total : undefined };
+}
+
+function renderAt(input: LiveWidgetInput, width: number, now: number): string[] {
+  const maxRows = input.maxRows ?? 5;
+  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 5 * 60_000;
+  const { rows, totalCost } = buildSnapshot(input, now, terminalCompletedVisibleMs);
   if (!rows.length) return [];
-  const finished = rows.filter((row) => row.state === "completed").length;
-  const failed = rows.filter((row) => row.state === "failed" || row.state === "cancelled" || row.state === "expired").length;
-  const terminal = [finished ? `${finished} finished` : "", failed ? `${failed} failed` : ""].filter(Boolean).join(" - ");
-  const header = `Async subagents: ${snapshot.activeRunIds.length} running - ${snapshot.blockedRunIds.length} waiting${terminal ? ` - ${terminal}` : ""}`;
-  const lines = [header, ...rows.slice(0, maxRows).map((row) => formatRunRow(row, theme))];
-  if (rows.length > maxRows) lines.push(`+${rows.length - maxRows} more`);
-  return lines;
+  const widgetRows: WidgetRowInput[] = rows.map((row) => widgetRowFromSummary(row, now));
+  return renderWidgetCard({ width: clampWidth(width), rows: widgetRows, maxRows, totalCost });
+}
+
+// Exposed for tests and the few callers that want a one-shot static render
+// (e.g. plain-text transcripts). The production code path goes through the
+// factory below so pi can pass its real container width on every redraw.
+export function renderLiveWidget(input: LiveWidgetInput): string[] {
+  const now = Date.now();
+  // When width is explicit (tests / fixtures) honor it; otherwise fall back to
+  // the previous heuristic so non-component callers keep working.
+  const width = input.width ?? (() => {
+    const term = typeof process !== "undefined" ? process.stdout?.columns : undefined;
+    return typeof term === "number" && term > 0 ? term : 64;
+  })();
+  return renderAt(input, width, now);
+}
+
+interface LiveWidgetComponent {
+  render(width: number): string[];
+  invalidate(): void;
+  dispose?(): void;
+}
+
+function createLiveWidgetComponent(input: LiveWidgetInput): LiveWidgetComponent {
+  // Pi calls `render(width)` with the actual container width on every redraw,
+  // so the snapshot is always fresh — there's no need to cache it across
+  // frames. Trust the width arg; do not consult `process.stdout.columns`.
+  return {
+    render(width: number) {
+      return renderAt(input, width, Date.now());
+    },
+    invalidate() {},
+    dispose() {},
+  };
+}
+
+interface UiSetWidget {
+  setWidget?: (
+    key: string,
+    value: string[] | undefined | ((tui: unknown, theme: unknown) => LiveWidgetComponent),
+    options?: Record<string, unknown>,
+  ) => void;
 }
 
 export function updateLiveWidget(ctx: unknown, input: LiveWidgetInput): void {
-  const ui = (ctx as { ui?: { setWidget?: (key: string, value: unknown, options?: Record<string, unknown>) => void } } | undefined)?.ui;
+  const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
   if (!ui?.setWidget) return;
-  const lines = renderLiveWidget(input);
-  ui.setWidget("async-subagents-live", lines.length ? lines : undefined, { placement: "belowEditor" });
+  // Cheap probe so we can drop the widget entirely when there's nothing to
+  // show — pi keeps showing the previous content otherwise. The probe uses a
+  // 64-wide render purely for the visibility check; the factory below will
+  // re-evaluate at the real container width.
+  const probeLines = renderAt(input, 64, Date.now());
+  if (!probeLines.length) {
+    ui.setWidget("async-subagents-live", undefined, { placement: "belowEditor" });
+    return;
+  }
+  ui.setWidget(
+    "async-subagents-live",
+    () => createLiveWidgetComponent(input),
+    { placement: "belowEditor" },
+  );
 }

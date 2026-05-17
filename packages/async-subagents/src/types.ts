@@ -66,8 +66,13 @@ export interface TokenMetrics {
   total?: number;
 }
 
+export interface CostMetrics {
+  total?: number;
+}
+
 export interface RunMetrics {
   tokens?: TokenMetrics;
+  cost?: CostMetrics;
   toolCalls?: number;
 }
 
@@ -262,6 +267,12 @@ export interface SubagentStartResult {
   sessionPolicy: SessionPolicy;
   piSessionPath?: string;
   requestedPiSessionPath?: string;
+  // Agent-definition detail surfaced to the launch card so the user can see what skills/tools
+  // the child has, its budget, and any nested subagent depth limit.
+  skills?: string[];
+  tools?: string[];
+  maxRunMs?: number;
+  maxSubagentDepth?: number;
   next: Array<{ tool: string; args: Record<string, unknown> }>;
 }
 

@@ -86,21 +86,34 @@ function resultDelivery(runId: string, result: RunResult): WakeupDelivery {
   };
 }
 
-function eventDelivery(event: RunEvent): WakeupDelivery {
+function eventDelivery(event: RunEvent, status?: { agentName?: string; displayName?: string }): WakeupDelivery {
+  // Map the event type onto a run-state-ish string so wake-card glyph/badge selection works
+  // (event types like "question" → "waiting_for_input").
+  const state = event.type === "question" ? "waiting_for_input" : event.type;
   return {
     deliveryKey: eventDeliveryKey(event),
     runId: event.runId,
     message: {
       kind: "subagent_wakeup",
-      title: `Subagent ${event.type}`,
+      title: status?.displayName ?? status?.agentName ?? `Subagent ${event.type}`,
       runId: event.runId,
-      state: event.type,
+      state,
       summary: event.summary,
       body: event.body,
       event,
+      status,
       next: event.type === "question" || event.type === "blocked" ? [{ tool: "subagent_message", args: { runId: event.runId, type: "answer" } }] : [{ tool: "subagent_result", args: { runId: event.runId } }],
     },
   };
+}
+
+function statusForRun(store: RunStore, runId: string): { agentName?: string; displayName?: string } | undefined {
+  try {
+    const status = store.readStatus(runId);
+    return { agentName: status.agent?.name, displayName: status.displayName };
+  } catch {
+    return undefined;
+  }
 }
 
 function pendingForRun(store: RunStore, runId: string, notifyOn?: EventType[]): WakeupDelivery[] {
@@ -108,9 +121,10 @@ function pendingForRun(store: RunStore, runId: string, notifyOn?: EventType[]): 
   const result = store.readResult(runId);
   if (result && (!allowed || allowed.has("result") || allowed.has(result.state))) return [resultDelivery(runId, result)];
   const events = store.readEvents(runId).records.filter((event) => isInterestingEvent(event.type, event.wake) && (!allowed || allowed.has(event.type)));
+  const status = events.length ? statusForRun(store, runId) : undefined;
   return events
     .filter((event) => !["result", "completed", "failed", "cancelled", "expired"].includes(event.type))
-    .map(eventDelivery);
+    .map((event) => eventDelivery(event, status));
 }
 
 function claimDelivery(store: RunStore, deliveryKey: string, ownerId: string, nowMs?: number): boolean {

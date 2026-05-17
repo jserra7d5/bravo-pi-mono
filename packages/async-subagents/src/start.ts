@@ -224,6 +224,10 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       thinkingLevel: selectedThinkingLevel,
       piSessionPath,
       requestedPiSessionPath,
+      skills: definition.skills,
+      tools: definition.tools,
+      maxRunMs: definition.maxRunMs,
+      maxSubagentDepth: definition.maxSubagentDepth,
       next: [{ tool: "subagent_result", args: { runId } }],
     };
   };
@@ -386,6 +390,10 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     sessionPolicy: status.sessionPolicy,
     piSessionPath: status.piSessionPath,
     requestedPiSessionPath: status.requestedPiSessionPath,
+    skills: definition.skills,
+    tools: definition.tools,
+    maxRunMs: definition.maxRunMs,
+    maxSubagentDepth: definition.maxSubagentDepth,
     next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [{ tool: "subagent_wait", args: { runIds: [runId] } }],
   };
 }
