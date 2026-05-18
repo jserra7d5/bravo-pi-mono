@@ -181,6 +181,42 @@ test("updateLiveWidget passes a component factory that renders at the width pi p
   }
 });
 
+test("updateLiveWidget keeps pi TUI as this when requesting render after an update", () => {
+  const empty = workspace();
+  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
+
+  const w = workspace();
+  addRun({ ...w, displayName: "Rex", state: "running", summary: "working" });
+
+  type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void; update?(input: Parameters<typeof updateLiveWidget>[1]): void };
+  let captured: WidgetFactory | undefined;
+  const ctx = {
+    ui: {
+      setWidget(_key: string, value: unknown) {
+        if (typeof value === "function") captured = value as WidgetFactory;
+      },
+    },
+  };
+
+  updateLiveWidget(ctx, { store: w.store, parentRunId: w.parentRunId });
+  assert.ok(captured, "expected setWidget to receive a factory function");
+
+  let renders = 0;
+  const tui = {
+    renderRequested: false,
+    requestRender() {
+      assert.equal(this, tui);
+      this.renderRequested = true;
+      renders += 1;
+    },
+  };
+  const component = captured!(tui, undefined);
+  component.update?.({ store: w.store, parentRunId: w.parentRunId });
+
+  assert.equal(renders, 1);
+  assert.equal(tui.renderRequested, true);
+});
+
 test("updateLiveWidget clears the widget when there are no visible rows", () => {
   const w = workspace();
   const calls: Array<{ value: unknown }> = [];

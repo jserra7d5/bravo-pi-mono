@@ -106,11 +106,11 @@ let mountedWidget: LiveWidgetComponent | undefined;
 
 function createLiveWidgetComponent(input: LiveWidgetInput, tui: unknown): LiveWidgetComponent {
   let currentInput = input;
-  const requestRender = (tui as RenderRequester | undefined)?.requestRender;
+  const renderHost = tui as RenderRequester | undefined;
   const component: LiveWidgetComponent = {
     update(nextInput: LiveWidgetInput) {
       currentInput = nextInput;
-      requestRender?.();
+      renderHost?.requestRender?.();
     },
     render(width: number) {
       return renderAt(currentInput, width, Date.now());
