@@ -9,6 +9,7 @@ import { createRootSession } from "../src/rootSession.js";
 import { RunStore } from "../src/runStore.js";
 import { startSubagent } from "../src/start.js";
 import { createInitialStatus } from "../src/status.js";
+import { NAME_PACKS } from "../src/namePacks.js";
 import type { RootSessionIdentity } from "../src/types.js";
 
 function workspace() {
@@ -199,7 +200,7 @@ test("subagent_name_pack inspects and changes the active pack for future runs", 
     parentRunId: w.identity.parentRunId,
     fake: { mode: "immediate", body: "Done" },
   });
-  assert.equal(started.displayName, "Rex");
+  assert.ok(NAME_PACKS.clones.includes(started.displayName as (typeof NAME_PACKS.clones)[number]));
   assert.equal(started.agentName, "scout");
 });
 

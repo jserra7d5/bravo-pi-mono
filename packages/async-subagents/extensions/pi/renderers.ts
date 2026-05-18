@@ -9,6 +9,16 @@ export interface RenderOptions {
   expanded?: boolean;
 }
 
+export type SubagentToolName =
+  | "subagent_start"
+  | "subagent_wait"
+  | "subagent_message"
+  | "subagent_interrupt"
+  | "subagent_continue"
+  | "subagent_result"
+  | "subagent_name_pack"
+  | "subagent_status";
+
 export interface TextRenderable {
   invalidate(): void;
   render(width: number): string[];
@@ -608,6 +618,26 @@ export function renderWakeCard(input: WakeCardInput): string[] {
   return out;
 }
 
+export interface ToolCallCardInput {
+  width?: number;
+  title: string;
+  badge: string;
+  rows?: Array<[string, string]>;
+}
+
+export function renderToolCallCard(input: ToolCallCardInput): string[] {
+  const width = cardWidth(input);
+  const ch = chrome(width);
+  const titleContent = `${ANSI.bold}${input.title}${ANSI.reset}`;
+  const out: string[] = [ch.topTitled(titleContent, ANSI.cyan + input.badge + ANSI.reset)];
+  const label = (s: string) => ANSI.dim + s.padEnd(10) + ANSI.reset;
+  for (const [key, value] of input.rows ?? []) {
+    if (value) out.push(ch.row(label(key) + ANSI.white + value + ANSI.reset));
+  }
+  out.push(ch.bot());
+  return out;
+}
+
 // ----------------------------------------------------------------------------
 // Card adapters: turn tool args / wake payloads into card props.
 // ----------------------------------------------------------------------------
@@ -673,21 +703,61 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function renderLaunchCardFromArgs(args: Record<string, unknown>, width?: number): string[] {
   const agent = typeof args.agent === "string" ? args.agent : "subagent";
-  const displayName = typeof args.name === "string" && args.name ? args.name : agent;
   const task = typeof args.task === "string" ? args.task : undefined;
   const thinking = typeof args.thinkingLevel === "string" ? args.thinkingLevel : undefined;
-  const tools = Array.isArray(args.tools) ? args.tools.filter((t): t is string => typeof t === "string") : undefined;
-  return renderLaunchCard({
+  return renderToolCallCard({
     width,
-    displayName,
-    role: agent,
-    state: "queued",
-    task,
-    thinking,
-    tools,
-    budget: describeBudget(args),
-    context: describeContext(args),
+    title: "start subagent",
+    badge: "→ starting",
+    rows: [
+      ["role", agent],
+      ["name", "from active pack"],
+      ...(task ? [["task", task] as [string, string]] : []),
+      ...(thinking ? [["thinking", thinking] as [string, string]] : []),
+      ...(describeBudget(args) ? [["budget", describeBudget(args) as string] as [string, string]] : []),
+      ...(describeContext(args) ? [["context", describeContext(args) as string] as [string, string]] : []),
+    ],
   });
+}
+
+function selectedRunsLabel(args: Record<string, unknown>): string {
+  const runIds = Array.isArray(args.runIds) ? args.runIds.filter((runId): runId is string => typeof runId === "string") : [];
+  const runDirs = Array.isArray(args.runDirs) ? args.runDirs.filter((runDir): runDir is string => typeof runDir === "string") : [];
+  if (typeof args.runId === "string" && args.runId) return args.runId;
+  if (typeof args.runDir === "string" && args.runDir) return "run directory";
+  if (runIds.length) return `${runIds.length} selected`;
+  if (runDirs.length) return `${runDirs.length} run dirs`;
+  return "direct children";
+}
+
+function renderSubagentCallCard(toolName: SubagentToolName | undefined, args: Record<string, unknown>, width?: number): string[] {
+  switch (toolName) {
+    case "subagent_wait": {
+      const until = typeof args.until === "string" ? args.until : "interesting";
+      const mode = typeof args.mode === "string" ? args.mode : "race";
+      const timeout = typeof args.timeoutMs === "number" ? compactDuration(args.timeoutMs) : "5m";
+      return renderToolCallCard({
+        width,
+        title: "wait for subagents",
+        badge: "◐ watching",
+        rows: [["scope", selectedRunsLabel(args)], ["until", until], ["mode", mode], ["timeout", timeout]],
+      });
+    }
+    case "subagent_status":
+      return renderToolCallCard({ width, title: "subagent status", badge: "○ reading", rows: [["scope", selectedRunsLabel(args)]] });
+    case "subagent_result":
+      return renderToolCallCard({ width, title: "subagent result", badge: "★ reading", rows: [["target", selectedRunsLabel(args)]] });
+    case "subagent_message":
+      return renderToolCallCard({ width, title: "message subagent", badge: "→ sending", rows: [["target", selectedRunsLabel(args)], ["type", typeof args.type === "string" ? args.type : "instruction"], ["body", typeof args.body === "string" ? preview(args.body, 120) : ""]] });
+    case "subagent_interrupt":
+      return renderToolCallCard({ width, title: "interrupt subagent", badge: "⚠ control", rows: [["target", selectedRunsLabel(args)], ["action", typeof args.action === "string" ? args.action : "pause"]] });
+    case "subagent_continue":
+      return renderToolCallCard({ width, title: "continue subagent", badge: "→ resume", rows: [["target", selectedRunsLabel(args)], ["body", typeof args.body === "string" ? preview(args.body, 120) : "resume work"]] });
+    case "subagent_name_pack":
+      return renderToolCallCard({ width, title: "subagent name pack", badge: "○ config", rows: [["pack", typeof args.pack === "string" ? args.pack : "current"]] });
+    default:
+      return renderToolCallCard({ width, title: "subagent tool", badge: "○ running", rows: [["scope", selectedRunsLabel(args)]] });
+  }
 }
 
 function renderStartResultCard(details: Record<string, unknown>, width?: number): string[] | undefined {
@@ -755,23 +825,23 @@ function renderTerminalResultCardFromDetails(result: Record<string, unknown>, wi
   });
 }
 
-export function renderSubagentToolCall(args: Record<string, unknown>, theme?: TextTheme): string {
+export function renderSubagentToolCall(args: Record<string, unknown>, theme?: TextTheme, toolName?: SubagentToolName): string {
   // Plain-text fallback used by transcript text-mode and tests. Components use the
   // card path below.
-  const target = typeof args.runId === "string" ? args.runId : typeof args.agent === "string" ? args.agent : "subagents";
+  const target = typeof args.runId === "string" ? args.runId : typeof args.agent === "string" ? args.agent : selectedRunsLabel(args);
   const task = typeof args.task === "string" ? ` - ${preview(args.task, 90)}` : "";
   const accent = (v: string) => (theme?.fg ? theme.fg("accent", v) : v);
   const muted = (v: string) => (theme?.fg ? theme.fg("muted", v) : v);
-  const title = theme?.fg ? theme.fg("toolTitle", "subagent") : "subagent";
-  if (target === "subagents" && !task) return theme?.fg ? theme.fg("toolTitle", "subagents") : "subagents";
+  const titleText = toolName === "subagent_wait" ? "subagent wait" : "subagent";
+  const title = theme?.fg ? theme.fg("toolTitle", titleText) : titleText;
   return `${title} ${accent(target)}${muted(task)}`;
 }
 
-export function renderSubagentToolCallComponent(args: Record<string, unknown>, theme?: TextTheme): TextRenderable {
+export function renderSubagentToolCallComponent(args: Record<string, unknown>, theme?: TextTheme, toolName?: SubagentToolName): TextRenderable {
   if (typeof args.agent === "string") {
     return chromeRenderable((width) => renderLaunchCardFromArgs(args, width));
   }
-  return textBlock(renderSubagentToolCall(args, theme));
+  return chromeRenderable((width) => renderSubagentCallCard(toolName, args, width));
 }
 
 function resultBodyLines(details: Record<string, unknown>, expanded: boolean): string[] {
@@ -900,4 +970,3 @@ export function summarizeStatusRows(rows: Array<Pick<RunStatus, "runId" | "state
   const results = rows.filter((row) => ["completed", "failed", "cancelled", "expired"].includes(row.state)).length;
   return `Subagent status: ${active} active, ${results} terminal, ${rows.length} total`;
 }
-

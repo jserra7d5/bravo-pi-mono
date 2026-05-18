@@ -30,7 +30,6 @@ export interface StartFakeImmediateInput extends SupervisorFakeInput {
 
 export interface StartSubagentInput {
   agent: string;
-  name?: string;
   task: string;
   cwd?: string;
   runRoot?: string;
@@ -157,7 +156,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     contextPolicy: requestedContextPolicy,
     sessionPolicy: requestedSessionPolicy,
   });
-  const display = assignDisplayName({ runRoot: store.runRoot, requestedName: input.name });
+  const display = assignDisplayName({ runRoot: store.runRoot });
   let contextPolicy = requestedContextPolicy;
   const sessionPolicy = requestedSessionPolicy;
   const requestedPiSessionPath = sessionPolicy === "record" ? paths.requestedPiSessionPath : undefined;

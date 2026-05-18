@@ -336,7 +336,6 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
             ASYNC_SUBAGENTS_ROOT_SESSION_ID: root.rootSessionId,
             ASYNC_SUBAGENTS_PARENT_RUN_ID: root.parentRunId,
           },
-          name: typeof params.name === "string" ? params.name : undefined,
           thinkingLevel: isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined,
         });
         writeDeliverySubscription(storeFor(cwd), {
@@ -349,7 +348,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(summarizeStartResult(result), { ...result, rootSessionId: root.rootSessionId });
       },
-      renderCall: renderSubagentToolCallComponent,
+      renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_start"),
       renderResult: renderSubagentToolResultComponent,
       renderShell: "self",
     },
@@ -388,7 +387,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(summarizeWaitResult(result), details as unknown as Record<string, unknown>);
       },
-      renderCall: renderSubagentToolCallComponent,
+      renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_wait"),
       renderResult: renderSubagentToolResultComponent,
       renderShell: "self",
     },
@@ -418,7 +417,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(summarizeMessageResult(result), { ...result, status: { runId: status.runId, state: status.state } });
       },
-      renderCall: renderSubagentToolCallComponent,
+      renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_message"),
       renderResult: renderSubagentToolResultComponent,
       renderShell: "self",
     },
@@ -466,7 +465,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(`Subagent ${runId} cancelled`, { runId, state: "cancelled", pid: status.pid, signal: requestedSignal, signalDelivered: signal.ok, signalError: signal.error, result: finalized });
       },
-      renderCall: renderSubagentToolCallComponent,
+      renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_interrupt"),
       renderResult: renderSubagentToolResultComponent,
       renderShell: "self",
     },
@@ -504,7 +503,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(`Subagent ${runId} continued`, { ...result, runId, state: "running", signalDelivered: signal?.ok, event, thinkingLevel: selectedThinkingLevel });
       },
-      renderCall: renderSubagentToolCallComponent,
+      renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_continue"),
       renderResult: renderSubagentToolResultComponent,
       renderShell: "self",
     },
@@ -540,7 +539,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(summarizeRunResult(result, runId), details as Record<string, unknown>);
       },
-      renderCall: renderSubagentToolCallComponent,
+      renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_result"),
       renderResult: renderSubagentToolResultComponent,
       renderShell: "self",
     },
@@ -562,7 +561,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           changed: Boolean(pack),
         } as unknown as Record<string, unknown>);
       },
-      renderCall: renderSubagentToolCallComponent,
+      renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_name_pack"),
       renderResult: renderSubagentToolResultComponent,
       renderShell: "self",
     },
@@ -626,7 +625,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         }
         return response(summarizeStatusRows(rows), details);
       },
-      renderCall: renderSubagentToolCallComponent,
+      renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_status"),
       renderResult: renderSubagentToolResultComponent,
       renderShell: "self",
     },

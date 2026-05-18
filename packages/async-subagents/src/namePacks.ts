@@ -17,12 +17,6 @@ export interface NamePackConfig {
   updatedAt: string;
 }
 
-interface NamePackState {
-  schemaVersion: typeof SCHEMA_VERSION;
-  counters: Partial<Record<NamePackId, number>>;
-  updatedAt: string;
-}
-
 export interface NamePackSelection {
   activePack: NamePackId;
   availablePacks: Array<{ id: NamePackId; names: string[] }>;
@@ -31,10 +25,6 @@ export interface NamePackSelection {
 
 function configPath(runRoot: string): string {
   return join(runRoot, "..", "name-config.json");
-}
-
-function statePath(runRoot: string): string {
-  return join(runRoot, "..", "name-state.json");
 }
 
 function lockPath(runRoot: string): string {
@@ -52,6 +42,21 @@ function readJson<T>(path: string): T | undefined {
   } catch {
     return undefined;
   }
+}
+
+function readJsonl<T>(path: string): T[] {
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8")
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return [];
+      try {
+        return [JSON.parse(trimmed) as T];
+      } catch {
+        return [];
+      }
+    });
 }
 
 function isErrnoCode(error: unknown, code: string): boolean {
@@ -80,10 +85,21 @@ export function writeNamePackSelection(runRoot: string, pack: NamePackId): NameP
   return readNamePackSelection(runRoot);
 }
 
-export function assignDisplayName(input: { runRoot: string; requestedName?: string }): { displayName: string; namePack: NamePackId } {
+function activeDisplayNames(runRoot: string): Set<string> {
+  const active = new Set<string>();
+  const records = readJsonl<{ runDir?: string }>(join(runRoot, "..", "run-index.jsonl"));
+  for (const record of records) {
+    if (!record.runDir) continue;
+    const status = readJson<{ displayName?: string; state?: string }>(join(record.runDir, "status.json"));
+    if (!status?.displayName) continue;
+    if (status.state === "completed" || status.state === "failed" || status.state === "cancelled" || status.state === "expired") continue;
+    active.add(status.displayName);
+  }
+  return active;
+}
+
+export function assignDisplayName(input: { runRoot: string; random?: () => number }): { displayName: string; namePack: NamePackId } {
   const selection = readNamePackSelection(input.runRoot);
-  const requested = input.requestedName?.trim();
-  if (requested) return { displayName: requested, namePack: selection.activePack };
 
   mkdirSync(join(input.runRoot, ".."), { recursive: true });
   const lock = lockPath(input.runRoot);
@@ -96,18 +112,13 @@ export function assignDisplayName(input: { runRoot: string; requestedName?: stri
       continue;
     }
     try {
-      const path = statePath(input.runRoot);
-      const state = readJson<Partial<NamePackState>>(path);
-      const counters = state?.counters ?? {};
       const names = NAME_PACKS[selection.activePack];
-      const index = Math.max(0, Math.trunc(counters[selection.activePack] ?? 0));
-      const displayName = names[index % names.length];
-      atomicWriteJson(path, {
-        schemaVersion: SCHEMA_VERSION,
-        counters: { ...counters, [selection.activePack]: index + 1 },
-        updatedAt: new Date().toISOString(),
-      } satisfies NamePackState);
-      return { displayName, namePack: selection.activePack };
+      const active = activeDisplayNames(input.runRoot);
+      const available = names.filter((name) => !active.has(name));
+      const pool = available.length ? available : names;
+      const random = input.random ?? Math.random;
+      const index = Math.min(pool.length - 1, Math.max(0, Math.floor(random() * pool.length)));
+      return { displayName: pool[index], namePack: selection.activePack };
     } finally {
       rmSync(lock, { recursive: true, force: true });
     }

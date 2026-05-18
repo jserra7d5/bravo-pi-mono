@@ -19,7 +19,6 @@ const Attachment = Type.Object({
 export const subagentStartSchema = Type.Object({
   agent: Type.String({ description: "Agent definition name, such as scout, reviewer, or worker." }),
   task: Type.String({ description: "Bounded task for the child agent." }),
-  name: Type.Optional(Type.String({ description: "Human-readable run display name. Defaults to the active name pack." })),
   mode: Type.Optional(StringEnum(["async", "sync"] as const, { default: "async" })),
   wait: Type.Optional(StringEnum(["none", "interesting", "terminal", "result"] as const, { default: "none" })),
   cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current Pi session cwd." })),

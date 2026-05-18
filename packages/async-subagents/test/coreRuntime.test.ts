@@ -11,6 +11,7 @@ import { createRunEvent } from "../src/events.js";
 import { createInitialStatus, readSubagentStatus, updateRunStatus } from "../src/status.js";
 import { waitOnce, waitSubagents } from "../src/wait.js";
 import { finalizeTerminalRun } from "../src/lifecycle.js";
+import { assignDisplayName } from "../src/namePacks.js";
 
 function workspace() {
   const root = mkdtempSync(join(tmpdir(), "async-subagents-core-"));
@@ -83,7 +84,7 @@ test("startSubagent drives a detached fake child lifecycle", async () => {
   assert.equal(Object.hasOwn(launch, "thinkingLevel"), false);
 });
 
-test("startSubagent assigns and persists display names separately from agent type", async () => {
+test("startSubagent assigns and persists generated display names separately from agent type", async () => {
   const w = workspace();
   const first = await startSubagent({
     agent: "scout",
@@ -95,8 +96,7 @@ test("startSubagent assigns and persists display names separately from agent typ
   });
   const second = await startSubagent({
     agent: "scout",
-    name: "Human Lead",
-    task: "Explicit name",
+    task: "Another generated name",
     cwd: w.root,
     runRoot: w.runRoot,
     parentRunId: "root_test",
@@ -105,11 +105,32 @@ test("startSubagent assigns and persists display names separately from agent typ
 
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
   assert.equal(first.agentName, "scout");
-  assert.equal(first.displayName, "Alex");
-  assert.equal(store.readStatus(first.runId).displayName, "Alex");
-  assert.equal(store.readResult(first.runId)?.displayName, "Alex");
-  assert.equal(second.displayName, "Human Lead");
+  assert.ok(first.displayName);
+  assert.ok(second.displayName);
+  assert.equal(store.readStatus(first.runId).displayName, first.displayName);
+  assert.equal(store.readResult(first.runId)?.displayName, first.displayName);
   assert.equal(store.readStatus(second.runId).agent.name, "scout");
+});
+
+test("assignDisplayName skips names already used by active runs", () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const { runId } = store.createRunDirectory({ cwd: w.root, parentRunId: "root_test" });
+  store.writeStatus(createInitialStatus({
+    runId,
+    parentRunId: "root_test",
+    displayName: "Alex",
+    namePack: "default",
+    agentName: "scout",
+    agentSource: "project",
+    definitionPath: join(w.root, ".agents", "scout.md"),
+    mode: "oneshot",
+    cwd: w.root,
+    state: "running",
+  }));
+
+  const assigned = assignDisplayName({ runRoot: w.runRoot, random: () => 0 });
+  assert.equal(assigned.displayName, "Blair");
 });
 
 test("startSubagent can explicitly opt out of Pi session recording", async () => {

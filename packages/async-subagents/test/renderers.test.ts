@@ -283,16 +283,20 @@ test("formatRunRow plain-text fallback preserves identity mention and state labe
 });
 
 test("renderSubagentToolCallComponent renders a launch card when called with agent args", () => {
-  const comp = renderSubagentToolCallComponent({ agent: "researcher", task: "look around", name: "taro" });
+  const comp = renderSubagentToolCallComponent({ agent: "researcher", task: "look around" }, undefined, "subagent_start");
   const rendered = comp.render(72).map(stripAnsi).join("\n");
-  assert.ok(rendered.includes("@taro"));
+  assert.ok(rendered.includes("start subagent"));
   assert.ok(rendered.includes("researcher"));
+  assert.ok(rendered.includes("from active pack"));
   assert.ok(rendered.includes("look around"));
 });
 
-test("renderSubagentToolCallComponent falls back to plain text when no agent is supplied", () => {
-  const comp = renderSubagentToolCallComponent({});
-  assert.equal(comp.render(80).join("\n"), "subagents");
+test("renderSubagentToolCallComponent renders a wait card when no agent is supplied", () => {
+  const comp = renderSubagentToolCallComponent({}, undefined, "subagent_wait");
+  const rendered = comp.render(72).map(stripAnsi).join("\n");
+  assert.ok(rendered.includes("wait for subagents"));
+  assert.ok(rendered.includes("direct children"));
+  assert.ok(rendered.includes("interesting"));
 });
 
 test("renderSubagentToolResultComponent renders a result card from terminal result details", () => {
