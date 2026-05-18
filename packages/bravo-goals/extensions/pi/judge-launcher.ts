@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -199,7 +200,7 @@ async function runJudgeAttempt(runDir: string, options: AutonomousJudgeOptions):
 		return;
 	}
 
-	const extensionPath = resolve(dirname(fileURLToPath(import.meta.url)), "index.js");
+	const extensionPath = resolveJudgeExtensionPath();
 	const modelArgs = modelCliArgs(options.model);
 	const taskPrompt = await readFile(join(runDir, "prompt", "task.md"), "utf8");
 	const systemPrompt = join(runDir, "prompt", "system.md");
@@ -240,6 +241,14 @@ async function runJudgeAttempt(runDir: string, options: AutonomousJudgeOptions):
 	if (result.code !== 0) {
 		throw new Error(`Judge process exited ${result.code}: ${result.stderr.slice(0, 800)}`);
 	}
+}
+
+export function resolveJudgeExtensionPath(extensionDir = dirname(fileURLToPath(import.meta.url))): string {
+	const compiled = resolve(extensionDir, "index.js");
+	if (existsSync(compiled)) return compiled;
+	const source = resolve(extensionDir, "index.ts");
+	if (existsSync(source)) return source;
+	return compiled;
 }
 
 function renderJudgeInstruction(taskPrompt: string): string {

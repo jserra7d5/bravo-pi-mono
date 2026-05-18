@@ -16,6 +16,7 @@ test("goal policy is controller-owned and blocks protected Bravo mutation paths"
 
 	const loaded = await readGoalPolicy(policy.policy_path);
 	assert.equal(loaded.goal_id, "policy-goal");
+	assert.equal(loaded.bash.mode, "unsafe_raw");
 
 	assert.deepEqual(await decidePath(loaded, "mutate", join(root, ".bravo", "goals", "policy-goal", "state.yaml")), {
 		allowed: false,
@@ -25,7 +26,7 @@ test("goal policy is controller-owned and blocks protected Bravo mutation paths"
 	assert.equal((await decidePath(loaded, "mutate", join(root, "src", "app.ts"))).allowed, true);
 });
 
-test("goal policy blocks outside-workspace writes and destructive bash", async () => {
+test("goal policy blocks outside-workspace writes while bash scoping is disabled by default", async () => {
 	const root = await mkdtemp(join(tmpdir(), "bravo-policy-"));
 	await mkdir(join(root, ".bravo", "goals", "policy-goal"), { recursive: true });
 	const policy = await createDefaultGoalPolicy({ workspaceRoot: root, goalId: "policy-goal" });
@@ -33,6 +34,17 @@ test("goal policy blocks outside-workspace writes and destructive bash", async (
 	await writeFile(outside, "x");
 
 	assert.equal((await decidePath(policy, "mutate", outside)).allowed, false);
+	assert.equal(policy.bash.mode, "unsafe_raw");
+	assert.equal(decideBash(policy, "rm -rf .bravo").allowed, true);
+	assert.equal(decideBash(policy, "python script.py").allowed, true);
+});
+
+test("constrained bash policy blocks destructive commands when explicitly enabled", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-policy-"));
+	await mkdir(join(root, ".bravo", "goals", "policy-goal"), { recursive: true });
+	const policy = await createDefaultGoalPolicy({ workspaceRoot: root, goalId: "policy-goal" });
+	policy.bash.mode = "constrained";
+
 	assert.equal(decideBash(policy, "git status --short").allowed, true);
 	assert.equal(decideBash(policy, "cd ROGER-main && git status --short --branch && git worktree list --porcelain").allowed, true);
 	assert.equal(decideBash(policy, "git -C ROGER-main status --short --branch").allowed, true);

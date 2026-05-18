@@ -11,6 +11,13 @@ import bravoGoalsPiExtension from "../extensions/pi/index.js";
 import { scaffoldGoalWorkspace } from "../src/workspace.js";
 import { readActiveGoalsIndex, readGoalState, upsertActiveGoal, writeGoalState } from "../src/runtime.js";
 import { createJudgeRun, updateJudgeRunStatus, writeJudgeVerdict, type JudgeVerdictFile } from "../src/judge-runner.js";
+import { resolveJudgeExtensionPath } from "../extensions/pi/judge-launcher.js";
+
+test("Judge launcher uses source extension path when running from an unbuilt source tree", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-extension-path-"));
+	await writeFile(join(root, "index.ts"), "export default function () {}\n");
+	assert.equal(resolveJudgeExtensionPath(root), join(root, "index.ts"));
+});
 
 const snapshot: HudSnapshot = {
 	goalPath: "/workspace/.bravo/goals/durable-resume-loop",

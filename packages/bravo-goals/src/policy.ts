@@ -62,7 +62,10 @@ export async function createDefaultGoalPolicy(options: {
 			],
 		},
 		bash: {
-			mode: "constrained",
+			// Command-level bash scoping is intentionally disabled by default for now.
+			// The constrained policy implementation remains available, but proved too
+			// brittle in normal goal work and blocked too many legitimate commands.
+			mode: "unsafe_raw",
 			allow_prefixes: [
 				"npm test",
 				"npm run",
@@ -128,7 +131,9 @@ export function summarizeGoalPolicy(policy: GoalPolicy): string {
 		"Writes/edits are allowed for normal workspace files plus resume.md and the active worker receipt.",
 		"Writes/edits are blocked for Bravo runtime, Judge runs, state.yaml, policy files, non-active receipts, and Judge receipts.",
 		"Deletes are denied unless explicitly allowed.",
-		`Bash mode: ${policy.bash.mode}.`,
+		policy.bash.mode === "unsafe_raw"
+			? "Bash command scoping is disabled; normal Pi bash behavior is allowed."
+			: `Bash mode: ${policy.bash.mode}.`,
 	].join("\n");
 }
 

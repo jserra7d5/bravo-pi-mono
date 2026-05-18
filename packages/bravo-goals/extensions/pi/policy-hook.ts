@@ -87,7 +87,7 @@ async function resolveEffectivePolicy(ctx: ExtensionContext): Promise<GoalPolicy
 		if (expectedHash && await sha256File(envPath) !== expectedHash) {
 			throw new Error("Bravo goal policy hash mismatch.");
 		}
-		return policy;
+		return applyDefaultBashScoping(policy);
 	}
 	const workspaceRoot = await discoverWorkspaceRoot(ctx.cwd);
 	if (!workspaceRoot) return null;
@@ -96,7 +96,15 @@ async function resolveEffectivePolicy(ctx: ExtensionContext): Promise<GoalPolicy
 	const index = await readActiveGoalsIndex(workspaceRoot);
 	const active = index.active_goals.find((entry) => entry.pi_session_id === sessionId);
 	if (!active) return null;
-	return readGoalPolicy(join(workspaceRoot, ".bravo", "runtime", "policies", active.goal_id, "policy.yaml"));
+	return applyDefaultBashScoping(await readGoalPolicy(join(workspaceRoot, ".bravo", "runtime", "policies", active.goal_id, "policy.yaml")));
+}
+
+export function applyDefaultBashScoping(policy: GoalPolicy): GoalPolicy {
+	if (policy.bash.mode !== "constrained" || process.env.BRAVO_GOALS_ENABLE_BASH_SCOPING === "1") return policy;
+	return {
+		...policy,
+		bash: { ...policy.bash, mode: "unsafe_raw" },
+	};
 }
 
 async function auditPolicyBlock(ctx: ExtensionContext, policy: GoalPolicy, toolName: string, reason: string): Promise<void> {
