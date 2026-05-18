@@ -87,12 +87,13 @@ export async function createDefaultGoalPolicy(options: {
 				"\\bgit\\s+(checkout|reset|clean|rm|mv|merge|rebase)\\b",
 				";",
 				"\\r|\\n",
-				"\\|",
+				"(^|[^|])\\|($|[^|])",
 				"`",
 				"\\$\\(",
 				"(^|[^&])&($|[^&])",
 				"(^|[\\s;&|()])(?:\\d+)?(?:>>?|<<?|<<<|<>|>&|<&)",
 				"(^|[\\s;&|()])(tee|xargs)\\b",
+				"\\b(mkdir|touch|chmod|chown|cp|mv|python|python3|perl|ruby|sh|bash|zsh|curl|wget)\\b",
 			],
 		},
 	};
@@ -154,44 +155,83 @@ export async function decidePath(policy: GoalPolicy, operation: "read" | "mutate
 export function decideBash(policy: GoalPolicy, command: string): PolicyDecision {
 	if (policy.bash.mode === "unsafe_raw") return { allowed: true };
 	if (policy.bash.mode === "denied") return { allowed: false, reason: "bash is blocked by Bravo policy" };
-	const commandSegments = bashCommandSegmentsForPolicy(command);
-	const commandsToCheck = [command.trim(), ...commandSegments.flat()];
 	for (const pattern of policy.bash.deny_patterns) {
 		const regex = new RegExp(pattern);
-		if (commandsToCheck.some((candidate) => regex.test(candidate))) {
+		if (regex.test(command)) {
 			return { allowed: false, reason: `bash command blocked by Bravo policy: ${command}` };
 		}
 	}
-	const allowed = commandSegments.length > 0 && commandSegments.every((segment) => segment.some((candidate) => isAllowedBashPrefix(policy, candidate)));
-	return allowed ? { allowed: true } : { allowed: false, reason: `bash command is not policy-approved: ${command}` };
+	const segments = bashCommandSegmentsForPolicy(command);
+	if (segments.length === 0) {
+		return { allowed: false, reason: `bash command is not policy-approved: ${command}` };
+	}
+	for (const segment of segments) {
+		const decision = decideBashSegment(segment);
+		if (!decision.allowed) return { allowed: false, reason: `${decision.reason}: ${command}` };
+	}
+	return { allowed: true };
 }
 
-function bashCommandSegmentsForPolicy(command: string): string[][] {
+function bashCommandSegmentsForPolicy(command: string): string[] {
 	const normalized = command.trim();
 	const cdMatch = /^cd\s+(?:"[^"]+"|'[^']+'|[^\s;&|()<>]+)\s+&&\s+([\s\S]+)$/.exec(normalized);
 	if (cdMatch?.[1]) {
 		return bashCommandSegmentsForPolicy(cdMatch[1]);
 	}
-	return normalized.split(/\s*&&\s*/).map((segment) => normalizeBashCommandForPolicySegment(segment));
+	return normalized.split(/\s*(?:&&|\|\|)\s*/).map(normalizeBashCommandForPolicySegment).filter((segment) => segment.length > 0);
 }
 
-function normalizeBashCommandForPolicySegment(command: string): string[] {
+function normalizeBashCommandForPolicySegment(command: string): string {
 	const normalized = command.trim();
-	const candidates = [normalized];
 	const gitCMatch = /^git\s+-C\s+(?:"[^"]+"|'[^']+'|[^\s;&|()<>]+)\s+([\s\S]+)$/.exec(normalized);
 	if (gitCMatch?.[1]) {
-		candidates.push(`git ${gitCMatch[1].trim()}`);
+		return `git ${gitCMatch[1].trim()}`;
 	}
-	return [...new Set(candidates)];
+	return normalized;
 }
 
-function isAllowedBashPrefix(policy: GoalPolicy, command: string): boolean {
-	return policy.bash.allow_prefixes.some((prefix) => {
-		const trimmed = prefix.trim();
-		if (command === trimmed) return true;
-		return prefix.endsWith(" ") ? command.startsWith(prefix) : command.startsWith(`${trimmed} `);
+function decideBashSegment(command: string): PolicyDecision {
+	const [program, ...args] = tokenizeBashSegment(command);
+	if (!program) return { allowed: false, reason: "empty bash segment" };
+	if (READ_ONLY_COMMANDS.has(program)) return { allowed: true };
+	if (program === "npm") return decideNpmSegment(args);
+	if (program === "node") return args[0] === "--check" ? { allowed: true } : { allowed: false, reason: "node command is not policy-approved" };
+	if (program === "git") return decideGitSegment(args);
+	return { allowed: false, reason: `bash command is not policy-approved (${program})` };
+}
+
+function decideNpmSegment(args: string[]): PolicyDecision {
+	const subcommand = args[0];
+	if (subcommand === "test" || subcommand === "run") return { allowed: true };
+	if (subcommand === "--prefix") return { allowed: true };
+	return { allowed: false, reason: "npm command is not policy-approved" };
+}
+
+function decideGitSegment(args: string[]): PolicyDecision {
+	const [subcommand, ...rest] = args;
+	if (!subcommand) return { allowed: false, reason: "git command is missing subcommand" };
+	if (READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) return { allowed: true };
+	if (subcommand === "worktree") {
+		const worktreeSubcommand = rest[0];
+		if (worktreeSubcommand === "list" || worktreeSubcommand === "add") return { allowed: true };
+		return { allowed: false, reason: "git worktree command is not policy-approved" };
+	}
+	if (subcommand === "add" || subcommand === "commit") return { allowed: true };
+	return { allowed: false, reason: `git command is not policy-approved (${subcommand})` };
+}
+
+function tokenizeBashSegment(command: string): string[] {
+	const matches = command.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+	return matches.map((token) => {
+		if ((token.startsWith("\"") && token.endsWith("\"")) || (token.startsWith("'") && token.endsWith("'"))) {
+			return token.slice(1, -1);
+		}
+		return token;
 	});
 }
+
+const READ_ONLY_COMMANDS = new Set(["test", "[", "echo", "pwd", "ls", "find", "cat", "sed", "rg", "wc", "head", "tail", "date"]);
+const READ_ONLY_GIT_SUBCOMMANDS = new Set(["status", "diff", "branch", "log", "show", "rev-parse", "remote", "describe", "ls-files"]);
 
 async function resolvePolicyPath(workspaceRoot: string, inputPath: string): Promise<string> {
 	const absolute = isAbsolute(inputPath) ? inputPath : resolve(workspaceRoot, inputPath);
