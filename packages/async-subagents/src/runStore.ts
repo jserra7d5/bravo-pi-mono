@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { defaultRunRoot, findProjectRoot } from "./config.js";
+import { asyncSubagentsHome, defaultRunRoot, findProjectRoot } from "./config.js";
 import { SubagentError } from "./errors.js";
 import { appendJsonl, atomicWriteJson, readJsonl } from "./jsonl.js";
 import { newRunId } from "./ids.js";
@@ -31,10 +31,12 @@ export interface RunStoreOptions {
 export class RunStore {
   readonly cwd: string;
   readonly runRoot: string;
+  readonly env: NodeJS.ProcessEnv;
 
   constructor(options: RunStoreOptions = {}) {
     this.cwd = resolve(options.cwd ?? process.cwd());
-    this.runRoot = defaultRunRoot(this.cwd, options.runRoot, options.env ?? process.env);
+    this.env = options.env ?? process.env;
+    this.runRoot = defaultRunRoot(this.cwd, options.runRoot, this.env);
   }
 
   resolveRunRoot(cwd = this.cwd, configuredRoot?: string): string {
@@ -43,6 +45,10 @@ export class RunStore {
 
   indexPath(): string {
     return join(this.runRoot, "..", "run-index.jsonl");
+  }
+
+  globalIndexPath(): string {
+    return join(asyncSubagentsHome(this.env), "run-index.jsonl");
   }
 
   pathsFor(runRef: { runId: string } | { runDir: string }): RunPaths {
@@ -92,14 +98,39 @@ export class RunStore {
 
   appendRunIndex(record: RunIndexRecord): void {
     appendJsonl(this.indexPath(), record);
+    if (resolve(this.globalIndexPath()) !== resolve(this.indexPath())) appendJsonl(this.globalIndexPath(), record);
+  }
+
+  fallbackIndexPaths(): string[] {
+    const paths = [
+      join(findProjectRoot(this.cwd), ".subagents", "run-index.jsonl"),
+      ...(this.env.ASYNC_SUBAGENTS_HOME ? [join(resolve(this.env.ASYNC_SUBAGENTS_HOME), "run-index.jsonl")] : []),
+    ];
+    return [...new Set(paths.map((path) => resolve(path)))].filter((path) => path !== resolve(this.indexPath()));
+  }
+
+  lookupIndexPaths(): string[] {
+    return [...new Set([this.indexPath(), this.globalIndexPath(), ...this.fallbackIndexPaths()].map((path) => resolve(path)))];
   }
 
   readRunIndex(): RunIndexRecord[] {
-    return readJsonl<RunIndexRecord>(this.indexPath()).records;
+    const records = readJsonl<RunIndexRecord>(this.indexPath()).records;
+    for (const path of this.fallbackIndexPaths()) {
+      if (existsSync(path)) records.push(...readJsonl<RunIndexRecord>(path).records);
+    }
+    return records;
+  }
+
+  readLookupRunIndex(): RunIndexRecord[] {
+    const records: RunIndexRecord[] = [];
+    for (const path of this.lookupIndexPaths()) {
+      if (existsSync(path)) records.push(...readJsonl<RunIndexRecord>(path).records);
+    }
+    return records;
   }
 
   resolveRunDir(runId: string): string {
-    const records = this.readRunIndex().filter((record) => record.runId === runId);
+    const records = this.readLookupRunIndex().filter((record) => record.runId === runId);
     const latest = records.at(-1);
     if (!latest) throw new SubagentError("RUN_NOT_FOUND", `run not found: ${runId}`, { runId, indexPath: this.indexPath() });
     return latest.runDir;

@@ -217,10 +217,41 @@ test("subagent_wait returns usable result bodies with truncation metadata", asyn
   assert.equal(result.isError, undefined);
   const ready = (result.details.results as Array<{ body?: string; bodyTruncation?: { truncated?: boolean; originalBytes?: number; returnedBytes?: number; maxBytes?: number } }>)[0];
   assert.equal(ready.body, "01234...");
+  assert.match(result.content[0]?.text ?? "", /01234\.\.\./);
+  assert.match(result.content[0]?.text ?? "", /Body truncated: 8 of 16 bytes returned/);
   assert.equal(ready.bodyTruncation?.truncated, true);
   assert.equal(ready.bodyTruncation?.originalBytes, 16);
   assert.equal(ready.bodyTruncation?.returnedBytes, 8);
   assert.equal(ready.bodyTruncation?.maxBytes, 8);
+});
+
+test("subagent_wait omits model-facing bodies when includeResult is false", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const status = store.readStatus(w.runId);
+  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", body: "secret body" }));
+  store.writeStatus({ ...status, state: "completed", resultReady: true });
+
+  const built = tools(w.identity);
+  const result = await built.subagent_wait.execute("call", { runIds: [w.runId], until: "result", includeResult: false, timeoutMs: 0 }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, undefined);
+  assert.doesNotMatch(result.content[0]?.text ?? "", /secret body/);
+});
+
+test("subagent_result omits model-facing body when includeBody is false", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const status = store.readStatus(w.runId);
+  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", body: "secret body" }));
+  store.writeStatus({ ...status, state: "completed", resultReady: true });
+
+  const built = tools(w.identity);
+  const result = await built.subagent_result.execute("call", { runId: w.runId, includeBody: false }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, undefined);
+  assert.doesNotMatch(result.content[0]?.text ?? "", /secret body/);
+  assert.match(result.content[0]?.text ?? "", /Body omitted: includeBody=false/);
 });
 
 test("subagent_result returns body with truncation metadata", async () => {
@@ -235,6 +266,8 @@ test("subagent_result returns body with truncation metadata", async () => {
 
   assert.equal(result.isError, undefined);
   assert.equal(result.details.body, "01234...");
+  assert.match(result.content[0]?.text ?? "", /01234\.\.\./);
+  assert.match(result.content[0]?.text ?? "", /Body truncated: 8 of 16 bytes returned/);
   assert.deepEqual((result.details.bodyTruncation as { truncated?: boolean; returnedBytes?: number; maxBytes?: number }).truncated, true);
   assert.equal((result.details.bodyTruncation as { returnedBytes?: number }).returnedBytes, 8);
 });

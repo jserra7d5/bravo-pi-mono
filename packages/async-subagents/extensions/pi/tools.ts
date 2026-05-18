@@ -49,6 +49,8 @@ interface ToolResponse {
   isError?: boolean;
 }
 
+const LIVE_ACK_TIMEOUT_MS = 500;
+
 function ctxCwd(ctx: unknown): string {
   const cwd = (ctx as { cwd?: unknown } | undefined)?.cwd;
   return typeof cwd === "string" ? cwd : process.cwd();
@@ -70,8 +72,54 @@ function rootFor(runtime: ToolRuntime, cwd: string): RootSessionIdentity {
   return identity;
 }
 
-function response(summary: string, details: Record<string, unknown>, isError = false): ToolResponse {
-  return { content: [{ type: "text", text: summary }], details: { summary, ...details }, isError: isError || undefined };
+function response(summary: string, details: Record<string, unknown>, isError = false, contentText?: string): ToolResponse {
+  return { content: [{ type: "text", text: contentText ?? summary }], details: { summary, ...details }, isError: isError || undefined };
+}
+
+function resultBodyContent(summary: string, result: RunResult, body: { body?: string; bodyTruncation: Record<string, unknown> }): string {
+  const lines = [summary];
+  if (body.body !== undefined) {
+    lines.push("", body.body);
+    if (body.bodyTruncation.truncated === true) {
+      lines.push("", `[Body truncated: ${body.bodyTruncation.returnedBytes} of ${body.bodyTruncation.originalBytes} bytes returned (maxBytes=${body.bodyTruncation.maxBytes}).]`);
+    }
+  } else if (body.bodyTruncation.included === false) {
+    lines.push("", "[Body omitted: includeBody=false]");
+  } else if (result.body !== undefined) {
+    lines.push("", "[Body unavailable]");
+  }
+  return lines.join("\n");
+}
+
+function appendWithinBudget(lines: string[], value: string, budget: { used: number; maxBytes: number; omitted: number }): boolean {
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (budget.used + bytes > budget.maxBytes) {
+    budget.omitted += 1;
+    return false;
+  }
+  lines.push(value);
+  budget.used += bytes;
+  return true;
+}
+
+function waitResultContent(summary: string, results: Array<RunResult & { bodyTruncation: Record<string, unknown> }>, maxContentBytes = 64_000): string {
+  if (!results.length) return summary;
+  const lines = [summary];
+  const budget = { used: Buffer.byteLength(summary, "utf8"), maxBytes: maxContentBytes, omitted: 0 };
+  for (const result of results) {
+    const section: string[] = ["", `## ${result.displayName ? `@${result.displayName} ` : ""}${result.agentName} ${result.state} (${result.runId})`];
+    if (result.body !== undefined) {
+      section.push("", result.body);
+      if (result.bodyTruncation.truncated === true) {
+        section.push("", `[Body truncated: ${result.bodyTruncation.returnedBytes} of ${result.bodyTruncation.originalBytes} bytes returned (maxBytes=${result.bodyTruncation.maxBytes}).]`);
+      }
+    } else if (result.bodyTruncation.included === false) {
+      section.push("", "[Body omitted: includeResult=false]");
+    }
+    if (!appendWithinBudget(lines, section.join("\n"), budget)) break;
+  }
+  if (budget.omitted) lines.push("", `[${budget.omitted} result section(s) omitted from model-facing content because the aggregate subagent_wait content cap of ${maxContentBytes} bytes was reached. Use subagent_result for specific runs.]`);
+  return lines.join("\n");
 }
 
 function ensureIndexedRunDir(store: RunStore, cwd: string, runDir: string): string {
@@ -141,14 +189,14 @@ function defaultRunIds(store: RunStore, parentRunId: string, params: Record<stri
 async function waitForMessageAckFromParams(store: RunStore, params: Record<string, unknown>, runId: string, messageId: string): Promise<{ eventId: string } | undefined> {
   if (typeof params.runDir === "string" && params.runDir && typeof params.runId !== "string") {
     const startedAt = Date.now();
-    while (Date.now() - startedAt < 2_000) {
+    while (Date.now() - startedAt < LIVE_ACK_TIMEOUT_MS) {
       const event = readJsonl<any>(join(params.runDir, "events.jsonl")).records.find((candidate) => candidate.type === "message.received" && candidate.data?.messageId === messageId);
       if (event?.eventId) return { eventId: event.eventId };
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
     return undefined;
   }
-  return waitForMessageAck(store, { runId, messageId, timeoutMs: 2_000 });
+  return waitForMessageAck(store, { runId, messageId, timeoutMs: LIVE_ACK_TIMEOUT_MS });
 }
 
 function truncateUtf8WithMarker(value: string, maxBytes: number): string {
@@ -308,8 +356,9 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       description: "Start a durable async Pi child agent and return immediately by default.",
       parameters: subagentStartSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
+        const sessionCwd = ctxCwd(ctx);
         const cwd = cwdFromParams(params, ctx);
-        const root = rootFor(runtime, cwd);
+        const root = rootFor(runtime, sessionCwd);
         const mode = params.mode === "sync" ? "sync" : "async";
         const wait = typeof params.wait === "string" ? params.wait : "none";
         const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : undefined;
@@ -320,6 +369,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           agent: String(params.agent),
           task: String(params.task),
           cwd,
+          runRoot: storeFor(sessionCwd).runRoot,
           parentRunId: root.parentRunId,
           rootRunId: root.parentRunId,
           rootSessionId: root.rootSessionId,
@@ -338,14 +388,14 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           },
           thinkingLevel: isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined,
         });
-        writeDeliverySubscription(storeFor(cwd), {
+        writeDeliverySubscription(storeFor(sessionCwd), {
           schemaVersion: SCHEMA_VERSION,
           parentRunId: root.parentRunId,
           runId: result.runId,
           notifyOn: notifyOn ?? ["question", "blocked", "result", "completed", "failed", "cancelled", "expired"],
           createdAt: new Date().toISOString(),
         });
-        await runtime.afterMutation?.(ctx, cwd, root);
+        await runtime.afterMutation?.(ctx, sessionCwd, root);
         return response(summarizeStartResult(result), { ...result, rootSessionId: root.rootSessionId });
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_start"),
@@ -380,12 +430,14 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         for (const event of result.events) markWakeupKeyHandled(store, parentRunId, eventDeliveryKey(event));
         for (const readyResult of result.results) markWakeupKeyHandled(store, parentRunId, resultDeliveryKey(readyResult.runId, readyResult));
         result.events = compactEvents(result.events, maxEvents) as typeof result.events;
+        const shapedResults = result.results.map((readyResult) => shapeResult(readyResult, maxBytes, includeResult));
         const details = {
           ...result,
-          results: result.results.map((readyResult) => shapeResult(readyResult, maxBytes, includeResult)),
+          results: shapedResults,
         };
+        const summary = summarizeWaitResult(result);
         await runtime.afterMutation?.(ctx, cwd, root);
-        return response(summarizeWaitResult(result), details as unknown as Record<string, unknown>);
+        return response(summary, details as unknown as Record<string, unknown>, false, waitResultContent(summary, shapedResults));
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_wait"),
       renderResult: renderSubagentToolResultComponent,
@@ -536,8 +588,9 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           artifactsDir: join(runDir, "artifacts"),
           next: [],
         };
+        const summary = summarizeRunResult(result, runId);
         await runtime.afterMutation?.(ctx, cwd, root);
-        return response(summarizeRunResult(result, runId), details as Record<string, unknown>);
+        return response(summary, details as Record<string, unknown>, false, resultBodyContent(summary, result, body));
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_result"),
       renderResult: renderSubagentToolResultComponent,

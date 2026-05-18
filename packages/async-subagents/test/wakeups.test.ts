@@ -8,7 +8,7 @@ import { createRunResult } from "../src/result.js";
 import { RunStore } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
 import { SCHEMA_VERSION } from "../src/types.js";
-import { pollWakeups, markWakeupHandled, writeDeliverySubscription } from "../extensions/pi/wakeups.js";
+import { pollWakeups, markWakeupHandled, isWakeupKeyHandled, writeDeliverySubscription } from "../extensions/pi/wakeups.js";
 
 function workspace() {
   const root = mkdtempSync(join(tmpdir(), "async-subagents-wakeups-"));
@@ -87,9 +87,12 @@ test("markWakeupHandled records handled delivery metadata", () => {
   const { root, store } = workspace();
   const runId = createCompletedRun(store, root, "root_test");
   acquireRootSessionLease({ cwd: root, rootSessionId: "root_test", ownerId: "owner_a", ttlMs: 10_000 });
-  assert.equal(pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" }).length, 1);
+  const first = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" });
+  assert.equal(first.length, 1);
 
+  const key = first[0]?.deliveryKey ?? "";
   markWakeupHandled(store, "root_test", runId);
+  assert.equal(isWakeupKeyHandled(store, "root_test", key), true);
   assert.equal(pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" }).length, 0);
 });
 

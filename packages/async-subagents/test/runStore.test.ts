@@ -31,6 +31,54 @@ test("RunStore creates durable run layout and leaves result absent until complet
   assert.equal(store.listDirectChildren("root_a").length, 1);
 });
 
+test("RunStore can resolve legacy project-local .subagents run indexes", () => {
+  const w = workspace();
+  const legacyStore = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const { runId } = legacyStore.createRunDirectory({ cwd: w.root, parentRunId: "root_legacy", rootSessionId: "root_legacy" });
+  legacyStore.writeStatus(
+    createInitialStatus({
+      runId,
+      parentRunId: "root_legacy",
+      rootSessionId: "root_legacy",
+      agentName: "scout",
+      agentSource: "builtin",
+      definitionPath: "/builtin/scout.md",
+      mode: "oneshot",
+      cwd: w.root,
+      state: "completed",
+    }),
+  );
+  legacyStore.writeResult(createRunResult({ runId, parentRunId: "root_legacy", agentName: "scout", state: "completed", summary: "Legacy done" }));
+
+  const currentStore = new RunStore({ cwd: w.root, env: { HOME: join(w.root, "home") } as NodeJS.ProcessEnv });
+  assert.equal(currentStore.readStatus(runId).state, "completed");
+  assert.equal(currentStore.readResult(runId)?.summary, "Legacy done");
+  assert.equal(currentStore.listDirectChildren("root_legacy")[0]?.runId, runId);
+});
+
+test("RunStore writes and resolves runs through the harness global index from another cwd", () => {
+  const w = workspace();
+  const home = join(w.root, "home");
+  const first = new RunStore({ cwd: join(w.root, "project-a"), env: { HOME: home } as NodeJS.ProcessEnv });
+  const { runId } = first.createRunDirectory({ cwd: first.cwd, parentRunId: "root_global", rootSessionId: "root_global" });
+  first.writeStatus(
+    createInitialStatus({
+      runId,
+      parentRunId: "root_global",
+      rootSessionId: "root_global",
+      agentName: "scout",
+      agentSource: "builtin",
+      definitionPath: "/builtin/scout.md",
+      mode: "oneshot",
+      cwd: first.cwd,
+      state: "completed",
+    }),
+  );
+
+  const second = new RunStore({ cwd: join(w.root, "project-b"), env: { HOME: home } as NodeJS.ProcessEnv });
+  assert.equal(second.readStatus(runId).state, "completed");
+});
+
 test("RunStore reads and writes status, events, inbox, and terminal result", () => {
   const w = workspace();
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });

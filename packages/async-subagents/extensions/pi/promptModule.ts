@@ -12,7 +12,7 @@ Read source-of-truth artifacts yourself before delegating interpretation of them
 
 After delegating broad work, do not duplicate the same broad exploration yourself. Continue with non-overlapping work, then use the subagent tools to wait for and read results.
 
-Treat subagent tool results as the primary result channel. Do not read raw \`.subagents/runs/...\` files unless the native tool output is unavailable, truncated beyond usefulness, or appears corrupted.
+Treat subagent tool results as the primary result channel. Do not read raw async-subagent run files unless the native tool output is unavailable, truncated beyond usefulness, or appears corrupted.
 
 When a child fails, blocks, or returns a surprising result, inspect native status and result details first. Inspect raw run files or logs only when the tool result is insufficient.
 

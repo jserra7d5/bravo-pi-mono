@@ -57,7 +57,13 @@ function readDeliveryState(store: RunStore, parentRunId: string): DeliveryState 
 }
 
 function writeDeliveryState(store: RunStore, state: DeliveryState): void {
-  atomicWriteJson(deliveryPath(store, state.parentRunId), state);
+  const existing = readDeliveryState(store, state.parentRunId);
+  atomicWriteJson(deliveryPath(store, state.parentRunId), {
+    schemaVersion: SCHEMA_VERSION,
+    parentRunId: state.parentRunId,
+    delivered: { ...existing.delivered, ...state.delivered },
+    handled: { ...existing.handled, ...state.handled },
+  });
 }
 
 export function resultDeliveryKey(runId: string, result: RunResult): string {
@@ -156,6 +162,10 @@ export function readDeliverySubscriptions(store: RunStore, parentRunId: string):
   return parsed.subscriptions ?? [];
 }
 
+export function isWakeupKeyHandled(store: RunStore, parentRunId: string, deliveryKey: string): boolean {
+  return Boolean(readDeliveryState(store, parentRunId).handled[deliveryKey]);
+}
+
 export function markWakeupKeyHandled(store: RunStore, parentRunId: string, deliveryKey: string): void {
   const state = readDeliveryState(store, parentRunId);
   state.handled[deliveryKey] = new Date().toISOString();
@@ -195,6 +205,7 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
     for (const delivery of pendingForRun(input.store, record.runId, subscription?.notifyOn)) {
       if (state.delivered[delivery.deliveryKey] || state.handled[delivery.deliveryKey]) continue;
       if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) continue;
+      if (isWakeupKeyHandled(input.store, input.parentRunId, delivery.deliveryKey)) continue;
       deliveries.push(delivery);
       state.delivered[delivery.deliveryKey] = new Date(input.nowMs ?? Date.now()).toISOString();
       if (deliveries.length >= (input.limit ?? 5)) break;

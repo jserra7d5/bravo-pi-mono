@@ -2,8 +2,15 @@
 
 Pi-only async subagent primitive for bounded, session-backed child agents.
 
-The runtime is file-backed. Each child run gets a durable directory under
-`.subagents/runs/<runId>/` with:
+The runtime is file-backed. By default, each child run gets a durable directory under a harness-owned cache outside the target repo:
+
+```text
+~/.async-subagents/projects/<project-hash>/runs/<runId>/
+```
+
+Set `ASYNC_SUBAGENTS_HOME` to move that cache root. Explicit `runRoot` callers can still choose a custom location. For run-id recovery across cwd changes, new runs are also appended to a harness-level lookup index at `~/.async-subagents/run-index.jsonl`; legacy project-local `.subagents/run-index.jsonl` files remain readable.
+
+Each run directory contains:
 
 - `status.json`
 - `events.jsonl`
