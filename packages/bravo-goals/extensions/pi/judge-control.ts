@@ -10,7 +10,11 @@ import { createJudgeRun, updateJudgeRunStatus, writeJudgeVerdict, type JudgeRunC
 import { readActiveGoalsIndex, readGoalState, writeGoalState } from "../../src/runtime.js";
 import { markJudgeStarted, markWorkerReceiptReady } from "../../src/state.js";
 import { markBoundaryApplied, renderCompactInstructions, selectNextBoundary, type BoundarySelection } from "../../src/phase-boundary.js";
-import type { GoalState, GoalTask } from "../../src/types.js";
+import {
+	renderCarryContinuationPrompt as renderPromptCarryContinuation,
+	renderHandoffContinuationPrompt as renderPromptHandoffContinuation,
+} from "../../src/prompts.js";
+import type { GoalState } from "../../src/types.js";
 import { discoverWorkspaceRoot } from "../../src/workspace.js";
 import {
 	chromeRenderable,
@@ -588,50 +592,30 @@ async function queueAfterJudge(pi: ExtensionAPI, result: ReceiptReadyResult, out
 		ctx.compact({
 			customInstructions: renderCompactInstructions(stateWithBoundary),
 			onComplete: () => {
-				pi.sendUserMessage(renderHandoffContinuationPrompt(result.goalDir, stateWithBoundary, active, selection), { deliverAs: "followUp" });
+				pi.sendUserMessage(renderPromptHandoffContinuation({
+					goalDir: result.goalDir,
+					state: stateWithBoundary,
+					mode: "compact",
+					boundaryReason: selection.reason,
+				}), { deliverAs: "followUp" });
 			},
 		});
 		return;
 	}
 	const prompt = selection.mode === "carry"
-		? renderCarryContinuationPrompt(result.goalDir, stateWithBoundary, active)
-		: renderHandoffContinuationPrompt(result.goalDir, stateWithBoundary, active, selection);
+		? renderPromptCarryContinuation({
+			goalDir: result.goalDir,
+			state: stateWithBoundary,
+			mode: "carry",
+			boundaryReason: selection.reason,
+		})
+		: renderPromptHandoffContinuation({
+			goalDir: result.goalDir,
+			state: stateWithBoundary,
+			mode: selection.mode === "fresh_session" ? "durable_current_session" : selection.mode,
+			boundaryReason: selection.reason,
+		});
 	pi.sendUserMessage(prompt, { deliverAs: "followUp" });
-}
-
-function renderCarryContinuationPrompt(goalDir: string, state: GoalState, active: GoalTask): string {
-	const receiptPath = active.receipt ?? canonicalWorkerReceiptPath(active.id);
-	return `Continue Bravo goal "${state.goal.title}" (${state.goal.id}) in the current session.
-
-No handoff or compaction occurred. Keep using the context already in this session; consult state.yaml or receipts only if you need to confirm the durable task boundary.
-
-Active task: ${active.id}: ${active.title}
-Expected worker receipt path for task_receipt_ready: ${receiptPath}
-Write the receipt file at: ${join(goalDir, receiptPath)}
-
-When complete, write the worker receipt and call task_receipt_ready with goal_id: ${state.goal.id} and receipt_path: ${receiptPath}.`;
-}
-
-function renderHandoffContinuationPrompt(goalDir: string, state: GoalState, active: GoalTask, selection: BoundarySelection): string {
-	const receiptPath = active.receipt ?? canonicalWorkerReceiptPath(active.id);
-	const modeLine = selection.mode === "fresh_session"
-		? "Fresh-session handoff was selected, but autonomous tool context cannot replace the Pi session; continue from durable files in this session."
-		: "Compaction handoff completed; use the compacted summary plus durable files as the source of truth.";
-	return `Continue Bravo goal "${state.goal.title}" (${state.goal.id}).
-
-${modeLine}
-
-Read these files before acting:
-1. ${relative(process.cwd(), join(goalDir, "goal.md"))}
-2. ${relative(process.cwd(), join(goalDir, "context.md"))}
-3. ${relative(process.cwd(), join(goalDir, "state.yaml"))}
-4. ${relative(process.cwd(), join(goalDir, "resume.md"))} if it exists; it is created only by checkpoint or pause.
-
-Active task: ${active.id}: ${active.title}
-Expected worker receipt path for task_receipt_ready: ${receiptPath}
-Write the receipt file at: ${join(goalDir, receiptPath)}
-
-Continue from state.yaml. When complete, write the worker receipt and call task_receipt_ready with goal_id: ${state.goal.id} and receipt_path: ${receiptPath}.`;
 }
 
 function canonicalWorkerReceiptPath(taskId: string): string {

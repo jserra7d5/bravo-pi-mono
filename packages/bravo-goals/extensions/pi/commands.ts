@@ -5,6 +5,13 @@ import YAML from "yaml";
 import { archiveGoal } from "../../src/archive.js";
 import { checkGoal } from "../../src/checker.js";
 import { createDefaultGoalPolicy } from "../../src/policy.js";
+import {
+	renderCarryContinuationPrompt,
+	renderCheckpointPrompt,
+	renderHandoffContinuationPrompt,
+	renderWorkerResumePrompt,
+	renderWorkerStartPrompt,
+} from "../../src/prompts.js";
 import { exists as pathExists, recordUserVerification } from "../../src/runtime.js";
 import { bravoWorkspacePaths, discoverWorkspaceRoot, initBravoWorkspace, scaffoldGoalWorkspace } from "../../src/workspace.js";
 import { markBoundaryApplied, normalizeBoundaryMode, selectNextBoundary } from "../../src/phase-boundary.js";
@@ -335,84 +342,28 @@ async function detachActiveGoal(root: string, goalId: string, sessionId?: string
 	});
 }
 
-function expectedWorkerReceiptPath(goal: GoalRecord): string | null {
-	const active = goal.state.tasks.find((task) => task.id === goal.state.active_task);
-	if (!active) return null;
-	return active.receipt ?? `receipts/${active.id}-worker.md`;
-}
-
 function activeTaskPrompt(goal: GoalRecord): string {
-	const active = goal.state.tasks.find((task) => task.id === goal.state.active_task);
-	const task = active ? `${active.id}: ${active.title}` : "no active task";
-	const receiptPath = expectedWorkerReceiptPath(goal);
-	const receiptFullPath = receiptPath ? join(goal.path, receiptPath) : null;
-	return `You are working on Bravo goal "${goal.state.goal.title}" (${goal.id}).
-
-Read these files before acting:
-1. ${relPath(process.cwd(), join(goal.path, "goal.md"))}
-2. ${relPath(process.cwd(), join(goal.path, "context.md"))}
-3. ${relPath(process.cwd(), join(goal.path, "state.yaml"))}
-4. ${relPath(process.cwd(), join(goal.path, "resume.md"))} if it exists; it is created only by checkpoint or pause.
-
-Active task: ${task}
-${receiptPath && receiptFullPath ? `Expected worker receipt path for task_receipt_ready: ${receiptPath}\nWrite the receipt file at: ${receiptFullPath}` : "No active task receipt path is available."}
-
-${receiptPath && receiptFullPath ? `Continue the active task from state.yaml. When complete, write the worker receipt file at the full path above using this exact YAML-frontmatter shape, then Markdown details after the closing ---:\n\n${workerReceiptTemplate(active?.id ?? "<task-id>")}\n\nThen call task_receipt_ready with goal_id: ${goal.id} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory. Do not edit state.yaml manually for the receipt-ready transition.` : "Continue from state.yaml. There is no active task receipt path available."}`;
+	return renderWorkerStartPrompt({ goalDir: goal.path, state: goal.state, cwd: process.cwd() });
 }
 
 function carryTaskPrompt(goal: GoalRecord, intro = "Continue in this same Pi session."): string {
-	const active = goal.state.tasks.find((task) => task.id === goal.state.active_task);
-	const task = active ? `${active.id}: ${active.title}` : "no active task";
-	const receiptPath = expectedWorkerReceiptPath(goal);
-	const receiptFullPath = receiptPath ? join(goal.path, receiptPath) : null;
-	return `Continue Bravo goal "${goal.state.goal.title}" (${goal.id}).
-
-${intro}
-Keep using the context already in this conversation. Consult state.yaml or receipts only if your current context conflicts with this task capsule or you need exact durable evidence.
-
-Task capsule:
-- Active task: ${task}
-${receiptPath && receiptFullPath ? `- Expected worker receipt path for task_receipt_ready: ${receiptPath}\n- Write the receipt file at: ${receiptFullPath}` : "- No active task receipt path is available."}
-
-${receiptPath && receiptFullPath ? `When complete, write the worker receipt file at the full path above using this exact YAML-frontmatter shape, then Markdown details after the closing ---:\n\n${workerReceiptTemplate(active?.id ?? "<task-id>")}\n\nThen call task_receipt_ready with goal_id: ${goal.id} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory. Do not edit state.yaml manually for the receipt-ready transition.` : "There is no active task receipt path available."}`;
+	return renderCarryContinuationPrompt({ goalDir: goal.path, state: goal.state, cwd: process.cwd(), mode: "carry", intro });
 }
 
-function workerReceiptTemplate(taskId: string): string {
-	return `---
-schema_version: 1
-type: worker
-task_id: ${taskId}
-status: complete
-created_at: "<ISO-8601 timestamp>"
-files_changed: []
-commands: []
-claims:
-  - claim: "<what was completed>"
-    evidence:
-      - "<file or command evidence>"
-remaining_risk: []
----`;
+function compactTaskPrompt(goal: GoalRecord, boundaryReason?: string | null): string {
+	return renderHandoffContinuationPrompt({ goalDir: goal.path, state: goal.state, cwd: process.cwd(), mode: "compact", boundaryReason });
+}
+
+function freshHandoffPrompt(goal: GoalRecord, boundaryReason?: string | null): string {
+	return renderHandoffContinuationPrompt({ goalDir: goal.path, state: goal.state, cwd: process.cwd(), mode: "fresh_session", boundaryReason });
 }
 
 function restartPrompt(goal: GoalRecord): string {
-	const active = goal.state.tasks.find((task) => task.id === goal.state.active_task);
-	const receiptPath = expectedWorkerReceiptPath(goal);
-	const receiptFullPath = receiptPath ? join(goal.path, receiptPath) : null;
-	return `You are resuming a Bravo goal in a fresh Pi session.
-
-Read these files before acting:
-1. ${relPath(process.cwd(), join(goal.path, "goal.md"))}
-2. ${relPath(process.cwd(), join(goal.path, "context.md"))}
-3. ${relPath(process.cwd(), join(goal.path, "state.yaml"))}
-4. ${relPath(process.cwd(), join(goal.path, "resume.md"))} if it exists; it is created only by checkpoint or pause.
-
-Then continue the active task from state.yaml.${receiptPath && receiptFullPath ? ` When complete, write the worker receipt file at ${receiptFullPath} using this frontmatter shape:\n\n${workerReceiptTemplate(active?.id ?? "<task-id>")}\n\nThen call task_receipt_ready with goal_id: ${goal.id} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory.` : " There is no active task receipt path available."}`;
+	return renderWorkerResumePrompt({ goalDir: goal.path, state: goal.state, cwd: process.cwd() });
 }
 
 function checkpointPrompt(goal: GoalRecord): string {
-	return `Checkpoint Bravo goal "${goal.state.goal.title}".
-
-Refresh ${relPath(process.cwd(), join(goal.path, "resume.md"))} with the current durable resume context for the active task. Do not mark the goal complete unless state.yaml and receipts already prove completion.`;
+	return renderCheckpointPrompt({ goalDir: goal.path, state: goal.state, cwd: process.cwd() });
 }
 
 function prepPrompt(goal: { id: string; path: string; title: string }): string {
@@ -438,10 +389,14 @@ When enough user-provided intent exists, work with the user to clarify:
 4. A small initial task queue with verifiable expected outputs.
 5. The verification plan for each task and the final acceptance bar.
 
+The interview is not complete until the user explicitly confirms that they are happy with the current goal definition and that you may write the durable goal files. Before writing any durable file, summarize the proposed goal definition, task queue, and verification plan, then ask for that confirmation. Do not treat inferred agreement, silence, or a partial answer as approval to write files.
+
 Durable files to update:
 1. ${relPath(process.cwd(), join(goal.path, "goal.md"))}
 2. ${relPath(process.cwd(), join(goal.path, "context.md"))}
 3. ${relPath(process.cwd(), join(goal.path, "state.yaml"))}
+
+Do not edit goal.md, context.md, or state.yaml beyond reading placeholders until the explicit confirmation gate above is satisfied.
 
 Do not create resume.md during prep. resume.md is created only by checkpoint or pause, when there is an actual stopping point to preserve.
 
@@ -515,7 +470,7 @@ async function queuePrompt(pi: ExtensionAPI, prompt: string): Promise<void> {
 	pi.sendUserMessage(prompt, { deliverAs: "followUp" });
 }
 
-async function freshSession(root: string, ctx: ExtensionCommandContext, goal: GoalRecord): Promise<void> {
+async function freshSession(root: string, ctx: ExtensionCommandContext, goal: GoalRecord, boundaryReason?: string | null): Promise<void> {
 	await ctx.waitForIdle();
 	await ctx.newSession({
 		parentSession: ctx.sessionManager.getSessionFile?.(),
@@ -532,21 +487,21 @@ async function freshSession(root: string, ctx: ExtensionCommandContext, goal: Go
 				status: goal.state.goal.status,
 				active_task: goal.state.active_task,
 			});
-			await replacement.sendUserMessage(restartPrompt(goal), { deliverAs: "followUp" });
+			await replacement.sendUserMessage(freshHandoffPrompt(goal, boundaryReason), { deliverAs: "followUp" });
 		},
 	});
 }
 
-async function runBoundary(root: string, pi: ExtensionAPI, ctx: ExtensionCommandContext, goal: GoalRecord, mode: BoundaryMode): Promise<"continued" | "replaced" | "none"> {
+async function runBoundary(root: string, pi: ExtensionAPI, ctx: ExtensionCommandContext, goal: GoalRecord, mode: BoundaryMode, boundaryReason?: string | null): Promise<"continued" | "replaced" | "none"> {
 	if (mode === "checkpoint_only") return "none";
 	if (mode === "fresh_session") {
-		await freshSession(root, ctx, goal);
+		await freshSession(root, ctx, goal, boundaryReason);
 		return "replaced";
 	}
 	if (mode === "compact") {
 		ctx.compact({
 			customInstructions: compactInstructions(goal),
-			onComplete: () => queuePrompt(pi, carryTaskPrompt(goal, "Compaction completed. Use the compacted summary plus this task capsule as your working context.")),
+			onComplete: () => queuePrompt(pi, compactTaskPrompt(goal, boundaryReason)),
 		});
 		return "continued";
 	}
@@ -702,7 +657,8 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 		const selection = selectNextBoundary(fullState, completedTask, { override });
 		const updated = markBoundaryApplied(fullState, selection);
 		await writeYaml(join(goal.path, "state.yaml"), updated);
-		const outcome = await runBoundary(root, pi, ctx, goal, selection.mode);
+		const boundaryGoal = { ...goal, state: updated as unknown as GoalStateView };
+		const outcome = await runBoundary(root, pi, ctx, boundaryGoal, selection.mode, selection.reason);
 		if (outcome !== "replaced") await runtime.refresh(ctx);
 		return;
 	}

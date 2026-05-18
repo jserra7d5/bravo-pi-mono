@@ -4,7 +4,8 @@ import { registerGoalValidationTools } from "./goal-validation.js";
 import { clearHud, updateHud } from "./hud.js";
 import { registerJudgeControlTools } from "./judge-control.js";
 import { registerGoalPolicyHooks } from "./policy-hook.js";
-import { readActiveGoalsIndex, readGoalState, renderWorkerPrompt } from "../../src/runtime.js";
+import { renderIdleRecoveryPrompt } from "../../src/prompts.js";
+import { readActiveGoalsIndex, readGoalState } from "../../src/runtime.js";
 import { discoverWorkspaceRoot } from "../../src/workspace.js";
 
 let currentCtx: ExtensionContext | undefined;
@@ -92,8 +93,11 @@ export default function bravoGoalsPiExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		watchdogNudges.set(key, count + 1);
-		pi.sendUserMessage(`${renderWorkerPrompt(state, `${workspaceRoot}/${active.path}`)}
-
-The prior assistant turn ended without completing the active Bravo task, running Judge, or marking the task blocked. Continue autonomously. Ask the user only if you are genuinely blocked by missing requirements or unsafe scope.`, { deliverAs: "followUp" });
+		pi.sendUserMessage(renderIdleRecoveryPrompt({
+			state,
+			goalDir: `${workspaceRoot}/${active.path}`,
+			cwd: ctx.cwd,
+			nudgeCount: count + 1,
+		}), { deliverAs: "followUp" });
 	});
 }

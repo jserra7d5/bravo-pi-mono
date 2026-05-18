@@ -7,6 +7,7 @@ import { renderHud, renderStatusLine, snapshotForSession, type HudSnapshot } fro
 import { testables } from "../extensions/pi/commands.js";
 import { registerGoalValidationTools } from "../extensions/pi/goal-validation.js";
 import { registerJudgeControlTools } from "../extensions/pi/judge-control.js";
+import bravoGoalsPiExtension from "../extensions/pi/index.js";
 import { scaffoldGoalWorkspace } from "../src/workspace.js";
 import { readActiveGoalsIndex, readGoalState, upsertActiveGoal, writeGoalState } from "../src/runtime.js";
 import { createJudgeRun, updateJudgeRunStatus, writeJudgeVerdict, type JudgeVerdictFile } from "../src/judge-runner.js";
@@ -159,6 +160,10 @@ test("/goal prep creates a draft goal workspace from Pi command context", async 
 	assert.match(queuedPrompts[0]!, /working title provided by the user/i);
 	assert.match(queuedPrompts[0]!, /Do not infer the title, scope, success criteria, task queue, implementation plan, or affected systems from the id or working title alone/);
 	assert.match(queuedPrompts[0]!, /After reading them, stop and talk with the user right away/);
+	assert.match(queuedPrompts[0]!, /interview is not complete until the user explicitly confirms/);
+	assert.match(queuedPrompts[0]!, /happy with the current goal definition and that you may write the durable goal files/);
+	assert.match(queuedPrompts[0]!, /Do not treat inferred agreement, silence, or a partial answer as approval/);
+	assert.match(queuedPrompts[0]!, /Do not edit goal\.md, context\.md, or state\.yaml beyond reading placeholders until the explicit confirmation gate above is satisfied/);
 	assert.match(queuedPrompts[0]!, /Do not create resume\.md during prep/);
 	assert.match(queuedPrompts[0]!, /kind: work/);
 	assert.match(queuedPrompts[0]!, /validate_goal_state/);
@@ -308,8 +313,8 @@ test("/goal next supports carry, compact, and fresh handoff modes from Pi slash 
 	assert.match(compactInstructions, /Preserve the Bravo goal context/);
 	assert.equal(compactPrompts.length, 1);
 	assert.match(compactPrompts[0]!, /Active task: task-two/);
-	assert.match(compactPrompts[0]!, /Compaction completed/);
-	assert.doesNotMatch(compactPrompts[0]!, /Read these files before acting/);
+	assert.match(compactPrompts[0]!, /Compaction handoff completed/);
+	assert.match(compactPrompts[0]!, /Read these files before acting/);
 	assert.equal(compactRefreshes, 1);
 
 	const fresh = await createPassedBoundaryGoal("handoff-fresh", "fresh_session");
@@ -339,7 +344,8 @@ test("/goal next supports carry, compact, and fresh handoff modes from Pi slash 
 	assert.equal(waited, true);
 	assert.equal(newSessionCalled, true);
 	assert.equal(replacementPrompts.length, 1);
-	assert.match(replacementPrompts[0]!, /fresh Pi session/);
+	assert.match(replacementPrompts[0]!, /Fresh-session handoff is in effect/);
+	assert.match(replacementPrompts[0]!, /replacement session/);
 	assert.equal(freshRefreshes, 0);
 });
 
@@ -946,6 +952,37 @@ test("HUD discovers ancestor workspace and does not fall back to unrelated activ
 		sessionManager: { getSessionId: () => "pi_other" },
 	});
 	assert.equal(unmatched, undefined);
+});
+
+test("agent_end watchdog queues idle recovery prompt rather than cold-start worker prompt", async () => {
+	const { root } = await createActiveReceiptGoal("idle-recovery", "pi_idle");
+	const handlers = new Map<string, (event: unknown, ctx: any) => Promise<void> | void>();
+	const prompts: string[] = [];
+	bravoGoalsPiExtension({
+		registerCommand: () => {},
+		registerTool: () => {},
+		on: (event: string, handler: (event: unknown, ctx: any) => Promise<void> | void) => {
+			handlers.set(event, handler);
+		},
+		sendUserMessage: (prompt: string) => {
+			prompts.push(prompt);
+		},
+	} as any);
+
+	const handler = handlers.get("agent_end");
+	assert.ok(handler, "agent_end handler registered");
+	await handler({}, {
+		cwd: root,
+		hasPendingMessages: () => false,
+		sessionManager: { getSessionId: () => "pi_idle" },
+		ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+	});
+
+	assert.equal(prompts.length, 1);
+	assert.match(prompts[0]!, /Recover Bravo goal/);
+	assert.match(prompts[0]!, /not a fresh task start/);
+	assert.match(prompts[0]!, /first diagnose why the prior turn stopped/);
+	assert.doesNotMatch(prompts[0]!, /This is a fresh worker-start prompt/);
 });
 
 async function createActiveReceiptGoal(goalId: string, sessionId: string): Promise<{ root: string; goalPath: string }> {
