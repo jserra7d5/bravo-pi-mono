@@ -1,4 +1,4 @@
-import { access, readFile, readdir } from "node:fs/promises";
+import { access, readFile, readdir, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import YAML from "yaml";
 import type { GoalState, GoalStatus } from "./types.js";
@@ -19,6 +19,17 @@ export interface ActiveGoalEntry {
 export interface ActiveGoalsIndex {
 	schema_version: 1;
 	active_goals: ActiveGoalEntry[];
+}
+
+export interface GoalListEntry {
+	goal_id: string;
+	title: string;
+	status: GoalStatus;
+	active_task: string | null;
+	progress: string;
+	path: string;
+	modified_at: string;
+	modified_ms: number;
 }
 
 export async function readGoalState(goalDir: string): Promise<GoalState> {
@@ -97,6 +108,30 @@ export async function recoverActiveGoalsIndex(workspaceRoot: string): Promise<Ac
 	return index;
 }
 
+export async function listGoals(workspaceRoot: string): Promise<GoalListEntry[]> {
+	const paths = bravoWorkspacePaths(workspaceRoot);
+	if (!(await exists(paths.goals))) return [];
+	const entries: GoalListEntry[] = [];
+	for (const dirent of await readdir(paths.goals, { withFileTypes: true })) {
+		if (!dirent.isDirectory()) continue;
+		const goalDir = join(paths.goals, dirent.name);
+		if (!(await exists(join(goalDir, "state.yaml")))) continue;
+		const state = await readGoalState(goalDir);
+		const modifiedMs = await newestMtimeMs(goalDir);
+		entries.push({
+			goal_id: state.goal.id || dirent.name,
+			title: state.goal.title,
+			status: state.goal.status,
+			active_task: state.active_task,
+			progress: `${state.progress?.completed_tasks ?? 0}/${state.progress?.total_tasks ?? state.tasks.length}`,
+			path: relative(workspaceRoot, goalDir),
+			modified_at: new Date(modifiedMs).toISOString(),
+			modified_ms: modifiedMs,
+		});
+	}
+	return entries.sort((left, right) => right.modified_ms - left.modified_ms || left.goal_id.localeCompare(right.goal_id));
+}
+
 export function renderWorkerPrompt(state: GoalState, goalDir: string): string {
 	return renderWorkerStartPrompt({ state, goalDir });
 }
@@ -172,4 +207,16 @@ export async function exists(path: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
+}
+
+async function newestMtimeMs(path: string): Promise<number> {
+	const info = await stat(path);
+	if (!info.isDirectory()) return info.mtimeMs;
+	let newest = info.mtimeMs;
+	for (const dirent of await readdir(path, { withFileTypes: true })) {
+		const childPath = join(path, dirent.name);
+		const childMtime = dirent.isDirectory() ? await newestMtimeMs(childPath) : (await stat(childPath)).mtimeMs;
+		if (childMtime > newest) newest = childMtime;
+	}
+	return newest;
 }

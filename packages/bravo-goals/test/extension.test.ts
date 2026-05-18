@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { renderHud, renderStatusLine, snapshotForSession, type HudSnapshot } from "../extensions/pi/hud.js";
@@ -169,6 +169,36 @@ test("/goal prep creates a draft goal workspace from Pi command context", async 
 	assert.match(queuedPrompts[0]!, /validate_goal_state/);
 	assert.match(queuedPrompts[0]!, /Do not start implementation/);
 	assert.match(queuedPrompts[0]!, /\/goal start pi-smoke/);
+});
+
+test("/goal list renders goals sorted by recently modified first", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-list-"));
+	await testables.handleGoal({} as any, { refresh: async () => {} }, "init", {
+		cwd: root,
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => "pi_list" },
+	} as any);
+	const older = (await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "older-goal", title: "Older goal" })).goalPath;
+	const newer = (await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "newer-goal", title: "Newer goal" })).goalPath;
+	await writeFile(join(older, "goal.md"), "older");
+	await writeFile(join(newer, "goal.md"), "newer");
+	await utimes(join(older, "goal.md"), new Date("2030-01-01T00:00:00.000Z"), new Date("2030-01-01T00:00:00.000Z"));
+	await utimes(join(newer, "goal.md"), new Date("2031-01-01T00:00:00.000Z"), new Date("2031-01-01T00:00:00.000Z"));
+
+	const notifications: string[] = [];
+	let refreshes = 0;
+	await testables.handleGoal({} as any, { refresh: async () => { refreshes += 1; } }, "list", {
+		cwd: root,
+		ui: { notify: (message: string) => notifications.push(message) },
+		sessionManager: { getSessionId: () => "pi_list" },
+	} as any);
+
+	assert.equal(refreshes, 1);
+	const plain = stripAnsi(notifications[0] ?? "");
+	assert.match(plain, /Bravo goals/);
+	assert.ok(plain.indexOf("newer-goal") < plain.indexOf("older-goal"));
+	assert.match(plain, /2031-01-01T00:00:00\.000Z/);
+	assert.match(plain, /Newer goal/);
 });
 
 test("/goal prep without title leaves title TBD and asks the user before deriving it", async () => {

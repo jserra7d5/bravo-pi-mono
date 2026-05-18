@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { access, mkdtemp } from "node:fs/promises";
+import { access, mkdtemp, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { main } from "../src/cli.js";
 import { checkGoal } from "../src/checker.js";
 import { archiveGoal } from "../src/archive.js";
-import { readGoalState, recoverActiveGoalsIndex, upsertActiveGoal, writeGoalState } from "../src/runtime.js";
+import { listGoals, readGoalState, recoverActiveGoalsIndex, upsertActiveGoal, writeGoalState } from "../src/runtime.js";
 import { scaffoldGoalWorkspace } from "../src/workspace.js";
 import { createJudgeRun, updateJudgeRunStatus, writeJudgeVerdict, type JudgeVerdictFile } from "../src/judge-runner.js";
 
@@ -74,6 +74,26 @@ test("runtime index can recover from goal state", async () => {
 	assert.equal(index.active_goals.length, 1);
 	assert.equal(index.active_goals[0]?.goal_id, "active-index");
 	assert.equal(index.active_goals[0]?.pi_session_id, "pi_123");
+});
+
+test("listGoals sorts goals by newest goal-directory modification first", async () => {
+	const root = await tempRoot();
+	const olderGoal = (await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "older-goal", title: "Older goal" })).goalPath;
+	const newerGoal = (await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "newer-goal", title: "Newer goal" })).goalPath;
+	const olderContext = join(olderGoal, "context.md");
+	const newerContext = join(newerGoal, "context.md");
+	const olderTime = new Date("2030-01-01T00:00:00.000Z");
+	const newerTime = new Date("2031-01-01T00:00:00.000Z");
+	await writeFile(olderContext, "older");
+	await writeFile(newerContext, "newer");
+	await utimes(olderContext, olderTime, olderTime);
+	await utimes(newerContext, newerTime, newerTime);
+
+	const goals = await listGoals(root);
+	assert.deepEqual(goals.map((goal) => goal.goal_id), ["newer-goal", "older-goal"]);
+	assert.equal(goals[0]?.title, "Newer goal");
+	assert.equal(goals[0]?.modified_at, "2031-01-01T00:00:00.000Z");
+	assert.equal(goals[1]?.modified_at, "2030-01-01T00:00:00.000Z");
 });
 
 test("next records boundary selection with runtime override", async () => {

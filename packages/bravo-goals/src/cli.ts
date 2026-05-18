@@ -6,6 +6,7 @@ import { checkGoal as checkGoalWorkspace } from "./checker.js";
 import { markBoundaryApplied, normalizeBoundaryMode, renderCompactInstructions, selectNextBoundary } from "./phase-boundary.js";
 import {
 	exists,
+	listGoals,
 	readGoalState,
 	recordUserVerification,
 	recoverActiveGoalsIndex,
@@ -35,6 +36,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 				return await cmdPrep(args);
 			case "status":
 				return await cmdStatus(args);
+			case "list":
+				return await cmdList(args);
 			case "check":
 				return await cmdCheck(args);
 			case "verify":
@@ -76,6 +79,19 @@ async function cmdPrep(args: ParsedArgs): Promise<number> {
 		workspaceRoot: root,
 	});
 	console.log(`prepared ${relative(root, result.goalPath)}`);
+	return 0;
+}
+
+async function cmdList(args: ParsedArgs): Promise<number> {
+	const root = await workspaceRootFromArgs(args);
+	const goals = await listGoals(root);
+	if (goals.length === 0) {
+		console.log("no goals");
+		return 0;
+	}
+	for (const goal of goals) {
+		console.log(`${goal.modified_at}\t${goal.goal_id}\t${goal.status}\t${goal.progress}\t${goal.active_task ?? "-"}\t${goal.path}\t${goal.title}`);
+	}
 	return 0;
 }
 
@@ -250,6 +266,7 @@ function printHelp(): void {
 		"commands:",
 		"  init [--workspace-root <path>]",
 		"  prep <goal-id> [--workspace-root <path>] [--title <title>]",
+		"  list [--workspace-root <path>]",
 		"  status [goal-id]",
 		"  check [goal-id]",
 		"  verify <goal-id> [--note <note>]",

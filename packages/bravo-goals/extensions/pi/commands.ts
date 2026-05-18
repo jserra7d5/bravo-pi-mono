@@ -12,7 +12,7 @@ import {
 	renderWorkerResumePrompt,
 	renderWorkerStartPrompt,
 } from "../../src/prompts.js";
-import { exists as pathExists, recordUserVerification } from "../../src/runtime.js";
+import { exists as pathExists, listGoals, recordUserVerification } from "../../src/runtime.js";
 import { bravoWorkspacePaths, discoverWorkspaceRoot, initBravoWorkspace, scaffoldGoalWorkspace } from "../../src/workspace.js";
 import { markBoundaryApplied, normalizeBoundaryMode, selectNextBoundary } from "../../src/phase-boundary.js";
 import type { GoalState } from "../../src/types.js";
@@ -116,6 +116,11 @@ const GOAL_COMMAND_HELP: GoalCommandHelp[] = [
 		usage: "/goal start <goal-id-or-path>",
 		when: "Attach this Pi session to an existing goal and queue the active worker prompt.",
 		args: ["goal-id-or-path: goal id under .bravo/goals/ or a path to a goal directory."],
+	},
+	{
+		name: "list",
+		usage: "/goal list",
+		when: "List goals sorted by most recently modified first.",
 	},
 	{
 		name: "status",
@@ -250,6 +255,22 @@ function renderNotice(label: string, detail?: string): string {
 
 function renderSuccess(label: string, detail?: string): string {
 	return `${C.bold}${C.ok}${label}${C.reset}${detail ? ` ${C.text}${detail}${C.reset}` : ""}`;
+}
+
+function renderGoalList(goals: Awaited<ReturnType<typeof listGoals>>): string {
+	if (goals.length === 0) return renderNotice("No Bravo goals found.");
+	return [
+		`${C.bold}${C.gold}Bravo goals${C.reset}`,
+		"",
+		...goals.map((goal) => [
+			`${C.muted}${goal.modified_at}${C.reset}`,
+			`${C.bold}${C.sky}${goal.goal_id}${C.reset}`,
+			`${C.text}${goal.status}${C.reset}`,
+			`${C.gold}${goal.progress}${C.reset}`,
+			`${C.muted}${goal.active_task ?? "-"}${C.reset}`,
+			`${C.text}${goal.title}${C.reset}`,
+		].join("\t")),
+	].join("\n");
 }
 
 async function checkWorkspace(root: string): Promise<string[]> {
@@ -534,6 +555,12 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 	const root = await discoverWorkspaceRoot(ctx.cwd);
 	if (!root) throw new Error("No Bravo workspace found. Run /goal init at the workspace root first.");
 	const sessionId = sessionIdOf(ctx);
+
+	if (subcommand === "list") {
+		ctx.ui.notify(renderGoalList(await listGoals(root)), "info");
+		await runtime.refresh(ctx);
+		return;
+	}
 
 	if (subcommand === "prep") {
 		if (!goalArg) throw new Error("usage: /goal prep <goal-id> [--title <title>]");
