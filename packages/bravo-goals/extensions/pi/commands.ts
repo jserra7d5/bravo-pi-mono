@@ -11,6 +11,7 @@ import {
 	renderHandoffContinuationPrompt,
 	renderWorkerResumePrompt,
 	renderWorkerStartPrompt,
+	wrapBravoSystemMessage,
 } from "../../src/prompts.js";
 import { exists as pathExists, listGoals, recordUserVerification } from "../../src/runtime.js";
 import { bravoWorkspacePaths, discoverWorkspaceRoot, initBravoWorkspace, scaffoldGoalWorkspace } from "../../src/workspace.js";
@@ -491,7 +492,7 @@ function boundaryFromFlags(flags: Map<string, string | boolean>): Exclude<Bounda
 }
 
 async function queuePrompt(pi: ExtensionAPI, prompt: string): Promise<void> {
-	pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+	pi.sendUserMessage(wrapBravoSystemMessage(prompt), { deliverAs: "followUp" });
 }
 
 async function freshSession(root: string, ctx: ExtensionCommandContext, goal: GoalRecord, boundaryReason?: string | null): Promise<void> {
@@ -511,7 +512,7 @@ async function freshSession(root: string, ctx: ExtensionCommandContext, goal: Go
 				status: goal.state.goal.status,
 				active_task: goal.state.active_task,
 			});
-			await replacement.sendUserMessage(freshHandoffPrompt(goal, boundaryReason), { deliverAs: "followUp" });
+			await replacement.sendUserMessage(wrapBravoSystemMessage(freshHandoffPrompt(goal, boundaryReason)), { deliverAs: "followUp" });
 		},
 	});
 }

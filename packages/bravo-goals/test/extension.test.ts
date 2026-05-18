@@ -553,6 +553,53 @@ test("task_receipt_ready uses default active task receipt path", async () => {
 	assert.match(result.details.judge_run_id, /^judge_/);
 });
 
+test("task_receipt_ready pass queues wrapped next-task prompt and refreshes active-goals", async () => {
+	const { root, goalPath } = await createTwoTaskReceiptGoal("queued-next", "pi_queued_next");
+	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
+	const queuedPrompts: string[] = [];
+	const tool = registeredTaskReceiptReadyTool({
+		sendUserMessage: (prompt: string) => queuedPrompts.push(prompt),
+	});
+
+	const result = await withFakeJudge("pass", () => tool.execute("call_1", {
+		goal_id: "queued-next",
+	}, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_queued_next" } }));
+
+	const next = await readGoalState(goalPath);
+	const activeIndex = await readActiveGoalsIndex(root);
+	const entry = activeIndex.active_goals.find((candidate) => candidate.goal_id === "queued-next");
+	assert.equal(next.active_task, "task-two");
+	assert.equal(entry?.active_task, "task-two");
+	assert.equal(result.details.active_task, "task-two");
+	assert.equal(queuedPrompts.length, 1);
+	assert.match(queuedPrompts[0]!, /^<BRAVO_GOALS_SYSTEM_MESSAGE>\n/);
+	assert.match(queuedPrompts[0]!, /Active task: task-two: Task Two/);
+	assert.match(queuedPrompts[0]!, /\n<\/BRAVO_GOALS_SYSTEM_MESSAGE>$/);
+});
+
+test("task_receipt_ready failure returns Judge ruling without queuing stale task prompt", async () => {
+	const { root, goalPath } = await createTwoTaskReceiptGoal("failed-task", "pi_failed_task");
+	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
+	const queuedPrompts: string[] = [];
+	const tool = registeredTaskReceiptReadyTool({
+		sendUserMessage: (prompt: string) => queuedPrompts.push(prompt),
+	});
+
+	const result = await withFakeJudge("fail", () => tool.execute("call_1", {
+		goal_id: "failed-task",
+	}, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_failed_task" } }));
+
+	const next = await readGoalState(goalPath);
+	const activeIndex = await readActiveGoalsIndex(root);
+	const entry = activeIndex.active_goals.find((candidate) => candidate.goal_id === "failed-task");
+	assert.equal(next.active_task, "task-one");
+	assert.equal(next.tasks[0]?.status, "active");
+	assert.equal(entry?.active_task, "task-one");
+	assert.equal(queuedPrompts.length, 0);
+	assert.match(result.content[0].text, /Judge completed: fail/);
+	assert.match(result.content[0].text, /Address the Judge ruling before calling task_receipt_ready again/);
+});
+
 test("task_receipt_ready resumes an existing judging task after a crashed parent session", async () => {
 	const { root, goalPath } = await createActiveReceiptGoal("resume-judging", "pi_resume_judging");
 	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
@@ -1079,6 +1126,30 @@ test("agent_end watchdog queues idle recovery prompt rather than cold-start work
 async function createActiveReceiptGoal(goalId: string, sessionId: string): Promise<{ root: string; goalPath: string }> {
 	const root = await mkdtemp(join(tmpdir(), `bravo-goals-${goalId}-`));
 	const { goalPath } = await scaffoldGoalWorkspace({ workspaceRoot: root, goalId, tasks: [{ id: "task-one", title: "Task One" }] });
+	const state = await readGoalState(goalPath);
+	state.goal.status = "active";
+	state.session.attached_pi_session_id = sessionId;
+	await writeGoalState(goalPath, state);
+	await upsertActiveGoal(root, {
+		goal_id: goalId,
+		path: `.bravo/goals/${goalId}`,
+		pi_session_id: sessionId,
+		status: "active",
+		active_task: "task-one",
+	});
+	return { root, goalPath };
+}
+
+async function createTwoTaskReceiptGoal(goalId: string, sessionId: string): Promise<{ root: string; goalPath: string }> {
+	const root = await mkdtemp(join(tmpdir(), `bravo-goals-${goalId}-`));
+	const { goalPath } = await scaffoldGoalWorkspace({
+		workspaceRoot: root,
+		goalId,
+		tasks: [
+			{ id: "task-one", title: "Task One" },
+			{ id: "task-two", title: "Task Two" },
+		],
+	});
 	const state = await readGoalState(goalPath);
 	state.goal.status = "active";
 	state.session.attached_pi_session_id = sessionId;

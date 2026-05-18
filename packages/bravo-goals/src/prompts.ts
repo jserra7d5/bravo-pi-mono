@@ -33,6 +33,14 @@ export interface IdleRecoveryPromptOptions extends WorkerPromptOptions {
 	nudgeCount?: number;
 }
 
+export function wrapBravoSystemMessage(prompt: string): string {
+	return [
+		"<BRAVO_GOALS_SYSTEM_MESSAGE>",
+		prompt,
+		"</BRAVO_GOALS_SYSTEM_MESSAGE>",
+	].join("\n");
+}
+
 function fromCwd(cwd: string | undefined, path: string): string {
 	if (!cwd) return path;
 	return relative(cwd, path) || ".";
@@ -93,6 +101,7 @@ function receiptBlock(goalId: string, goalDir: string, task: PromptTask | null, 
 		"",
 		`Then call task_receipt_ready with goal_id: ${goalId} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory. Do not edit state.yaml manually for the receipt-ready transition.`,
 		`Use ${fromCwd(cwd, join(goalDir, "state.yaml"))} only as durable task state; task_receipt_ready owns the receipt-ready state transition.`,
+		"If this generated Bravo message conflicts with state.yaml, state.yaml wins.",
 	].join("\n");
 }
 

@@ -7,12 +7,13 @@ import { Type } from "typebox";
 import { parse as parseYaml } from "yaml";
 import { runAutonomousJudge, type AutonomousJudgeOutcome } from "./judge-launcher.js";
 import { createJudgeRun, updateJudgeRunStatus, writeJudgeVerdict, type JudgeRunConfig, type JudgeVerdictFile } from "../../src/judge-runner.js";
-import { readActiveGoalsIndex, readGoalState, writeGoalState } from "../../src/runtime.js";
+import { readActiveGoalsIndex, readGoalState, upsertActiveGoal, writeGoalState } from "../../src/runtime.js";
 import { markJudgeStarted, markWorkerReceiptReady } from "../../src/state.js";
 import { markBoundaryApplied, renderCompactInstructions, selectNextBoundary, type BoundarySelection } from "../../src/phase-boundary.js";
 import {
 	renderCarryContinuationPrompt as renderPromptCarryContinuation,
 	renderHandoffContinuationPrompt as renderPromptHandoffContinuation,
+	wrapBravoSystemMessage,
 } from "../../src/prompts.js";
 import type { GoalState } from "../../src/types.js";
 import { discoverWorkspaceRoot } from "../../src/workspace.js";
@@ -121,7 +122,7 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 				at: new Date().toISOString(),
 			});
 			await queueAfterJudge(pi, result, judgeOutcome, ctx);
-			return taskReceiptReadyResponse(params.goal_id, result, result.title, judgeOutcome);
+			return await taskReceiptReadyResponse(params.goal_id, result, result.title, judgeOutcome);
 		},
 		renderCall(args: unknown): TextRenderable {
 			const params = isRecord(args) ? args : {};
@@ -173,7 +174,7 @@ export function registerJudgeControlTools(pi: ExtensionAPI): void {
 				note: params.note,
 				at: new Date().toISOString(),
 			});
-			return taskReceiptReadyResponse(params.goal_id, result, result.title);
+			return await taskReceiptReadyResponse(params.goal_id, result, result.title);
 		},
 		renderCall(args: unknown): TextRenderable {
 			const params = isRecord(args) ? args : {};
@@ -611,20 +612,47 @@ function receiptReadyResultFromRun(options: {
 	};
 }
 
-function taskReceiptReadyResponse(goalId: string, result: ReceiptReadyResult, title: string | undefined, judgeOutcome?: AutonomousJudgeOutcome): { content: { type: "text"; text: string }[]; details: Record<string, unknown> } {
-	const finalAuditText = judgeOutcome?.finalAudit
-		? ` Federal Judge: ${judgeOutcome.finalAudit.verdict} (${judgeOutcome.finalAudit.runId}). Follow-up tasks: ${judgeOutcome.finalAudit.followUpTasksAdded}.`
-		: "";
-	const verdictText = judgeOutcome ? ` Judge verdict: ${judgeOutcome.verdict}. Attempts: ${judgeOutcome.attempts}.${finalAuditText} Next action: ${judgeOutcome.nextAction}.` : "";
+async function taskReceiptReadyResponse(goalId: string, result: ReceiptReadyResult, title: string | undefined, judgeOutcome?: AutonomousJudgeOutcome): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown> }> {
+	const state = judgeOutcome ? await readGoalState(result.goalDir) : null;
+	const activeTask = state?.active_task ?? null;
+	const taskVerdict = judgeOutcome ? await readJudgeVerdict(result.workspaceRoot, judgeOutcome.runId) : null;
+	const finalVerdict = judgeOutcome?.finalAudit ? await readJudgeVerdict(result.workspaceRoot, judgeOutcome.finalAudit.runId) : null;
+	const lines = [
+		`Task receipt ready: ${goalId}/${result.taskId}`,
+		`Receipt: ${result.receiptPath}`,
+		`Judge run: ${result.judgeRunId}`,
+	];
+	if (!judgeOutcome) {
+		lines.push("Judge status: running", "Next action: judge_running");
+	} else {
+		lines.push(
+			`Judge completed: ${judgeOutcome.verdict}`,
+			`Attempts: ${judgeOutcome.attempts}`,
+			`Active task: ${activeTask ?? "none"}`,
+			`Next action: ${judgeOutcome.nextAction}`,
+		);
+		if (judgeOutcome.verdict === "fail" || judgeOutcome.verdict === "needs_more_evidence") {
+			lines.push("", "Address the Judge ruling before calling task_receipt_ready again.", `Judge receipt: ${judgeOutcome.judgeReceiptPath}`);
+			appendVerdictGuidance(lines, taskVerdict);
+		}
+		if (judgeOutcome.finalAudit) {
+			lines.push("", `Federal Judge completed: ${judgeOutcome.finalAudit.verdict}`, `Federal Judge run: ${judgeOutcome.finalAudit.runId}`, `Federal Judge receipt: ${judgeOutcome.finalAudit.judgeReceiptPath}`, `Federal follow-up tasks added: ${judgeOutcome.finalAudit.followUpTasksAdded}`);
+			if (judgeOutcome.finalAudit.verdict !== "pass") {
+				lines.push("Address the Federal Judge ruling before final verification.");
+				appendVerdictGuidance(lines, finalVerdict);
+			}
+		}
+	}
 	return {
 		content: [{
 			type: "text",
-			text: `Task receipt ready: ${goalId}/${result.taskId} entered Judge review. Receipt: ${result.receiptPath}. Judge run: ${result.judgeRunId}.${verdictText}`,
+			text: lines.join("\n"),
 		}],
 		details: {
 			status: judgeOutcome?.taskStatus ?? "judging",
 			goal_id: goalId,
 			task_id: result.taskId,
+			active_task: activeTask,
 			receipt_path: result.receiptPath,
 			judge_run_id: result.judgeRunId,
 			judge_run_path: result.judgeRunPath,
@@ -643,8 +671,9 @@ function taskReceiptReadyResponse(goalId: string, result: ReceiptReadyResult, ti
 }
 
 async function queueAfterJudge(pi: ExtensionAPI, result: ReceiptReadyResult, outcome: AutonomousJudgeOutcome, ctx?: ToolContextLike): Promise<void> {
-	if (outcome.nextAction === "blocked") return;
 	const state = await readGoalState(result.goalDir);
+	await syncActiveGoalProjection(result.workspaceRoot, state, ctx);
+	if (outcome.nextAction === "blocked" || outcome.nextAction === "return_to_worker") return;
 	if (outcome.nextAction === "human_verification") {
 		pi.sendMessage?.({
 			customType: "bravo-goal-federal-judge-ready",
@@ -662,7 +691,7 @@ async function queueAfterJudge(pi: ExtensionAPI, result: ReceiptReadyResult, out
 	if (typeof pi.sendUserMessage !== "function") return;
 	const active = state.active_task ? state.tasks.find((task) => task.id === state.active_task) : null;
 	if (!active) {
-		pi.sendUserMessage(`Bravo goal ${state.goal.id} has no active worker task after Judge verdict ${outcome.verdict}. Check final audit status and continue only if the durable state requires more work.`, { deliverAs: "followUp" });
+		pi.sendUserMessage(wrapBravoSystemMessage(`Bravo goal ${state.goal.id} has no active worker task after Judge verdict ${outcome.verdict}. Check final audit status and continue only if the durable state requires more work.`), { deliverAs: "followUp" });
 		return;
 	}
 	const completedTask = state.tasks.find((task) => task.id === result.taskId) ?? null;
@@ -670,16 +699,17 @@ async function queueAfterJudge(pi: ExtensionAPI, result: ReceiptReadyResult, out
 	const selection = selectNextBoundary(state, completedTask, { contextUsagePercent });
 	const stateWithBoundary = markBoundaryApplied(state, selection);
 	await writeGoalState(result.goalDir, stateWithBoundary);
+	await syncActiveGoalProjection(result.workspaceRoot, stateWithBoundary, ctx);
 	if (selection.mode === "compact" && typeof ctx?.compact === "function") {
 		ctx.compact({
 			customInstructions: renderCompactInstructions(stateWithBoundary),
 			onComplete: () => {
-				pi.sendUserMessage(renderPromptHandoffContinuation({
+				pi.sendUserMessage(wrapBravoSystemMessage(renderPromptHandoffContinuation({
 					goalDir: result.goalDir,
 					state: stateWithBoundary,
 					mode: "compact",
 					boundaryReason: selection.reason,
-				}), { deliverAs: "followUp" });
+				})), { deliverAs: "followUp" });
 			},
 		});
 		return;
@@ -697,7 +727,40 @@ async function queueAfterJudge(pi: ExtensionAPI, result: ReceiptReadyResult, out
 			mode: selection.mode === "fresh_session" ? "durable_current_session" : selection.mode,
 			boundaryReason: selection.reason,
 		});
-	pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+	pi.sendUserMessage(wrapBravoSystemMessage(prompt), { deliverAs: "followUp" });
+}
+
+async function readJudgeVerdict(workspaceRoot: string, runId: string): Promise<JudgeVerdictFile | null> {
+	try {
+		return JSON.parse(await readFile(join(workspaceRoot, ".bravo", "runs", runId, "verdict.json"), "utf8")) as JudgeVerdictFile;
+	} catch {
+		return null;
+	}
+}
+
+function appendVerdictGuidance(lines: string[], verdict: JudgeVerdictFile | null): void {
+	if (!verdict) return;
+	if (verdict.recommendation) lines.push(`Recommendation: ${verdict.recommendation}`);
+	const missing = verdict.missing_or_weak_evidence.map((item) => String(item)).filter(Boolean);
+	if (missing.length) {
+		lines.push("Missing or weak evidence:");
+		for (const item of missing.slice(0, 5)) lines.push(`- ${item}`);
+	}
+	const followUps = verdict.follow_up_tasks?.map((task) => task.title).filter(Boolean) ?? [];
+	if (followUps.length) {
+		lines.push("Follow-up tasks:");
+		for (const title of followUps.slice(0, 5)) lines.push(`- ${title}`);
+	}
+}
+
+async function syncActiveGoalProjection(workspaceRoot: string, state: GoalState, ctx?: ToolContextLike): Promise<void> {
+	await upsertActiveGoal(workspaceRoot, {
+		goal_id: state.goal.id,
+		path: `.bravo/goals/${state.goal.id}`,
+		pi_session_id: state.session.attached_pi_session_id ?? ctx?.sessionManager?.getSessionId?.() ?? null,
+		status: state.goal.status,
+		active_task: state.active_task,
+	});
 }
 
 function canonicalWorkerReceiptPath(taskId: string): string {

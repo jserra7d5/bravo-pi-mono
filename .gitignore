@@ -13,4 +13,5 @@ dist/
 # Runtime state and transient reports
 .subagents/
 _audits/
+bug_reports/
 .tango-*.md

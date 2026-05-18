@@ -4,7 +4,7 @@ import { registerGoalValidationTools } from "./goal-validation.js";
 import { clearHud, updateHud } from "./hud.js";
 import { registerJudgeControlTools } from "./judge-control.js";
 import { registerGoalPolicyHooks } from "./policy-hook.js";
-import { renderIdleRecoveryPrompt } from "../../src/prompts.js";
+import { renderIdleRecoveryPrompt, wrapBravoSystemMessage } from "../../src/prompts.js";
 import { readActiveGoalsIndex, readGoalState } from "../../src/runtime.js";
 import { discoverWorkspaceRoot } from "../../src/workspace.js";
 
@@ -93,11 +93,11 @@ export default function bravoGoalsPiExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		watchdogNudges.set(key, count + 1);
-		pi.sendUserMessage(renderIdleRecoveryPrompt({
+		pi.sendUserMessage(wrapBravoSystemMessage(renderIdleRecoveryPrompt({
 			state,
 			goalDir: `${workspaceRoot}/${active.path}`,
 			cwd: ctx.cwd,
 			nudgeCount: count + 1,
-		}), { deliverAs: "followUp" });
+		})), { deliverAs: "followUp" });
 	});
 }
