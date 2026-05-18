@@ -497,8 +497,18 @@ async function persistWorkerReceiptReady(params: { goal_id: string; receipt_path
 	if (!task) {
 		throw new Error(`Goal ${params.goal_id} has no active task for task_receipt_ready.`);
 	}
+	if (task.status === "awaiting_judge" || task.status === "judging") {
+		return existingJudgeReceiptReadyResult({
+			workspaceRoot,
+			goalDir,
+			goalId: params.goal_id,
+			task,
+			state,
+			receiptPath: params.receipt_path,
+		});
+	}
 	if (task.status !== "active") {
-		throw new Error(`Task ${task.id} must be active before task_receipt_ready; current status is ${task.status}.`);
+		throw new Error(`Task ${task.id} must be active, awaiting_judge, or judging before task_receipt_ready; current status is ${task.status}.`);
 	}
 	const receiptPath = params.receipt_path ?? task.receipt ?? canonicalWorkerReceiptPath(task.id);
 	const validatedReceiptPath = await validateWorkerReceipt(goalDir, receiptPath, task.id);
@@ -527,6 +537,39 @@ async function persistWorkerReceiptReady(params: { goal_id: string; receipt_path
 		goalDir,
 		nextAction: "judge_running",
 		title: state.goal.title,
+	};
+}
+
+async function existingJudgeReceiptReadyResult(options: {
+	workspaceRoot: string;
+	goalDir: string;
+	goalId: string;
+	task: GoalState["tasks"][number];
+	state: GoalState;
+	receiptPath?: string;
+}): Promise<ReceiptReadyResult> {
+	const receiptPath = options.receiptPath ?? options.task.receipt ?? canonicalWorkerReceiptPath(options.task.id);
+	const validatedReceiptPath = await validateWorkerReceipt(options.goalDir, receiptPath, options.task.id);
+	const judgeRunId = options.state.session.current_judge_run_id;
+	if (!judgeRunId) {
+		throw new Error(`Task ${options.task.id} is already ${options.task.status}, but no current Judge run is recorded. Use /goal check ${options.goalId} and repair the goal state before retrying task_receipt_ready.`);
+	}
+	const judgeRunDir = join(options.workspaceRoot, ".bravo", "runs", judgeRunId);
+	const run = JSON.parse(await readFile(join(judgeRunDir, "run.json"), "utf8")) as JudgeRunConfig;
+	if (run.goal_id !== options.goalId || run.task_id !== options.task.id) {
+		throw new Error(`Current Judge run ${judgeRunId} does not match ${options.goalId}/${options.task.id}.`);
+	}
+	return {
+		taskId: options.task.id,
+		receiptPath: validatedReceiptPath,
+		judgeRunId,
+		judgeRunDir,
+		judgeRunPath: relative(options.workspaceRoot, join(judgeRunDir, "run.json")),
+		judgeReceiptPath: run.judge_receipt_path,
+		workspaceRoot: options.workspaceRoot,
+		goalDir: options.goalDir,
+		nextAction: "judge_running",
+		title: options.state.goal.title,
 	};
 }
 
