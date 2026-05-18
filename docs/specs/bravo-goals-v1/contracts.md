@@ -30,15 +30,15 @@ Goal workspace:
   goal.md
   context.md
   state.yaml
-  resume.md
   receipts/
   artifacts/
+  resume.md      # created by checkpoint or pause
 ```
 
-Scaffold creates all six entries. `goal.md`, `context.md`, `state.yaml`, and
-`resume.md` are files; `receipts/` and `artifacts/` are directories. `resume.md`
-may start as a short "no checkpoint yet" packet, but it must exist before a
-goal can enter `fresh_session` or `paused`.
+Prep scaffold creates `goal.md`, `context.md`, `state.yaml`, `receipts/`, and
+`artifacts/`. `resume.md` is not created during prep; it is created by the
+first checkpoint or pause when there is an actual stopping point to preserve.
+It must exist before a goal can enter `fresh_session` or `paused`.
 
 Archived goal:
 
@@ -332,7 +332,9 @@ Commands that perform session replacement must be command handlers, not event ha
 
 Command responsibilities:
 
-- `prep`: scaffold a draft goal workspace.
+- `prep`: scaffold a draft goal workspace, then prompt the agent to ask the
+  user for goal intent before drafting content; the goal id is only a stable
+  slug, and `--title` is only a working title.
 - `start`: attach this Pi session, validate state, and queue the active worker prompt.
 - `checkpoint`: write a controller-known `resume.md` snapshot or queue an agent
   checkpoint and leave the goal in a checkpoint-pending state until a receipt exists.

@@ -10,9 +10,9 @@ Bravo Goals stores goal state above repos under a workspace `.bravo/` directory:
     goal.md
     context.md
     state.yaml
-    resume.md
     receipts/
     artifacts/
+    resume.md       # created by checkpoint or pause, not prep
   runtime/active-goals.yaml
   runs/
   archived/goals/
@@ -34,9 +34,12 @@ bravo-goals verify durable-resume-loop --note "User verified"
 bravo-goals archive durable-resume-loop
 ```
 
-`prep` scaffolds every required goal entry, including `resume.md`, `receipts/`,
-and `artifacts/`. Workspace creation is explicit; the CLI will not silently
-create a repo-local `.bravo/` from a nested cwd.
+`prep` scaffolds the draft goal shell, including `goal.md`, `context.md`,
+`state.yaml`, `receipts/`, and `artifacts/`. It does not derive a title from
+the goal id, and it does not create `resume.md`; `resume.md` is created by the
+first checkpoint or pause when there is an actual stopping point to preserve.
+Workspace creation is explicit; the CLI will not silently create a repo-local
+`.bravo/` from a nested cwd.
 
 ## Pi Extension
 
@@ -62,10 +65,12 @@ The extension renders a footer status and a below-editor HUD from
 `state.yaml` plus `.bravo/runtime/active-goals.yaml`.
 
 `/goal prep` is interactive. It creates a draft goal workspace, then queues a
-prep prompt so the agent can work with you to clarify the problem, fill
-`goal.md` and `context.md`, and write the initial task queue into `state.yaml`.
-It does not attach the session or start implementation; use `/goal start` after
-the draft goal is ready.
+prep prompt that tells the agent to read the placeholders and talk with you
+before drafting goal content. The goal id is only the stable slug used for
+paths and tools; the agent must not infer scope from it. `--title` is accepted
+as a working title, but the agent should confirm or refine it during prep. Prep
+does not attach the session, create `resume.md`, or start implementation; use
+`/goal start` after the draft goal is ready.
 
 Prep agents should call the native `validate_goal_state` Pi tool after editing
 `state.yaml`. The tool validates the state shape and returns a compact issue

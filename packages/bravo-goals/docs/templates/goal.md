@@ -1,4 +1,6 @@
-# Goal: {{title}}
+# Goal
+
+Draft placeholder. Define this during prep after talking with the user.
 
 ## Problem
 

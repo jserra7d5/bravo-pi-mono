@@ -80,7 +80,8 @@ npm test --workspace @bravo/goals
 Acceptance:
 
 - can scaffold a goal workspace;
-- scaffold always creates `goal.md`, `context.md`, `state.yaml`, `resume.md`, `receipts/`, and `artifacts/`;
+- prep scaffold creates `goal.md`, `context.md`, `state.yaml`, `receipts/`, and `artifacts/`;
+- `resume.md` is created only by checkpoint or pause;
 - workspace creation is explicit and does not silently create repo-local `.bravo/` from nested cwd;
 - can validate `goal.md`, `context.md`, `state.yaml`;
 - can reject missing receipts for done tasks;

@@ -100,14 +100,12 @@ export function renderWorkerPrompt(state: GoalState, goalDir: string): string {
 	const task = state.tasks.find((candidate) => candidate.id === state.active_task) ?? null;
 	const receiptPath = task ? (task.receipt ?? `receipts/${task.id}-worker.md`) : null;
 	const receiptFullPath = receiptPath ? join(goalDir, receiptPath) : null;
+	const readList = renderReadList(goalDir);
 	return [
 		`You are working on Bravo goal ${state.goal.id}.`,
 		"",
 		"Read these files before acting:",
-		`1. ${join(goalDir, "goal.md")}`,
-		`2. ${join(goalDir, "context.md")}`,
-		`3. ${join(goalDir, "state.yaml")}`,
-		`4. ${join(goalDir, "resume.md")}`,
+		readList,
 		"",
 		task ? `Active task: ${task.id} - ${task.title}` : "No active task is selected in state.yaml.",
 		receiptPath && receiptFullPath ? `Expected worker receipt path for task_receipt_ready: ${receiptPath}\nWrite the receipt file at: ${receiptFullPath}` : "No active task receipt path is available.",
@@ -136,18 +134,25 @@ export function renderRestartPrompt(state: GoalState, goalDir: string): string {
 	const task = state.tasks.find((candidate) => candidate.id === state.active_task) ?? null;
 	const receiptPath = task ? (task.receipt ?? `receipts/${task.id}-worker.md`) : null;
 	const receiptFullPath = receiptPath ? join(goalDir, receiptPath) : null;
+	const readList = renderReadList(goalDir);
 	return [
 		"You are resuming a Bravo goal in a fresh Pi session.",
 		"",
 		"Read these files before acting:",
-		`1. ${join(goalDir, "goal.md")}`,
-		`2. ${join(goalDir, "context.md")}`,
-		`3. ${join(goalDir, "state.yaml")}`,
-		`4. ${join(goalDir, "resume.md")}`,
+		readList,
 		"",
 		"Then continue the active task from state.yaml.",
 		receiptPath && receiptFullPath ? `When complete, write the worker receipt file at ${receiptFullPath} with this frontmatter shape:\n\n${renderWorkerReceiptTemplate(task?.id ?? "<task-id>")}\n\nThen call task_receipt_ready with goal_id: ${state.goal.id} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory.` : "There is no active task receipt path available.",
 		"Do not redo completed tasks unless the state or Judge receipt says evidence is weak.",
+	].join("\n");
+}
+
+function renderReadList(goalDir: string): string {
+	return [
+		`1. ${join(goalDir, "goal.md")}`,
+		`2. ${join(goalDir, "context.md")}`,
+		`3. ${join(goalDir, "state.yaml")}`,
+		`4. ${join(goalDir, "resume.md")} if it exists; it is created only by checkpoint or pause.`,
 	].join("\n");
 }
 

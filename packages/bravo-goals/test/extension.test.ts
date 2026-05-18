@@ -144,9 +144,9 @@ test("/goal prep creates a draft goal workspace from Pi command context", async 
 	await access(join(goalDir, "goal.md"));
 	await access(join(goalDir, "context.md"));
 	await access(join(goalDir, "state.yaml"));
-	await access(join(goalDir, "resume.md"));
 	await access(join(goalDir, "receipts"));
 	await access(join(goalDir, "artifacts"));
+	assert.equal(await exists(join(goalDir, "resume.md")), false);
 	const state = await readGoalState(goalDir);
 	assert.equal(state.goal.title, "Pi Smoke Goal");
 	assert.equal(state.goal.status, "draft");
@@ -156,9 +156,70 @@ test("/goal prep creates a draft goal workspace from Pi command context", async 
 	assert.match(stripAnsi(notifications[0] ?? ""), /Prepared Bravo goal \.bravo\/goals\/pi-smoke/);
 	assert.equal(queuedPrompts.length, 1);
 	assert.match(queuedPrompts[0]!, /interactive goal-definition flow/);
+	assert.match(queuedPrompts[0]!, /working title provided by the user/i);
+	assert.match(queuedPrompts[0]!, /Do not infer the title, scope, success criteria, task queue, implementation plan, or affected systems from the id or working title alone/);
+	assert.match(queuedPrompts[0]!, /After reading them, stop and talk with the user right away/);
+	assert.match(queuedPrompts[0]!, /Do not create resume\.md during prep/);
+	assert.match(queuedPrompts[0]!, /kind: work/);
 	assert.match(queuedPrompts[0]!, /validate_goal_state/);
 	assert.match(queuedPrompts[0]!, /Do not start implementation/);
 	assert.match(queuedPrompts[0]!, /\/goal start pi-smoke/);
+});
+
+test("/goal prep without title leaves title TBD and asks the user before deriving it", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-prep-no-title-"));
+	await testables.handleGoal({} as any, { refresh: async () => {} }, "init", {
+		cwd: root,
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => "pi_prep_no_title" },
+	} as any);
+
+	const queuedPrompts: string[] = [];
+	await testables.handleGoal({ sendUserMessage: (prompt: string) => queuedPrompts.push(prompt) } as any, { refresh: async () => {} }, "prep no-title-goal", {
+		cwd: root,
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => "pi_prep_no_title" },
+	} as any);
+
+	const goalDir = join(root, ".bravo", "goals", "no-title-goal");
+	const state = await readGoalState(goalDir);
+	assert.equal(state.goal.title, "TBD");
+	assert.equal(await exists(join(goalDir, "resume.md")), false);
+	assert.equal(queuedPrompts.length, 1);
+	assert.match(queuedPrompts[0]!, /No working title was provided/);
+	assert.match(queuedPrompts[0]!, /The title must be derived during prep after talking with the user/);
+	assert.match(queuedPrompts[0]!, /After reading them, stop and talk with the user right away/);
+});
+
+test("/goal pause creates the first resume.md checkpoint", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-pause-resume-"));
+	const { goalPath } = await scaffoldGoalWorkspace({
+		workspaceRoot: root,
+		goalId: "pause-goal",
+		title: "Pause Goal",
+		tasks: [{ id: "task-one", title: "Task One" }],
+	});
+	assert.equal(await exists(join(goalPath, "resume.md")), false);
+
+	const prompts: string[] = [];
+	const pi = { sendUserMessage: (prompt: string) => prompts.push(prompt) } as any;
+	const runtime = { refresh: async () => {} };
+	const ctx = {
+		cwd: root,
+		ui: { notify: () => {} },
+		sessionManager: { getSessionId: () => "pi_pause" },
+	} as any;
+	await testables.handleGoal(pi, runtime, "start pause-goal", ctx);
+	await testables.handleGoal(pi, runtime, 'pause pause-goal --reason "taking a break"', ctx);
+
+	const state = await readGoalState(goalPath);
+	assert.equal(state.goal.status, "paused");
+	assert.equal(state.session.attached_pi_session_id, null);
+	assert.equal(state.pause.pause_reason, "taking a break");
+	const resume = await readFile(join(goalPath, "resume.md"), "utf8");
+	assert.match(resume, /# Resume: Pause Goal/);
+	assert.match(resume, /Reason: taking a break/);
+	assert.equal(prompts.length, 1);
 });
 
 test("/goal check validates explicit goals from Pi command context", async () => {
@@ -825,7 +886,12 @@ test("validate_goal_state reports valid state for an explicit goal", async () =>
 test("validate_goal_state returns actionable issues without mutating invalid state", async () => {
 	const root = await mkdtemp(join(tmpdir(), "bravo-goals-validate-state-bad-"));
 	const { goalPath } = await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "state-bad" });
-	await writeFile(join(goalPath, "state.yaml"), "schema_version: 1\ngoal:\n  id: state-bad\n");
+	const state = await readGoalState(goalPath);
+	await writeGoalState(goalPath, {
+		...state,
+		active_task: "task-one",
+		tasks: [{ id: "task-one", title: "Task One" } as any],
+	});
 
 	const tool = registeredValidateGoalStateTool();
 	const result = await tool.execute("call_1", { goal_id: "state-bad" }, undefined, undefined, { cwd: root });
@@ -834,8 +900,22 @@ test("validate_goal_state returns actionable issues without mutating invalid sta
 	assert.equal(result.details.goal_id, "state-bad");
 	assert.ok(result.details.issue_count > 0);
 	assert.match(result.content[0].text, /Goal state invalid/);
-	assert.match(result.content[0].text, /STATE_MISSING_KEY|STRING_REQUIRED/);
+	assert.match(result.content[0].text, /TASK_KIND_INVALID|TASK_BOUNDARY_INVALID/);
+	assert.match(result.content[0].text, /Valid task shape/);
 	assert.match(await readFile(join(goalPath, "state.yaml"), "utf8"), /schema_version: 1/);
+});
+
+test("validate_goal_state includes task repair shape when state yaml cannot be parsed", async () => {
+	const root = await mkdtemp(join(tmpdir(), "bravo-goals-validate-state-yaml-bad-"));
+	const { goalPath } = await scaffoldGoalWorkspace({ workspaceRoot: root, goalId: "state-yaml-bad" });
+	await writeFile(join(goalPath, "state.yaml"), "schema_version: 1\ntasks:\n  - id: task-one\n    title: [\n");
+
+	const tool = registeredValidateGoalStateTool();
+	const result = await tool.execute("call_1", { goal_id: "state-yaml-bad" }, undefined, undefined, { cwd: root });
+
+	assert.equal(result.details.ok, false);
+	assert.match(result.content[0].text, /STATE_LOAD_FAILED/);
+	assert.match(result.content[0].text, /Valid task shape/);
 });
 
 test("HUD discovers ancestor workspace and does not fall back to unrelated active goal", async () => {
@@ -1048,4 +1128,13 @@ async function withFakeJudges<T>(taskVerdict: "pass" | "fail" | "needs_more_evid
 
 function stripAnsi(value: string): string {
 	return value.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+async function exists(path: string): Promise<boolean> {
+	try {
+		await access(path);
+		return true;
+	} catch {
+		return false;
+	}
 }

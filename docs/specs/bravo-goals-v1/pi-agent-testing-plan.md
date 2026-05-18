@@ -52,10 +52,12 @@ $BRAVO_GOALS_TEST_ROOT/.bravo/config.yaml
 $BRAVO_GOALS_TEST_ROOT/.bravo/goals/pi-smoke/goal.md
 $BRAVO_GOALS_TEST_ROOT/.bravo/goals/pi-smoke/context.md
 $BRAVO_GOALS_TEST_ROOT/.bravo/goals/pi-smoke/state.yaml
-$BRAVO_GOALS_TEST_ROOT/.bravo/goals/pi-smoke/resume.md
 $BRAVO_GOALS_TEST_ROOT/.bravo/goals/pi-smoke/receipts/
 $BRAVO_GOALS_TEST_ROOT/.bravo/goals/pi-smoke/artifacts/
 ```
+
+`resume.md` should not exist after prep. It is created by the first checkpoint
+or pause.
 
 ## Test 1: Extension Discovery From Nested Repo
 
@@ -138,7 +140,7 @@ Expected:
 - `state.yaml` returns to `goal.status: active`.
 - `session.attached_pi_session_id` is set.
 - `active-goals.yaml` rebinds the current Pi session.
-- A restart prompt is queued that tells the worker to read `goal.md`, `context.md`, `state.yaml`, and `resume.md`.
+- A restart prompt is queued that tells the worker to read `goal.md`, `context.md`, `state.yaml`, and `resume.md` if it exists.
 - HUD reappears.
 
 ## Test 5: Compact Boundary

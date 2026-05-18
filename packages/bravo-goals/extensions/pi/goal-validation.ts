@@ -120,7 +120,14 @@ function renderValidateGoalStateText(result: ValidateGoalStateResult): string {
 		return `${issue.severity}\t${issue.code}\t${path}${issue.message}`;
 	});
 	const suffix = result.issues.length > shown.length ? `\n... ${result.issues.length - shown.length} more issue(s)` : "";
-	return `Goal state invalid: ${result.goal_id} (${result.state_path}).\n${shown.join("\n")}${suffix}`;
+	const taskHelp = result.issues.some((issue) =>
+		issue.path === "tasks"
+		|| issue.path?.startsWith("tasks[")
+		|| (issue.path === "state.yaml" && issue.code === "STATE_LOAD_FAILED")
+	)
+		? `\n\nValid task shape:\ntasks:\n  - id: "<short-task-slug>"\n    title: "<human-readable task title>"\n    kind: work\n    status: active\n    boundary_after_pass: inherit\n    context_switch_severity: medium\n    receipt: null\n    judge_receipt: null\n    verify:\n      - "<command or evidence the Judge should check>"\n    expected_output:\n      - "<observable result of this task>"`
+		: "";
+	return `Goal state invalid: ${result.goal_id} (${result.state_path}).\n${shown.join("\n")}${suffix}${taskHelp}`;
 }
 
 function renderValidateGoalStateToolResult(rawResult: unknown, args?: unknown): TextRenderable {

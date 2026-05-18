@@ -83,9 +83,9 @@ Each goal has a stable slug:
   goal.md
   context.md
   state.yaml
-  resume.md
   receipts/
   artifacts/
+  resume.md      # created by checkpoint or pause
 ```
 
 Scaffolded files:
@@ -95,7 +95,7 @@ Scaffolded files:
 | `goal.md` | Durable problem statement, desired outcome, success criteria, non-goals, verification plan, and final acceptance criteria. |
 | `context.md` | Stable startup context: files to read, repos involved, commands, background, constraints, and gotchas. |
 | `state.yaml` | Machine-readable goal state, task queue, active task, verification status, lifecycle, and audit state. |
-| `resume.md` | Current resume packet. It may start as "no checkpoint yet", but must exist before pause or fresh-session handoff. |
+| `resume.md` | Current resume packet. It is created by checkpoint or pause, not by prep, and must exist before pause or fresh-session handoff. |
 
 Scaffolded directories:
 
@@ -160,7 +160,7 @@ Recommended v1 layout:
       goal.md
       context.md
       state.yaml
-      resume.md
+      resume.md      # after checkpoint or pause
       receipts/
         001-worker-implement-checkpoint.md
         002-judge-checkpoint.md
@@ -253,7 +253,7 @@ It should answer:
 - what not to redo;
 - the recommended next action.
 
-`resume.md` is rewritten on pause and may be refreshed by explicit checkpoint commands.
+`resume.md` is created or rewritten on pause and may be created or refreshed by explicit checkpoint commands. It should not exist merely because a goal was prepped.
 
 ## State Schema
 
@@ -295,7 +295,7 @@ tasks:
       - "npm run check --workspace @bravo/goals"
     expected_output:
       - "Pause command writes resume.md"
-      - "Resume command loads goal.md, context.md, resume.md, and state.yaml"
+      - "Resume command loads goal.md, context.md, state.yaml, and resume.md when it exists"
 
 judge:
   last_verdict: pass # pass | fail | needs_more_evidence | blocked | none

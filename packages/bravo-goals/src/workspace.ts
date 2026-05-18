@@ -33,9 +33,8 @@ export interface ScaffoldedGoal {
 const TEMPLATE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../docs/templates");
 const SOURCE_TEMPLATE_DIR = resolve(process.cwd(), "packages/bravo-goals/docs/templates");
 const DEFAULT_TEMPLATES: Record<string, string> = {
-	"goal.md": "# Goal: {{title}}\n\n## Problem\n\nTBD.\n\n## Desired Outcome\n\nTBD.\n\n## Success Criteria\n\n- TBD.\n\n## Non-goals\n\n- TBD.\n\n## Verification Plan\n\n- TBD.\n\n## Final Acceptance\n\nTBD.\n\n## Risks and Constraints\n\n- TBD.\n",
-	"context.md": "# Context\n\n## Workspace\n\nGoal id: `{{goal_id}}`\n\n## Repositories\n\n- TBD.\n\n## Read First\n\n- `goal.md`\n- `state.yaml`\n- `resume.md`\n\n## Commands\n\n- TBD.\n\n## Background\n\nTBD.\n\n## Known Constraints\n\n- TBD.\n\n## Gotchas\n\n- TBD.\n",
-	"resume.md": "# Resume: {{title}}\n\nNo checkpoint yet.\n\n## Read First\n\n1. `goal.md`\n2. `context.md`\n3. `state.yaml`\n4. `resume.md`\n\n## Next Action\n\nContinue from `active_task` in `state.yaml`.\n",
+	"goal.md": "# Goal\n\nDraft placeholder. Define this during prep after talking with the user.\n\n## Problem\n\nTBD.\n\n## Desired Outcome\n\nTBD.\n\n## Success Criteria\n\n- TBD.\n\n## Non-goals\n\n- TBD.\n\n## Verification Plan\n\n- TBD.\n\n## Final Acceptance\n\nTBD.\n\n## Risks and Constraints\n\n- TBD.\n",
+	"context.md": "# Context\n\nDraft placeholder. Fill this during prep after talking with the user.\n\n## Workspace\n\nGoal id: `{{goal_id}}`\n\n## Repositories\n\n- TBD.\n\n## Read First\n\n- `goal.md`\n- `context.md`\n- `state.yaml`\n\n## Commands\n\n- TBD.\n\n## Background\n\nTBD.\n\n## Known Constraints\n\n- TBD.\n\n## Gotchas\n\n- TBD.\n",
 };
 
 export function bravoWorkspacePaths(root: string): WorkspacePaths {
@@ -131,7 +130,7 @@ export function resolveGoalPath(workspaceRoot: string, goalIdOrPath: string): st
 export async function scaffoldGoalWorkspace(options: GoalScaffoldOptions): Promise<ScaffoldedGoal> {
 	const workspace = await initBravoWorkspace({ root: options.workspaceRoot });
 	const goalId = validateGoalId(options.goalId);
-	const title = options.title ?? titleFromId(goalId);
+	const title = options.title ?? "TBD";
 	const goalPath = join(workspace.goals, goalId);
 	if (!options.overwrite && await exists(goalPath)) {
 		throw new Error(`Goal already exists: ${goalId}`);
@@ -151,7 +150,6 @@ export async function scaffoldGoalWorkspace(options: GoalScaffoldOptions): Promi
 	await Promise.all([
 		writeTemplate(join(goalPath, "goal.md"), "goal.md", { goalId, title }, options.overwrite),
 		writeTemplate(join(goalPath, "context.md"), "context.md", { goalId, title }, options.overwrite),
-		writeTemplate(join(goalPath, "resume.md"), "resume.md", { goalId, title }, options.overwrite),
 	]);
 	await saveGoalState(join(goalPath, "state.yaml"), state);
 	return { workspace, goalPath, state };
@@ -175,10 +173,6 @@ function validateGoalId(goalId: string): string {
 		throw new Error(`Invalid goal id: ${goalId}`);
 	}
 	return goalId;
-}
-
-function titleFromId(goalId: string): string {
-	return goalId.split("-").filter(Boolean).map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ");
 }
 
 async function writeTemplate(path: string, templateName: string, values: Record<string, string>, overwrite = false): Promise<void> {

@@ -10,7 +10,7 @@ export interface CheckGoalOptions {
 	goalPath: string;
 }
 
-const REQUIRED_FILES = ["goal.md", "context.md", "state.yaml", "resume.md"];
+const REQUIRED_FILES = ["goal.md", "context.md", "state.yaml"];
 const REQUIRED_DIRS = ["receipts", "artifacts"];
 
 export async function checkGoal(options: CheckGoalOptions): Promise<CheckResult> {
@@ -29,6 +29,9 @@ export async function checkGoal(options: CheckGoalOptions): Promise<CheckResult>
 	}
 	if (state) {
 		issues.push(...validateGoalState(state));
+		if (state.goal.status === "paused") {
+			await requireFile(options.goalPath, "resume.md", issues);
+		}
 		issues.push(...await checkTaskReceipts(options.goalPath, state));
 		issues.push(...await checkFinalAudit(options.goalPath, state));
 		issues.push(...checkArchiveGates(state));

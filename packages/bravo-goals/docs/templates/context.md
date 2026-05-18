@@ -1,5 +1,7 @@
 # Context
 
+Draft placeholder. Fill this during prep after talking with the user.
+
 ## Workspace
 
 Goal id: `{{goal_id}}`
@@ -11,8 +13,8 @@ Goal id: `{{goal_id}}`
 ## Read First
 
 - `goal.md`
+- `context.md`
 - `state.yaml`
-- `resume.md`
 
 ## Commands
 

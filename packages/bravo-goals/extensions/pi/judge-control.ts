@@ -625,7 +625,7 @@ Read these files before acting:
 1. ${relative(process.cwd(), join(goalDir, "goal.md"))}
 2. ${relative(process.cwd(), join(goalDir, "context.md"))}
 3. ${relative(process.cwd(), join(goalDir, "state.yaml"))}
-4. ${relative(process.cwd(), join(goalDir, "resume.md"))}
+4. ${relative(process.cwd(), join(goalDir, "resume.md"))} if it exists; it is created only by checkpoint or pause.
 
 Active task: ${active.id}: ${active.title}
 Expected worker receipt path for task_receipt_ready: ${receiptPath}

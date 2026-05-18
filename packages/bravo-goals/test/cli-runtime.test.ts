@@ -15,12 +15,23 @@ test("init and prep scaffold durable goal workspace", async () => {
 	assert.equal(await main(["init", "--workspace-root", root]), 0);
 	assert.equal(await main(["prep", "durable-resume-loop", "--workspace-root", root]), 0);
 
-	for (const required of ["goal.md", "context.md", "state.yaml", "resume.md", "receipts", "artifacts"]) {
+	for (const required of ["goal.md", "context.md", "state.yaml", "receipts", "artifacts"]) {
 		assert.ok(await exists(join(root, ".bravo", "goals", "durable-resume-loop", required)), required);
 	}
+	assert.equal(await exists(join(root, ".bravo", "goals", "durable-resume-loop", "resume.md")), false);
 	const state = await readGoalState(join(root, ".bravo", "goals", "durable-resume-loop"));
 	assert.equal(state.goal.status, "draft");
+	assert.equal(state.goal.title, "TBD");
 	assert.equal(state.phase_boundary.default_after_judge_pass, "carry");
+});
+
+test("prep stores provided title without deriving title from goal id", async () => {
+	const root = await tempRoot();
+	assert.equal(await main(["init", "--workspace-root", root]), 0);
+	assert.equal(await main(["prep", "structured-log-roger-prod-refactor", "--workspace-root", root, "--title", "Roger logging cleanup"]), 0);
+
+	const state = await readGoalState(join(root, ".bravo", "goals", "structured-log-roger-prod-refactor"));
+	assert.equal(state.goal.title, "Roger logging cleanup");
 });
 
 test("check rejects done tasks with missing receipts", async () => {

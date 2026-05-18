@@ -352,7 +352,7 @@ Read these files before acting:
 1. ${relPath(process.cwd(), join(goal.path, "goal.md"))}
 2. ${relPath(process.cwd(), join(goal.path, "context.md"))}
 3. ${relPath(process.cwd(), join(goal.path, "state.yaml"))}
-4. ${relPath(process.cwd(), join(goal.path, "resume.md"))}
+4. ${relPath(process.cwd(), join(goal.path, "resume.md"))} if it exists; it is created only by checkpoint or pause.
 
 Active task: ${task}
 ${receiptPath && receiptFullPath ? `Expected worker receipt path for task_receipt_ready: ${receiptPath}\nWrite the receipt file at: ${receiptFullPath}` : "No active task receipt path is available."}
@@ -404,7 +404,7 @@ Read these files before acting:
 1. ${relPath(process.cwd(), join(goal.path, "goal.md"))}
 2. ${relPath(process.cwd(), join(goal.path, "context.md"))}
 3. ${relPath(process.cwd(), join(goal.path, "state.yaml"))}
-4. ${relPath(process.cwd(), join(goal.path, "resume.md"))}
+4. ${relPath(process.cwd(), join(goal.path, "resume.md"))} if it exists; it is created only by checkpoint or pause.
 
 Then continue the active task from state.yaml.${receiptPath && receiptFullPath ? ` When complete, write the worker receipt file at ${receiptFullPath} using this frontmatter shape:\n\n${workerReceiptTemplate(active?.id ?? "<task-id>")}\n\nThen call task_receipt_ready with goal_id: ${goal.id} and receipt_path: ${receiptPath}. Do not create receipts under the repo directory.` : " There is no active task receipt path available."}`;
 }
@@ -416,11 +416,22 @@ Refresh ${relPath(process.cwd(), join(goal.path, "resume.md"))} with the current
 }
 
 function prepPrompt(goal: { id: string; path: string; title: string }): string {
-	return `Prepare Bravo goal "${goal.title}" (${goal.id}).
+	const hasWorkingTitle = goal.title !== "TBD";
+	const workingTitle = hasWorkingTitle ? `\nWorking title provided by the user: "${goal.title}". Treat it as a conversation hint, not as enough information to draft the goal.` : "\nNo working title was provided. The title must be derived during prep after talking with the user.";
+	return `Prepare Bravo goal ${goal.id}.${workingTitle}
 
 This is an interactive goal-definition flow, not active implementation.
 
-Work with the user to clarify:
+The goal id is only a stable filesystem and tooling identifier. Do not infer the title, scope, success criteria, task queue, implementation plan, or affected systems from the id or working title alone.
+
+First read these placeholder files:
+1. ${relPath(process.cwd(), join(goal.path, "goal.md"))}
+2. ${relPath(process.cwd(), join(goal.path, "context.md"))}
+3. ${relPath(process.cwd(), join(goal.path, "state.yaml"))}
+
+After reading them, stop and talk with the user right away. Ask what this goal is meant to accomplish, what context matters, and what done should look like. Do not write goal content or tasks until the user has supplied enough intent.
+
+When enough user-provided intent exists, work with the user to clarify:
 1. The problem and desired outcome.
 2. Concrete success criteria and non-goals.
 3. Relevant repos/files/commands/background context.
@@ -431,9 +442,26 @@ Durable files to update:
 1. ${relPath(process.cwd(), join(goal.path, "goal.md"))}
 2. ${relPath(process.cwd(), join(goal.path, "context.md"))}
 3. ${relPath(process.cwd(), join(goal.path, "state.yaml"))}
-4. ${relPath(process.cwd(), join(goal.path, "resume.md"))}
 
-Keep goal.status as draft while preparing. When the goal definition is ready, update state.yaml with worker tasks. Use status active for the first task, queued for later tasks, active_task set to the first task id, and progress.total_tasks matching the task count.
+Do not create resume.md during prep. resume.md is created only by checkpoint or pause, when there is an actual stopping point to preserve.
+
+Keep goal.status as draft while preparing. When the goal definition is ready, update state.yaml with the final title and worker tasks. Use status active for the first task, queued for later tasks, active_task set to the first task id, and progress.total_tasks matching the task count.
+
+Use this exact task shape when editing state.yaml:
+
+tasks:
+  - id: "<short-task-slug>"
+    title: "<human-readable task title>"
+    kind: work
+    status: active
+    boundary_after_pass: inherit
+    context_switch_severity: medium
+    receipt: null
+    judge_receipt: null
+    verify:
+      - "<command or evidence the Judge should check>"
+    expected_output:
+      - "<observable result of this task>"
 
 After editing state.yaml, call validate_goal_state with goal_id: ${goal.id}. Fix any reported issues before you tell the user the goal is ready.
 
