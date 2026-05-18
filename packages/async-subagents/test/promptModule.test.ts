@@ -4,6 +4,10 @@ import { ASYNC_SUBAGENTS_PROMPT_MODULE, appendAsyncSubagentsPrompt } from "../ex
 
 test("async subagents prompt module establishes neutral lifecycle rules", () => {
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /first-party interface/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /thinking override/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /source-of-truth artifacts/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /planned collection point/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /validation boundary/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /@DisplayName/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /Do not hard-code or assume particular subagent types/);
   assert.doesNotMatch(ASYNC_SUBAGENTS_PROMPT_MODULE, /\b(worker|reviewer|scout|fast-worker)\b/);
