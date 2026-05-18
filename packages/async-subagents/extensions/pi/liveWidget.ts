@@ -95,19 +95,32 @@ interface LiveWidgetComponent {
   render(width: number): string[];
   invalidate(): void;
   dispose?(): void;
+  update?(input: LiveWidgetInput): void;
 }
 
-function createLiveWidgetComponent(input: LiveWidgetInput): LiveWidgetComponent {
-  // Pi calls `render(width)` with the actual container width on every redraw,
-  // so the snapshot is always fresh — there's no need to cache it across
-  // frames. Trust the width arg; do not consult `process.stdout.columns`.
-  return {
+interface RenderRequester {
+  requestRender?: () => void;
+}
+
+let mountedWidget: LiveWidgetComponent | undefined;
+
+function createLiveWidgetComponent(input: LiveWidgetInput, tui: unknown): LiveWidgetComponent {
+  let currentInput = input;
+  const requestRender = (tui as RenderRequester | undefined)?.requestRender;
+  const component: LiveWidgetComponent = {
+    update(nextInput: LiveWidgetInput) {
+      currentInput = nextInput;
+      requestRender?.();
+    },
     render(width: number) {
-      return renderAt(input, width, Date.now());
+      return renderAt(currentInput, width, Date.now());
     },
     invalidate() {},
-    dispose() {},
+    dispose() {
+      if (mountedWidget === component) mountedWidget = undefined;
+    },
   };
+  return component;
 }
 
 interface UiSetWidget {
@@ -118,21 +131,35 @@ interface UiSetWidget {
   ) => void;
 }
 
+export function clearLiveWidget(ctx: unknown): void {
+  const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
+  if (!ui?.setWidget) return;
+  mountedWidget = undefined;
+  ui.setWidget("async-subagents-live", undefined, { placement: "belowEditor" });
+}
+
 export function updateLiveWidget(ctx: unknown, input: LiveWidgetInput): void {
   const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
   if (!ui?.setWidget) return;
   // Cheap probe so we can drop the widget entirely when there's nothing to
   // show — pi keeps showing the previous content otherwise. The probe uses a
-  // 64-wide render purely for the visibility check; the factory below will
+  // 64-wide render purely for the visibility check; the component below will
   // re-evaluate at the real container width.
   const probeLines = renderAt(input, 64, Date.now());
   if (!probeLines.length) {
-    ui.setWidget("async-subagents-live", undefined, { placement: "belowEditor" });
+    clearLiveWidget(ctx);
+    return;
+  }
+  if (mountedWidget) {
+    mountedWidget.update?.(input);
     return;
   }
   ui.setWidget(
     "async-subagents-live",
-    () => createLiveWidgetComponent(input),
+    (tui) => {
+      mountedWidget = createLiveWidgetComponent(input, tui);
+      return mountedWidget;
+    },
     { placement: "belowEditor" },
   );
 }

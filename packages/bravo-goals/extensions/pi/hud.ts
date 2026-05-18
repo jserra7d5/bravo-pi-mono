@@ -64,9 +64,25 @@ export interface HudSnapshot {
 	indexEntry?: ActiveGoalEntry;
 }
 
+interface HudWidgetComponent {
+	render(width: number): string[];
+	invalidate(): void;
+	dispose?(): void;
+	update?(snapshot: HudSnapshot | undefined, frameIndex: number): void;
+}
+
+interface HudWidgetSetter {
+	(key: string, value: string[] | undefined, options?: { placement?: "belowEditor" | "aboveEditor" }): void;
+	(
+		key: string,
+		value: ((tui: unknown, theme: unknown) => HudWidgetComponent) | undefined,
+		options?: { placement?: "belowEditor" | "aboveEditor" },
+	): void;
+}
+
 interface UiLike {
 	setStatus?: (key: string, value: string | undefined) => void;
-	setWidget?: (key: string, value: string[] | undefined, options?: { placement?: "belowEditor" | "aboveEditor" }) => void;
+	setWidget?: HudWidgetSetter;
 }
 
 interface ContextLike {
@@ -521,14 +537,21 @@ export function renderStatusLine(snapshot?: HudSnapshot, frameIndex = 0): string
 	return `${title}  ${dots}  ${caption}`;
 }
 
-export function renderHud(snapshot?: HudSnapshot, frameIndex = nextJudgeFrame()): string[] {
+function clampHudWidth(width: number): number {
+	if (!Number.isFinite(width) || width <= 0) return 64;
+	return Math.max(4, Math.min(96, Math.floor(width)));
+}
+
+function renderHudAtWidth(snapshot: HudSnapshot | undefined, width: number, frameIndex: number): string[] {
 	if (!snapshot) return [];
-	// Pi wraps string-array widgets in Text(line, 1, 0), leaving two cells
-	// for horizontal padding. Keep our pre-rendered lines inside that content
-	// width so box chrome does not wrap in the actual TUI.
+	return pickLayout(snapshot.state, clampHudWidth(width), frameIndex);
+}
+
+export function renderHud(snapshot?: HudSnapshot, frameIndex = nextJudgeFrame()): string[] {
+	// Backward-compatible one-shot renderer for tests and transcript callers that
+	// still use string-array widget semantics.
 	const raw = process.stdout.columns ?? 66;
-	const width = Math.max(4, Math.min(96, raw - 2));
-	return pickLayout(snapshot.state, width, frameIndex);
+	return renderHudAtWidth(snapshot, raw - 2, frameIndex);
 }
 
 export async function readGoalState(goalPath: string): Promise<GoalStateView | undefined> {
@@ -565,17 +588,59 @@ export async function snapshotForSession(ctx: ContextLike): Promise<HudSnapshot 
 	return { goalPath, state, indexEntry: entry };
 }
 
+interface RenderRequester {
+	requestRender?: () => void;
+}
+
+let mountedHudWidget: HudWidgetComponent | undefined;
+
+function createHudWidget(snapshot: HudSnapshot | undefined, frameIndex: number, tui: unknown): HudWidgetComponent {
+	let currentSnapshot = snapshot;
+	let currentFrameIndex = frameIndex;
+	const requestRender = (tui as RenderRequester | undefined)?.requestRender;
+	const component: HudWidgetComponent = {
+		update(nextSnapshot: HudSnapshot | undefined, nextFrameIndex: number) {
+			currentSnapshot = nextSnapshot;
+			currentFrameIndex = nextFrameIndex;
+			requestRender?.();
+		},
+		render(width: number) {
+			return renderHudAtWidth(currentSnapshot, width, currentFrameIndex);
+		},
+		invalidate() {},
+		dispose() {
+			if (mountedHudWidget === component) mountedHudWidget = undefined;
+		},
+	};
+	return component;
+}
+
 export async function updateHud(ctx: ContextLike): Promise<void> {
 	const ui = ctx.ui;
 	if (!ui) return;
 	const snapshot = await snapshotForSession(ctx);
 	const frameIndex = nextJudgeFrame();
 	ui.setStatus?.(HUD_STATUS_KEY, renderStatusLine(snapshot, frameIndex));
-	const lines = renderHud(snapshot, frameIndex);
-	ui.setWidget?.(HUD_WIDGET_KEY, lines.length ? lines : undefined, { placement: "belowEditor" });
+	if (!snapshot) {
+		clearHud(ctx);
+		return;
+	}
+	if (mountedHudWidget) {
+		mountedHudWidget.update?.(snapshot, frameIndex);
+		return;
+	}
+	ui.setWidget?.(
+		HUD_WIDGET_KEY,
+		(tui) => {
+			mountedHudWidget = createHudWidget(snapshot, frameIndex, tui);
+			return mountedHudWidget;
+		},
+		{ placement: "belowEditor" },
+	);
 }
 
 export function clearHud(ctx: ContextLike): void {
+	mountedHudWidget = undefined;
 	ctx.ui?.setStatus?.(HUD_STATUS_KEY, undefined);
 	ctx.ui?.setWidget?.(HUD_WIDGET_KEY, undefined, { placement: "belowEditor" });
 }

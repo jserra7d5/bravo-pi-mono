@@ -6,7 +6,7 @@ import { createRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import type { RootSessionIdentity } from "../../src/types.js";
 import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from "./compactionReminder.js";
-import { updateLiveWidget } from "./liveWidget.js";
+import { clearLiveWidget, updateLiveWidget } from "./liveWidget.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
 import { registerSubagentTools, type ToolRuntime } from "./tools.js";
@@ -139,7 +139,7 @@ function stopTimers(ctx?: ExtensionContext): void {
   uiTimer = undefined;
   wakeupTimer = undefined;
   if (ctx) {
-    ctx.ui?.setWidget?.("async-subagents-live", undefined);
+    clearLiveWidget(ctx);
   }
   currentCtx = undefined;
 }
