@@ -11,13 +11,13 @@ import {
 	renderHandoffContinuationPrompt,
 	renderWorkerResumePrompt,
 	renderWorkerStartPrompt,
-	wrapBravoSystemMessage,
 } from "../../src/prompts.js";
 import { exists as pathExists, listGoals, recordUserVerification } from "../../src/runtime.js";
 import { bravoWorkspacePaths, discoverWorkspaceRoot, initBravoWorkspace, scaffoldGoalWorkspace } from "../../src/workspace.js";
 import { markBoundaryApplied, normalizeBoundaryMode, renderCompactInstructions, selectNextBoundary } from "../../src/phase-boundary.js";
 import type { GoalState } from "../../src/types.js";
 import { clearHud, readActiveGoals, readGoalState, updateHud, type ActiveGoalEntry, type GoalStateView } from "./hud.js";
+import { sendBravoControlMessage, sendBravoControlMessageAsync } from "./messages.js";
 
 type BoundaryMode = "carry" | "compact" | "fresh_session" | "checkpoint_only";
 
@@ -45,7 +45,10 @@ interface GoalCommandHelp {
 }
 
 interface ReplacementSession {
-	sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): Promise<void>;
+	sendMessage(
+		message: { customType: string; content: string; display: boolean; details?: unknown },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	): Promise<void>;
 	sessionManager?: {
 		getSessionId?: () => string;
 	};
@@ -491,8 +494,12 @@ function boundaryFromFlags(flags: Map<string, string | boolean>): Exclude<Bounda
 	return normalizeBoundaryMode(typeof flags.get("boundary") === "string" ? flags.get("boundary") as string : null) ?? "carry";
 }
 
-async function queuePrompt(pi: ExtensionAPI, prompt: string): Promise<void> {
-	pi.sendUserMessage(wrapBravoSystemMessage(prompt), { deliverAs: "followUp" });
+async function queuePrompt(pi: ExtensionAPI, prompt: string, kind: string, goal?: GoalRecord): Promise<void> {
+	sendBravoControlMessage(pi, prompt, {
+		kind,
+		goal_id: goal?.id,
+		goal_title: goal?.state.goal.title,
+	});
 }
 
 async function freshSession(root: string, ctx: ExtensionCommandContext, goal: GoalRecord, boundaryReason?: string | null): Promise<void> {
@@ -512,7 +519,11 @@ async function freshSession(root: string, ctx: ExtensionCommandContext, goal: Go
 				status: goal.state.goal.status,
 				active_task: goal.state.active_task,
 			});
-			await replacement.sendUserMessage(wrapBravoSystemMessage(freshHandoffPrompt(goal, boundaryReason)), { deliverAs: "followUp" });
+			await sendBravoControlMessageAsync(replacement, freshHandoffPrompt(goal, boundaryReason), {
+				kind: "fresh_handoff",
+				goal_id: goal.id,
+				goal_title: goal.state.goal.title,
+			});
 		},
 	});
 }
@@ -526,11 +537,11 @@ async function runBoundary(root: string, pi: ExtensionAPI, ctx: ExtensionCommand
 	if (mode === "compact") {
 		ctx.compact({
 			customInstructions: compactInstructions(goal),
-			onComplete: () => queuePrompt(pi, compactTaskPrompt(goal, boundaryReason)),
+			onComplete: () => queuePrompt(pi, compactTaskPrompt(goal, boundaryReason), "compact_handoff", goal),
 		});
 		return "continued";
 	}
-	await queuePrompt(pi, carryTaskPrompt(goal));
+	await queuePrompt(pi, carryTaskPrompt(goal), "carry_handoff", goal);
 	return "continued";
 }
 
@@ -579,7 +590,11 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 			id: result.state.goal.id,
 			title: result.state.goal.title,
 			path: result.goalPath,
-		}));
+		}), "prep", {
+			id: result.state.goal.id,
+			path: result.goalPath,
+			state: result.state as unknown as GoalStateView,
+		});
 		return;
 	}
 
@@ -620,7 +635,7 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 			mode: "worker",
 		});
 		await runtime.refresh(ctx);
-		await queuePrompt(pi, subcommand === "resume" ? restartPrompt(goal) : activeTaskPrompt(goal));
+		await queuePrompt(pi, subcommand === "resume" ? restartPrompt(goal) : activeTaskPrompt(goal), subcommand === "resume" ? "resume" : "start", goal);
 		return;
 	}
 
@@ -667,7 +682,7 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 	}
 
 	if (subcommand === "checkpoint") {
-		await queuePrompt(pi, checkpointPrompt(goal));
+		await queuePrompt(pi, checkpointPrompt(goal), "checkpoint", goal);
 		await runtime.refresh(ctx);
 		return;
 	}

@@ -13,10 +13,13 @@ import { markBoundaryApplied, renderCompactInstructions, selectNextBoundary, typ
 import {
 	renderCarryContinuationPrompt as renderPromptCarryContinuation,
 	renderHandoffContinuationPrompt as renderPromptHandoffContinuation,
-	wrapBravoSystemMessage,
 } from "../../src/prompts.js";
 import type { GoalState } from "../../src/types.js";
 import { discoverWorkspaceRoot } from "../../src/workspace.js";
+import {
+	BRAVO_GOAL_FEDERAL_JUDGE_READY_MESSAGE_TYPE,
+	sendBravoControlMessage,
+} from "./messages.js";
 import {
 	chromeRenderable,
 	renderFailureCard,
@@ -676,7 +679,7 @@ async function queueAfterJudge(pi: ExtensionAPI, result: ReceiptReadyResult, out
 	if (outcome.nextAction === "blocked" || outcome.nextAction === "return_to_worker") return;
 	if (outcome.nextAction === "human_verification") {
 		pi.sendMessage?.({
-			customType: "bravo-goal-federal-judge-ready",
+			customType: BRAVO_GOAL_FEDERAL_JUDGE_READY_MESSAGE_TYPE,
 			display: true,
 			content: `Bravo goal "${state.goal.title}" (${state.goal.id}) completed all worker tasks and passed Federal Judge review.\n\nFederal Judge receipt: ${state.final_audit.receipt ?? outcome.finalAudit?.judgeReceiptPath ?? "the goal receipts directory"}\n\nHuman verification is now available with /goal verify ${state.goal.id}.`,
 			details: {
@@ -688,10 +691,14 @@ async function queueAfterJudge(pi: ExtensionAPI, result: ReceiptReadyResult, out
 		});
 		return;
 	}
-	if (typeof pi.sendUserMessage !== "function") return;
 	const active = state.active_task ? state.tasks.find((task) => task.id === state.active_task) : null;
 	if (!active) {
-		pi.sendUserMessage(wrapBravoSystemMessage(`Bravo goal ${state.goal.id} has no active worker task after Judge verdict ${outcome.verdict}. Check final audit status and continue only if the durable state requires more work.`), { deliverAs: "followUp" });
+		sendBravoControlMessage(pi, `Bravo goal ${state.goal.id} has no active worker task after Judge verdict ${outcome.verdict}. Check final audit status and continue only if the durable state requires more work.`, {
+			kind: "no_active_task_after_judge",
+			goal_id: state.goal.id,
+			goal_title: state.goal.title,
+			next_action: "inspect_state",
+		});
 		return;
 	}
 	const completedTask = state.tasks.find((task) => task.id === result.taskId) ?? null;
@@ -704,12 +711,17 @@ async function queueAfterJudge(pi: ExtensionAPI, result: ReceiptReadyResult, out
 		ctx.compact({
 			customInstructions: renderCompactInstructions(stateWithBoundary),
 			onComplete: () => {
-				pi.sendUserMessage(wrapBravoSystemMessage(renderPromptHandoffContinuation({
+				sendBravoControlMessage(pi, renderPromptHandoffContinuation({
 					goalDir: result.goalDir,
 					state: stateWithBoundary,
 					mode: "compact",
 					boundaryReason: selection.reason,
-				})), { deliverAs: "followUp" });
+				}), {
+					kind: "compact_handoff",
+					goal_id: stateWithBoundary.goal.id,
+					goal_title: stateWithBoundary.goal.title,
+					next_action: "continue",
+				});
 			},
 		});
 		return;
@@ -727,7 +739,12 @@ async function queueAfterJudge(pi: ExtensionAPI, result: ReceiptReadyResult, out
 			mode: selection.mode === "fresh_session" ? "durable_current_session" : selection.mode,
 			boundaryReason: selection.reason,
 		});
-	pi.sendUserMessage(wrapBravoSystemMessage(prompt), { deliverAs: "followUp" });
+	sendBravoControlMessage(pi, prompt, {
+		kind: selection.mode === "carry" ? "carry_handoff" : "boundary_handoff",
+		goal_id: stateWithBoundary.goal.id,
+		goal_title: stateWithBoundary.goal.title,
+		next_action: "continue",
+	});
 }
 
 async function readJudgeVerdict(workspaceRoot: string, runId: string): Promise<JudgeVerdictFile | null> {

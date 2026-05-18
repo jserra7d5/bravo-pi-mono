@@ -142,7 +142,7 @@ test("/goal prep creates a draft goal workspace from Pi command context", async 
 	const notifications: string[] = [];
 	const queuedPrompts: string[] = [];
 	let refreshes = 0;
-	await testables.handleGoal({ sendUserMessage: (prompt: string) => queuedPrompts.push(prompt) } as any, { refresh: async () => { refreshes += 1; } }, 'prep pi-smoke --title "Pi Smoke Goal"', {
+	await testables.handleGoal({ sendMessage: (message: { content?: string }) => queuedPrompts.push(message.content ?? "") } as any, { refresh: async () => { refreshes += 1; } }, 'prep pi-smoke --title "Pi Smoke Goal"', {
 		cwd: root,
 		ui: { notify: (message: string) => notifications.push(message) },
 		sessionManager: { getSessionId: () => "pi_prep" },
@@ -217,7 +217,7 @@ test("/goal prep without title leaves title TBD and asks the user before derivin
 	} as any);
 
 	const queuedPrompts: string[] = [];
-	await testables.handleGoal({ sendUserMessage: (prompt: string) => queuedPrompts.push(prompt) } as any, { refresh: async () => {} }, "prep no-title-goal", {
+	await testables.handleGoal({ sendMessage: (message: { content?: string }) => queuedPrompts.push(message.content ?? "") } as any, { refresh: async () => {} }, "prep no-title-goal", {
 		cwd: root,
 		ui: { notify: () => {} },
 		sessionManager: { getSessionId: () => "pi_prep_no_title" },
@@ -244,7 +244,7 @@ test("/goal pause creates the first resume.md checkpoint", async () => {
 	assert.equal(await exists(join(goalPath, "resume.md")), false);
 
 	const prompts: string[] = [];
-	const pi = { sendUserMessage: (prompt: string) => prompts.push(prompt) } as any;
+	const pi = { sendMessage: (message: { content?: string }) => prompts.push(message.content ?? "") } as any;
 	const runtime = { refresh: async () => {} };
 	const ctx = {
 		cwd: root,
@@ -319,7 +319,7 @@ test("/goal next supports carry, compact, and fresh handoff modes from Pi slash 
 	const carry = await createPassedBoundaryGoal("handoff-carry", "carry");
 	const carryPrompts: string[] = [];
 	let carryRefreshes = 0;
-	await testables.handleGoal({ sendUserMessage: (prompt: string) => carryPrompts.push(prompt) } as any, { refresh: async () => { carryRefreshes += 1; } }, "next handoff-carry --carry", {
+	await testables.handleGoal({ sendMessage: (message: { content?: string }) => carryPrompts.push(message.content ?? "") } as any, { refresh: async () => { carryRefreshes += 1; } }, "next handoff-carry --carry", {
 		cwd: carry.root,
 		ui: { notify: () => {} },
 		sessionManager: { getSessionId: () => "pi_handoff" },
@@ -336,7 +336,7 @@ test("/goal next supports carry, compact, and fresh handoff modes from Pi slash 
 	const compactPrompts: string[] = [];
 	let compactRefreshes = 0;
 	let compactInstructions = "";
-	await testables.handleGoal({ sendUserMessage: (prompt: string) => compactPrompts.push(prompt) } as any, { refresh: async () => { compactRefreshes += 1; } }, "next handoff-compact --compact", {
+	await testables.handleGoal({ sendMessage: (message: { content?: string }) => compactPrompts.push(message.content ?? "") } as any, { refresh: async () => { compactRefreshes += 1; } }, "next handoff-compact --compact", {
 		cwd: compact.root,
 		ui: { notify: () => {} },
 		sessionManager: { getSessionId: () => "pi_handoff" },
@@ -359,7 +359,7 @@ test("/goal next supports carry, compact, and fresh handoff modes from Pi slash 
 	let freshRefreshes = 0;
 	let waited = false;
 	let newSessionCalled = false;
-	await testables.handleGoal({ sendUserMessage: () => { throw new Error("fresh should use replacement session"); } } as any, { refresh: async () => { freshRefreshes += 1; } }, "next handoff-fresh --fresh", {
+	await testables.handleGoal({ sendMessage: () => { throw new Error("fresh should use replacement session"); } } as any, { refresh: async () => { freshRefreshes += 1; } }, "next handoff-fresh --fresh", {
 		cwd: fresh.root,
 		ui: { notify: () => {} },
 		sessionManager: { getSessionId: () => "pi_handoff", getSessionFile: () => "/tmp/pi_handoff.json" },
@@ -369,7 +369,7 @@ test("/goal next supports carry, compact, and fresh handoff modes from Pi slash 
 			assert.equal(options.parentSession, "/tmp/pi_handoff.json");
 			await options.withSession({
 				sessionManager: { getSessionId: () => "pi_replacement" },
-				sendUserMessage: async (prompt: string) => { replacementPrompts.push(prompt); },
+				sendMessage: async (message: { content?: string }) => { replacementPrompts.push(message.content ?? ""); },
 			});
 		},
 	} as any);
@@ -477,8 +477,10 @@ test("Federal Judge pass announces human verification without queuing worker sla
 	const customMessages: string[] = [];
 
 	const tool = registeredTaskReceiptReadyTool({
-		sendUserMessage: (prompt: string) => queuedPrompts.push(prompt),
-		sendMessage: (message: { content?: string }) => customMessages.push(message.content ?? ""),
+		sendMessage: (message: { content?: string; customType?: string }) => {
+			if (message.customType === "bravo-goal-federal-judge-ready") customMessages.push(message.content ?? "");
+			else queuedPrompts.push(message.content ?? "");
+		},
 	});
 	const result = await withFakeJudge("pass", () => tool.execute("call_1", {
 		goal_id: "federal-pass",
@@ -504,7 +506,7 @@ test("Federal Judge failure appends remediation tasks and keeps autonomous goal 
 	const queuedPrompts: string[] = [];
 
 	const tool = registeredTaskReceiptReadyTool({
-		sendUserMessage: (prompt: string) => queuedPrompts.push(prompt),
+		sendMessage: (message: { content?: string }) => queuedPrompts.push(message.content ?? ""),
 	});
 	const result = await withFakeJudges("pass", "fail", () => tool.execute("call_1", {
 		goal_id: "federal-fail",
@@ -558,7 +560,7 @@ test("task_receipt_ready pass queues wrapped next-task prompt and refreshes acti
 	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
 	const queuedPrompts: string[] = [];
 	const tool = registeredTaskReceiptReadyTool({
-		sendUserMessage: (prompt: string) => queuedPrompts.push(prompt),
+		sendMessage: (message: { content?: string }) => queuedPrompts.push(message.content ?? ""),
 	});
 
 	const result = await withFakeJudge("pass", () => tool.execute("call_1", {
@@ -582,7 +584,7 @@ test("task_receipt_ready failure returns Judge ruling without queuing stale task
 	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
 	const queuedPrompts: string[] = [];
 	const tool = registeredTaskReceiptReadyTool({
-		sendUserMessage: (prompt: string) => queuedPrompts.push(prompt),
+		sendMessage: (message: { content?: string }) => queuedPrompts.push(message.content ?? ""),
 	});
 
 	const result = await withFakeJudge("fail", () => tool.execute("call_1", {
@@ -1099,11 +1101,12 @@ test("agent_end watchdog queues idle recovery prompt rather than cold-start work
 	bravoGoalsPiExtension({
 		registerCommand: () => {},
 		registerTool: () => {},
+		registerMessageRenderer: () => {},
 		on: (event: string, handler: (event: unknown, ctx: any) => Promise<void> | void) => {
 			handlers.set(event, handler);
 		},
-		sendUserMessage: (prompt: string) => {
-			prompts.push(prompt);
+		sendMessage: (message: { content?: string }) => {
+			prompts.push(message.content ?? "");
 		},
 	} as any);
 

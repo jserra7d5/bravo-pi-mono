@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text, type Component } from "@earendil-works/pi-tui";
 import { registerGoalCommands } from "./commands.js";
 import { registerGoalValidationTools } from "./goal-validation.js";
 import { clearHud, updateHud } from "./hud.js";
@@ -7,6 +8,11 @@ import { registerGoalPolicyHooks } from "./policy-hook.js";
 import { renderIdleRecoveryPrompt, wrapBravoSystemMessage } from "../../src/prompts.js";
 import { readActiveGoalsIndex, readGoalState } from "../../src/runtime.js";
 import { discoverWorkspaceRoot } from "../../src/workspace.js";
+import {
+	BRAVO_GOAL_CONTROL_MESSAGE_TYPE,
+	BRAVO_GOAL_FEDERAL_JUDGE_READY_MESSAGE_TYPE,
+	BRAVO_GOAL_WATCHDOG_MESSAGE_TYPE,
+} from "./messages.js";
 
 let currentCtx: ExtensionContext | undefined;
 let hudTimer: ReturnType<typeof setInterval> | undefined;
@@ -49,7 +55,16 @@ function stopHud(): void {
 	consecutiveFailures = 0;
 }
 
+function renderBravoMessage(message: unknown): Component {
+	const content = (message as { content?: unknown } | undefined)?.content;
+	return new Text(typeof content === "string" ? content : "", 0, 0);
+}
+
 export default function bravoGoalsPiExtension(pi: ExtensionAPI): void {
+	pi.registerMessageRenderer(BRAVO_GOAL_CONTROL_MESSAGE_TYPE, renderBravoMessage);
+	pi.registerMessageRenderer(BRAVO_GOAL_WATCHDOG_MESSAGE_TYPE, renderBravoMessage);
+	pi.registerMessageRenderer(BRAVO_GOAL_FEDERAL_JUDGE_READY_MESSAGE_TYPE, renderBravoMessage);
+
 	registerGoalCommands(pi, {
 		refresh: async (ctx) => {
 			currentCtx = ctx;
@@ -93,11 +108,21 @@ export default function bravoGoalsPiExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		watchdogNudges.set(key, count + 1);
-		pi.sendUserMessage(wrapBravoSystemMessage(renderIdleRecoveryPrompt({
-			state,
-			goalDir: `${workspaceRoot}/${active.path}`,
-			cwd: ctx.cwd,
-			nudgeCount: count + 1,
-		})), { deliverAs: "followUp" });
+		pi.sendMessage({
+			customType: BRAVO_GOAL_WATCHDOG_MESSAGE_TYPE,
+			display: true,
+			content: wrapBravoSystemMessage(renderIdleRecoveryPrompt({
+				state,
+				goalDir: `${workspaceRoot}/${active.path}`,
+				cwd: ctx.cwd,
+				nudgeCount: count + 1,
+			})),
+			details: {
+				goal_id: state.goal.id,
+				goal_title: state.goal.title,
+				kind: "idle_recovery",
+				nudge_count: count + 1,
+			},
+		}, { deliverAs: "followUp", triggerTurn: true });
 	});
 }
