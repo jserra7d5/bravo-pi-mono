@@ -625,8 +625,9 @@ export function chromeRenderable(build: (width: number) => string[]): TextRender
 export function textBlock(lines: string[]): TextRenderable {
   return {
     invalidate() {},
-    render() {
-      return [...lines];
+    render(width: number) {
+      const w = safeWidth(width);
+      return lines.map((line) => (visWidth(line) <= w ? line : truncAnsi(line, w)));
     },
   };
 }

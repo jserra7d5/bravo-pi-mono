@@ -550,19 +550,56 @@ async function existingJudgeReceiptReadyResult(options: {
 }): Promise<ReceiptReadyResult> {
 	const receiptPath = options.receiptPath ?? options.task.receipt ?? canonicalWorkerReceiptPath(options.task.id);
 	const validatedReceiptPath = await validateWorkerReceipt(options.goalDir, receiptPath, options.task.id);
-	const judgeRunId = options.state.session.current_judge_run_id;
-	if (!judgeRunId) {
-		throw new Error(`Task ${options.task.id} is already ${options.task.status}, but no current Judge run is recorded. Use /goal check ${options.goalId} and repair the goal state before retrying task_receipt_ready.`);
+	const existingRunId = options.state.session.current_judge_run_id;
+	if (existingRunId) {
+		const existing = await readExistingJudgeRun(options.workspaceRoot, existingRunId);
+		if (existing && existing.run.goal_id === options.goalId && existing.run.task_id === options.task.id) {
+			return receiptReadyResultFromRun(options, validatedReceiptPath, existingRunId, existing.run);
+		}
 	}
-	const judgeRunDir = join(options.workspaceRoot, ".bravo", "runs", judgeRunId);
-	const run = JSON.parse(await readFile(join(judgeRunDir, "run.json"), "utf8")) as JudgeRunConfig;
-	if (run.goal_id !== options.goalId || run.task_id !== options.task.id) {
-		throw new Error(`Current Judge run ${judgeRunId} does not match ${options.goalId}/${options.task.id}.`);
+
+	const judgeReceiptPath = `.bravo/goals/${options.goalId}/receipts/${options.task.id}-judge.md`;
+	const judgeRun = await createJudgeRun({
+		workspaceRoot: options.workspaceRoot,
+		goalId: options.goalId,
+		taskId: options.task.id,
+		workerReceiptPath: `.bravo/goals/${options.goalId}/${validatedReceiptPath}`,
+		judgeReceiptPath,
+		cwd: options.workspaceRoot,
+	});
+	await writeGoalState(options.goalDir, {
+		...options.state,
+		goal: { ...options.state.goal, status: "judging" },
+		judge: { ...options.state.judge, active: true },
+		session: { ...options.state.session, current_judge_run_id: judgeRun.runId },
+		tasks: options.state.tasks.map((candidate) => candidate.id === options.task.id
+			? { ...candidate, receipt: validatedReceiptPath, status: "judging" }
+			: candidate),
+	});
+	return receiptReadyResultFromRun(options, validatedReceiptPath, judgeRun.runId, judgeRun.config);
+}
+
+async function readExistingJudgeRun(workspaceRoot: string, runId: string): Promise<{ run: JudgeRunConfig } | null> {
+	try {
+		const run = JSON.parse(await readFile(join(workspaceRoot, ".bravo", "runs", runId, "run.json"), "utf8")) as JudgeRunConfig;
+		return { run };
+	} catch {
+		return null;
 	}
+}
+
+function receiptReadyResultFromRun(options: {
+	workspaceRoot: string;
+	goalDir: string;
+	goalId: string;
+	task: GoalState["tasks"][number];
+	state: GoalState;
+}, receiptPath: string, runId: string, run: JudgeRunConfig): ReceiptReadyResult {
+	const judgeRunDir = join(options.workspaceRoot, ".bravo", "runs", runId);
 	return {
 		taskId: options.task.id,
-		receiptPath: validatedReceiptPath,
-		judgeRunId,
+		receiptPath,
+		judgeRunId: runId,
 		judgeRunDir,
 		judgeRunPath: relative(options.workspaceRoot, join(judgeRunDir, "run.json")),
 		judgeReceiptPath: run.judge_receipt_path,

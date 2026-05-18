@@ -584,6 +584,29 @@ test("task_receipt_ready resumes an existing judging task after a crashed parent
 	assert.equal(next.session.current_judge_run_id, null);
 });
 
+test("task_receipt_ready recreates Judge run when judging state lost current run id", async () => {
+	const { root, goalPath } = await createActiveReceiptGoal("recreate-judging", "pi_recreate_judging");
+	await writeFile(join(goalPath, "receipts", "task-one-worker.md"), workerReceipt("task-one"));
+	const state = await readGoalState(goalPath);
+	state.goal.status = "judging";
+	state.tasks[0]!.status = "judging";
+	state.tasks[0]!.receipt = "receipts/task-one-worker.md";
+	state.judge.active = false;
+	state.session.current_judge_run_id = null;
+	await writeGoalState(goalPath, state);
+
+	const tool = registeredTaskReceiptReadyTool();
+	const result = await withFakeJudge("pass", () => tool.execute("call_1", {
+		goal_id: "recreate-judging",
+		receipt_path: "receipts/task-one-worker.md",
+	}, undefined, undefined, { cwd: root, sessionManager: { getSessionId: () => "pi_recreate_judging" } }));
+
+	const next = await readGoalState(goalPath);
+	assert.match(String(result.details.judge_run_id), /^judge_/);
+	assert.equal(next.tasks[0]?.status, "done");
+	assert.equal(next.session.current_judge_run_id, null);
+});
+
 test("task_receipt_ready rejects malformed, empty, and directory worker receipts without mutation", async () => {
 	const cases: { name: string; write: (goalPath: string) => Promise<string>; message: RegExp }[] = [
 		{
