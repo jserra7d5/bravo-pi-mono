@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -113,7 +114,9 @@ async function flushMetrics(ctx: any) {
 
 function runTango(args: string[], timeoutMs: number): Promise<void> {
   return new Promise((resolve) => {
-    const proc = spawn(process.execPath, [distCli, ...args], { cwd: process.cwd(), env: process.env as Record<string, string>, stdio: "ignore" });
+    const command = existsSync(distCli) ? process.execPath : "tango";
+    const commandArgs = existsSync(distCli) ? [distCli, ...args] : args;
+    const proc = spawn(command, commandArgs, { cwd: process.cwd(), env: process.env as Record<string, string>, stdio: "ignore" });
     const timer = setTimeout(() => { try { proc.kill("SIGTERM"); } catch {}; resolve(); }, timeoutMs);
     proc.on("error", () => { clearTimeout(timer); resolve(); });
     proc.on("close", () => { clearTimeout(timer); resolve(); });

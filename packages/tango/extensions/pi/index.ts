@@ -80,7 +80,7 @@ function ensureRootSessionRecord() {
 
 async function runTango(args: string[], signal?: AbortSignal): Promise<ExecResult> {
   const candidates: Array<{ command: string; args: string[] }> = [
-    { command: process.execPath, args: [distCli, ...args] },
+    ...(existsSync(distCli) ? [{ command: process.execPath, args: [distCli, ...args] }] : []),
     { command: "tango", args },
   ];
   let last: ExecResult = { code: 1, stdout: "", stderr: "tango not found" };
