@@ -539,7 +539,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 	let lastRefresh = 0;
 	let inFlight = false;
 	let codexUsage: CodexUsage | undefined;
-	let thinkingLevel: string = pi.getThinkingLevel?.() ?? "off";
+	let thinkingLevel = "off";
 	let tuiRef: TUI | undefined;
 	let footerInstalled = false;
 	let unsubBranch: (() => void) | undefined;
