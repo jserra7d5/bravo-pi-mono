@@ -4,6 +4,7 @@ import { nowIso } from "./fs.js";
 export type BoundarySelectionReason =
 	| "runtime_override"
 	| "task_boundary"
+	| "context_usage"
 	| "context_switch_severity"
 	| "goal_default"
 	| "package_default";
@@ -16,10 +17,13 @@ export interface BoundarySelection {
 
 export interface BoundarySelectionOptions {
 	override?: Exclude<BoundaryMode, "inherit"> | null;
+	contextUsagePercent?: number | null;
+	contextUsageThresholdPercent?: number;
 	packageDefault?: Exclude<BoundaryMode, "inherit">;
 }
 
 const DEFAULT_BOUNDARY: Exclude<BoundaryMode, "inherit"> = "carry";
+const DEFAULT_CONTEXT_USAGE_THRESHOLD_PERCENT = 45;
 
 export function normalizeBoundaryMode(value: string | null | undefined): Exclude<BoundaryMode, "inherit"> | null {
 	if (value === "carry" || value === "compact" || value === "fresh_session") {
@@ -53,6 +57,16 @@ export function selectNextBoundary(
 			mode: task.boundary_after_pass,
 			reason: "task_boundary",
 			message: `selected ${task.boundary_after_pass} from task boundary`,
+		};
+	}
+
+	if (typeof options.contextUsagePercent === "number" && Number.isFinite(options.contextUsagePercent)) {
+		const threshold = options.contextUsageThresholdPercent ?? DEFAULT_CONTEXT_USAGE_THRESHOLD_PERCENT;
+		const mode = options.contextUsagePercent >= threshold ? "compact" : "carry";
+		return {
+			mode,
+			reason: "context_usage",
+			message: `selected ${mode} from context usage ${Math.round(options.contextUsagePercent)}% with ${threshold}% threshold`,
 		};
 	}
 
@@ -102,14 +116,17 @@ export function markBoundaryApplied(
 }
 
 export function renderCompactInstructions(state: GoalState): string {
-	return (
-		state.phase_boundary.compact_custom_instructions ??
-		[
-			`Summarize the current Bravo goal session for goal ${state.goal.id}.`,
-			"Preserve completed task evidence, active task status, blockers, and next action.",
-			"Do not invent completion claims. Treat state.yaml and receipts as authoritative.",
-		].join("\n")
-	);
+	if (state.phase_boundary.compact_custom_instructions) {
+		return state.phase_boundary.compact_custom_instructions;
+	}
+	const nextTask = state.active_task ? state.tasks.find((task) => task.id === state.active_task) : null;
+	return [
+		`Preserve the Bravo goal context for ${state.goal.id}.`,
+		"Focus on context that will help with the next worker task, not stale exploration.",
+		nextTask ? `Preview the next task: ${nextTask.id} — ${nextTask.title}.` : "There is no active next task; preserve final-audit or verification context if relevant.",
+		"Preserve completed task evidence, active task status, blockers, relevant files changed, commands run, and the next concrete action.",
+		"Do not invent completion claims. Treat state.yaml and receipts as authoritative.",
+	].join("\n");
 }
 
 function boundaryFromSeverity(severity: GoalTask["context_switch_severity"]): Exclude<BoundaryMode, "inherit"> {

@@ -7,6 +7,7 @@ import { discoverWorkspaceRoot, scaffoldGoalWorkspace } from "../src/workspace.j
 import { applyJudgeVerdict, createGoalState, loadGoalState, markJudgeStarted, markWorkerReceiptReady, saveGoalState } from "../src/state.js";
 import { checkGoal } from "../src/checker.js";
 import { parseReceiptMarkdown, validateReceipt } from "../src/receipts.js";
+import { renderCompactInstructions, selectNextBoundary } from "../src/phase-boundary.js";
 
 async function tempRoot(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "bravo-goals-"));
@@ -117,6 +118,27 @@ test("state machine transitions worker receipt through passing judge verdict", (
 	assert.equal(state.tasks[1]?.status, "active");
 	assert.equal(state.active_task, "two");
 	assert.deepEqual(state.progress, { completed_tasks: 1, total_tasks: 2 });
+});
+
+test("boundary selection can use 45 percent context usage rule", () => {
+	const state = createGoalState({
+		id: "context-rule",
+		title: "Context Rule",
+		tasks: [{ id: "next", title: "Next useful task" }],
+	});
+	const task = state.tasks[0]!;
+	assert.deepEqual(selectNextBoundary(state, task, { contextUsagePercent: 44 }), {
+		mode: "carry",
+		reason: "context_usage",
+		message: "selected carry from context usage 44% with 45% threshold",
+	});
+	assert.deepEqual(selectNextBoundary(state, task, { contextUsagePercent: 45 }), {
+		mode: "compact",
+		reason: "context_usage",
+		message: "selected compact from context usage 45% with 45% threshold",
+	});
+	assert.match(renderCompactInstructions(state), /Focus on context that will help with the next worker task/);
+	assert.match(renderCompactInstructions(state), /Preview the next task: next — Next useful task/);
 });
 
 test("archive gates require final audit, user verification, and detached session", async () => {

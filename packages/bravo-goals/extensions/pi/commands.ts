@@ -14,7 +14,7 @@ import {
 } from "../../src/prompts.js";
 import { exists as pathExists, listGoals, recordUserVerification } from "../../src/runtime.js";
 import { bravoWorkspacePaths, discoverWorkspaceRoot, initBravoWorkspace, scaffoldGoalWorkspace } from "../../src/workspace.js";
-import { markBoundaryApplied, normalizeBoundaryMode, selectNextBoundary } from "../../src/phase-boundary.js";
+import { markBoundaryApplied, normalizeBoundaryMode, renderCompactInstructions, selectNextBoundary } from "../../src/phase-boundary.js";
 import type { GoalState } from "../../src/types.js";
 import { clearHud, readActiveGoals, readGoalState, updateHud, type ActiveGoalEntry, type GoalStateView } from "./hud.js";
 
@@ -477,7 +477,10 @@ function controllerResumeSnapshot(goal: GoalRecord, reason: string | null): stri
 }
 
 function compactInstructions(goal: GoalRecord): string {
-	return `Preserve the Bravo goal context for ${goal.id}. Include the active task, current blockers, receipt status, relevant files changed, and next action. The durable source of truth remains ${relPath(process.cwd(), goal.path)}.`;
+	return [
+		renderCompactInstructions(goal.state as unknown as GoalState),
+		`Durable source of truth: ${relPath(process.cwd(), goal.path)}.`,
+	].join("\n");
 }
 
 function boundaryFromFlags(flags: Map<string, string | boolean>): Exclude<BoundaryMode, "checkpoint_only"> {
@@ -681,7 +684,8 @@ async function handleGoal(pi: ExtensionAPI, runtime: CommandRuntime, args: strin
 		if (!completedTask) {
 			throw new Error("next boundary requires judge.last_receipt to match a completed task Judge receipt");
 		}
-		const selection = selectNextBoundary(fullState, completedTask, { override });
+		const contextUsagePercent = override ? null : (ctx.getContextUsage()?.percent ?? null);
+		const selection = selectNextBoundary(fullState, completedTask, { override, contextUsagePercent });
 		const updated = markBoundaryApplied(fullState, selection);
 		await writeYaml(join(goal.path, "state.yaml"), updated);
 		const boundaryGoal = { ...goal, state: updated as unknown as GoalStateView };

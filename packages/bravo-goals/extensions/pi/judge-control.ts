@@ -79,6 +79,7 @@ const TaskReceiptReadyParams = Type.Object({
 interface ToolContextLike {
 	cwd?: string;
 	compact?: (options?: { customInstructions?: string; onComplete?: () => void }) => void;
+	getContextUsage?: () => { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
 	shutdown?: () => void;
 	model?: unknown;
 	sessionManager?: {
@@ -665,7 +666,8 @@ async function queueAfterJudge(pi: ExtensionAPI, result: ReceiptReadyResult, out
 		return;
 	}
 	const completedTask = state.tasks.find((task) => task.id === result.taskId) ?? null;
-	const selection = selectNextBoundary(state, completedTask);
+	const contextUsagePercent = ctx?.getContextUsage?.()?.percent ?? null;
+	const selection = selectNextBoundary(state, completedTask, { contextUsagePercent });
 	const stateWithBoundary = markBoundaryApplied(state, selection);
 	await writeGoalState(result.goalDir, stateWithBoundary);
 	if (selection.mode === "compact" && typeof ctx?.compact === "function") {
