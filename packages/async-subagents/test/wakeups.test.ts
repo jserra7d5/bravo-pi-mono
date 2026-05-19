@@ -18,8 +18,8 @@ function workspace() {
 
 function createCompletedRun(store: RunStore, cwd: string, parentRunId: string): string {
   const { runId } = store.createRunDirectory({ cwd, parentRunId, rootSessionId: parentRunId });
-  store.writeStatus(
-    createInitialStatus({
+  store.writeStatus({
+    ...createInitialStatus({
       runId,
       parentRunId,
       rootSessionId: parentRunId,
@@ -30,7 +30,8 @@ function createCompletedRun(store: RunStore, cwd: string, parentRunId: string): 
       cwd,
       state: "completed",
     }),
-  );
+    resultReady: true,
+  });
   store.writeResult(createRunResult({ runId, parentRunId, agentName: "scout", state: "completed", summary: "Done" }));
   writeDeliverySubscription(store, {
     schemaVersion: SCHEMA_VERSION,
@@ -106,6 +107,31 @@ test("markWakeupHandled suppresses terminal result before watcher delivery", () 
   assert.equal(pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" }).length, 0);
 });
 
+test("pollWakeups does not redeliver durable results after collection clears readiness", () => {
+  const { root, store } = workspace();
+  const runId = createCompletedRun(store, root, "root_test");
+  acquireRootSessionLease({ cwd: root, rootSessionId: "root_test", ownerId: "owner_a", ttlMs: 10_000 });
+  markWakeupHandled(store, "root_test", runId);
+  const status = store.readStatus(runId);
+  store.writeStatus({ ...status, resultReady: false });
+
+  assert.equal(store.readResult(runId)?.summary, "Done");
+  assert.equal(pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" }).length, 0);
+});
+
+test("model follow-up polling skips terminal results before claiming them", () => {
+  const { root, store } = workspace();
+  createCompletedRun(store, root, "root_test");
+  acquireRootSessionLease({ cwd: root, rootSessionId: "root_test", ownerId: "owner_a", ttlMs: 10_000 });
+
+  const modelPoll = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a", modelFollowUpOnly: true });
+  assert.equal(modelPoll.length, 0);
+
+  const normalPoll = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" });
+  assert.equal(normalPoll.length, 1);
+  assert.match(normalPoll[0]?.deliveryKey ?? "", /^terminal:/);
+});
+
 test("pollWakeups remaps a question event onto waiting_for_input so the wake card badge picks 'needs you'", () => {
   const { root, store } = workspace();
   const parentRunId = "root_test";
@@ -143,7 +169,7 @@ test("pollWakeups remaps a question event onto waiting_for_input so the wake car
   });
   acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
 
-  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", modelFollowUpOnly: true });
   assert.equal(deliveries.length, 1);
   // The crux: event.type is "question" but the wake message state is "waiting_for_input" so
   // wake-card glyph/badge selection lights up amber instead of plain `?`.

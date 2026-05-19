@@ -316,6 +316,10 @@ function isDoneState(state: string | undefined): boolean {
   return state === "completed" || state === "cancelled" || state === "expired";
 }
 
+function isTerminalWidgetState(state: string | undefined): boolean {
+  return state === "completed" || state === "failed" || state === "cancelled" || state === "expired";
+}
+
 export type WidgetLayout = "full" | "no-role" | "minimal";
 
 export function pickWidgetLayout(width: number): WidgetLayout {
@@ -332,11 +336,12 @@ export interface WidgetRowInput {
   age?: string;
   urgent?: boolean;
   done?: boolean;
+  resultReady?: boolean;
 }
 
 export function renderWidgetRow(width: number, ch: Chrome, r: WidgetRowInput): string {
   const layout = pickWidgetLayout(width);
-  const gl = stateGlyph(r.state);
+  const gl = stateGlyph(r.state, r.resultReady);
   const urgent = Boolean(r.urgent) || isUrgentState(r.state);
   const done = Boolean(r.done) || isDoneState(r.state);
   const cappedName = capName(r.displayName);
@@ -398,9 +403,9 @@ function headerBadgeFits(width: number, title: string, badge: string): boolean {
 export function renderWidgetCard(input: WidgetCardInput): string[] {
   const width = input.width;
   const ch = chrome(width);
-  const activeCount = input.rows.filter((r) => !(r.done || isDoneState(r.state))).length;
+  const activeCount = input.rows.filter((r) => !isTerminalWidgetState(r.state) && !(r.done || isDoneState(r.state))).length;
   const urgentCount = input.rows.filter((r) => r.urgent || isUrgentState(r.state)).length;
-  const readyCount = input.rows.filter((r) => r.state === "completed" || r.state === "result_ready").length;
+  const readyCount = input.rows.filter((r) => r.resultReady || r.state === "result_ready").length;
   const baseSegments = [
     activeCount ? `${ANSI.cyan}${activeCount} active${ANSI.reset}` : "",
     urgentCount ? `${ANSI.amber}${urgentCount} need you${ANSI.reset}` : "",
@@ -445,6 +450,7 @@ export function widgetRowFromSummary(row: RunSummaryRow, now = Date.now()): Widg
     age,
     urgent: isUrgentState(row.state),
     done: isDoneState(row.state),
+    resultReady: row.resultReady,
   };
 }
 

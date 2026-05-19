@@ -1,6 +1,7 @@
 import { RunStore } from "../../src/runStore.js";
 import { readWatcherSnapshot, type RunSummaryRow } from "../../src/watcher.js";
 import { renderWidgetCard, widgetRowFromSummary, type WidgetRowInput } from "./renderers.js";
+import { isResultWakeupCurrent } from "./wakeups.js";
 
 export interface LiveWidgetInput {
   store: RunStore;
@@ -48,12 +49,20 @@ interface BuildResult {
   totalCost: number | undefined;
 }
 
+function rowWithCurrentResultReady(input: LiveWidgetInput, row: RunSummaryRow): RunSummaryRow {
+  if (!row.resultReady || !row.result) return row;
+  const parentRunId = input.parentRunId ?? row.result.parentRunId;
+  if (isResultWakeupCurrent(input.store, parentRunId, row.runId, row.result)) return row;
+  return { ...row, resultReady: false };
+}
+
 function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVisibleMs: number): BuildResult {
   const snapshot = readWatcherSnapshot(input.store, {
     parentRunId: input.parentRunId,
     rootSessionId: input.rootSessionId,
   });
   const rows = snapshot.rows
+    .map((row) => rowWithCurrentResultReady(input, row))
     .filter((row) => visible(row, now, terminalCompletedVisibleMs))
     .sort((a, b) => rowPriority(a) - rowPriority(b) || b.updatedAt.localeCompare(a.updatedAt));
   let total = 0;

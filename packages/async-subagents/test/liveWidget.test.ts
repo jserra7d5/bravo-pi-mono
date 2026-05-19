@@ -4,8 +4,10 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { renderLiveWidget, updateLiveWidget } from "../extensions/pi/liveWidget.js";
+import { markWakeupHandled } from "../extensions/pi/wakeups.js";
 import { visWidth } from "../extensions/pi/renderers.js";
 import { RunStore } from "../src/runStore.js";
+import { createRunResult } from "../src/result.js";
 import { createInitialStatus } from "../src/status.js";
 import type { RunMetrics, RunState } from "../src/types.js";
 
@@ -90,6 +92,18 @@ test("live widget shows the need-you count when an urgent run is present", () =>
   assert.ok(header.includes("active"));
   assert.ok(header.includes("1 need you"));
   assert.ok(header.includes("1 ready"));
+});
+
+test("live widget does not count collected completed results as ready", () => {
+  const w = workspace();
+  const runId = addRun({ ...w, displayName: "Sam", state: "completed", summary: "done" });
+  w.store.writeResult(createRunResult({ runId, parentRunId: w.parentRunId, agentName: "scout", displayName: "Sam", state: "completed", summary: "done" }));
+  markWakeupHandled(w.store, w.parentRunId, runId);
+
+  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
+  const body = lines.map(stripAnsi).join("\n");
+  assert.ok(body.includes("@Sam"));
+  assert.ok(!stripAnsi(lines[0]).includes("ready"));
 });
 
 test("live widget chrome holds a constant width across all rendered lines", () => {

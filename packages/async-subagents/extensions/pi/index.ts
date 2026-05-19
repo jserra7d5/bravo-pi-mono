@@ -10,7 +10,7 @@ import { clearLiveWidget, updateLiveWidget } from "./liveWidget.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
 import { registerSubagentTools, type ToolRuntime } from "./tools.js";
-import { isWakeupKeyHandled, pollWakeups } from "./wakeups.js";
+import { isResultWakeupCurrent, isWakeupKeyHandled, pollWakeups } from "./wakeups.js";
 
 const OWNER_ID = `pi-${process.pid}-${Date.now().toString(36)}`;
 const roots = new Map<string, RootSessionIdentity>();
@@ -67,7 +67,7 @@ function pollAndSendWakeups(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const cwd = cwdOf(ctx);
   const identity = ensureRoot(cwd);
   const store = new RunStore({ cwd });
-  for (const delivery of pollWakeups({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, ownerId: OWNER_ID })) {
+  for (const delivery of pollWakeups({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, ownerId: OWNER_ID, modelFollowUpOnly: true })) {
     if (isWakeupKeyHandled(store, identity.parentRunId, delivery.deliveryKey)) continue;
     sendWakeup(pi, delivery.message);
   }
@@ -160,6 +160,11 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   pi.registerMessageRenderer("async-subagent-message", (message: unknown, options: unknown, theme: unknown): Component => {
     const details = (message as { details?: WakeupMessage })?.details;
     if (!details) return new Text("", 0, 0);
+    if (details.result && currentCtx) {
+      const store = new RunStore({ cwd: cwdOf(currentCtx) });
+      const parentRunId = details.result.parentRunId;
+      if (!isResultWakeupCurrent(store, parentRunId, details.runId, details.result)) return new Text("", 0, 0);
+    }
     return renderSubagentWakeMessageComponent(details, options as { expanded?: boolean }, theme as { fg?: (name: string, value: string) => string });
   });
 

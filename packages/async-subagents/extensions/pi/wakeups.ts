@@ -22,6 +22,7 @@ export interface WakeupPollInput {
   ownerId: string;
   nowMs?: number;
   limit?: number;
+  modelFollowUpOnly?: boolean;
 }
 
 export interface WakeupDelivery {
@@ -122,10 +123,27 @@ function statusForRun(store: RunStore, runId: string): { agentName?: string; dis
   }
 }
 
-function pendingForRun(store: RunStore, runId: string, notifyOn?: EventType[]): WakeupDelivery[] {
+function isActionableModelWakeup(delivery: WakeupDelivery): boolean {
+  const eventType = delivery.message.event?.type;
+  return eventType === "question" || eventType === "blocked";
+}
+
+export function isResultWakeupCurrent(store: RunStore, parentRunId: string, runId: string, result: RunResult): boolean {
+  if (isWakeupKeyHandled(store, parentRunId, resultDeliveryKey(runId, result))) return false;
+  try {
+    const status = store.readStatus(runId);
+    if (status.resultReady === false) return false;
+  } catch {
+    // If status recovery fails, fall back to handled-state only so durable results
+    // can still be delivered instead of being lost.
+  }
+  return true;
+}
+
+function pendingForRun(store: RunStore, parentRunId: string, runId: string, notifyOn?: EventType[]): WakeupDelivery[] {
   const allowed = notifyOn ? new Set(notifyOn) : undefined;
   const result = store.readResult(runId);
-  if (result && (!allowed || allowed.has("result") || allowed.has(result.state))) return [resultDelivery(runId, result)];
+  if (result && isResultWakeupCurrent(store, parentRunId, runId, result) && (!allowed || allowed.has("result") || allowed.has(result.state))) return [resultDelivery(runId, result)];
   const events = store.readEvents(runId).records.filter((event) => isInterestingEvent(event.type, event.wake) && (!allowed || allowed.has(event.type)));
   const status = events.length ? statusForRun(store, runId) : undefined;
   return events
@@ -202,7 +220,8 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
     : [];
   for (const record of records) {
     const subscription = subscriptions.get(record.runId);
-    for (const delivery of pendingForRun(input.store, record.runId, subscription?.notifyOn)) {
+    for (const delivery of pendingForRun(input.store, input.parentRunId, record.runId, subscription?.notifyOn)) {
+      if (input.modelFollowUpOnly && !isActionableModelWakeup(delivery)) continue;
       if (state.delivered[delivery.deliveryKey] || state.handled[delivery.deliveryKey]) continue;
       if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) continue;
       if (isWakeupKeyHandled(input.store, input.parentRunId, delivery.deliveryKey)) continue;

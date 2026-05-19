@@ -150,13 +150,25 @@ test("widget header counts active/urgent/ready in their semantic colors and omit
     rows: [
       { displayName: "a", role: "r", state: "running", summary: "x" },
       { displayName: "b", role: "r", state: "waiting_for_input", summary: "y", urgent: true },
-      { displayName: "c", role: "r", state: "completed", summary: "z", done: true },
+      { displayName: "c", role: "r", state: "completed", summary: "z", done: true, resultReady: true },
     ],
   });
   const header = card[0];
   assert.ok(header.includes(`${cyan}2 active`));
   assert.ok(header.includes(`${amber}1 need you`));
   assert.ok(header.includes(`${gold}1 ready`));
+});
+
+test("widget header treats unread failed results as ready but not active", () => {
+  const card = renderWidgetCard({
+    width: 72,
+    rows: [
+      { displayName: "fail", role: "reviewer", state: "failed", summary: "boom", resultReady: true },
+    ],
+  });
+  const header = stripAnsi(card[0]);
+  assert.ok(header.includes("1 ready"));
+  assert.ok(!header.includes("active"));
 });
 
 test("card chrome holds its box at widths 72, 56, 44, and 32", () => {
