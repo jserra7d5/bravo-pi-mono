@@ -4,6 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from "../extensions/pi/compactionReminder.js";
+import { markWakeupHandled } from "../extensions/pi/wakeups.js";
 import { createRunResult } from "../src/result.js";
 import { RunStore } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
@@ -66,4 +67,14 @@ test("compaction reminder preserves active, blocked, and result-ready subagent s
   assert.equal(reminder?.details.waiting, 1);
   assert.equal(reminder?.details.resultReady, 1);
   assert.equal(reminder?.details.rows.length, 3);
+});
+
+test("compaction reminder omits terminal results after they are collected", () => {
+  const w = workspace();
+  const completed = addRun({ ...w, displayName: "Mira", state: "completed", summary: "review done", resultReady: true });
+  w.store.writeResult(createRunResult({ runId: completed, parentRunId: w.parentRunId, agentName: "scout", displayName: "Mira", state: "completed", summary: "review done" }));
+
+  markWakeupHandled(w.store, w.parentRunId, completed);
+
+  assert.equal(buildCompactionReminder({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId }), undefined);
 });

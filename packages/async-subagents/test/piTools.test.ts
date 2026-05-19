@@ -166,6 +166,7 @@ test("subagent_result can recover by runDir", async () => {
   assert.equal(result.isError, undefined);
   assert.equal(result.details.body, "Recovered result");
   assert.equal(result.details.runDir, runDir);
+  assert.equal(store.readStatus(w.runId).resultReady, false);
 });
 
 test("subagent_status reports result and status mismatches", async () => {
@@ -223,6 +224,7 @@ test("subagent_wait returns usable result bodies with truncation metadata", asyn
   assert.equal(ready.bodyTruncation?.originalBytes, 16);
   assert.equal(ready.bodyTruncation?.returnedBytes, 8);
   assert.equal(ready.bodyTruncation?.maxBytes, 8);
+  assert.equal(store.readStatus(w.runId).resultReady, false);
 });
 
 test("subagent_wait omits model-facing bodies when includeResult is false", async () => {
@@ -270,4 +272,5 @@ test("subagent_result returns body with truncation metadata", async () => {
   assert.match(result.content[0]?.text ?? "", /Body truncated: 8 of 16 bytes returned/);
   assert.deepEqual((result.details.bodyTruncation as { truncated?: boolean; returnedBytes?: number; maxBytes?: number }).truncated, true);
   assert.equal((result.details.bodyTruncation as { returnedBytes?: number }).returnedBytes, 8);
+  assert.equal(store.readStatus(w.runId).resultReady, false);
 });

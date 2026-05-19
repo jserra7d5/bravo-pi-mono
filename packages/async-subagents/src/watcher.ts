@@ -50,7 +50,7 @@ function latestInterestingEvent(store: RunStore, runId: string): RunEvent | unde
 }
 
 function priority(row: RunSummaryRow): number {
-  if (row.resultReady || row.result) return 0;
+  if (row.resultReady) return 0;
   if (row.state === "blocked" || row.state === "waiting_for_input") return 1;
   if (!isTerminalRunState(row.state)) return 2;
   return 3;
@@ -89,7 +89,7 @@ export function readWatcherSnapshot(store: RunStore, input: ReadWatcherSnapshotI
   return {
     activeRunIds: rows.filter((row) => !isTerminalRunState(row.state) && row.state !== "blocked" && row.state !== "waiting_for_input").map((row) => row.runId),
     blockedRunIds: rows.filter((row) => row.state === "blocked" || row.state === "waiting_for_input").map((row) => row.runId),
-    resultReadyRunIds: rows.filter((row) => row.resultReady || Boolean(row.result)).map((row) => row.runId),
+    resultReadyRunIds: rows.filter((row) => row.resultReady).map((row) => row.runId),
     rows: limitedRows,
   };
 }

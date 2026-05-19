@@ -1,6 +1,7 @@
 import { isTerminalRunState } from "../../src/schemas.js";
 import { RunStore } from "../../src/runStore.js";
 import { readWatcherSnapshot, type RunSummaryRow } from "../../src/watcher.js";
+import { isWakeupKeyHandled, resultDeliveryKey } from "./wakeups.js";
 
 export const ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE = "async-subagent-compaction-status";
 
@@ -35,8 +36,15 @@ export interface CompactionReminderMessage {
   details: CompactionReminderDetails;
 }
 
-function needsReminder(row: RunSummaryRow): boolean {
-  return !isTerminalRunState(row.state) || row.resultReady || Boolean(row.result);
+function unreadResult(input: CompactionReminderInput, row: RunSummaryRow): boolean {
+  if (!row.result) return row.resultReady;
+  const parentRunId = input.parentRunId ?? row.result.parentRunId;
+  if (isWakeupKeyHandled(input.store, parentRunId, resultDeliveryKey(row.runId, row.result))) return false;
+  return row.resultReady || Boolean(row.result);
+}
+
+function needsReminder(input: CompactionReminderInput, row: RunSummaryRow): boolean {
+  return !isTerminalRunState(row.state) || unreadResult(input, row);
 }
 
 function shortText(value: string | undefined, max = 120): string | undefined {
@@ -67,7 +75,7 @@ export function buildCompactionReminder(input: CompactionReminderInput): Compact
     parentRunId: input.parentRunId,
     rootSessionId: input.rootSessionId,
   });
-  const rows = snapshot.rows.filter(needsReminder);
+  const rows = snapshot.rows.filter((row) => needsReminder(input, row));
   if (!rows.length) return undefined;
 
   const maxRows = input.maxRows ?? 6;
@@ -75,7 +83,7 @@ export function buildCompactionReminder(input: CompactionReminderInput): Compact
   const omitted = Math.max(0, rows.length - shown.length);
   const active = rows.filter((row) => !isTerminalRunState(row.state) && row.state !== "blocked" && row.state !== "waiting_for_input").length;
   const waiting = rows.filter((row) => row.state === "blocked" || row.state === "waiting_for_input").length;
-  const resultReady = rows.filter((row) => row.resultReady || Boolean(row.result)).length;
+  const resultReady = rows.filter((row) => unreadResult(input, row)).length;
 
   const counts = [
     active ? `${active} active` : "",
@@ -107,7 +115,7 @@ export function buildCompactionReminder(input: CompactionReminderInput): Compact
         agentName: row.agentName,
         state: row.state,
         summary: shortText(row.needs ?? row.summary ?? row.event?.summary ?? row.result?.summary),
-        resultReady: row.resultReady || Boolean(row.result),
+        resultReady: unreadResult(input, row),
       })),
     },
   };

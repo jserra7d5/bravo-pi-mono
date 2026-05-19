@@ -15,7 +15,7 @@ import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageTy
 import { waitSubagents } from "../../src/wait.js";
 import { finalizeTerminalRun } from "../../src/lifecycle.js";
 import { readParentPiSessionRef } from "../../src/piSession.js";
-import { eventDeliveryKey, markWakeupHandled, markWakeupKeyHandled, resultDeliveryKey, writeDeliverySubscription } from "./wakeups.js";
+import { eventDeliveryKey, markWakeupHandled, markWakeupKeyHandled, writeDeliverySubscription } from "./wakeups.js";
 import {
   subagentContinueSchema,
   subagentInterruptSchema,
@@ -241,6 +241,17 @@ function shapeResult(result: RunResult, maxBytes: number, includeBody = true): R
   return { ...result, body: body.body, bodyTruncation: body.bodyTruncation };
 }
 
+function markResultCollected(store: RunStore, parentRunId: string, runId: string): void {
+  markWakeupHandled(store, parentRunId, runId);
+  try {
+    const status = store.readStatus(runId);
+    if (status.resultReady) store.writeStatus(updateRunStatus(status, { resultReady: false }));
+  } catch {
+    // Best-effort cleanup: result reads should not fail just because a recovered
+    // runDir is missing from this workspace's status index.
+  }
+}
+
 function compactEvents(events: unknown[], maxEvents: number): unknown[] {
   return events.length <= maxEvents ? events : events.slice(0, maxEvents);
 }
@@ -428,7 +439,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           includeResult,
         });
         for (const event of result.events) markWakeupKeyHandled(store, parentRunId, eventDeliveryKey(event));
-        for (const readyResult of result.results) markWakeupKeyHandled(store, parentRunId, resultDeliveryKey(readyResult.runId, readyResult));
+        for (const readyResult of result.results) markResultCollected(store, parentRunId, readyResult.runId);
         result.events = compactEvents(result.events, maxEvents) as typeof result.events;
         const shapedResults = result.results.map((readyResult) => shapeResult(readyResult, maxBytes, includeResult));
         const details = {
@@ -570,7 +581,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const store = storeFor(cwd);
         const { runId, runDir, result } = resultFromParams(store, cwd, params);
         if (!result) return response(summarizeRunResult(undefined, runId), { code: "RESULT_NOT_READY", runId }, true);
-        markWakeupHandled(store, root.parentRunId, runId);
+        markResultCollected(store, result.parentRunId ?? root.parentRunId, runId);
         const includeBody = params.includeBody !== false;
         const includeArtifacts = params.includeArtifacts !== false;
         const maxBytes = typeof params.maxBytes === "number" ? params.maxBytes : 64_000;
