@@ -7,7 +7,7 @@ import { renderHud, renderStatusLine, snapshotForSession, type HudSnapshot } fro
 import { testables } from "../extensions/pi/commands.js";
 import { registerGoalValidationTools } from "../extensions/pi/goal-validation.js";
 import { registerJudgeControlTools } from "../extensions/pi/judge-control.js";
-import bravoGoalsPiExtension from "../extensions/pi/index.js";
+import bravoGoalsPiExtension, { testables as extensionTestables } from "../extensions/pi/index.js";
 import { scaffoldGoalWorkspace } from "../src/workspace.js";
 import { readActiveGoalsIndex, readGoalState, upsertActiveGoal, writeGoalState } from "../src/runtime.js";
 import { createJudgeRun, updateJudgeRunStatus, writeJudgeVerdict, type JudgeVerdictFile } from "../src/judge-runner.js";
@@ -1118,12 +1118,131 @@ test("agent_end watchdog queues idle recovery prompt rather than cold-start work
 		sessionManager: { getSessionId: () => "pi_idle" },
 		ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
 	});
+	await waitForWatchdog();
 
 	assert.equal(prompts.length, 1);
 	assert.match(prompts[0]!, /Recover Bravo goal/);
 	assert.match(prompts[0]!, /not a fresh task start/);
 	assert.match(prompts[0]!, /first diagnose why the prior turn stopped/);
 	assert.doesNotMatch(prompts[0]!, /This is a fresh worker-start prompt/);
+});
+
+test("agent_end watchdog rechecks state after deferred scheduling before sending", async () => {
+	const previousDelay = process.env.BRAVO_GOALS_IDLE_RECOVERY_DEFER_MS;
+	process.env.BRAVO_GOALS_IDLE_RECOVERY_DEFER_MS = "100";
+	try {
+		const { root, goalPath } = await createTwoTaskReceiptGoal("idle-scheduled-stale", "pi_idle_scheduled_stale");
+		const handlers = new Map<string, (event: unknown, ctx: any) => Promise<void> | void>();
+		const prompts: string[] = [];
+		bravoGoalsPiExtension({
+			registerCommand: () => {},
+			registerTool: () => {},
+			registerMessageRenderer: () => {},
+			on: (event: string, handler: (event: unknown, ctx: any) => Promise<void> | void) => {
+				handlers.set(event, handler);
+			},
+			sendMessage: (message: { content?: string }) => {
+				prompts.push(message.content ?? "");
+			},
+		} as any);
+		const handler = handlers.get("agent_end");
+		assert.ok(handler, "agent_end handler registered");
+		await handler({}, {
+			cwd: root,
+			hasPendingMessages: () => false,
+			sessionManager: { getSessionId: () => "pi_idle_scheduled_stale" },
+			ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+		});
+
+		const state = await readGoalState(goalPath);
+		state.tasks = state.tasks.map((task) => {
+			if (task.id === "task-one") return { ...task, status: "done" };
+			if (task.id === "task-two") return { ...task, status: "active" };
+			return task;
+		});
+		state.active_task = "task-two";
+		await writeGoalState(goalPath, state);
+		await upsertActiveGoal(root, {
+			goal_id: "idle-scheduled-stale",
+			path: ".bravo/goals/idle-scheduled-stale",
+			pi_session_id: "pi_idle_scheduled_stale",
+			status: "active",
+			active_task: "task-two",
+		});
+
+		await waitForWatchdog(125);
+		assert.equal(prompts.length, 0);
+	} finally {
+		if (previousDelay === undefined) delete process.env.BRAVO_GOALS_IDLE_RECOVERY_DEFER_MS;
+		else process.env.BRAVO_GOALS_IDLE_RECOVERY_DEFER_MS = previousDelay;
+	}
+});
+
+test("idle recovery skips stale prompt when durable active task advances before send", async () => {
+	const { root, goalPath } = await createTwoTaskReceiptGoal("idle-stale", "pi_idle_stale");
+	const prompts: string[] = [];
+	const ctx = {
+		cwd: root,
+		hasPendingMessages: () => false,
+		sessionManager: { getSessionId: () => "pi_idle_stale" },
+		ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+	} as any;
+	const candidate = await extensionTestables.collectIdleRecoveryCandidate(ctx);
+	assert.ok(candidate);
+
+	const state = await readGoalState(goalPath);
+	state.tasks = state.tasks.map((task) => {
+		if (task.id === "task-one") return { ...task, status: "done" };
+		if (task.id === "task-two") return { ...task, status: "active" };
+		return task;
+	});
+	state.active_task = "task-two";
+	await writeGoalState(goalPath, state);
+	await upsertActiveGoal(root, {
+		goal_id: "idle-stale",
+		path: ".bravo/goals/idle-stale",
+		pi_session_id: "pi_idle_stale",
+		status: "active",
+		active_task: "task-two",
+	});
+
+	await extensionTestables.sendIdleRecoveryIfStillCurrent({
+		sendMessage: (message: { content?: string }) => prompts.push(message.content ?? ""),
+	} as any, ctx, candidate);
+
+	assert.equal(prompts.length, 0);
+});
+
+test("idle recovery does not emit worker instructions after goal is already done", async () => {
+	const { root, goalPath } = await createActiveReceiptGoal("idle-done", "pi_idle_done");
+	const prompts: string[] = [];
+	const ctx = {
+		cwd: root,
+		hasPendingMessages: () => false,
+		sessionManager: { getSessionId: () => "pi_idle_done" },
+		ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+	} as any;
+	const candidate = await extensionTestables.collectIdleRecoveryCandidate(ctx);
+	assert.ok(candidate);
+
+	const state = await readGoalState(goalPath);
+	state.tasks = state.tasks.map((task) => ({ ...task, status: "done" }));
+	state.active_task = null;
+	state.goal.status = "done";
+	await writeGoalState(goalPath, state);
+	await upsertActiveGoal(root, {
+		goal_id: "idle-done",
+		path: ".bravo/goals/idle-done",
+		pi_session_id: "pi_idle_done",
+		status: "done",
+		active_task: null,
+	});
+
+	await extensionTestables.sendIdleRecoveryIfStillCurrent({
+		sendMessage: (message: { content?: string }) => prompts.push(message.content ?? ""),
+	} as any, ctx, candidate);
+
+	assert.equal(prompts.length, 0);
 });
 
 async function createActiveReceiptGoal(goalId: string, sessionId: string): Promise<{ root: string; goalPath: string }> {
@@ -1330,6 +1449,10 @@ async function withFakeJudges<T>(taskVerdict: "pass" | "fail" | "needs_more_evid
 
 function stripAnsi(value: string): string {
 	return value.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+async function waitForWatchdog(ms = 5): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function exists(path: string): Promise<boolean> {

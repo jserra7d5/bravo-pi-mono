@@ -62,7 +62,10 @@ Install or load the package as a Pi extension, then use:
 ```
 
 The extension renders a footer status and a below-editor HUD from
-`state.yaml` plus `.bravo/runtime/active-goals.yaml`.
+`state.yaml` plus `.bravo/runtime/active-goals.yaml`. Idle-recovery prompts are
+also gated by fresh durable state: the watchdog re-reads `state.yaml` before
+sending and suppresses recovery if the active task has advanced or the goal is
+complete.
 
 `/goal prep` is interactive. It creates a draft goal workspace, then queues a
 prep prompt that tells the agent to read the placeholders and talk with you
