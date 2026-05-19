@@ -227,9 +227,70 @@ export function modeBadgeText(mode: RenderedMode | undefined, language?: string)
   }
 }
 
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+function stripAnsi(str: string): string {
+  return str.replace(ANSI_RE, "");
+}
+
+function codePointWidth(codePoint: number): number {
+  if (codePoint === 0) return 0;
+  if (codePoint < 32 || (codePoint >= 0x7f && codePoint < 0xa0)) return 0;
+  if (codePoint >= 0x300 && codePoint <= 0x36f) return 0;
+  if (codePoint >= 0xfe00 && codePoint <= 0xfe0f) return 0;
+  if (codePoint === 0x200d) return 0;
+  if (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    (codePoint >= 0x2329 && codePoint <= 0x232a) ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1f300 && codePoint <= 0x1faff)
+  ) return 2;
+  return 1;
+}
+
 // Strip ANSI for width measurement.
 export function visWidth(str: string): number {
-  return str.replace(/\x1b\[[0-9;]*m/g, "").length;
+  let width = 0;
+  for (const char of stripAnsi(str)) width += codePointWidth(char.codePointAt(0) ?? 0);
+  return width;
+}
+
+function truncateToWidth(str: string, maxWidth: number): string {
+  if (maxWidth <= 0 || visWidth(str) <= maxWidth) return maxWidth <= 0 ? "" : str;
+  if (maxWidth === 1) return "…";
+  let out = "";
+  let width = 0;
+  let openAnsi = false;
+  for (let i = 0; i < str.length;) {
+    if (str[i] === "\x1b") {
+      ANSI_RE.lastIndex = i;
+      const match = ANSI_RE.exec(str);
+      if (match && match.index === i) {
+        out += match[0];
+        openAnsi = !match[0].endsWith("[0m");
+        i += match[0].length;
+        continue;
+      }
+    }
+    const codePoint = str.codePointAt(i) ?? 0;
+    const char = String.fromCodePoint(codePoint);
+    const charWidth = codePointWidth(codePoint);
+    if (width + charWidth > maxWidth - 1) break;
+    out += char;
+    width += charWidth;
+    i += char.length;
+  }
+  return `${out}${openAnsi ? ANSI.reset : ""}…`;
+}
+
+function fitLine(str: string, width: number): string {
+  return truncateToWidth(str, Math.max(0, width));
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -318,7 +379,7 @@ export function buildCardLines(width: number, spec: CardSpec): string[] {
     badgeFitsMin: BADGE_MIN,
   });
   const bottom = bottomRule(width, spec.idColor);
-  return [top, ...spec.bodyLines(width), bottom];
+  return [fitLine(top, width), ...spec.bodyLines(width).map((line) => fitLine(line, width)), fitLine(bottom, width)];
 }
 
 // ────────────────────────────────────────────────────────────────────────────

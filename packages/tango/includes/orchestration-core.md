@@ -4,6 +4,8 @@ Tango lets you delegate bounded work to child agents while keeping all agent pro
 
 Delegate only when it reduces complexity or enables useful parallelism. Prefer small, named child agents with clear tasks and expected outputs.
 
+External or potentially long-running commands must fail fast. Put explicit time bounds on tests, builds, package installs, git remotes, and network/API calls; disable interactive git/SSH prompts where practical; if a check cannot be safely bounded, skip it and report the reason instead of letting the workstream hang.
+
 Common roles:
 
 - `scout`: GPT-backed read-only discovery and evidence gathering.

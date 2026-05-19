@@ -20,7 +20,8 @@ Workflow:
 6. Dispatch implementation agents only with bounded scope, the `loom-implement` skill (or another specific Loom skill), review/validation expectations, mutation authority, and stop conditions.
 7. For multi-writer implementation, scope writers to distinct nodes/files/worktrees/branches; avoid overlapping edits unless a coordinator explicitly serializes integration.
 8. Require mutation summaries from every writer: files changed, Loom nodes/notes/inbox items updated, validation run, blockers, and handoff branch/diff location.
-9. Record results, blockers, validation, and review outcomes in Loom.
-10. Do not delete worktrees or branches without explicit approval.
+9. Require explicit fail-fast timeouts for tests, builds, git remotes, package installs, and network/API calls; disable interactive git/SSH prompts where practical, or record why an unsafe unbounded check was skipped.
+10. Record results, blockers, validation, and review outcomes in Loom.
+11. Do not delete worktrees or branches without explicit approval.
 
 Prefer integration worktrees for curated changes and worker worktrees for isolated attempts.

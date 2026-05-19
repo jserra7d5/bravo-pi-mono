@@ -309,6 +309,25 @@ test("diff mode body uses diff coloring helpers", () => {
   assert.ok(stripAnsi(middle).includes("added"), "diff body missing added line");
 });
 
+test("diff mode truncates long rendered rows to the component width", () => {
+  const diff = {
+    summary: "ok",
+    ok: true as const,
+    path: "feature.diff",
+    offset: 1,
+    endLine: 2,
+    lineCount: 2,
+    mode: "diff" as const,
+    body: `@@ -1 +1 @@\n+${"x".repeat(240)}`,
+  };
+  const width = 118;
+  const lines = renderCardForTest(diff, width);
+  for (const [index, line] of lines.entries()) {
+    assert.ok(visWidth(line) <= width, `line ${index} exceeds width: ${visWidth(line)} > ${width}`);
+  }
+  assert.ok(stripAnsi(lines.join("\n")).includes("…"), "expected truncated diff body marker");
+});
+
 test("plain mode body has gutter line numbers and no syntax highlighting", () => {
   const plain = {
     summary: "ok",

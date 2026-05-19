@@ -21,6 +21,7 @@ For implementation readiness, verify:
 - target repos, base branches/commits, and dirty state are known;
 - worktree plan is defined when needed;
 - validation commands/environment paths are known or explicitly deferred;
+- tests, builds, git remotes, package installs, and network/API checks have explicit fail-fast timeout expectations and noninteractive git/SSH behavior where practical;
 - review/validation path exists or is intentionally unnecessary;
 - blockers and assumptions are explicit.
 

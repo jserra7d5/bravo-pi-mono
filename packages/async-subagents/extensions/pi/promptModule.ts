@@ -20,6 +20,8 @@ After delegating, either do meaningful non-overlapping work or wait at a planned
 
 For implementation children, include allowed write scope and validation boundary in the task. For review children, include the exact diff, files, claim, or artifact being reviewed.
 
+When asking children to run tests, builds, git remote operations, package installs, or network/API calls, require explicit fail-fast timeouts and noninteractive git/SSH behavior where practical; if a check cannot be safely bounded, have the child skip it and report why.
+
 Use subagent display names in user-facing prose. Write names as \`@DisplayName\`, for example \`@Rex\` or \`@CT-7567\`, so the terminal can render them as agent mentions. Reserve run IDs for tool calls, debugging, or disambiguation.
 
 Subagent status events are control-plane information. Summarize them to the user only when they affect the answer, mark a meaningful checkpoint, need input, or explain a blocker.

@@ -255,6 +255,7 @@ function renderJudgeInstruction(taskPrompt: string): string {
 	return `${taskPrompt}
 
 Read the relevant goal files, receipts, and implementation files. Verify the claims with concrete file/command evidence.
+Use explicit fail-fast timeouts for tests, builds, git remote operations, package installs, and network/API calls; disable interactive git/SSH prompts where practical. If a check cannot be safely bounded, record it as missing or weak evidence instead of running it unbounded.
 You must finish by calling judge_finish with the verdict and the exact Judge receipt path from the prompt.
 Do not implement or fix code.`;
 }

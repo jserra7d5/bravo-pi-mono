@@ -32,6 +32,7 @@ Work only on the assigned task and bounded scope.
 Do not spawn child agents unless your effective recursion policy explicitly permits it.
 Report completion through your normal final answer.
 If you need parent input, call the subagent_event tool with type question or blocked.
+Apply explicit fail-fast timeouts to tests, builds, git remotes, package installs, and network/API calls; disable interactive git/SSH prompts where practical, or skip the check with a clear reason if it cannot be safely bounded.
 Respect all file and code safety instructions in the task.`;
 
 export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult {

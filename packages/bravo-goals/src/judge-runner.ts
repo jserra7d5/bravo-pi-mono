@@ -341,6 +341,7 @@ function defaultJudgeSystemPrompt(config: JudgeRunConfig): string {
 			? "Verify all task receipts, Judge receipts, implementation changes, tests, and architectural fit against the goal and context."
 			: "Verify the worker receipt against the task, goal criteria, and concrete evidence.",
 		"Do not perform implementation work.",
+		"External checks must fail fast: use explicit timeouts for tests, builds, git remotes, package installs, and network/API calls; disable interactive git/SSH prompts where practical, and treat unbounded checks as missing evidence rather than waiting indefinitely.",
 		"Write a machine verdict and a Markdown Judge receipt that agree.",
 		followUpLine,
 		unsafeLine,
