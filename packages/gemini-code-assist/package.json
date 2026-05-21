@@ -1,0 +1,33 @@
+{
+  "name": "@bravo/gemini-code-assist",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless Gemini Code Assist OAuth spike.",
+  "keywords": ["pi-package"],
+  "bin": {
+    "gemini-code-assist-spike": "./dist/src/spike.js"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "spike": "npm run build && node dist/src/spike.js",
+    "antigravity:proof": "npm run build && node dist/src/antigravity-proof.js",
+    "antigravity:login": "npm run build && node dist/src/antigravity-oauth-login.js",
+    "eval:reasoning-continuity": "npm run build && node dist/src/eval-reasoning-continuity.js",
+    "eval:tool-signature-continuity": "npm run build && node dist/src/eval-tool-signature-continuity.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions/pi"]
+  }
+}
