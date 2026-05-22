@@ -15,6 +15,7 @@ export function createInitialStatus(input: {
   agentSource: AgentDefinitionSource;
   definitionPath: string;
   mode: AgentMode;
+  variant?: string;
   model?: string;
   thinkingLevel?: ThinkingLevel;
   contextPolicy?: ContextPolicy;
@@ -46,7 +47,9 @@ export function createInitialStatus(input: {
       source: input.agentSource,
       definitionPath: input.definitionPath,
       mode: input.mode,
+      variant: input.variant,
     },
+    variant: input.variant,
     model: input.model,
     thinkingLevel: input.thinkingLevel,
     contextPolicy: input.contextPolicy ?? "fresh",

@@ -54,6 +54,7 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
     agentName: input.agentName,
     displayName: status.displayName,
     namePack: status.namePack,
+    variant: status.variant,
     model: status.model,
     thinkingLevel: status.thinkingLevel,
     contextPolicy: status.contextPolicy,

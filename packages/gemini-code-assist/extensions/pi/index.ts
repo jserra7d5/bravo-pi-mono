@@ -24,6 +24,7 @@ import {
   ANTIGRAVITY_SCOPES,
   antigravityMethodUrl,
   antigravityStreamUrl,
+  buildAntigravityHeaders,
   defaultAntigravityCredentialsPath,
   getAntigravityAccessToken,
   refreshAntigravityCredentials,
@@ -120,7 +121,7 @@ function convertTools(tools: Tool[] | undefined): Array<Record<string, unknown>>
 function thinkingConfig(options?: SimpleStreamOptions): Record<string, unknown> | undefined {
   switch (options?.reasoning) {
     case undefined:
-      return { includeThoughts: false, thinkingBudget: 0 };
+      return { includeThoughts: false, thinkingLevel: "HIGH" };
     case "minimal":
       return { includeThoughts: false, thinkingLevel: "MINIMAL" };
     case "low":
@@ -139,11 +140,7 @@ async function accessToken(options?: SimpleStreamOptions): Promise<string> {
 }
 
 function authHeaders(token: string): Record<string, string> {
-  return {
-    "Content-Type": "application/json",
-    "User-Agent": "antigravity/cli/1.0.0 linux/amd64",
-    Authorization: `Bearer ${token}`,
-  };
+  return buildAntigravityHeaders(token);
 }
 
 function mapStopReason(reason: string | undefined): "stop" | "length" | "error" {

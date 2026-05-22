@@ -64,11 +64,12 @@ export function antigravityStreamUrl(env: NodeJS.ProcessEnv = process.env): stri
   return `${antigravityMethodUrl('streamGenerateContent', env)}?alt=sse`;
 }
 
-function antigravityUserAgent(): string {
-  return `antigravity/cli/1.0.0 ${platform()}/${arch()}`;
+export function antigravityUserAgent(): string {
+  const goArch = arch() === 'x64' ? 'amd64' : arch();
+  return `antigravity/cli/1.0.0 ${platform()}/${goArch}`;
 }
 
-function buildHeaders(accessToken: string): Record<string, string> {
+export function buildAntigravityHeaders(accessToken: string): Record<string, string> {
   return {
     'Content-Type': 'application/json',
     'User-Agent': antigravityUserAgent(),
@@ -128,13 +129,23 @@ export async function getAntigravityAccessToken(path = defaultAntigravityCredent
 export async function resolveAntigravityProject(accessToken: string, fetchImpl: typeof fetch = fetch): Promise<string> {
   const response = await fetchImpl(antigravityMethodUrl('loadCodeAssist'), {
     method: 'POST',
-    headers: buildHeaders(accessToken),
+    headers: buildAntigravityHeaders(accessToken),
     body: JSON.stringify({ metadata: { ideType: 'ANTIGRAVITY' } }),
   });
   if (!response.ok) throw new Error(await errorMessageForResponse(response, 'Antigravity Code Assist setup'));
   const json = await response.json() as { cloudaicompanionProject?: string };
   if (!json.cloudaicompanionProject) throw new Error('Antigravity setup response did not include cloudaicompanionProject.');
   return json.cloudaicompanionProject;
+}
+
+export async function fetchAntigravityAvailableModels(accessToken: string, project: string, fetchImpl: typeof fetch = fetch): Promise<unknown> {
+  const response = await fetchImpl(antigravityMethodUrl('fetchAvailableModels'), {
+    method: 'POST',
+    headers: buildAntigravityHeaders(accessToken),
+    body: JSON.stringify({ project, requestId: `agent/pi/${Date.now()}/${randomUUID()}/models` }),
+  });
+  if (!response.ok) throw new Error(await errorMessageForResponse(response, 'Antigravity model metadata'));
+  return response.json();
 }
 
 export function buildAntigravityAgentRequest(prompt: string, project: string, options: Pick<AntigravityGenerateOptions, 'thinkingBudget' | 'includeThoughts' | 'thinkingLevel' | 'model' | 'requestType'> = {}): unknown {
@@ -174,7 +185,7 @@ export async function generateAntigravityText(options: AntigravityGenerateOption
   try {
     const response = await fetchImpl(antigravityStreamUrl(), {
       method: 'POST',
-      headers: buildHeaders(accessToken),
+      headers: buildAntigravityHeaders(accessToken),
       body: JSON.stringify(buildAntigravityAgentRequest(options.prompt, project, options)),
       signal: controller.signal,
     });

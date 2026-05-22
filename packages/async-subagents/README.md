@@ -43,6 +43,28 @@ Default child policy:
 - `context: fresh`
 - `session: record`
 
+Agent definitions may declare named `variants` that keep the same prompt/body but overlay launch config such as `model`, `thinkingLevel`, tools, skills, extensions, context/session policy, and budgets:
+
+```md
+---
+description: Read-only repository reconnaissance.
+model: openai-codex/gpt-5.4-mini
+thinkingLevel: medium
+tools: [read, grep, find, ls, bash]
+variants:
+  gemini:
+    model: antigravity-code-assist/gemini-3.5-flash
+    thinkingLevel: high
+    extensions: [/absolute/path/to/gemini-code-assist/extensions/pi/index.ts]
+---
+
+You are a focused reconnaissance agent.
+```
+
+Use the default by omitting `variant`; use a variant with `subagent_start({ agent: "scout", variant: "gemini", task: "..." })`.
+
+Provider-backed variants must include the provider extension that registers the model because child Pi launches are intentionally isolated with `--no-extensions`. Point `extensions` at a loadable Pi extension module file, such as `extensions/pi/index.ts` or `dist/extensions/pi/index.js`; a package extension directory may not be enough when async-subagents passes it through Pi's `-e` CLI flag.
+
 Recorded children launch Pi with:
 
 ```sh
@@ -60,6 +82,8 @@ pi --session <runDir>/pi-session/session.jsonl \
 ```
 
 `session: none` is an explicit opt-out and uses `--no-session`.
+
+When a child launch declares a model, async-subagents runs a cheap preflight using the exact isolated extension set before starting the child. If Pi cannot list the requested model, the run fails before spawn with `MODEL_PREFLIGHT_FAILED` and guidance to add the relevant provider extension. If a child still reaches Pi and Pi reports `Model "..." not found`, the supervisor augments the failure with the same provider-extension diagnostic.
 
 `context: fork` requires a persisted parent Pi session. It branches the current
 parent leaf with `SessionManager.open(...).createBranchedSession(leafId)` and

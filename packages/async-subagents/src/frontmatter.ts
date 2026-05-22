@@ -24,6 +24,51 @@ function parseScalar(raw: string): unknown {
   return value;
 }
 
+function parseIndentedObject(lines: string[], start: number, filename: string): { value: Record<string, unknown>; next: number } {
+  const value: Record<string, unknown> = {};
+  let i = start;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+    if (!line.startsWith("  ") || line.startsWith("    ")) break;
+
+    const objectMatch = line.match(/^  ([A-Za-z0-9_-]+):(?:\s*(.*))?$/);
+    if (!objectMatch) throw new SubagentError("INVALID_FRONTMATTER", `invalid nested frontmatter line in ${filename}: ${line}`);
+    const [, objectKey, rawObjectValue = ""] = objectMatch;
+    if (rawObjectValue.trim() !== "") {
+      value[objectKey] = parseScalar(rawObjectValue);
+      i++;
+      continue;
+    }
+
+    const nested: Record<string, unknown> = {};
+    i++;
+    while (i < lines.length) {
+      const nestedLine = lines[i];
+      if (!nestedLine.trim()) {
+        i++;
+        continue;
+      }
+      if (!nestedLine.startsWith("    ")) break;
+      const nestedMatch = nestedLine.match(/^    ([A-Za-z0-9_-]+):(?:\s*(.*))?$/);
+      if (!nestedMatch) throw new SubagentError("INVALID_FRONTMATTER", `invalid nested frontmatter line in ${filename}: ${nestedLine}`);
+      const [, nestedKey, rawNestedValue = ""] = nestedMatch;
+      if (rawNestedValue.trim() === "") {
+        throw new SubagentError("INVALID_FRONTMATTER", `nested arrays and maps are not supported in ${filename}: ${nestedLine}`);
+      }
+      nested[nestedKey] = parseScalar(rawNestedValue);
+      i++;
+    }
+    value[objectKey] = nested;
+  }
+
+  return { value, next: i };
+}
+
 export function parseFrontmatter(source: string, filename = "<memory>"): ParsedFrontmatter {
   const normalized = source.replace(/\r\n/g, "\n");
   if (!normalized.startsWith("---\n")) {
@@ -49,14 +94,26 @@ export function parseFrontmatter(source: string, filename = "<memory>"): ParsedF
       continue;
     }
 
-    const items: unknown[] = [];
-    while (i + 1 < lines.length && lines[i + 1].startsWith("  - ")) {
-      i++;
-      const item = lines[i].slice("  - ".length);
-      if (item.includes(":")) throw new SubagentError("INVALID_FRONTMATTER", `nested array objects are not supported in ${filename}`);
-      items.push(parseScalar(item));
+    if (i + 1 < lines.length && lines[i + 1].startsWith("  - ")) {
+      const items: unknown[] = [];
+      while (i + 1 < lines.length && lines[i + 1].startsWith("  - ")) {
+        i++;
+        const item = lines[i].slice("  - ".length);
+        if (item.includes(":")) throw new SubagentError("INVALID_FRONTMATTER", `nested array objects are not supported in ${filename}`);
+        items.push(parseScalar(item));
+      }
+      data[key] = items;
+      continue;
     }
-    data[key] = items;
+
+    if (i + 1 < lines.length && lines[i + 1].startsWith("  ")) {
+      const parsed = parseIndentedObject(lines, i + 1, filename);
+      data[key] = parsed.value;
+      i = parsed.next - 1;
+      continue;
+    }
+
+    data[key] = [];
   }
 
   return { data, body };

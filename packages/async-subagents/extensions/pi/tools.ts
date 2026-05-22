@@ -378,6 +378,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const notifyOn = Array.isArray(params.notifyOn) ? (params.notifyOn.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined;
         const result = await startSubagent({
           agent: String(params.agent),
+          variant: typeof params.variant === "string" && params.variant ? params.variant : undefined,
           task: String(params.task),
           cwd,
           runRoot: storeFor(sessionCwd).runRoot,

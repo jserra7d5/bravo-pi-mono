@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startSubagent } from "../src/start.js";
@@ -187,6 +187,158 @@ Thinking body.
   assert.equal(result?.thinkingLevel, "high");
   assert.deepEqual(launch.args.slice(launch.args.indexOf("--thinking"), launch.args.indexOf("--thinking") + 2), ["--thinking", "high"]);
   assert.equal(launch.thinkingLevel, "high");
+});
+
+test("startSubagent applies a named agent variant before launch", async () => {
+  const w = workspace();
+  writeFileSync(
+    join(w.root, ".agents", "variant-scout.md"),
+    `---
+description: Variant scout.
+model: openai-codex/gpt-5.4-mini
+thinkingLevel: low
+tools: [read]
+variants:
+  gemini:
+    model: antigravity-code-assist/gemini-3.5-flash
+    thinkingLevel: high
+    tools: [read, bash]
+---
+
+Variant scout body.
+`,
+    "utf8",
+  );
+  const started = await startSubagent({
+    agent: "variant-scout",
+    variant: "gemini",
+    task: "Use variant config",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    fake: { mode: "immediate", body: "Done" },
+  });
+
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const status = store.readStatus(started.runId);
+  const result = store.readResult(started.runId);
+  const launch = JSON.parse(readFileSync(join(started.runDir, "logs", "launch.json"), "utf8"));
+  assert.equal(started.variant, "gemini");
+  assert.equal(started.model, "antigravity-code-assist/gemini-3.5-flash");
+  assert.equal(started.thinkingLevel, "high");
+  assert.deepEqual(started.tools, ["read", "bash"]);
+  assert.equal(status.variant, "gemini");
+  assert.equal(status.agent.variant, "gemini");
+  assert.equal(result?.variant, "gemini");
+  assert.equal(launch.model, "antigravity-code-assist/gemini-3.5-flash");
+  assert.equal(launch.variant, "gemini");
+  assert.deepEqual(launch.args.slice(launch.args.indexOf("--model"), launch.args.indexOf("--model") + 2), ["--model", "antigravity-code-assist/gemini-3.5-flash"]);
+});
+
+test("model preflight fails before launch when isolated child Pi cannot see the requested model", async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi.js");
+  writeFileSync(
+    piBin,
+    `#!/usr/bin/env node
+if (process.argv.includes("--list-models")) {
+  console.log('No models matching "gemini-3.5-flash"');
+  process.exit(0);
+}
+console.error("child should not launch after failed preflight");
+process.exit(99);
+`,
+    "utf8",
+  );
+  chmodSync(piBin, 0o755);
+  writeFileSync(
+    join(w.root, ".agents", "gemini-scout.md"),
+    `---
+description: Gemini scout.
+model: antigravity-code-assist/gemini-3.5-flash
+tools: []
+---
+
+Gemini scout body.
+`,
+    "utf8",
+  );
+
+  const started = await startSubagent({
+    agent: "gemini-scout",
+    task: "Should fail preflight",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    piBin,
+  });
+
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const result = store.readResult(started.runId);
+  assert.equal(started.state, "failed");
+  assert.equal(result?.error?.code, "MODEL_PREFLIGHT_FAILED");
+  assert.match(result?.body ?? "", /provider extension/);
+  assert.ok(existsSync(join(started.runDir, "logs", "model-preflight.json")));
+});
+
+test("model preflight uses the selected variant extension set", async () => {
+  const w = workspace();
+  const extensionPath = "provider-index";
+  const piBin = join(w.root, "fake-pi.js");
+  writeFileSync(
+    piBin,
+    `#!/usr/bin/env node
+if (process.argv.includes("--list-models")) {
+  if (!process.argv.includes(${JSON.stringify(extensionPath)})) {
+    console.log('No models matching "gemini-3.5-flash"');
+    process.exit(0);
+  }
+  console.log("provider                 model");
+  console.log("antigravity-code-assist  gemini-3.5-flash");
+  process.exit(0);
+}
+console.log("Variant child completed");
+`,
+    "utf8",
+  );
+  chmodSync(piBin, 0o755);
+  writeFileSync(
+    join(w.root, ".agents", "variant-provider.md"),
+    `---
+description: Provider variant.
+model: openai-codex/gpt-5.5
+tools: []
+variants:
+  gemini:
+    model: antigravity-code-assist/gemini-3.5-flash
+    extensions: [${extensionPath}]
+---
+
+Provider variant body.
+`,
+    "utf8",
+  );
+
+  const started = await startSubagent({
+    agent: "variant-provider",
+    variant: "gemini",
+    task: "Should pass preflight",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    piBin,
+    startMode: "sync",
+    waitUntil: "result",
+    waitTimeoutMs: 5000,
+  });
+
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const result = store.readResult(started.runId);
+  const launch = JSON.parse(readFileSync(join(started.runDir, "logs", "launch.json"), "utf8"));
+  assert.equal(started.state, "completed");
+  assert.match(result?.body ?? "", /Variant child completed/);
+  assert.deepEqual(launch.extensions, [extensionPath]);
+  assert.ok(existsSync(join(started.runDir, "logs", "model-preflight.json")));
 });
 
 test("context fork fails clearly without a parent Pi session reference", async () => {

@@ -88,7 +88,7 @@ The Pi extension maps Pi thinking levels to Antigravity values:
 
 | Pi thinking | Antigravity thinkingConfig |
 | --- | --- |
-| unset / default | `{ includeThoughts: false, thinkingBudget: 0 }` |
+| unset / default | `{ includeThoughts: false, thinkingLevel: "HIGH" }` |
 | minimal | `{ includeThoughts: false, thinkingLevel: "MINIMAL" }` |
 | low | `{ includeThoughts: false, thinkingLevel: "LOW" }` |
 | medium | `{ includeThoughts: false, thinkingLevel: "MEDIUM" }` |
@@ -101,7 +101,7 @@ Use:
 pi --model antigravity-code-assist/gemini-3.5-flash --thinking high
 ```
 
-Live proof showed higher settings return `thoughtsTokenCount`; disabled/minimal settings omit it or keep it near zero.
+Live proof showed higher settings return `thoughtsTokenCount`; disabled/minimal settings omit it or keep it near zero. The provider defaults to high reasoning when Pi does not pass an explicit `--thinking` value.
 
 ## Metadata available from the backend
 

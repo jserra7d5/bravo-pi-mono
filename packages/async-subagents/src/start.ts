@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveAgentDefinition } from "./agentDefinitions.js";
+import { applyAgentVariant, resolveAgentDefinition } from "./agentDefinitions.js";
 import { buildPiCommand, childControlEventTool, childControlExtensionPath, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
 import { assemblePrompt } from "./promptAssembly.js";
 import { finalizeTerminalRun } from "./lifecycle.js";
@@ -30,6 +30,7 @@ export interface StartFakeImmediateInput extends SupervisorFakeInput {
 
 export interface StartSubagentInput {
   agent: string;
+  variant?: string;
   task: string;
   cwd?: string;
   runRoot?: string;
@@ -121,6 +122,97 @@ function writeLauncherFailure(store: RunStore, input: SupervisorInput, message: 
   });
 }
 
+function childModelSearchTerm(model: string): string {
+  return model.includes("/") ? model.split("/").at(-1) || model : model;
+}
+
+function extensionArgs(args: string[]): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === "-e" || args[i] === "--extension") && args[i + 1]) {
+      values.push(args[i + 1]);
+      i++;
+    }
+  }
+  return values;
+}
+
+function modelListed(output: string, model: string): boolean {
+  const [provider, modelId] = model.includes("/") ? model.split(/\/(.+)/) as [string, string] : [undefined, model];
+  return output.split(/\r?\n/).some((line) => {
+    if (!line.includes(modelId)) return false;
+    return provider ? line.includes(provider) : true;
+  });
+}
+
+export interface ModelPreflightResult {
+  ok: boolean;
+  command?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  message?: string;
+}
+
+function providerExtensionHint(model: string): string {
+  return [
+    `Model "${model}" is not available in the isolated child Pi launch.`,
+    "Async subagents launch child Pi with --no-extensions and then load only extensions declared on the agent or selected variant.",
+    "If this model is registered by a Pi provider extension, add that extension to the agent/variant extensions list.",
+    "Use a loadable extension module path, for example /path/to/package/extensions/pi/index.ts or /path/to/package/dist/extensions/pi/index.js; a package extension directory may not be enough for the child -e launch path.",
+  ].join(" ");
+}
+
+export async function preflightPiModelAvailability(command: PiCommand, model: string, timeoutMs = 15_000): Promise<ModelPreflightResult> {
+  const extensions = extensionArgs(command.args);
+  const args = [
+    "--no-context-files",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-extensions",
+    ...extensions.flatMap((extension) => ["-e", extension]),
+    "--list-models",
+    childModelSearchTerm(model),
+  ];
+  const renderedCommand = [command.command, ...args].join(" ");
+
+  return new Promise((resolve) => {
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let settled = false;
+    const child = spawn(command.command, args, {
+      cwd: command.cwd,
+      env: { ...process.env, ...command.env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill("SIGTERM"); } catch { /* already exited */ }
+      resolve({ ok: false, command: renderedCommand, stdout: Buffer.concat(stdoutChunks).toString("utf8"), stderr: Buffer.concat(stderrChunks).toString("utf8"), message: `model preflight timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+
+    child.stdout?.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve({ ok: false, command: renderedCommand, stdout: Buffer.concat(stdoutChunks).toString("utf8"), stderr: Buffer.concat(stderrChunks).toString("utf8"), message: error.message });
+    });
+    child.once("close", (exitCode, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      const ok = exitCode === 0 && modelListed(stdout, model);
+      resolve({ ok, command: renderedCommand, stdout, stderr, exitCode, signal, message: ok ? undefined : providerExtensionHint(model) });
+    });
+  });
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -144,7 +236,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   const cwd = resolve(input.cwd ?? process.cwd());
   const store = new RunStore({ cwd, runRoot: input.runRoot });
   const root = resolveRootIdentity(input, cwd);
-  const definition = resolveAgentDefinition(input.agent, { cwd, env: process.env });
+  const baseDefinition = resolveAgentDefinition(input.agent, { cwd, env: process.env });
+  const definition = applyAgentVariant(baseDefinition, input.variant);
   const selectedThinkingLevel = input.thinkingLevel ?? definition.thinkingLevel;
   const requestedContextPolicy = input.context ?? definition.context ?? "fresh";
   const requestedSessionPolicy = input.session ?? definition.session ?? "record";
@@ -180,6 +273,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     agentSource: definition.source,
     definitionPath: definition.definitionPath,
     mode: definition.mode,
+    variant: input.variant,
     model: definition.model,
     thinkingLevel: selectedThinkingLevel,
     contextPolicy,
@@ -214,6 +308,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       agentName: definition.name,
       displayName: display.displayName,
       namePack: display.namePack,
+      variant: input.variant,
       state: result.state,
       started: false,
       waited: false,
@@ -320,6 +415,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   });
   const command = input.fake?.mode === "child" ? fakeChildCommand(input.fake, cwd) : piCommand;
   writeLaunchLogWithMetadata(paths.runDir, command, {
+    variant: input.variant,
     model: prompt.model,
     thinkingLevel: selectedThinkingLevel,
     userBuiltinTools: definition.tools,
@@ -337,6 +433,14 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     rootSessionId: root.rootSessionId,
     parentRunId: root.parentRunId,
   });
+
+  if (prompt.model && !input.fake) {
+    const preflight = await preflightPiModelAvailability(command, prompt.model);
+    writeFileSync(join(paths.logsDir, "model-preflight.json"), `${JSON.stringify(preflight, null, 2)}\n`, "utf8");
+    if (!preflight.ok) {
+      return failBeforeLaunch("MODEL_PREFLIGHT_FAILED", preflight.message ?? `model preflight failed for ${prompt.model}`, preflight);
+    }
+  }
 
   const supervisorInput: SupervisorInput = {
     runId,
@@ -379,6 +483,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     agentName: definition.name,
     displayName: display.displayName,
     namePack: display.namePack,
+    variant: status.variant,
     state: status.state,
     model: status.model,
     thinkingLevel: status.thinkingLevel,

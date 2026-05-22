@@ -9,6 +9,7 @@ export function createRunResult(input: {
   agentName: string;
   displayName?: string;
   namePack?: string;
+  variant?: string;
   model?: string;
   thinkingLevel?: ThinkingLevel;
   contextPolicy?: ContextPolicy;
@@ -34,6 +35,7 @@ export function createRunResult(input: {
     agentName: input.agentName,
     displayName: input.displayName,
     namePack: input.namePack,
+    variant: input.variant,
     model: input.model,
     thinkingLevel: input.thinkingLevel,
     contextPolicy: input.contextPolicy ?? "fresh",

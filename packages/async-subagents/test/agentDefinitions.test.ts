@@ -59,6 +59,32 @@ Snake body.
   assert.equal(definition.thinkingLevel, "medium");
 });
 
+test("agent parser accepts nested variants", () => {
+  const w = workspace();
+  const path = join(w.userHome, "agents", "scout.md");
+  writeFileSync(path, `---
+description: Scout with variants
+model: openai-codex/gpt-5.4-mini
+thinkingLevel: medium
+tools: [read]
+variants:
+  gemini:
+    model: antigravity-code-assist/gemini-3.5-flash
+    thinkingLevel: high
+    tools: [read, bash]
+  cheap:
+    thinking_level: low
+---
+
+Scout body.
+`);
+  const definition = parseAgentDefinitionFile(path, "user");
+  assert.equal(definition.variants.gemini?.model, "antigravity-code-assist/gemini-3.5-flash");
+  assert.equal(definition.variants.gemini?.thinkingLevel, "high");
+  assert.deepEqual(definition.variants.gemini?.tools, ["read", "bash"]);
+  assert.equal(definition.variants.cheap?.thinkingLevel, "low");
+});
+
 test("discovery uses project over user over builtin precedence", () => {
   const w = workspace();
   writeFileSync(join(w.userHome, "agents", "scout.md"), `---

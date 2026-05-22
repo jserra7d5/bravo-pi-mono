@@ -89,7 +89,9 @@ export interface RunStatus {
     source: AgentDefinitionSource;
     definitionPath: string;
     mode: AgentMode;
+    variant?: string;
   };
+  variant?: string;
   model?: string;
   thinkingLevel?: ThinkingLevel;
   contextPolicy: ContextPolicy;
@@ -156,6 +158,7 @@ export interface RunResult {
   agentName: string;
   displayName?: string;
   namePack?: string;
+  variant?: string;
   model?: string;
   thinkingLevel?: ThinkingLevel;
   contextPolicy: ContextPolicy;
@@ -257,6 +260,7 @@ export interface SubagentStartResult {
   agentName: string;
   displayName?: string;
   namePack?: string;
+  variant?: string;
   model?: string;
   thinkingLevel?: ThinkingLevel;
   state: RunState;

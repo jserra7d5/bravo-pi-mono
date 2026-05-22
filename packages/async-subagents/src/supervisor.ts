@@ -46,6 +46,30 @@ function appendLog(path: string, text: string): void {
   appendFileSync(path, text, "utf8");
 }
 
+function childLaunchUsesNoExtensions(command: PiCommand): boolean {
+  return command.args.includes("--no-extensions");
+}
+
+function providerExtensionHint(model: string): string {
+  return [
+    `Model "${model}" is not available in the isolated child Pi launch.`,
+    "Async subagents launch child Pi with --no-extensions and then load only extensions declared on the agent or selected variant.",
+    "If this model is registered by a Pi provider extension, add that extension to the agent/variant extensions list.",
+    "Use a loadable extension module path, for example /path/to/package/extensions/pi/index.ts or /path/to/package/dist/extensions/pi/index.js; a package extension directory may not be enough for the child -e launch path.",
+  ].join(" ");
+}
+
+export function augmentChildFailureDiagnostics(command: PiCommand, stderr: string, error?: RunResult["error"]): { stderr: string; error?: RunResult["error"] } {
+  const match = stderr.match(/Model "([^"]+)" not found/);
+  if (!match || !childLaunchUsesNoExtensions(command)) return { stderr, error };
+  const hint = providerExtensionHint(match[1]);
+  const augmentedStderr = stderr.includes(hint) ? stderr : `${stderr.trimEnd()}\n\n${hint}\n`;
+  return {
+    stderr: augmentedStderr,
+    error: error ? { ...error, message: `${error.message}. ${hint}` } : error,
+  };
+}
+
 async function finalizeRun(input: SupervisorInput, output: { state: TerminalRunState; stdout?: string; stderr?: string; error?: RunResult["error"] }): Promise<RunResult> {
   const store = new RunStore({ cwd: input.cwd, runRoot: input.runRoot });
   const status = store.readStatus(input.runId);
@@ -129,8 +153,10 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       settled = true;
       if (timeout) clearTimeout(timeout);
       const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
-      void finalizeRun(input, { state, stdout, stderr, error }).then(resolve);
+      const rawStderr = Buffer.concat(stderrChunks).toString("utf8");
+      const diagnostics = state === "failed" ? augmentChildFailureDiagnostics(input.command, rawStderr, error) : { stderr: rawStderr, error };
+      if (diagnostics.stderr !== rawStderr) appendLog(stderrPath, diagnostics.stderr.slice(rawStderr.length));
+      void finalizeRun(input, { state, stdout, stderr: diagnostics.stderr, error: diagnostics.error }).then(resolve);
     };
 
     child.once("error", (error) => {

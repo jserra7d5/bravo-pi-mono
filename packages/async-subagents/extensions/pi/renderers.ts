@@ -709,6 +709,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function renderLaunchCardFromArgs(args: Record<string, unknown>, width?: number): string[] {
   const agent = typeof args.agent === "string" ? args.agent : "subagent";
+  const variant = typeof args.variant === "string" ? args.variant : undefined;
   const task = typeof args.task === "string" ? args.task : undefined;
   const thinking = typeof args.thinkingLevel === "string" ? args.thinkingLevel : undefined;
   return renderToolCallCard({
@@ -716,7 +717,7 @@ function renderLaunchCardFromArgs(args: Record<string, unknown>, width?: number)
     title: "start subagent",
     badge: "→ starting",
     rows: [
-      ["role", agent],
+      ["role", variant ? `${agent}/${variant}` : agent],
       ["name", "from active pack"],
       ...(task ? [["task", task] as [string, string]] : []),
       ...(thinking ? [["thinking", thinking] as [string, string]] : []),
@@ -771,6 +772,7 @@ function renderStartResultCard(details: Record<string, unknown>, width?: number)
   const agentName = typeof details.agentName === "string" ? details.agentName : undefined;
   if (!agentName) return undefined;
   const displayName = typeof details.displayName === "string" && details.displayName ? details.displayName : (runId ?? agentName);
+  const variant = typeof details.variant === "string" ? details.variant : undefined;
   const model = typeof details.model === "string" ? details.model : undefined;
   const thinking = typeof details.thinkingLevel === "string" ? details.thinkingLevel : undefined;
   const contextPolicy = typeof details.contextPolicy === "string" ? details.contextPolicy : undefined;
@@ -786,7 +788,7 @@ function renderStartResultCard(details: Record<string, unknown>, width?: number)
   return renderLaunchCard({
     width,
     displayName,
-    role: agentName,
+    role: variant ? `${agentName}/${variant}` : agentName,
     state,
     model,
     thinking,
@@ -800,6 +802,7 @@ function renderStartResultCard(details: Record<string, unknown>, width?: number)
 function renderTerminalResultCardFromDetails(result: Record<string, unknown>, width?: number): string[] | undefined {
   const agentName = typeof result.agentName === "string" ? result.agentName : undefined;
   if (!agentName) return undefined;
+  const variant = typeof result.variant === "string" ? result.variant : undefined;
   const displayName = typeof result.displayName === "string" && result.displayName ? result.displayName : agentName;
   const state = typeof result.state === "string" ? result.state : "completed";
   const durationMs = typeof result.durationMs === "number" ? result.durationMs : undefined;
@@ -821,7 +824,7 @@ function renderTerminalResultCardFromDetails(result: Record<string, unknown>, wi
   return renderResultCard({
     width,
     displayName,
-    role: agentName,
+    role: variant ? `${agentName}/${variant}` : agentName,
     state,
     duration: durationMs !== undefined ? compactDuration(durationMs) : undefined,
     summary,
@@ -934,12 +937,14 @@ export function renderSubagentWakeMessageComponent(message: WakeupMessage, optio
 
 export function summarizeStartResult(result: SubagentStartResult): string {
   const action = result.waited ? "started and waited" : "started";
-  const label = result.displayName ? `@${result.displayName} (${result.agentName})` : result.agentName;
+  const agent = result.variant ? `${result.agentName}/${result.variant}` : result.agentName;
+  const label = result.displayName ? `@${result.displayName} (${agent})` : agent;
   return `Subagent ${result.runId} ${action}: ${label} (${result.state})`;
 }
 
 function formatResultSummary(result: RunResult): string {
-  const label = result.displayName ? `@${result.displayName} ${result.agentName}` : result.agentName;
+  const agent = result.variant ? `${result.agentName}/${result.variant}` : result.agentName;
+  const label = result.displayName ? `@${result.displayName} ${agent}` : agent;
   const duration = typeof result.durationMs === "number" ? ` in ${compactDuration(result.durationMs)}` : "";
   const summary = result.summary ? ` - ${preview(result.summary, 96)}` : "";
   return `${label} ${stateGlyph(result.state).label}${duration}${summary}`;

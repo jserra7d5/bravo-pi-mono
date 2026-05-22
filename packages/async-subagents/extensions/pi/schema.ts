@@ -18,6 +18,7 @@ const Attachment = Type.Object({
 
 export const subagentStartSchema = Type.Object({
   agent: Type.String({ description: "Agent definition name, such as scout, reviewer, or worker." }),
+  variant: Type.Optional(Type.String({ description: "Optional agent variant name that overlays model/config while keeping the same agent prompt." })),
   task: Type.String({ description: "Bounded task for the child agent." }),
   mode: Type.Optional(StringEnum(["async", "sync"] as const, { default: "async" })),
   wait: Type.Optional(StringEnum(["none", "interesting", "terminal", "result"] as const, { default: "none" })),
