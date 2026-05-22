@@ -290,11 +290,11 @@ test("model preflight uses the selected variant extension set", async () => {
     `#!/usr/bin/env node
 if (process.argv.includes("--list-models")) {
   if (!process.argv.includes(${JSON.stringify(extensionPath)})) {
-    console.log('No models matching "gemini-3.5-flash"');
+    console.error('No models matching "gemini-3.5-flash"');
     process.exit(0);
   }
-  console.log("provider                 model");
-  console.log("antigravity-code-assist  gemini-3.5-flash");
+  console.error("provider                 model");
+  console.error("antigravity-code-assist  gemini-3.5-flash");
   process.exit(0);
 }
 console.log("Variant child completed");

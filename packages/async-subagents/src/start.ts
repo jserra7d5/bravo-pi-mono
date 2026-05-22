@@ -207,7 +207,7 @@ export async function preflightPiModelAvailability(command: PiCommand, model: st
       clearTimeout(timeout);
       const stdout = Buffer.concat(stdoutChunks).toString("utf8");
       const stderr = Buffer.concat(stderrChunks).toString("utf8");
-      const ok = exitCode === 0 && modelListed(stdout, model);
+      const ok = exitCode === 0 && modelListed(`${stdout}\n${stderr}`, model);
       resolve({ ok, command: renderedCommand, stdout, stderr, exitCode, signal, message: ok ? undefined : providerExtensionHint(model) });
     });
   });
