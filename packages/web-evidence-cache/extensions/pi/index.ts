@@ -7,6 +7,7 @@ import { assignSearchIdentities, searchContentSummary } from "../../src/search.j
 import { fetchContentSummary, fetchEvidence } from "../../src/fetch.js";
 import { lookupContentSummary, lookupResult } from "../../src/lookup.js";
 import type { WebFetchResult, WebLookupResult, WebSearchResult, WebSearchResultItem } from "../../src/types.js";
+import { appendWebEvidencePrompt } from "./promptModule.js";
 import { renderFetchCall, renderFetchResult, renderLookupCall, renderLookupResult, renderSearchCall, renderSearchResult } from "./renderers.js";
 
 const SHARED_GUIDANCE = [
@@ -128,4 +129,7 @@ export function buildWebEvidenceTools() {
 
 export default function webEvidenceCacheExtension(pi: ExtensionAPI) {
   for (const tool of buildWebEvidenceTools()) pi.registerTool(tool as never);
+  pi.on("before_agent_start", async (event) => ({
+    systemPrompt: appendWebEvidencePrompt(event.systemPrompt),
+  }));
 }
