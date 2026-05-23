@@ -16,7 +16,7 @@ export function assignSearchIdentities(results: Omit<SearchResultRecord, "id" | 
 export function searchContentSummary(results: SearchResultRecord[]): string {
   if (!results.length) return "web_search found no results.";
   return [
-    `web_search found ${results.length} discovery result${results.length === 1 ? "" : "s"}. Titles and snippets are leads only; use web_fetch and read artifacts before citing evidence.`,
-    ...results.map((r) => `[${r.alias}] ${r.title}\n${r.url}${r.snippet ? `\nsnippet: ${r.snippet}` : ""}`),
+    `web_search found ${results.length} discovery lead${results.length === 1 ? "" : "s"}. Titles and snippets are leads only; next step: call web_fetch with selected result aliases or UUID ids, then read artifacts before citing evidence.`,
+    ...results.map((r) => `[${r.alias}] id ${r.id} — ${r.title}\n${r.url}${r.snippet ? `\nsnippet: ${r.snippet}` : ""}`),
   ].join("\n\n");
 }

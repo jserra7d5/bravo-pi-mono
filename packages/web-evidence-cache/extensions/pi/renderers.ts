@@ -117,32 +117,44 @@ export function renderLookupCall(args: Record<string, unknown>): Component {
 export function renderSearchResult(result: AgentToolResult<WebSearchResult>, _options: ToolRenderResultOptions): Component {
   const details = result.details;
   if (!details) return new Text(contentText(result));
-  return new EvidenceCard("web_search", "✓ Web Search", details.results.slice(0, 5).flatMap((r) => [
-    `[${r.alias}] ${r.title} · ${r.provider}`,
-    `id  ${r.id}`,
-    truncateMiddle(r.url, 120),
-  ]));
+  return new EvidenceCard("web_search", "✓ Web Search Leads", [
+    "next web_fetch selected aliases/ids",
+    ...details.results.slice(0, 5).flatMap((r) => [
+      `[${r.alias}] id ${r.id}`,
+      `${r.title} · ${r.provider}`,
+      truncateMiddle(r.url, 120),
+    ]),
+  ]);
 }
 
 export function renderFetchResult(result: AgentToolResult<WebFetchResult>, _options: ToolRenderResultOptions): Component {
   const details = result.details;
   if (!details) return new Text(contentText(result));
-  return new EvidenceCard("web_fetch", "✓ Web Fetch", details.results.flatMap((r) => [
-    `[${shortId(r.id)}] ${r.title} · ${r.extraction.engine}/${r.extraction.confidence}${r.extraction.confidence === "good" ? "" : " · verify"}`,
-    `id       ${r.id}`,
-    `best     ${r.best_format} ${truncateMiddle(r.best_path, 112)}`,
-    `semantic ${truncateMiddle(r.semantic_html_path, 120)}`,
-    `markdown ${truncateMiddle(r.markdown_path, 120)}`,
-  ]));
+  return new EvidenceCard("web_fetch", "✓ Web Fetch", details.results.flatMap((r) => {
+    const warning = r.extraction.confidence === "good" ? [] : [`warning  ${r.extraction.confidence}: ${r.extraction.warnings.join("; ") || "verify before citing"}`];
+    const preview = r.preview ? [`preview  ${truncateEnd(r.preview.replace(/\s+/g, " ").trim(), 120)} (not citable)`] : [];
+    return [
+      `[${shortId(r.id)}] ${r.title} · ${r.extraction.engine}/${r.extraction.confidence}`,
+      `READ NEXT ${r.best_format} ${truncateMiddle(r.best_path, 108)}`,
+      ...warning,
+      ...preview,
+      `details  id ${r.id}; alternate paths in tool details`,
+    ];
+  }));
 }
 
 export function renderLookupResult(result: AgentToolResult<WebLookupResult>, _options: ToolRenderResultOptions): Component {
   const details = result.details;
   if (!details) return new Text(contentText(result));
+  if (!details.results.length) return new EvidenceCard("web_lookup", "✓ Web Lookup", [
+    "no matches in fetched artifacts; not proof of absence",
+    "try broader terms, remove filters, fetch more sources, or run web_search",
+  ]);
   return new EvidenceCard("web_lookup", "✓ Web Lookup", details.results.slice(0, 8).flatMap((r) => [
     `[${shortId(r.page_id)}:${shortId(r.chunk_id)}] ${r.title}${r.heading_path ? ` > ${r.heading_path}` : ""}`,
-    `matched ${r.matched_terms.join(", ") || "—"}`,
-    `best ${r.best_format} ${truncateMiddle(`${r.best_path}${r.line_start ? `:${r.line_start}` : ""}`, 112)}`,
+    `READ NEXT ${r.best_format} ${truncateMiddle(`${r.best_path}${r.line_start ? `:${r.line_start}` : ""}`, 108)}`,
+    `matched   ${r.matched_terms.join(", ") || "—"}`,
+    `snippet   ${truncateEnd(r.snippet.replace(/\s+/g, " ").trim(), 120)} (not citable)`,
   ]));
 }
 

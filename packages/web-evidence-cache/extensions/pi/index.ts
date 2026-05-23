@@ -12,15 +12,17 @@ import { appendWebEvidencePrompt } from "./promptModule.js";
 import { renderFetchCall, renderFetchResult, renderLookupCall, renderLookupResult, renderSearchCall, renderSearchResult } from "./renderers.js";
 
 const SHARED_GUIDANCE = [
-  "Use web_search only to discover candidate pages on the live web; titles and snippets are not evidence.",
-  "Use web_fetch for promising search results or URLs that must be read, cited, or searched locally; prefer best_path and verify partial/weak extraction before citing.",
-  "Use web_lookup only after web_fetch, as recall-oriented search within already-fetched local artifacts; no matches are not proof of absence.",
-  "Read artifact paths returned by web_fetch and web_lookup with normal filesystem tools before citing evidence.",
+  "Use web_search only to discover candidate pages on the live web; titles and snippets are discovery leads, not evidence.",
+  "Navigate search results by selecting promising aliases or UUID ids, then call web_fetch with those refs before relying on page content.",
+  "Use web_fetch for promising search results or URLs that must be read, cited, or searched locally; read READ NEXT/best_path first and verify partial/weak extraction warnings before citing.",
+  "Use web_lookup only after web_fetch, as recall-oriented search within already-fetched local artifacts; read READ NEXT/best_path context before relying on a hit.",
+  "If web_lookup returns no matches, try broader or synonym terms, remove filters, fetch more sources, or run web_search; no matches are not proof of absence.",
+  "Read artifact paths returned by web_fetch and web_lookup with normal filesystem tools before citing evidence; orientation previews/snippets are not citable evidence.",
   "Prefer primary sources and official documentation when choosing what to fetch.",
 ];
 
 export const webSearchSchema = Type.Object({
-  query: Type.String({ description: "Search query for discovering candidate pages. Do not treat returned titles/snippets as evidence." }),
+  query: Type.String({ description: "Search query for discovering candidate pages. Treat returned titles/snippets as navigation leads; fetch selected refs before using evidence." }),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: "Maximum number of discovery results to return." })),
   search_mode: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("exact"), Type.Literal("broad")], { description: "Use exact for quoted/phrase-sensitive discovery; use broad when initial discovery is too narrow." })),
   domains: Type.Optional(Type.Array(Type.String({ description: "Domain to include, converted to site: filters." }), { description: "Optional allowed domains for discovery." })),
@@ -67,8 +69,8 @@ export function buildWebEvidenceTools() {
     defineTool({
       name: "web_search",
       label: "Web Search",
-      description: "Discover candidate pages on the live web. Returns leads only; use web_fetch before relying on content as evidence.",
-      promptSnippet: "web_search: live web discovery only; titles/snippets are leads, not evidence. Follow with web_fetch for pages worth reading or citing.",
+      description: "Discover candidate pages on the live web. Returns navigation leads with aliases and UUID ids; call web_fetch on selected refs before relying on content as evidence.",
+      promptSnippet: "web_search: live web discovery only; titles/snippets are leads, not evidence. Select result aliases/UUID ids and follow with web_fetch for pages worth reading or citing.",
       promptGuidelines: SHARED_GUIDANCE,
       parameters: webSearchSchema,
       renderShell: "self",
@@ -87,8 +89,8 @@ export function buildWebEvidenceTools() {
     defineTool({
       name: "web_fetch",
       label: "Web Fetch",
-      description: "Fetch selected URLs, web_search result refs, or fetched page UUIDs into local readable artifacts and index them; returns best_path/best_format plus all artifact paths.",
-      promptSnippet: "web_fetch: use after selecting promising leads; read best_path first and verify partial/weak extraction before citing.",
+      description: "Fetch selected URLs, web_search result refs, or fetched page UUIDs into local readable artifacts and index them; returns visually prioritized READ NEXT/best_path plus all artifact paths in details.",
+      promptSnippet: "web_fetch: use after selecting promising leads; read READ NEXT/best_path first and verify partial/weak extraction warnings before citing.",
       promptGuidelines: SHARED_GUIDANCE,
       parameters: webFetchSchema,
       renderShell: "self",
@@ -109,7 +111,7 @@ export function buildWebEvidenceTools() {
       name: "web_lookup",
       label: "Web Lookup",
       description: "Recall-oriented search only over already-fetched local web evidence artifacts; no matches are not proof of absence.",
-      promptSnippet: "web_lookup: recall-oriented BM25 lookup inside local artifacts already created by web_fetch; not live web search or proof of absence.",
+      promptSnippet: "web_lookup: recall-oriented BM25 lookup inside local artifacts already created by web_fetch; read READ NEXT/best_path context, and treat no matches as a cue to broaden/fetch more, not proof of absence.",
       promptGuidelines: SHARED_GUIDANCE,
       parameters: webLookupSchema,
       renderShell: "self",

@@ -130,11 +130,17 @@ function pageToFetchItem(page: PageRecord, format: EvidenceFormat, indexed: bool
 }
 
 export function fetchContentSummary(results: WebFetchResultItem[]): string {
-  if (!results.length) return "web_fetch fetched no pages.";
+  if (!results.length) return "web_fetch fetched no pages. Next step: choose another URL/ref or run web_search for candidate pages.";
   return [
-    `web_fetch materialized ${results.length} page${results.length === 1 ? "" : "s"} as local evidence artifacts. Use best_path first; markdown is usually best for prose, semantic_html when structure matters, text for line-oriented lookup/citation. Extraction confidence: good=normal, partial=usable but verify against artifact context, weak=high risk of missing/poor extraction and should be corroborated or refetched from another source.`,
-    ...results.map((r) => `[${r.id}] ${r.title} · indexed\nbest (${r.best_format}): ${r.best_path}\nsemantic: ${r.semantic_html_path}\nmarkdown: ${r.markdown_path}\ntext: ${r.text_path}\nextract: ${r.extraction.engine}/${r.extraction.confidence}${r.extraction.confidence === "good" ? "" : " · verify before citing"}`),
+    `web_fetch materialized ${results.length} page${results.length === 1 ? "" : "s"} as local evidence artifacts. READ NEXT: open each best_path before citing; markdown is usually best for prose, semantic_html when structure matters, text for line-oriented lookup/citation. Other artifact paths are available in result details for alternate views. Extraction confidence: good=normal, partial=usable but verify against artifact context, weak=high risk of missing/poor extraction and should be corroborated or refetched from another source.`,
+    ...results.map(fetchResultSummary),
   ].join("\n\n");
+}
+
+function fetchResultSummary(r: WebFetchResultItem): string {
+  const warning = r.extraction.confidence === "good" ? "" : `\nWARNING: extraction ${r.extraction.confidence}; ${r.extraction.warnings.length ? r.extraction.warnings.join("; ") : "verify against the artifact before citing"}`;
+  const orientation = r.preview ? `\norientation preview (not citable): ${r.preview.slice(0, 280)}${r.preview.length > 280 ? "…" : ""}` : "";
+  return `[${r.id}] ${r.title} · indexed\nREAD NEXT (${r.best_format}): ${r.best_path}${warning}${orientation}\nnext step: read READ NEXT/best_path, then use web_lookup to find terms inside fetched artifacts if needed.`;
 }
 
 function fetchBestFormat(format: EvidenceFormat): Exclude<EvidenceFormat, "auto"> {

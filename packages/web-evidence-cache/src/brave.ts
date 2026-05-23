@@ -26,6 +26,35 @@ function normalizeDomainFilter(domain: string): string | undefined {
   }
 }
 
+const HTML_ENTITIES: Record<string, string> = {
+  amp: "&",
+  apos: "'",
+  gt: ">",
+  lt: "<",
+  nbsp: " ",
+  quot: '"',
+};
+
+function decodeHtmlEntities(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity: string) => {
+    const key = entity.toLowerCase();
+    if (key.startsWith("#x") || key.startsWith("#")) {
+      const codePoint = Number.parseInt(key.slice(key.startsWith("#x") ? 2 : 1), key.startsWith("#x") ? 16 : 10);
+      return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : match;
+    }
+    return HTML_ENTITIES[key] ?? match;
+  });
+}
+
+export function sanitizeBraveSnippet(snippet: string | undefined): string | undefined {
+  if (!snippet) return undefined;
+  const sanitized = decodeHtmlEntities(snippet)
+    .replace(/<\/?[a-z][^>]*>/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return sanitized || undefined;
+}
+
 export function shapeBraveQuery(input: WebSearchInput): string {
   const parts: string[] = [];
   const query = input.search_mode === "exact" && !/^".*"$/.test(input.query.trim())
@@ -78,7 +107,7 @@ export async function braveSearch(input: WebSearchInput, config: WebCacheConfig,
     return [{
       title: result.title,
       url: result.url,
-      snippet: result.description,
+      snippet: sanitizeBraveSnippet(result.description),
       provider: "brave",
     }];
   });
