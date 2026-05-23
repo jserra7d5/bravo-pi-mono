@@ -24,6 +24,13 @@ test("shapeBraveQuery applies exact mode and domain operators", () => {
   );
 });
 
+test("shapeBraveQuery treats multiple included domains as alternatives", () => {
+  assert.equal(
+    shapeBraveQuery({ query: "terraform", domains: ["https://cloud.google.com/docs/terraform", "developer.hashicorp.com"] }),
+    "terraform (site:cloud.google.com OR site:developer.hashicorp.com)",
+  );
+});
+
 test("assignSearchIdentities adds UUIDs, aliases, ranks, and timestamps", () => {
   let n = 1;
   const rows = assignSearchIdentities([{ title: "A", url: "https://example.com", provider: "brave" }], { query: "a" }, () => `r${n++}`);

@@ -47,9 +47,10 @@ test("EvidenceDatabase inserts page/chunks and returns lookup hits without score
       token_count: 10,
     }];
     db.insertPageWithChunks(page, chunks);
-    const hits = db.lookup("bm25", 5, "sqlite.org", "markdown");
+    const hits = db.lookup("nonexistentphrasezzzz bm25", 5, "sqlite.org", "markdown");
     assert.equal(hits.length, 1);
     assert.equal(hits[0].path, page.markdown_path);
+    assert.deepEqual(hits[0].matched_terms, ["bm25"]);
     assert.equal("score" in hits[0], false);
     db.close();
   } finally {

@@ -111,7 +111,7 @@ export class EvidenceDatabase {
   }
 
   findSearchRef(ref: string): SearchResultRecord | undefined {
-    return this.db.prepare("SELECT * FROM search_results WHERE id = ? OR alias = ?").get(ref, ref) as SearchResultRecord | undefined;
+    return this.db.prepare("SELECT * FROM search_results WHERE id = ? OR alias = ? ORDER BY created_at DESC, rank ASC LIMIT 1").get(ref, ref) as SearchResultRecord | undefined;
   }
 
   findPageByCanonicalUrl(canonicalUrl: string): PageRecord | undefined {
@@ -177,7 +177,7 @@ export class EvidenceDatabase {
       SELECT p.id AS page_id, p.alias AS page_alias, p.title, COALESCE(p.final_url, p.url) AS url,
         ${preferred} AS path,
         p.semantic_html_path, p.markdown_path, p.text_path,
-        c.line_start, c.line_end, c.id AS chunk_id, c.heading_path,
+        c.line_start, c.line_end, c.id AS chunk_id, c.heading_path, c.text AS text,
         snippet(chunk_fts, 5, '', '', ' ... ', 18) AS snippet
       FROM chunk_fts
       JOIN chunks c ON c.id = chunk_fts.chunk_id
@@ -190,12 +190,20 @@ export class EvidenceDatabase {
     return rows
       .filter((row) => !domain || domainMatches(row.url, domain))
       .slice(0, limit)
-      .map((row) => ({
-        ...row,
-        line_start: format === "markdown" || format === "semantic_html" ? undefined : row.line_start,
-        line_end: format === "markdown" || format === "semantic_html" ? undefined : row.line_end,
-        matched_terms: terms,
-      }));
+      .map((row) => {
+        const text = "text" in row && typeof row.text === "string" ? row.text : "";
+        const matched = matchedTermsInText(terms, [row.title, row.heading_path ?? "", row.snippet, text].join("\n"));
+        const { text: _text, ...publicRow } = row as LookupHit & { text?: string };
+        const best_format = format === "markdown" || format === "semantic_html" || format === "text" ? format : "text";
+        return {
+          ...publicRow,
+          best_path: publicRow.path,
+          best_format,
+          line_start: format === "markdown" || format === "semantic_html" ? undefined : row.line_start,
+          line_end: format === "markdown" || format === "semantic_html" ? undefined : row.line_end,
+          matched_terms: matched,
+        };
+      });
   }
 
   private withTransaction(fn: () => void): void {
@@ -237,6 +245,11 @@ export function normalizeFtsQuery(query: string): string {
 
 export function matchedTerms(query: string): string[] {
   return Array.from(new Set((query.match(/[A-Za-z0-9_./:-]+/g) ?? []).map((s) => s.toLowerCase()))).slice(0, 8);
+}
+
+function matchedTermsInText(terms: string[], text: string): string[] {
+  const haystack = text.toLowerCase();
+  return terms.filter((term) => haystack.includes(term));
 }
 
 function preferredPathExpression(format: EvidenceFormat): string {

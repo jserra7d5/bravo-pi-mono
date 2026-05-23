@@ -2,11 +2,11 @@
 
 `@bravo/web-evidence-cache` is a personal Pi extension package that gives agents a small web evidence workflow:
 
-- `web_search` discovers candidate pages on the live web through Brave Search.
-- `web_fetch` materializes selected URLs or search result refs into temporary local artifacts.
-- `web_lookup` searches only fetched local artifacts with SQLite FTS5/BM25.
+- `web_search` discovers candidate pages on the live web through Brave Search. It returns discovery leads only; titles and snippets are not evidence.
+- `web_fetch` materializes selected URLs or search result refs into temporary local artifacts that agents can read, cite, and search.
+- `web_lookup` searches only fetched local artifacts with SQLite FTS5/BM25; it is not live web search.
 
-The package intentionally does not crawl or index the public web. Search snippets are leads, not evidence. Fetched artifact paths are the evidence surface; agents should read those paths with normal filesystem tools.
+The package intentionally does not crawl or index the public web. Search snippets are leads, not evidence, and `web_search` does not auto-fetch results. Fetched artifact paths are the evidence surface; agents should read those paths with normal filesystem tools.
 
 ## Setup
 
@@ -35,7 +35,7 @@ export BRAVE_SEARCH_API_KEY=...
 export BRAVE_API_KEY=... # accepted fallback
 ```
 
-For local smoke tests, the expected personal key location is `~/.keys/BRAVE_API_KEY`. Do not commit keys, print keys, or put keys in fixtures.
+For local smoke tests, export one of those environment variables before starting Pi. This package does not read keys from `~/.keys`; do not commit keys, print keys, or put keys in fixtures.
 
 ## Runtime Behavior
 

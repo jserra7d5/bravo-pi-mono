@@ -118,7 +118,8 @@ export function renderSearchResult(result: AgentToolResult<WebSearchResult>, _op
   const details = result.details;
   if (!details) return new Text(contentText(result));
   return new EvidenceCard("web_search", "✓ Web Search", details.results.slice(0, 5).flatMap((r) => [
-    `[${r.alias}] ${r.title} · ${r.provider}${r.fetched ? " · fetched" : ""}`,
+    `[${r.alias}] ${r.title} · ${r.provider}`,
+    `id  ${r.id}`,
     truncateMiddle(r.url, 120),
   ]));
 }
@@ -127,7 +128,9 @@ export function renderFetchResult(result: AgentToolResult<WebFetchResult>, _opti
   const details = result.details;
   if (!details) return new Text(contentText(result));
   return new EvidenceCard("web_fetch", "✓ Web Fetch", details.results.flatMap((r) => [
-    `[${r.alias}] ${r.title} · ${r.extraction.engine}/${r.extraction.confidence}`,
+    `[${shortId(r.id)}] ${r.title} · ${r.extraction.engine}/${r.extraction.confidence}${r.extraction.confidence === "good" ? "" : " · verify"}`,
+    `id       ${r.id}`,
+    `best     ${r.best_format} ${truncateMiddle(r.best_path, 112)}`,
     `semantic ${truncateMiddle(r.semantic_html_path, 120)}`,
     `markdown ${truncateMiddle(r.markdown_path, 120)}`,
   ]));
@@ -137,9 +140,14 @@ export function renderLookupResult(result: AgentToolResult<WebLookupResult>, _op
   const details = result.details;
   if (!details) return new Text(contentText(result));
   return new EvidenceCard("web_lookup", "✓ Web Lookup", details.results.slice(0, 8).flatMap((r) => [
-    `[${r.page_alias}:${r.chunk_id}] ${r.title}${r.heading_path ? ` > ${r.heading_path}` : ""}`,
-    `path ${truncateMiddle(`${r.path}${r.line_start ? `:${r.line_start}` : ""}`, 120)}`,
+    `[${shortId(r.page_id)}:${shortId(r.chunk_id)}] ${r.title}${r.heading_path ? ` > ${r.heading_path}` : ""}`,
+    `matched ${r.matched_terms.join(", ") || "—"}`,
+    `best ${r.best_format} ${truncateMiddle(`${r.best_path}${r.line_start ? `:${r.line_start}` : ""}`, 112)}`,
   ]));
+}
+
+function shortId(id: string): string {
+  return id.length > 8 ? id.slice(0, 8) : id;
 }
 
 export function renderErrorCard(error: unknown): Component {

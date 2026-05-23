@@ -4,7 +4,6 @@ export type SearchMode = "auto" | "exact" | "broad";
 export interface WebSearchInput {
   query: string;
   limit?: number;
-  fetch_top?: number;
   search_mode?: SearchMode;
   domains?: string[];
   exclude_domains?: string[];
@@ -43,9 +42,6 @@ export interface WebSearchResultItem {
   url: string;
   snippet?: string;
   provider: string;
-  fetched?: boolean;
-  page_id?: string;
-  artifact_dir?: string;
 }
 
 export interface WebSearchResult {
@@ -92,6 +88,8 @@ export interface PageRecord {
 
 export interface WebFetchResultItem extends PageRecord {
   indexed: boolean;
+  best_path: string;
+  best_format: Exclude<EvidenceFormat, "auto">;
   preview: string;
   extraction: {
     engine: string;
@@ -112,6 +110,8 @@ export interface WebLookupResultItem {
   title: string;
   url: string;
   path: string;
+  best_path: string;
+  best_format: Exclude<EvidenceFormat, "auto">;
   semantic_html_path: string;
   markdown_path: string;
   text_path: string;

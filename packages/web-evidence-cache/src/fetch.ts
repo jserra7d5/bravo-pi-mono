@@ -6,6 +6,7 @@ import { extractDocument } from "./extract.js";
 import { chunkSemanticHtml } from "./chunking.js";
 import { ensureDir, pageArtifactPaths, sha256, writeTextFile } from "./filesystem.js";
 import type { SessionRegistry } from "./cache.js";
+import { preferredPath } from "./lookup.js";
 import type { EvidenceFormat, PageRecord, WebFetchResultItem } from "./types.js";
 import type { WebCacheConfig } from "./config.js";
 import { composeAbortSignal } from "./signals.js";
@@ -17,13 +18,11 @@ export interface FetchRef {
 
 export async function fetchEvidence(ref: FetchRef, registry: SessionRegistry, config: WebCacheConfig, format: EvidenceFormat = "auto", refresh: "auto" | "force" = "auto", signal?: AbortSignal): Promise<WebFetchResultItem> {
   const canonical = canonicalizeUrl(ref.url);
-  if (refresh === "auto") {
-    const existing = registry.db.findPageByUrlIdentity(canonical);
-    if (existing) return pageToFetchItem(existing, format, true);
-  }
+  const existing = registry.db.findPageByUrlIdentity(canonical);
+  if (refresh === "auto" && existing) return pageToFetchItem(existing, format, true);
   const fetched = await fetchHtml(canonical, config, signal);
-  const pageId = randomUUID();
-  const alias = `p${registry.nextPageAlias++}`;
+  const pageId = existing?.id ?? randomUUID();
+  const alias = existing?.alias ?? pageId;
   const extraction = await extractDocument(fetched.body, fetched.finalUrl, pageId);
   const paths = pageArtifactPaths(registry.rootDir, pageId);
   await ensureDir(paths.artifactDir);
@@ -73,7 +72,7 @@ export async function fetchHtml(initialUrl: string, config: WebCacheConfig, sign
     try {
       response = await fetch(url, {
         redirect: "manual",
-        headers: { "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.2", "User-Agent": "pi-web-evidence-cache/0.1" },
+        headers: { "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.2", "Accept-Language": "en", "User-Agent": "pi-web-evidence-cache/0.1" },
         signal: requestSignal,
       });
     } catch (cause) {
@@ -115,9 +114,12 @@ export async function fetchHtml(initialUrl: string, config: WebCacheConfig, sign
 
 function pageToFetchItem(page: PageRecord, format: EvidenceFormat, indexed: boolean, text?: string): WebFetchResultItem {
   const preview = (text ?? "").replace(/\s+/g, " ").trim().slice(0, 1200);
+  const best_format = fetchBestFormat(format);
   return {
     ...page,
     indexed,
+    best_path: preferredPath(page, best_format),
+    best_format,
     preview,
     extraction: {
       engine: page.extractor,
@@ -130,9 +132,14 @@ function pageToFetchItem(page: PageRecord, format: EvidenceFormat, indexed: bool
 export function fetchContentSummary(results: WebFetchResultItem[]): string {
   if (!results.length) return "web_fetch fetched no pages.";
   return [
-    `web_fetch materialized ${results.length} page${results.length === 1 ? "" : "s"} as local evidence artifacts.`,
-    ...results.map((r) => `[${r.alias}] ${r.title} · ${r.indexed ? "indexed" : "indexed"}\nsemantic: ${r.semantic_html_path}\nmarkdown: ${r.markdown_path}\ntext: ${r.text_path}\nextract: ${r.extraction.engine}/${r.extraction.confidence}`),
+    `web_fetch materialized ${results.length} page${results.length === 1 ? "" : "s"} as local evidence artifacts. Use best_path first; markdown is usually best for prose, semantic_html when structure matters, text for line-oriented lookup/citation. Extraction confidence: good=normal, partial=usable but verify against artifact context, weak=high risk of missing/poor extraction and should be corroborated or refetched from another source.`,
+    ...results.map((r) => `[${r.id}] ${r.title} · indexed\nbest (${r.best_format}): ${r.best_path}\nsemantic: ${r.semantic_html_path}\nmarkdown: ${r.markdown_path}\ntext: ${r.text_path}\nextract: ${r.extraction.engine}/${r.extraction.confidence}${r.extraction.confidence === "good" ? "" : " · verify before citing"}`),
   ].join("\n\n");
+}
+
+function fetchBestFormat(format: EvidenceFormat): Exclude<EvidenceFormat, "auto"> {
+  if (format === "semantic_html" || format === "markdown" || format === "text") return format;
+  return "markdown";
 }
 
 function escapeHtml(value: string): string {

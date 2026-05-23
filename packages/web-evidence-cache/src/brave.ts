@@ -16,14 +16,34 @@ interface BraveSearchResponse {
   };
 }
 
+function normalizeDomainFilter(domain: string): string | undefined {
+  const value = domain.trim();
+  if (!value || /\s/.test(value)) return undefined;
+  try {
+    return new URL(value.includes("://") ? value : `https://${value}`).hostname || undefined;
+  } catch {
+    return value.split("/")[0] || undefined;
+  }
+}
+
 export function shapeBraveQuery(input: WebSearchInput): string {
   const parts: string[] = [];
   const query = input.search_mode === "exact" && !/^".*"$/.test(input.query.trim())
     ? `"${input.query.trim()}"`
     : input.query.trim();
   parts.push(query);
-  for (const domain of input.domains ?? []) parts.push(`site:${domain}`);
-  for (const domain of input.exclude_domains ?? []) parts.push(`-site:${domain}`);
+
+  const domains = (input.domains ?? []).flatMap((domain) => {
+    const normalized = normalizeDomainFilter(domain);
+    return normalized ? [`site:${normalized}`] : [];
+  });
+  if (domains.length === 1) parts.push(domains[0]);
+  if (domains.length > 1) parts.push(`(${domains.join(" OR ")})`);
+
+  for (const domain of input.exclude_domains ?? []) {
+    const normalized = normalizeDomainFilter(domain);
+    if (normalized) parts.push(`-site:${normalized}`);
+  }
   return parts.filter(Boolean).join(" ");
 }
 
