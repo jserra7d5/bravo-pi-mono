@@ -124,6 +124,7 @@ function statusForRun(store: RunStore, runId: string): { agentName?: string; dis
 }
 
 function isActionableModelWakeup(delivery: WakeupDelivery): boolean {
+  if (delivery.message.result) return true;
   const eventType = delivery.message.event?.type;
   return eventType === "question" || eventType === "blocked";
 }

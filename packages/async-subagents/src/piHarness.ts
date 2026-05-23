@@ -25,6 +25,12 @@ export interface BuildPiCommandInput {
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
   forkFallback?: { allowed: boolean; used: boolean; reason?: string } | null;
+  continuation?: {
+    continuedFromRunId: string;
+    continuationRootRunId?: string;
+    continuationSequence?: number;
+    continuationOfPiSessionPath?: string;
+  };
   rootSessionId?: string;
   parentRunId?: string;
   useAtFilePrompt?: boolean;

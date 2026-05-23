@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createRunEvent } from "../../src/events.js";
 import { appendJsonl, readJsonl } from "../../src/jsonl.js";
@@ -9,7 +9,7 @@ import { readSubagentResult } from "../../src/result.js";
 import { createRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import { isTerminalRunState, isThinkingLevel } from "../../src/schemas.js";
-import { startSubagent } from "../../src/start.js";
+import { startSubagent, type StartSubagentInput } from "../../src/start.js";
 import { readSubagentStatus, updateRunStatus } from "../../src/status.js";
 import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult, type WaitCursorMap } from "../../src/types.js";
 import { waitSubagents } from "../../src/wait.js";
@@ -40,6 +40,7 @@ import {
 export interface ToolRuntime {
   getRootIdentity?: (cwd: string) => RootSessionIdentity | undefined;
   setRootIdentity?: (identity: RootSessionIdentity) => void;
+  startSubagent?: (input: StartSubagentInput) => ReturnType<typeof startSubagent>;
   afterMutation?: (ctx: unknown, cwd: string, identity: RootSessionIdentity) => void | Promise<void>;
 }
 
@@ -50,6 +51,7 @@ interface ToolResponse {
 }
 
 const LIVE_ACK_TIMEOUT_MS = 500;
+const CONTINUATION_START_LOCK_TTL_MS = 10 * 60 * 1000;
 
 function ctxCwd(ctx: unknown): string {
   const cwd = (ctx as { cwd?: unknown } | undefined)?.cwd;
@@ -350,6 +352,220 @@ function requiredAckFailed(params: Record<string, unknown>, result: SubagentMess
   return params.requiresAck !== false && Boolean(result.unsupported);
 }
 
+function continuationSequence(store: RunStore, status: RunStatus): { rootRunId: string; sequence: number } {
+  const rootRunId = status.continuationRootRunId ?? status.runId;
+  const priorSequences = store
+    .readRunIndex()
+    .filter((record) => record.continuationRootRunId === rootRunId)
+    .map((record) => record.continuationSequence ?? 0);
+  if (status.continuationRootRunId === rootRunId) priorSequences.push(status.continuationSequence ?? 0);
+  return { rootRunId, sequence: Math.max(0, ...priorSequences) + 1 };
+}
+
+function continuationLockPath(store: RunStore, rootRunId: string, piSessionPath: string): string {
+  const key = `${rootRunId}:${piSessionPath}`.replace(/[^A-Za-z0-9_.-]/g, "_");
+  return join(resolve(store.runRoot, ".."), "continuation-locks", `${key}.json`);
+}
+
+function writeContinuationLock(path: string, rootRunId: string, piSessionPath: string, runId: string): boolean {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const fd = openSync(path, "wx");
+    try {
+      writeFileSync(fd, `${JSON.stringify({ schemaVersion: SCHEMA_VERSION, rootRunId, piSessionPath, requestedByRunId: runId, claimedAt: new Date().toISOString() })}\n`, "utf8");
+    } finally {
+      closeSync(fd);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function continuationLockAgeMs(path: string, nowMs = Date.now()): number | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { claimedAt?: unknown };
+    if (typeof parsed.claimedAt === "string") {
+      const claimedAt = Date.parse(parsed.claimedAt);
+      if (Number.isFinite(claimedAt)) return nowMs - claimedAt;
+    }
+  } catch {
+    // Fall back to file mtime below. A crash can leave a partial lock file.
+  }
+  try {
+    return nowMs - statSync(path).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
+function removeStaleContinuationLock(path: string, nowMs = Date.now()): boolean {
+  const ageMs = continuationLockAgeMs(path, nowMs);
+  if (ageMs === undefined || ageMs < CONTINUATION_START_LOCK_TTL_MS) return false;
+  try {
+    rmSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function claimContinuationLock(store: RunStore, rootRunId: string, piSessionPath: string, runId: string): { claimed: boolean; path: string; recoveredStale?: boolean } {
+  const path = continuationLockPath(store, rootRunId, piSessionPath);
+  if (writeContinuationLock(path, rootRunId, piSessionPath, runId)) return { claimed: true, path };
+  if (!removeStaleContinuationLock(path)) return { claimed: false, path };
+  return { claimed: writeContinuationLock(path, rootRunId, piSessionPath, runId), path, recoveredStale: true };
+}
+
+function releaseContinuationLock(path: string): void {
+  try {
+    rmSync(path);
+  } catch {
+    // The lock is a short critical-section guard. Active continuation status is
+    // the durable long-lived guard once a run has been created.
+  }
+}
+
+function activeContinuationFor(store: RunStore, rootRunId: string, piSessionPath: string): RunStatus | undefined {
+  for (const record of store.readRunIndex()) {
+    if (record.continuationRootRunId !== rootRunId) continue;
+    if (record.continuationOfPiSessionPath !== piSessionPath) continue;
+    try {
+      const status = store.readStatus(record.runId);
+      if (!isTerminalRunState(status.state)) return status;
+    } catch {
+      // Ignore broken index entries; status diagnostics elsewhere surface them.
+    }
+  }
+  return undefined;
+}
+
+async function startTerminalContinuation(input: {
+  runtime: ToolRuntime;
+  ctx: unknown;
+  sessionCwd: string;
+  root: RootSessionIdentity;
+  store: RunStore;
+  status: RunStatus;
+  params: Record<string, unknown>;
+}): Promise<ToolResponse> {
+  const originalResult = input.store.readResult(input.status.runId);
+  const originalPiSessionPath = input.status.piSessionPath ?? originalResult?.piSessionPath;
+  if (!originalPiSessionPath) {
+    return response(
+      `Run ${input.status.runId} is terminal and has no recorded Pi session to continue`,
+      {
+        code: "TERMINAL_CONTINUATION_SESSION_UNAVAILABLE",
+        runId: input.status.runId,
+        state: input.status.state,
+        sessionPolicy: input.status.sessionPolicy,
+      },
+      true,
+    );
+  }
+
+  const body = typeof input.params.body === "string" && input.params.body.trim() ? input.params.body.trim() : "Continue from the previous terminal result.";
+  const mode = input.params.mode === "sync" ? "sync" : "async";
+  const wait = typeof input.params.wait === "string" ? input.params.wait : "none";
+  const timeoutMs = typeof input.params.timeoutMs === "number" ? input.params.timeoutMs : undefined;
+  const lineage = continuationSequence(input.store, input.status);
+  const lock = claimContinuationLock(input.store, lineage.rootRunId, originalPiSessionPath, input.status.runId);
+  if (!lock.claimed) {
+    const active = activeContinuationFor(input.store, lineage.rootRunId, originalPiSessionPath);
+    if (active) {
+      return response(
+        `Run ${input.status.runId} already has active continuation ${active.runId}`,
+        {
+          code: "ACTIVE_TERMINAL_CONTINUATION",
+          runId: input.status.runId,
+          activeRunId: active.runId,
+          activeState: active.state,
+          continuationRootRunId: lineage.rootRunId,
+          continuationOfPiSessionPath: originalPiSessionPath,
+        },
+        true,
+      );
+    }
+    return response(
+      `A terminal continuation is already being started for run ${input.status.runId}`,
+      {
+        code: "TERMINAL_CONTINUATION_START_IN_PROGRESS",
+        runId: input.status.runId,
+        continuationRootRunId: lineage.rootRunId,
+        continuationOfPiSessionPath: originalPiSessionPath,
+      },
+      true,
+    );
+  }
+  try {
+    const active = activeContinuationFor(input.store, lineage.rootRunId, originalPiSessionPath);
+    if (active) {
+      return response(
+        `Run ${input.status.runId} already has active continuation ${active.runId}`,
+        {
+          code: "ACTIVE_TERMINAL_CONTINUATION",
+          runId: input.status.runId,
+          activeRunId: active.runId,
+          activeState: active.state,
+          continuationRootRunId: lineage.rootRunId,
+          continuationOfPiSessionPath: originalPiSessionPath,
+        },
+        true,
+      );
+    }
+
+    const launcher = input.runtime.startSubagent ?? startSubagent;
+    const result = await launcher({
+      agent: input.status.agent.name,
+      variant: input.status.variant,
+      task: body,
+      cwd: input.status.cwd,
+      runRoot: input.store.runRoot,
+      parentRunId: input.root.parentRunId,
+      rootRunId: input.root.parentRunId,
+      rootSessionId: input.root.rootSessionId,
+      context: "fresh",
+      session: "record",
+      piSessionPathOverride: originalPiSessionPath,
+      continuation: {
+        continuedFromRunId: input.status.runId,
+        continuationRootRunId: lineage.rootRunId,
+        continuationSequence: lineage.sequence,
+        continuationOfPiSessionPath: originalPiSessionPath,
+      },
+      startMode: mode === "sync" || wait !== "none" ? "wait" : "async",
+      waitTimeoutMs: timeoutMs ?? (mode === "sync" || wait !== "none" ? 300_000 : 0),
+      waitUntil: wait === "terminal" || wait === "result" || wait === "interesting" ? wait : mode === "sync" ? "result" : "interesting",
+      env: {
+        ASYNC_SUBAGENTS_ROOT_SESSION_ID: input.root.rootSessionId,
+        ASYNC_SUBAGENTS_PARENT_RUN_ID: input.root.parentRunId,
+      },
+      thinkingLevel: isThinkingLevel(input.params.thinkingLevel) ? input.params.thinkingLevel : input.status.thinkingLevel,
+    });
+    const notifyOn = Array.isArray(input.params.notifyOn) ? (input.params.notifyOn.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined;
+    writeDeliverySubscription(input.store, {
+      schemaVersion: SCHEMA_VERSION,
+      parentRunId: input.root.parentRunId,
+      runId: result.runId,
+      notifyOn: notifyOn ?? ["question", "blocked", "result", "completed", "failed", "cancelled", "expired"],
+      createdAt: new Date().toISOString(),
+    });
+    await input.runtime.afterMutation?.(input.ctx, input.sessionCwd, input.root);
+    const summary = `Created continuation run ${result.runId} from terminal run ${input.status.runId}`;
+    return response(summary, {
+      ...result,
+      originalRunId: input.status.runId,
+      continuedFromRunId: input.status.runId,
+      continuationRootRunId: lineage.rootRunId,
+      continuationSequence: lineage.sequence,
+      continuationOfPiSessionPath: originalPiSessionPath,
+      rootSessionId: input.root.rootSessionId,
+    });
+  } finally {
+    releaseContinuationLock(lock.path);
+  }
+}
+
 function statusDiagnostics(store: RunStore, status: RunStatus): string[] {
   const diagnostics: string[] = [];
   const result = store.readResult(status.runId);
@@ -544,7 +760,9 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const store = storeFor(cwd);
         const status = statusFromParams(store, cwd, params);
         const runId = status.runId;
-        if (isTerminalRunState(status.state)) return response(`Run ${runId} is terminal; cannot continue`, { code: "RUN_TERMINAL", runId, state: status.state }, true);
+        if (isTerminalRunState(status.state)) {
+          return startTerminalContinuation({ runtime, ctx, sessionCwd: cwd, root, store, status, params });
+        }
         if (status.state !== "paused") {
           return response(`Run ${runId} is ${status.state}; use subagent_message for normal input`, { code: "RUN_NOT_PAUSED", runId, state: status.state }, true);
         }

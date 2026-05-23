@@ -50,6 +50,15 @@ function createStoredRun(store: RunStore, root: string, parentRunId: string) {
   return runId;
 }
 
+async function waitForStatusState(store: RunStore, runId: string, state: string, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (store.readStatus(runId).state === state) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(store.readStatus(runId).state, state);
+}
+
 test("startSubagent drives a detached fake child lifecycle", async () => {
   const w = workspace();
   const started = await startSubagent({
@@ -74,6 +83,7 @@ test("startSubagent drives a detached fake child lifecycle", async () => {
   assert.equal(waited.state, "ready");
   assert.equal(waited.results[0]?.state, "completed");
   assert.match(waited.results[0]?.body ?? "", /Fake child completed/);
+  await waitForStatusState(store, started.runId, "completed");
   assert.equal(store.readStatus(started.runId).state, "completed");
   assert.equal(store.readStatus(started.runId).piSessionPath, join(started.runDir, "pi-session", "session.jsonl"));
   assert.equal(store.readStatus(started.runId).thinkingLevel, undefined);

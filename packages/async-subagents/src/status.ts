@@ -22,6 +22,10 @@ export function createInitialStatus(input: {
   sessionPolicy?: SessionPolicy;
   piSessionPath?: string;
   requestedPiSessionPath?: string;
+  continuedFromRunId?: string;
+  continuationRootRunId?: string;
+  continuationSequence?: number;
+  continuationOfPiSessionPath?: string;
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
   forkFallback?: RunStatus["forkFallback"];
@@ -56,6 +60,10 @@ export function createInitialStatus(input: {
     sessionPolicy: input.sessionPolicy ?? "record",
     piSessionPath: input.piSessionPath,
     requestedPiSessionPath: input.requestedPiSessionPath,
+    continuedFromRunId: input.continuedFromRunId,
+    continuationRootRunId: input.continuationRootRunId,
+    continuationSequence: input.continuationSequence,
+    continuationOfPiSessionPath: input.continuationOfPiSessionPath,
     forkSourceSessionFile: input.forkSourceSessionFile,
     forkSourceLeafId: input.forkSourceLeafId,
     forkFallback: input.forkFallback ?? null,

@@ -73,6 +73,10 @@ export const subagentContinueSchema = Type.Object({
   type: Type.Optional(StringEnum(PARENT_MESSAGE_TYPES, { default: "instruction" })),
   attachments: Type.Optional(Type.Array(Attachment)),
   requiresAck: Type.Optional(Type.Boolean()),
+  mode: Type.Optional(StringEnum(["async", "sync"] as const, { default: "async", description: "Terminal continuations start asynchronously unless sync is requested." })),
+  wait: Type.Optional(StringEnum(["none", "interesting", "terminal", "result"] as const, { default: "none", description: "Optional wait behavior for terminal continuation runs." })),
+  timeoutMs: Type.Optional(Type.Number({ description: "Wait timeout for sync mode or requested terminal continuation wait behavior." })),
+  notifyOn: Type.Optional(Type.Array(StringEnum(EVENT_TYPES as readonly string[]))),
   thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS, { description: "Set the child's Pi thinking level while resuming, if the child-control extension is active." })),
 });
 

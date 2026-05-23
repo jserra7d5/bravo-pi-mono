@@ -119,17 +119,17 @@ test("pollWakeups does not redeliver durable results after collection clears rea
   assert.equal(pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" }).length, 0);
 });
 
-test("model follow-up polling skips terminal results before claiming them", () => {
+test("model follow-up polling delivers terminal results once", () => {
   const { root, store } = workspace();
   createCompletedRun(store, root, "root_test");
   acquireRootSessionLease({ cwd: root, rootSessionId: "root_test", ownerId: "owner_a", ttlMs: 10_000 });
 
   const modelPoll = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a", modelFollowUpOnly: true });
-  assert.equal(modelPoll.length, 0);
+  assert.equal(modelPoll.length, 1);
+  assert.match(modelPoll[0]?.deliveryKey ?? "", /^terminal:/);
 
   const normalPoll = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" });
-  assert.equal(normalPoll.length, 1);
-  assert.match(normalPoll[0]?.deliveryKey ?? "", /^terminal:/);
+  assert.equal(normalPoll.length, 0);
 });
 
 test("pollWakeups remaps a question event onto waiting_for_input so the wake card badge picks 'needs you'", () => {

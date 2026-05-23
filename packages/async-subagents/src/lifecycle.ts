@@ -22,6 +22,17 @@ function nextEventSequence(store: RunStore, runId: string): number {
   return store.readEvents(runId).records.length + 1;
 }
 
+function metricsForTerminalRun(statusMetrics: RunMetrics | undefined, costTotal: number | undefined, usesSharedContinuationSession: boolean): RunMetrics | undefined {
+  if (usesSharedContinuationSession) {
+    if (!statusMetrics) return undefined;
+    const { cost: _cost, ...withoutCost } = statusMetrics;
+    return Object.keys(withoutCost).length ? withoutCost : undefined;
+  }
+  return costTotal !== undefined || statusMetrics !== undefined
+    ? { ...(statusMetrics ?? {}), ...(costTotal !== undefined ? { cost: { total: costTotal } } : {}) }
+    : undefined;
+}
+
 export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunInput): RunResult {
   const status = store.readStatus(input.runId);
   const existingResult = store.readResult(input.runId);
@@ -41,12 +52,9 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
     return existingResult;
   }
 
-  const costTotal = extractCostFromSessionLogSync(status.piSessionPath);
-  const baseMetrics = status.metrics;
-  const metrics: RunMetrics | undefined =
-    costTotal !== undefined || baseMetrics !== undefined
-      ? { ...(baseMetrics ?? {}), ...(costTotal !== undefined ? { cost: { total: costTotal } } : {}) }
-      : undefined;
+  const usesSharedContinuationSession = Boolean(status.continuationOfPiSessionPath);
+  const costTotal = usesSharedContinuationSession ? undefined : extractCostFromSessionLogSync(status.piSessionPath);
+  const metrics = metricsForTerminalRun(status.metrics, costTotal, usesSharedContinuationSession);
 
   const result = createRunResult({
     runId: input.runId,
@@ -61,6 +69,10 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
     sessionPolicy: status.sessionPolicy,
     piSessionPath: status.piSessionPath,
     requestedPiSessionPath: status.requestedPiSessionPath,
+    continuedFromRunId: status.continuedFromRunId,
+    continuationRootRunId: status.continuationRootRunId,
+    continuationSequence: status.continuationSequence,
+    continuationOfPiSessionPath: status.continuationOfPiSessionPath,
     forkSourceSessionFile: status.forkSourceSessionFile,
     forkSourceLeafId: status.forkSourceLeafId,
     forkFallback: status.forkFallback,
@@ -93,7 +105,7 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
       lastActivityAt: result.createdAt,
       lastEventId: terminalEvent.eventId,
       summary: result.summary,
-      ...(metrics ? { metrics } : {}),
+      metrics,
       error: input.error ?? null,
     }),
   );

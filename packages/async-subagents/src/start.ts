@@ -48,6 +48,14 @@ export interface StartSubagentInput {
   allowFreshFallback?: boolean;
   parentPiSessionRef?: ParentPiSessionRef | null;
   branchSession?: BranchPiSession;
+  piSessionPathOverride?: string;
+  requestedPiSessionPathOverride?: string;
+  continuation?: {
+    continuedFromRunId: string;
+    continuationRootRunId?: string;
+    continuationSequence?: number;
+    continuationOfPiSessionPath?: string;
+  };
   thinkingLevel?: ThinkingLevel;
   piBin?: string;
   env?: Record<string, string>;
@@ -248,12 +256,18 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     rootSessionId: root.rootSessionId,
     contextPolicy: requestedContextPolicy,
     sessionPolicy: requestedSessionPolicy,
+    piSessionPath: input.piSessionPathOverride,
+    requestedPiSessionPath: input.requestedPiSessionPathOverride,
+    continuedFromRunId: input.continuation?.continuedFromRunId,
+    continuationRootRunId: input.continuation?.continuationRootRunId,
+    continuationSequence: input.continuation?.continuationSequence,
+    continuationOfPiSessionPath: input.continuation?.continuationOfPiSessionPath,
   });
   const display = assignDisplayName({ runRoot: store.runRoot });
   let contextPolicy = requestedContextPolicy;
   const sessionPolicy = requestedSessionPolicy;
-  const requestedPiSessionPath = sessionPolicy === "record" ? paths.requestedPiSessionPath : undefined;
-  let piSessionPath = sessionPolicy === "record" ? paths.requestedPiSessionPath : undefined;
+  const requestedPiSessionPath = sessionPolicy === "record" ? input.requestedPiSessionPathOverride ?? paths.requestedPiSessionPath : undefined;
+  let piSessionPath = sessionPolicy === "record" ? input.piSessionPathOverride ?? paths.requestedPiSessionPath : undefined;
   let forkSourceSessionFile: string | undefined;
   let forkSourceLeafId: string | undefined;
   let forkFallback: { allowed: boolean; used: boolean; reason?: string } | null = null;
@@ -280,6 +294,10 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     sessionPolicy,
     piSessionPath,
     requestedPiSessionPath,
+    continuedFromRunId: input.continuation?.continuedFromRunId,
+    continuationRootRunId: input.continuation?.continuationRootRunId,
+    continuationSequence: input.continuation?.continuationSequence,
+    continuationOfPiSessionPath: input.continuation?.continuationOfPiSessionPath,
     forkFallback,
     userBuiltinTools: definition.tools,
     runtimeBuiltinTools,
@@ -318,6 +336,10 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       thinkingLevel: selectedThinkingLevel,
       piSessionPath,
       requestedPiSessionPath,
+      continuedFromRunId: input.continuation?.continuedFromRunId,
+      continuationRootRunId: input.continuation?.continuationRootRunId,
+      continuationSequence: input.continuation?.continuationSequence,
+      continuationOfPiSessionPath: input.continuation?.continuationOfPiSessionPath,
       skills: definition.skills,
       tools: definition.tools,
       maxRunMs: definition.maxRunMs,
@@ -411,6 +433,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     forkFallback,
     rootSessionId: root.rootSessionId,
     parentRunId: root.parentRunId,
+    continuation: input.continuation,
     extraEnv: input.env,
   });
   const command = input.fake?.mode === "child" ? fakeChildCommand(input.fake, cwd) : piCommand;
@@ -432,6 +455,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     forkFallback,
     rootSessionId: root.rootSessionId,
     parentRunId: root.parentRunId,
+    continuation: input.continuation,
   });
 
   if (prompt.model && !input.fake) {
@@ -494,6 +518,10 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     sessionPolicy: status.sessionPolicy,
     piSessionPath: status.piSessionPath,
     requestedPiSessionPath: status.requestedPiSessionPath,
+    continuedFromRunId: status.continuedFromRunId,
+    continuationRootRunId: status.continuationRootRunId,
+    continuationSequence: status.continuationSequence,
+    continuationOfPiSessionPath: status.continuationOfPiSessionPath,
     skills: definition.skills,
     tools: definition.tools,
     maxRunMs: definition.maxRunMs,

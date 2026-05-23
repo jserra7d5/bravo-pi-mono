@@ -138,3 +138,49 @@ test("finalizeTerminalRun leaves metrics undefined when the session log has no a
 
   assert.equal(result.metrics, undefined);
 });
+
+test("finalizeTerminalRun does not charge shared continuation session history", () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const { runId, paths } = store.createRunDirectory({
+    cwd: w.root,
+    parentRunId: "root_test",
+    rootSessionId: "root_test",
+    continuedFromRunId: "run_original",
+    continuationRootRunId: "run_original",
+    continuationSequence: 1,
+  });
+  writeFileSync(paths.piSessionPath, [assistantLine(0.05), assistantLine(0.07), assistantLine(0.13)].join("\n") + "\n", "utf8");
+
+  const status = createInitialStatus({
+    runId,
+    parentRunId: "root_test",
+    rootSessionId: "root_test",
+    agentName: "scout",
+    agentSource: "project",
+    definitionPath: join(w.root, ".agents", "scout.md"),
+    mode: "oneshot",
+    cwd: w.root,
+    piSessionPath: paths.piSessionPath,
+    continuedFromRunId: "run_original",
+    continuationRootRunId: "run_original",
+    continuationSequence: 1,
+    continuationOfPiSessionPath: paths.piSessionPath,
+    state: "running",
+  });
+  store.writeStatus({ ...status, metrics: { tokens: { total: 42 }, cost: { total: 99 } } });
+
+  const result = finalizeTerminalRun(store, {
+    runId,
+    parentRunId: "root_test",
+    agentName: "scout",
+    state: "completed",
+    writerRole: "child-runtime",
+    summary: "Done",
+  });
+
+  assert.equal(result.metrics?.cost, undefined);
+  assert.equal(result.metrics?.tokens?.total, 42);
+  assert.equal(store.readStatus(runId).metrics?.cost, undefined);
+  assert.equal(store.readStatus(runId).metrics?.tokens?.total, 42);
+});

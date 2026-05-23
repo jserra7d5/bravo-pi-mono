@@ -18,6 +18,10 @@ export interface CreateRunDirectoryInput {
   sessionPolicy?: RunIndexRecord["sessionPolicy"];
   piSessionPath?: string;
   requestedPiSessionPath?: string;
+  continuedFromRunId?: string;
+  continuationRootRunId?: string;
+  continuationSequence?: number;
+  continuationOfPiSessionPath?: string;
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
 }
@@ -88,6 +92,10 @@ export class RunStore {
       sessionPolicy: input.sessionPolicy,
       piSessionPath: input.piSessionPath ?? (input.sessionPolicy === "record" ? paths.piSessionPath : undefined),
       requestedPiSessionPath: input.requestedPiSessionPath ?? (input.sessionPolicy === "record" ? paths.requestedPiSessionPath : undefined),
+      continuedFromRunId: input.continuedFromRunId,
+      continuationRootRunId: input.continuationRootRunId,
+      continuationSequence: input.continuationSequence,
+      continuationOfPiSessionPath: input.continuationOfPiSessionPath,
       forkSourceSessionFile: input.forkSourceSessionFile,
       forkSourceLeafId: input.forkSourceLeafId,
       createdAt: nowIso(),

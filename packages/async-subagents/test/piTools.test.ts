@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { buildSubagentTools } from "../extensions/pi/tools.js";
 import { createRunResult } from "../src/result.js";
@@ -40,6 +40,11 @@ function tools(identity: RootSessionIdentity) {
     },
   });
   return Object.fromEntries(built.map((tool) => [tool.name, tool]));
+}
+
+function continuationLockPath(store: RunStore, rootRunId: string, piSessionPath: string): string {
+  const key = `${rootRunId}:${piSessionPath}`.replace(/[^A-Za-z0-9_.-]/g, "_");
+  return join(resolve(store.runRoot, ".."), "continuation-locks", `${key}.json`);
 }
 
 test("subagent_status tool defaults to root session direct children", async () => {
@@ -118,6 +123,191 @@ test("subagent_continue records running state even when required ack fails", asy
   assert.equal(store.readStatus(w.runId).state, "running");
   assert.equal(store.readStatus(w.runId).thinkingLevel, "high");
   assert.equal(store.readInbox(w.runId).records.at(-1)?.thinkingLevel, "high");
+});
+
+test("subagent_continue creates an async terminal continuation using the original Pi session", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const originalSession = join(w.root, "original-child-session.jsonl");
+  const original = store.readStatus(w.runId);
+  store.writeStatus({
+    ...original,
+    state: "completed",
+    resultReady: true,
+    piSessionPath: originalSession,
+    requestedPiSessionPath: join(store.pathsFor({ runId: w.runId }).runDir, "pi-session", "session.jsonl"),
+    thinkingLevel: "low",
+  });
+  store.writeResult(createRunResult({
+    runId: w.runId,
+    parentRunId: w.identity.parentRunId,
+    agentName: "scout",
+    thinkingLevel: "low",
+    state: "completed",
+    summary: "Original done",
+    piSessionPath: originalSession,
+  }));
+
+  const calls: unknown[] = [];
+  const built = buildSubagentTools({
+    getRootIdentity() {
+      return w.identity;
+    },
+    startSubagent(input) {
+      calls.push(input);
+      return startSubagent({ ...input, fake: { mode: "immediate", body: "Continuation done" } });
+    },
+  });
+  const byName = Object.fromEntries(built.map((tool) => [tool.name, tool]));
+  const result = await byName.subagent_continue.execute("call", { runId: w.runId, body: "Add the retry loop" }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.details.continuedFromRunId, w.runId);
+  assert.equal(result.details.continuationRootRunId, w.runId);
+  assert.equal(result.details.continuationSequence, 1);
+  assert.equal(result.details.continuationOfPiSessionPath, originalSession);
+  assert.equal((calls[0] as { startMode?: string }).startMode, "async");
+
+  const newRunId = result.details.runId as string;
+  assert.notEqual(newRunId, w.runId);
+  const continuation = store.readStatus(newRunId);
+  assert.equal(continuation.continuedFromRunId, w.runId);
+  assert.equal(continuation.continuationRootRunId, w.runId);
+  assert.equal(continuation.continuationSequence, 1);
+  assert.equal(continuation.continuationOfPiSessionPath, originalSession);
+  assert.equal(continuation.piSessionPath, originalSession);
+  assert.equal(store.readResult(newRunId)?.continuedFromRunId, w.runId);
+
+  const launch = JSON.parse(readFileSync(join(store.pathsFor({ runId: newRunId }).runDir, "logs", "launch.json"), "utf8"));
+  assert.deepEqual(launch.args.slice(launch.args.indexOf("--session"), launch.args.indexOf("--session") + 2), ["--session", originalSession]);
+  assert.equal(launch.continuation.continuedFromRunId, w.runId);
+});
+
+test("subagent_continue rejects concurrent terminal continuation starts for the same session", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const originalSession = join(w.root, "original-child-session.jsonl");
+  const original = store.readStatus(w.runId);
+  store.writeStatus({ ...original, state: "completed", resultReady: true, piSessionPath: originalSession });
+  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", piSessionPath: originalSession }));
+
+  let launchCount = 0;
+  const built = buildSubagentTools({
+    getRootIdentity() {
+      return w.identity;
+    },
+    async startSubagent(input) {
+      launchCount += 1;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return startSubagent({ ...input, fake: { mode: "immediate", body: "Continuation done" } });
+    },
+  });
+  const byName = Object.fromEntries(built.map((tool) => [tool.name, tool]));
+
+  const [first, second] = await Promise.all([
+    byName.subagent_continue.execute("call-1", { runId: w.runId, body: "First" }, undefined, undefined, { cwd: w.root }),
+    byName.subagent_continue.execute("call-2", { runId: w.runId, body: "Second" }, undefined, undefined, { cwd: w.root }),
+  ]);
+
+  assert.equal(launchCount, 1);
+  const errors = [first, second].filter((result) => result.isError);
+  const successes = [first, second].filter((result) => !result.isError);
+  assert.equal(successes.length, 1);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]?.details.code, "TERMINAL_CONTINUATION_START_IN_PROGRESS");
+});
+
+test("subagent_continue recovers stale terminal continuation startup locks", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const originalSession = join(w.root, "original-child-session.jsonl");
+  const original = store.readStatus(w.runId);
+  store.writeStatus({ ...original, state: "completed", resultReady: true, piSessionPath: originalSession });
+  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", piSessionPath: originalSession }));
+  const lockPath = continuationLockPath(store, w.runId, originalSession);
+  mkdirSync(dirname(lockPath), { recursive: true });
+  writeFileSync(lockPath, `${JSON.stringify({
+    schemaVersion: 1,
+    rootRunId: w.runId,
+    piSessionPath: originalSession,
+    requestedByRunId: w.runId,
+    claimedAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
+  })}\n`, "utf8");
+
+  let launchCount = 0;
+  const built = buildSubagentTools({
+    getRootIdentity() {
+      return w.identity;
+    },
+    startSubagent(input) {
+      launchCount += 1;
+      return startSubagent({ ...input, fake: { mode: "immediate", body: "Recovered stale lock" } });
+    },
+  });
+  const byName = Object.fromEntries(built.map((tool) => [tool.name, tool]));
+  const result = await byName.subagent_continue.execute("call", { runId: w.runId, body: "Continue after stale lock" }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(launchCount, 1);
+  assert.equal(result.details.continuedFromRunId, w.runId);
+});
+
+test("subagent_continue points to an active terminal continuation instead of launching another", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const originalSession = join(w.root, "original-child-session.jsonl");
+  const original = store.readStatus(w.runId);
+  store.writeStatus({ ...original, state: "completed", resultReady: true, piSessionPath: originalSession });
+  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", piSessionPath: originalSession }));
+  const active = store.createRunDirectory({
+    cwd: w.root,
+    parentRunId: w.identity.parentRunId,
+    rootSessionId: w.identity.rootSessionId,
+    contextPolicy: "fresh",
+    sessionPolicy: "record",
+    piSessionPath: originalSession,
+    continuedFromRunId: w.runId,
+    continuationRootRunId: w.runId,
+    continuationSequence: 1,
+    continuationOfPiSessionPath: originalSession,
+  });
+  store.writeStatus(createInitialStatus({
+    runId: active.runId,
+    parentRunId: w.identity.parentRunId,
+    rootSessionId: w.identity.rootSessionId,
+    agentName: "scout",
+    agentSource: "builtin",
+    definitionPath: "/builtin/scout.md",
+    mode: "oneshot",
+    cwd: w.root,
+    state: "running",
+    piSessionPath: originalSession,
+    continuedFromRunId: w.runId,
+    continuationRootRunId: w.runId,
+    continuationSequence: 1,
+    continuationOfPiSessionPath: originalSession,
+  }));
+
+  const built = tools(w.identity);
+  const result = await built.subagent_continue.execute("call", { runId: w.runId, body: "Third" }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "ACTIVE_TERMINAL_CONTINUATION");
+  assert.equal(result.details.activeRunId, active.runId);
+});
+
+test("subagent_continue returns a structured error for terminal runs without a recorded Pi session", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const status = store.readStatus(w.runId);
+  store.writeStatus({ ...status, state: "completed", resultReady: true, sessionPolicy: "none", piSessionPath: undefined, requestedPiSessionPath: undefined });
+  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", sessionPolicy: "none" }));
+
+  const built = tools(w.identity);
+  const result = await built.subagent_continue.execute("call", { runId: w.runId, body: "Continue anyway" }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "TERMINAL_CONTINUATION_SESSION_UNAVAILABLE");
 });
 
 test("Pi tool schemas expose thinking level controls", () => {

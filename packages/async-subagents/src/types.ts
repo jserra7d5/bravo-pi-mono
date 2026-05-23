@@ -98,6 +98,10 @@ export interface RunStatus {
   sessionPolicy: SessionPolicy;
   piSessionPath?: string;
   requestedPiSessionPath?: string;
+  continuedFromRunId?: string;
+  continuationRootRunId?: string;
+  continuationSequence?: number;
+  continuationOfPiSessionPath?: string;
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
   forkFallback?: { allowed: boolean; used: boolean; reason?: string } | null;
@@ -165,6 +169,10 @@ export interface RunResult {
   sessionPolicy: SessionPolicy;
   piSessionPath?: string;
   requestedPiSessionPath?: string;
+  continuedFromRunId?: string;
+  continuationRootRunId?: string;
+  continuationSequence?: number;
+  continuationOfPiSessionPath?: string;
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
   forkFallback?: { allowed: boolean; used: boolean; reason?: string } | null;
@@ -212,6 +220,10 @@ export interface RunIndexRecord {
   sessionPolicy?: SessionPolicy;
   piSessionPath?: string;
   requestedPiSessionPath?: string;
+  continuedFromRunId?: string;
+  continuationRootRunId?: string;
+  continuationSequence?: number;
+  continuationOfPiSessionPath?: string;
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
   createdAt: string;
@@ -271,6 +283,10 @@ export interface SubagentStartResult {
   sessionPolicy: SessionPolicy;
   piSessionPath?: string;
   requestedPiSessionPath?: string;
+  continuedFromRunId?: string;
+  continuationRootRunId?: string;
+  continuationSequence?: number;
+  continuationOfPiSessionPath?: string;
   // Agent-definition detail surfaced to the launch card so the user can see what skills/tools
   // the child has, its budget, and any nested subagent depth limit.
   skills?: string[];
