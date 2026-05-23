@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PACKAGE_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+DISABLE_SQLITE_WARNING="--disable-warning=ExperimentalWarning"
+
+case " ${NODE_OPTIONS:-} " in
+  *" $DISABLE_SQLITE_WARNING "*) ;;
+  *) export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }$DISABLE_SQLITE_WARNING" ;;
+esac
+
+exec pi -e "$PACKAGE_DIR/extensions/pi/index.ts" "$@"

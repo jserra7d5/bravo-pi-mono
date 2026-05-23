@@ -1,0 +1,44 @@
+{
+  "name": "@bravo/web-evidence-cache",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi extension for web discovery, temporary local web evidence artifacts, and BM25 lookup.",
+  "keywords": [
+    "pi-package"
+  ],
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --disable-warning=ExperimentalWarning --test dist/test/*.test.js",
+    "pi": "./bin/pi-web-evidence"
+  },
+  "bin": {
+    "pi-web-evidence": "./bin/pi-web-evidence"
+  },
+  "dependencies": {
+    "@mozilla/readability": "latest",
+    "defuddle": "latest",
+    "ipaddr.js": "latest",
+    "linkedom": "latest",
+    "node-html-markdown": "latest",
+    "undici": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi"
+    ]
+  }
+}
