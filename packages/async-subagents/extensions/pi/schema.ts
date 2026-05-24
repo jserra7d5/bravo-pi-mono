@@ -24,6 +24,7 @@ export const subagentStartSchema = Type.Object({
   wait: Type.Optional(StringEnum(["none", "interesting", "terminal", "result"] as const, { default: "none" })),
   cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current Pi session cwd." })),
   files: Type.Optional(Type.Array(Type.String(), { description: "Relevant files to mention in the child task prompt." })),
+  skills: Type.Optional(Type.Array(Type.String(), { description: "Additional skill names to enable for this child run, merged with the agent definition skills. Children do not inherit parent-session skills automatically. Pass skill names only; path-like values are rejected." })),
   attachments: Type.Optional(Type.Array(Attachment)),
   timeoutMs: Type.Optional(Type.Number({ description: "Wait timeout for sync mode or requested wait behavior." })),
   notifyOn: Type.Optional(Type.Array(StringEnum(EVENT_TYPES as readonly string[]))),

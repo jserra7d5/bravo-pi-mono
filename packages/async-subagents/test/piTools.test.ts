@@ -310,10 +310,22 @@ test("subagent_continue returns a structured error for terminal runs without a r
   assert.equal(result.details.code, "TERMINAL_CONTINUATION_SESSION_UNAVAILABLE");
 });
 
-test("Pi tool schemas expose thinking level controls", () => {
+test("Pi tool schemas expose thinking level controls and skill forwarding", () => {
   const built = buildSubagentTools();
-  assert.ok(JSON.stringify(built.find((tool) => tool.name === "subagent_start")?.parameters).includes("thinkingLevel"));
+  const startSchema = JSON.stringify(built.find((tool) => tool.name === "subagent_start")?.parameters);
+  assert.ok(startSchema.includes("thinkingLevel"));
+  assert.ok(startSchema.includes("skills"));
+  assert.ok(startSchema.includes("Children do not inherit parent-session skills automatically"));
   assert.ok(JSON.stringify(built.find((tool) => tool.name === "subagent_continue")?.parameters).includes("thinkingLevel"));
+});
+
+test("subagent_start rejects path-like forwarded skills", async () => {
+  const w = workspace();
+  const built = tools(w.identity);
+  const result = await built.subagent_start.execute("call", { agent: "scout", task: "Probe", skills: ["./local-skill"] }, undefined, undefined, { cwd: w.root });
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "INVALID_SKILL_NAME");
+  assert.match(result.content[0].text, /path-like skill values are not allowed/);
 });
 
 test("every subagent tool opts into the self-rendered shell so card chrome sits on chat bg", () => {
@@ -326,7 +338,7 @@ test("every subagent tool opts into the self-rendered shell so card chrome sits 
   }
 });
 
-test("startSubagent surfaces agent-definition detail on the start result", async () => {
+test("startSubagent surfaces agent-definition detail and forwarded skills on the start result", async () => {
   const w = workspace();
   const store = new RunStore({ cwd: w.root });
   const started = await startSubagent({
@@ -335,12 +347,13 @@ test("startSubagent surfaces agent-definition detail on the start result", async
     cwd: w.root,
     runRoot: store.runRoot,
     parentRunId: w.identity.parentRunId,
+    skills: ["tui-design"],
     fake: { mode: "immediate", body: "Done" },
   });
   // scout.md defines: tools: [read, grep, find, ls], maxSubagentDepth: 0
   assert.ok(Array.isArray(started.tools) && started.tools.includes("read"));
   assert.equal(started.maxSubagentDepth, 0);
-  assert.ok(Array.isArray(started.skills));
+  assert.deepEqual(started.skills, ["tui-design"]);
 });
 
 test("subagent_result can recover by runDir", async () => {

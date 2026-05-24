@@ -39,6 +39,7 @@ export interface StartSubagentInput {
   rootSessionId?: string;
   depth?: number;
   files?: string[];
+  skills?: string[];
   startMode?: "async" | "wait" | "sync";
   waitUntil?: "interesting" | "terminal" | "result" | "event";
   waitTimeoutMs?: number;
@@ -409,6 +410,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     rootRunId: root.rootRunId,
     depth: input.depth ?? 0,
     files: input.files,
+    skills: input.skills,
   });
 
   const piCommand = buildPiCommand({
@@ -522,7 +524,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     continuationRootRunId: status.continuationRootRunId,
     continuationSequence: status.continuationSequence,
     continuationOfPiSessionPath: status.continuationOfPiSessionPath,
-    skills: definition.skills,
+    skills: prompt.skills,
     tools: definition.tools,
     maxRunMs: definition.maxRunMs,
     maxSubagentDepth: definition.maxSubagentDepth,

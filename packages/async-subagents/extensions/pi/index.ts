@@ -7,6 +7,7 @@ import { RunStore } from "../../src/runStore.js";
 import type { RootSessionIdentity } from "../../src/types.js";
 import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from "./compactionReminder.js";
 import { clearLiveWidget, updateLiveWidget } from "./liveWidget.js";
+import { renderDiscoveredAgentCatalog } from "./agentCatalog.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
 import { registerSubagentTools, type ToolRuntime } from "./tools.js";
@@ -195,8 +196,9 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
     pi.sendMessage(message, { deliverAs: "steer" });
   });
 
-  pi.on("before_agent_start", async (event) => {
-    return { systemPrompt: appendAsyncSubagentsPrompt(event.systemPrompt) };
+  pi.on("before_agent_start", async (event, ctx) => {
+    const catalog = renderDiscoveredAgentCatalog({ cwd: cwdOf(ctx), env: process.env });
+    return { systemPrompt: appendAsyncSubagentsPrompt(event.systemPrompt, catalog) };
   });
 
   registerSubagentTools(pi, runtime);

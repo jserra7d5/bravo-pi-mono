@@ -78,6 +78,18 @@ function response(summary: string, details: Record<string, unknown>, isError = f
   return { content: [{ type: "text", text: contentText ?? summary }], details: { summary, ...details }, isError: isError || undefined };
 }
 
+const SKILL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/;
+
+function skillNamesFromParams(params: Record<string, unknown>): string[] | undefined {
+  if (!Array.isArray(params.skills)) return undefined;
+  const skills = params.skills.filter((skill): skill is string => typeof skill === "string");
+  const invalid = skills.find((skill) => !SKILL_NAME_RE.test(skill) || skill.includes("/") || skill.includes("\\") || skill.startsWith("."));
+  if (invalid) {
+    throw new Error(`Invalid subagent_start skill: ${invalid}. Pass skill names only; path-like skill values are not allowed.`);
+  }
+  return [...new Set(skills)];
+}
+
 function resultBodyContent(summary: string, result: RunResult, body: { body?: string; bodyTruncation: Record<string, unknown> }): string {
   const lines = [summary];
   if (body.body !== undefined) {
@@ -592,6 +604,13 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const contextPolicy = params.context === "fork" ? "fork" : params.context === "fresh" ? "fresh" : undefined;
         const sessionPolicy = params.session === "none" ? "none" : params.session === "record" ? "record" : undefined;
         const notifyOn = Array.isArray(params.notifyOn) ? (params.notifyOn.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined;
+        let skills: string[] | undefined;
+        try {
+          skills = skillNamesFromParams(params);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return response(message, { code: "INVALID_SKILL_NAME" }, true);
+        }
         const result = await startSubagent({
           agent: String(params.agent),
           variant: typeof params.variant === "string" && params.variant ? params.variant : undefined,
@@ -603,6 +622,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           rootSessionId: root.rootSessionId,
           depth: typeof params.maxSubagentDepth === "number" ? params.maxSubagentDepth : undefined,
           files: Array.isArray(params.files) ? params.files.filter((file): file is string => typeof file === "string") : undefined,
+          skills,
           context: contextPolicy as ContextPolicy | undefined,
           session: sessionPolicy as SessionPolicy | undefined,
           allowFreshFallback: params.allowFreshFallback === true,

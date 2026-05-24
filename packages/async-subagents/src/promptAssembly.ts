@@ -13,6 +13,7 @@ export interface PromptAssemblyInput {
   rootRunId: string;
   depth: number;
   files?: string[];
+  skills?: string[];
 }
 
 export interface PromptAssemblyResult {
@@ -34,6 +35,10 @@ Report completion through your normal final answer.
 If you need parent input, call the subagent_event tool with type question or blocked.
 Apply explicit fail-fast timeouts to tests, builds, git remotes, package installs, and network/API calls; disable interactive git/SSH prompts where practical, or skip the check with a clear reason if it cannot be safely bounded.
 Respect all file and code safety instructions in the task.`;
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
 
 export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult {
   const includeFragments = loadIncludeFragments(input.definition, { cwd: input.cwd });
@@ -84,7 +89,7 @@ Interactive agents should watch their inbox and acknowledge handled parent messa
     systemPath,
     taskPath,
     includePaths,
-    skills: input.definition.skills,
+    skills: uniqueStrings([...input.definition.skills, ...(input.skills ?? [])]),
     extensions: input.definition.extensions,
     model: input.definition.model,
     thinkingLevel: input.definition.thinkingLevel,

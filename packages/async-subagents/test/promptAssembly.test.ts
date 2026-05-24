@@ -37,6 +37,7 @@ Scout system body.
     rootRunId: "root_a",
     depth: 0,
     files: ["src/api.ts"],
+    skills: ["tui-design", "repo-reader"],
   });
 
   const system = readFileSync(assembled.systemPath, "utf8");
@@ -49,7 +50,7 @@ Scout system body.
   assert.match(task, /Inspect API files/);
   assert.match(task, /parentRunId: root_a/);
   assert.match(task, /src\/api.ts/);
-  assert.deepEqual(assembled.skills, ["repo-reader"]);
+  assert.deepEqual(assembled.skills, ["repo-reader", "tui-design"]);
   assert.deepEqual(assembled.extensions, ["audit-extension"]);
   assert.equal(assembled.model, "openai-codex/gpt-5.5");
   assert.equal(assembled.thinkingLevel, "high");
