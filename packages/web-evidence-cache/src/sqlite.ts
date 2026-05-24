@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { contextError, toolExecutionError } from "./errors.js";
 import { ensureDir } from "./filesystem.js";
-import type { ChunkRecord, EvidenceFormat, PageRecord, SearchResultRecord, WebLookupResultItem } from "./types.js";
+import type { ChunkRecord, EvidenceFormat, LookupMatchMode, PageRecord, SearchResultRecord, WebLookupResultItem } from "./types.js";
 
 export interface LookupHit extends WebLookupResultItem {}
 
@@ -167,11 +167,11 @@ export class EvidenceDatabase {
     return row.count > 0;
   }
 
-  lookup(query: string, limit: number, domain: string | null | undefined, format: EvidenceFormat = "auto"): LookupHit[] {
+  lookup(query: string, limit: number, domain: string | null | undefined, format: EvidenceFormat = "auto", matchMode: LookupMatchMode = "any"): LookupHit[] {
     if (!this.hasChunks()) {
       throw toolExecutionError("No fetched web evidence is indexed yet.", "Call web_fetch on URLs or web_search result aliases before using web_lookup.");
     }
-    const ftsQuery = normalizeFtsQuery(query);
+    const ftsQuery = normalizeFtsQuery(query, matchMode);
     const preferred = preferredPathExpression(format);
     const rows = this.db.prepare(`
       SELECT p.id AS page_id, p.alias AS page_alias, p.title, COALESCE(p.final_url, p.url) AS url,
@@ -202,6 +202,7 @@ export class EvidenceDatabase {
           line_start: format === "markdown" || format === "semantic_html" ? undefined : row.line_start,
           line_end: format === "markdown" || format === "semantic_html" ? undefined : row.line_end,
           matched_terms: matched,
+          match_mode: matchMode,
         };
       });
   }
@@ -229,7 +230,7 @@ function rowToPage(row: PageRecord & { metadata_json?: string }): PageRecord {
   return { ...row, warnings };
 }
 
-export function normalizeFtsQuery(query: string): string {
+export function normalizeFtsQuery(query: string, matchMode: LookupMatchMode = "any"): string {
   const trimmed = query.trim();
   if (!trimmed) throw toolExecutionError("web_lookup query is empty.", "Pass a non-empty term or phrase.");
   const terms = trimmed.match(/"[^"]+"|[^\s]+/g) ?? [];
@@ -240,6 +241,12 @@ export function normalizeFtsQuery(query: string): string {
     return [quoteFtsPhrase(parts.join(" "))];
   });
   if (!ftsTerms.length) throw toolExecutionError("web_lookup query has no searchable terms.", "Pass an identifier, word, or quoted phrase.");
+  if (matchMode === "phrase") {
+    const phraseParts = trimmed.match(/[\p{L}\p{N}_]+/gu) ?? [];
+    if (!phraseParts.length) throw toolExecutionError("web_lookup query has no searchable terms.", "Pass an identifier, word, or quoted phrase.");
+    return quoteFtsPhrase(phraseParts.join(" "));
+  }
+  if (matchMode === "all") return ftsTerms.join(" AND ");
   return ftsTerms.join(" OR ");
 }
 

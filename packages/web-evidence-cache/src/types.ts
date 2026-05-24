@@ -1,5 +1,6 @@
 export type EvidenceFormat = "auto" | "semantic_html" | "markdown" | "text";
 export type SearchMode = "auto" | "exact" | "broad";
+export type LookupMatchMode = "any" | "all" | "phrase";
 
 export interface WebSearchInput {
   query: string;
@@ -21,6 +22,7 @@ export interface WebLookupInput {
   limit?: number;
   domain?: string | null;
   format?: EvidenceFormat;
+  match_mode?: LookupMatchMode;
 }
 
 export interface SearchResultRecord {
@@ -121,6 +123,7 @@ export interface WebLookupResultItem {
   heading_path?: string;
   snippet: string;
   matched_terms: string[];
+  match_mode: LookupMatchMode;
 }
 
 export interface WebLookupResult {

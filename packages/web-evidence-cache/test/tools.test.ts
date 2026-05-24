@@ -13,6 +13,21 @@ test("all web evidence tools use self-rendering shell and prompt guidance", () =
   }
 });
 
+test("advanced string options avoid opaque core enum validation", () => {
+  const tools = buildWebEvidenceTools() as unknown as Array<{ name: string; parameters: { properties: Record<string, { type?: string; anyOf?: unknown }> } }>;
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  assert.equal(byName.get("web_search")?.parameters.properties.search_mode.type, "string");
+  assert.equal(byName.get("web_search")?.parameters.properties.search_mode.anyOf, undefined);
+  assert.equal(byName.get("web_fetch")?.parameters.properties.format.type, "string");
+  assert.equal(byName.get("web_fetch")?.parameters.properties.format.anyOf, undefined);
+  assert.equal(byName.get("web_fetch")?.parameters.properties.refresh.type, "string");
+  assert.equal(byName.get("web_fetch")?.parameters.properties.refresh.anyOf, undefined);
+  assert.equal(byName.get("web_lookup")?.parameters.properties.format.type, "string");
+  assert.equal(byName.get("web_lookup")?.parameters.properties.format.anyOf, undefined);
+  assert.equal(byName.get("web_lookup")?.parameters.properties.match_mode.type, "string");
+  assert.equal(byName.get("web_lookup")?.parameters.properties.match_mode.anyOf, undefined);
+});
+
 test("web evidence extension appends the extension-wide prompt section before agent start", async () => {
   const tools: unknown[] = [];
   const handlers: Record<string, Function> = {};

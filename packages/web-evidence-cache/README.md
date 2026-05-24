@@ -6,7 +6,7 @@
 - `web_fetch` materializes selected URLs or search result refs (aliases or UUID ids from `web_search`) into temporary local artifacts that agents can read, cite, and search.
 - `web_lookup` searches only fetched local artifacts with SQLite FTS5/BM25; it is not live web search.
 
-The package intentionally does not crawl or index the public web. Search snippets are sanitized leads, not evidence, and `web_search` does not auto-fetch results. The next workflow step after discovery is to call `web_fetch` on selected aliases/UUID ids or URLs. Fetched artifact paths are the evidence surface; agents should read those paths with normal filesystem tools.
+The package intentionally does not crawl or index the public web. Search snippets are sanitized leads, not evidence, and `web_search` does not auto-fetch results. The next workflow step after discovery is normally to call `web_fetch` with only selected aliases/UUID ids or URLs in `refs`; `format` and `refresh` are optional advanced knobs that default to `auto`. Fetched artifact paths are the evidence surface; agents should read those paths with normal filesystem tools.
 
 ## Setup
 
@@ -56,7 +56,7 @@ There is no prune command. Temp cleanup is owned by the OS. The extension should
 
 Tool responses visually prioritize `READ NEXT`/`best_path`; read that artifact first before citing. Full semantic HTML, Markdown, text, metadata, and chunks paths remain in structured result details for alternate views. Orientation previews and lookup snippets are navigation aids only, not citable evidence. Partial or weak extraction warnings should be checked eagerly against the artifact and, when needed, corroborated by fetching another source.
 
-Lookup defaults to text paths because current line hints are text-derived; semantic HTML and Markdown lookup results suppress text line hints. If lookup returns no matches, broaden/synonymize the query, remove domain filters, fetch additional likely sources, or run web_search; no matches are not proof of absence.
+Lookup defaults to text paths because current line hints are text-derived; semantic HTML and Markdown lookup results suppress text line hints. `web_lookup` also accepts `match_mode`: `any` (default, match at least one query term), `all` (require every query term/quoted phrase), or `phrase` (search the full query as one phrase). Use `all` or `phrase` when common terms make default recall too noisy. If lookup returns no matches, broaden/synonymize the query, remove domain filters, fetch additional likely sources, or run web_search; no matches are not proof of absence.
 
 ## Commands
 

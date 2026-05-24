@@ -107,11 +107,16 @@ export function renderSearchCall(args: Record<string, unknown>): Component {
 
 export function renderFetchCall(args: Record<string, unknown>): Component {
   const refs = Array.isArray(args.refs) ? args.refs.join(", ") : "";
-  return new EvidenceCard(refs || "web_fetch", "◐ Web Fetch", [`refs   ${refs}`, `format ${String(args.format ?? "auto")}`]);
+  const rows = [`refs   ${refs}`];
+  if (args.format !== undefined) rows.push(`format ${String(args.format)}`);
+  if (args.refresh !== undefined) rows.push(`refresh ${String(args.refresh)}`);
+  return new EvidenceCard(refs || "web_fetch", "◐ Web Fetch", rows);
 }
 
 export function renderLookupCall(args: Record<string, unknown>): Component {
-  return new EvidenceCard(String(args.query ?? "web_lookup"), "◐ Web Lookup", [`query  ${String(args.query ?? "")}`, `limit  ${String(args.limit ?? "auto")}`]);
+  const rows = [`query  ${String(args.query ?? "")}`, `limit  ${String(args.limit ?? "auto")}`];
+  if (args.match_mode !== undefined) rows.push(`mode   ${String(args.match_mode)}`);
+  return new EvidenceCard(String(args.query ?? "web_lookup"), "◐ Web Lookup", rows);
 }
 
 export function renderSearchResult(result: AgentToolResult<WebSearchResult>, _options: ToolRenderResultOptions): Component {
@@ -153,7 +158,7 @@ export function renderLookupResult(result: AgentToolResult<WebLookupResult>, _op
   return new EvidenceCard("web_lookup", "✓ Web Lookup", details.results.slice(0, 8).flatMap((r) => [
     `[${shortId(r.page_id)}:${shortId(r.chunk_id)}] ${r.title}${r.heading_path ? ` > ${r.heading_path}` : ""}`,
     `READ NEXT ${r.best_format} ${truncateMiddle(`${r.best_path}${r.line_start ? `:${r.line_start}` : ""}`, 108)}`,
-    `matched   ${r.matched_terms.join(", ") || "—"}`,
+    `matched ${r.match_mode} ${r.matched_terms.join(", ") || "—"}`,
     `snippet   ${truncateEnd(r.snippet.replace(/\s+/g, " ").trim(), 120)} (not citable)`,
   ]));
 }

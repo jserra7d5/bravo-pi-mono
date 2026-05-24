@@ -121,9 +121,37 @@ test("lookup suppresses text line hints when returning semantic HTML or markdown
   }
 });
 
+test("EvidenceDatabase lookup match modes reduce noisy broad matches", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "web-cache-test-"));
+  try {
+    const db = await EvidenceDatabase.open(dir);
+    const page = fixturePage(dir, "page1", "p1", "https://example.com/page");
+    db.insertPageWithChunks(page, [
+      fixtureChunk(page, "only-common", "The cache stores common request metadata."),
+      fixtureChunk(page, "all-terms", "The cache stores common exact needle metadata."),
+      fixtureChunk(page, "phrase", "The result contains exact needle phrase metadata."),
+    ]);
+
+    const anyHits = db.lookup("common exact needle", 10, null, "auto", "any");
+    assert.ok(anyHits.some((hit) => hit.chunk_id === "only-common"));
+
+    const allHits = db.lookup("common exact needle", 10, null, "auto", "all");
+    assert.deepEqual(allHits.map((hit) => hit.chunk_id), ["all-terms"]);
+
+    const phraseHits = db.lookup("exact needle phrase", 10, null, "auto", "phrase");
+    assert.deepEqual(phraseHits.map((hit) => hit.chunk_id), ["phrase"]);
+    assert.equal(phraseHits[0].match_mode, "phrase");
+    db.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("normalizeFtsQuery quotes dangerous punctuation instead of emitting FTS syntax", () => {
   assert.equal(normalizeFtsQuery('"exact phrase"'), '"exact phrase"');
   assert.equal(normalizeFtsQuery("node:sqlite Type.Name foo/bar hyphenated-token"), '"node sqlite" OR "Type Name" OR "foo bar" OR "hyphenated token"');
+  assert.equal(normalizeFtsQuery("node:sqlite Type.Name", "all"), '"node sqlite" AND "Type Name"');
+  assert.equal(normalizeFtsQuery("node:sqlite Type.Name", "phrase"), '"node sqlite Type Name"');
 });
 
 function fixturePage(dir: string, id: string, alias: string, url: string): PageRecord {
