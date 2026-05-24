@@ -26,7 +26,8 @@ function renderSnippetWindow(window: SearchSnippetWindow): string[] {
   const truncation = window.truncatedBefore || window.truncatedAfter
     ? ` (truncated ${[window.truncatedBefore ? "before" : "", window.truncatedAfter ? "after" : ""].filter(Boolean).join("/")})`
     : window.truncated ? " (truncated)" : "";
-  const heading = `  lines ${window.lineStart}${window.lineEnd !== window.lineStart ? `-${window.lineEnd}` : ""}${truncation}:`;
+  const context = window.context ? ` in ${window.context.kind} ${window.context.name}` : "";
+  const heading = `  lines ${window.lineStart}${window.lineEnd !== window.lineStart ? `-${window.lineEnd}` : ""}${context}${truncation}:`;
   const lines = window.text.split("\n");
   return [heading, ...lines.map((line) => `    ${line}`)];
 }

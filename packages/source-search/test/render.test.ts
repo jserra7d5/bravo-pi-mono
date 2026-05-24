@@ -34,6 +34,23 @@ test("renders structured snippet windows without flattening whitespace", () => {
   assert.match(text, /    before\n      alpha\(\);\n    after/);
 });
 
+test("renders snippet enclosing context metadata", () => {
+  const text = renderQueryResult({
+    protocolVersion: 1,
+    ok: true,
+    query: "alpha",
+    hits: [{
+      path: "src/a.ts",
+      score: 1,
+      line: 2,
+      snippet: "alpha",
+      snippets: [{ lineStart: 1, lineEnd: 3, text: "function run() {\n  alpha();\n}", context: { kind: "function", name: "run", line: 1 } }],
+    }],
+    count: 1,
+  });
+  assert.match(text, /lines 1-3 in function run:/);
+});
+
 test("renders directional snippet truncation metadata", () => {
   const text = renderQueryResult({
     protocolVersion: 1,

@@ -42,6 +42,13 @@ struct TermBoost {
     weight: f32,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct SnippetContext {
+    kind: String,
+    name: String,
+    line: usize,
+}
+
 #[derive(Serialize)]
 struct SnippetWindow {
     #[serde(rename = "lineStart")]
@@ -54,6 +61,8 @@ struct SnippetWindow {
     truncated_before: bool,
     #[serde(rename = "truncatedAfter")]
     truncated_after: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<SnippetContext>,
 }
 
 #[derive(Serialize)]
@@ -911,6 +920,170 @@ fn crop_line_around_terms(line: &str, terms: &[String], max_chars: usize) -> (St
     (text, start_char > 0, end_char < char_count)
 }
 
+#[derive(Clone, Debug)]
+struct SnippetCandidate {
+    start: usize,
+    end: usize,
+    focus: usize,
+    score: usize,
+}
+
+fn clean_symbol_name(raw: &str) -> String {
+    raw.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' && ch != '.')
+        .to_string()
+}
+
+fn symbol_after_keyword(line: &str, keyword: &str) -> Option<String> {
+    let idx = line.find(keyword)?;
+    let before = &line[..idx];
+    if before
+        .chars()
+        .last()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    let after = &line[idx + keyword.len()..];
+    if after
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    let mut rest = after.trim_start();
+    if rest.starts_with("default ") {
+        rest = rest["default ".len()..].trim_start();
+    }
+    if rest.starts_with("async ") {
+        rest = rest["async ".len()..].trim_start();
+    }
+    let name = clean_symbol_name(
+        rest.split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | '<' | '=' | ':' | '{'))
+            .next()
+            .unwrap_or(""),
+    );
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn structural_context_at(line: &str, line_number: usize) -> Option<SnippetContext> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        let marker_len = trimmed.chars().take_while(|ch| *ch == '#').count();
+        let rest = &trimmed[marker_len..];
+        if rest.starts_with(char::is_whitespace) {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(SnippetContext {
+                    kind: "heading".into(),
+                    name: name.to_string(),
+                    line: line_number,
+                });
+            }
+        }
+    }
+    for (keyword, kind) in [
+        ("function", "function"),
+        ("fn", "function"),
+        ("class", "class"),
+        ("interface", "interface"),
+        ("enum", "enum"),
+        ("struct", "struct"),
+        ("trait", "trait"),
+        ("type", "type"),
+        ("impl", "impl"),
+    ] {
+        if let Some(name) = symbol_after_keyword(trimmed, keyword) {
+            return Some(SnippetContext {
+                kind: kind.into(),
+                name,
+                line: line_number,
+            });
+        }
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("export default ")
+        .or_else(|| trimmed.strip_prefix("export "))
+    {
+        let mut rest = rest.trim_start();
+        for declarator in ["const", "let", "var"] {
+            if let Some(after) = rest.strip_prefix(declarator) {
+                if after.chars().next().is_some_and(|ch| ch.is_whitespace()) {
+                    rest = after.trim_start();
+                    break;
+                }
+            }
+        }
+        let name = clean_symbol_name(
+            rest.split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | '<' | '=' | ':' | '{'))
+                .next()
+                .unwrap_or(""),
+        );
+        if !name.is_empty() {
+            return Some(SnippetContext {
+                kind: "export".into(),
+                name,
+                line: line_number,
+            });
+        }
+    }
+    None
+}
+
+fn enclosing_context(lines: &[&str], focus: usize) -> Option<SnippetContext> {
+    (0..=focus)
+        .rev()
+        .find_map(|idx| structural_context_at(lines[idx], idx + 1))
+}
+
+fn line_term_count(line: &str, terms: &[String]) -> (usize, usize) {
+    let lower = line.to_lowercase();
+    let mut total = 0;
+    let mut covered = 0;
+    for term in terms {
+        if contains_analyzed_term(&lower, term) {
+            covered += 1;
+            total += lower.matches(term).count().max(1);
+        }
+    }
+    (total, covered)
+}
+
+fn candidate_score(
+    lines: &[&str],
+    terms: &[String],
+    start: usize,
+    end: usize,
+    focus: usize,
+) -> usize {
+    let mut occurrences = 0usize;
+    let mut covered_terms = HashSet::new();
+    for line in &lines[start..=end] {
+        let lower = line.to_lowercase();
+        for term in terms {
+            if contains_analyzed_term(&lower, term) {
+                covered_terms.insert(term);
+                occurrences += lower.matches(term).count().max(1);
+            }
+        }
+    }
+    let focus_structural = structural_context_at(lines[focus], focus + 1).is_some() as usize;
+    let window_structural = lines[start..=end]
+        .iter()
+        .enumerate()
+        .any(|(offset, line)| structural_context_at(line, start + offset + 1).is_some())
+        as usize;
+    covered_terms.len() * 120
+        + occurrences * 25
+        + (occurrences * 20 / (end - start + 1).max(1))
+        + focus_structural * 50
+        + window_structural * 20
+}
+
 fn best_snippets(
     body: &str,
     q: &str,
@@ -932,62 +1105,73 @@ fn best_snippets(
         return (None, String::new(), Vec::new(), None, None);
     }
 
-    let mut matches = Vec::new();
+    let mut candidates = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        let lower = line.to_lowercase();
-        if terms.iter().any(|t| contains_analyzed_term(&lower, t)) {
-            matches.push(i);
+        let (line_matches, _) = line_term_count(line, &terms);
+        if line_matches == 0 {
+            continue;
         }
+        let start = i.saturating_sub(CONTEXT_LINES);
+        let end = (i + CONTEXT_LINES).min(lines.len() - 1);
+        candidates.push(SnippetCandidate {
+            start,
+            end,
+            focus: i,
+            score: candidate_score(&lines, &terms, start, end, i),
+        });
     }
 
-    let legacy_line = matches.first().map(|i| i + 1);
-    let legacy_snippet = matches
-        .first()
-        .map(|i| lines[*i].trim().chars().take(300).collect())
-        .unwrap_or_else(|| body.chars().take(300).collect());
+    if candidates.is_empty() {
+        candidates.push(SnippetCandidate {
+            start: 0,
+            end: CONTEXT_LINES.min(lines.len() - 1),
+            focus: 0,
+            score: 0,
+        });
+    }
 
-    let seed_lines: Vec<usize> = if matches.is_empty() {
-        vec![0]
-    } else {
-        matches.into_iter().take(MAX_WINDOWS).collect()
-    };
-    let mut ranges: Vec<(usize, usize, usize)> = Vec::new();
-    for idx in seed_lines {
-        let start = idx.saturating_sub(CONTEXT_LINES);
-        let end = (idx + CONTEXT_LINES).min(lines.len() - 1);
-        if let Some((_, prev_end, _)) = ranges.last_mut() {
-            if start <= *prev_end + 1 {
-                *prev_end = (*prev_end).max(end);
-                continue;
-            }
+    candidates.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.focus.cmp(&b.focus)));
+
+    let mut ranges: Vec<SnippetCandidate> = Vec::new();
+    for candidate in candidates {
+        if ranges
+            .iter()
+            .any(|range| candidate.start <= range.end && candidate.end >= range.start)
+        {
+            continue;
         }
-        ranges.push((start, end, idx));
+        ranges.push(candidate);
         if ranges.len() >= MAX_WINDOWS {
             break;
         }
     }
+    let legacy_line = ranges.first().map(|range| range.focus + 1);
+    let legacy_snippet = ranges
+        .first()
+        .map(|range| lines[range.focus].trim().chars().take(300).collect())
+        .unwrap_or_else(|| body.chars().take(300).collect());
 
     let mut snippets = Vec::new();
     let mut used_chars = 0usize;
-    for (start, end, focus) in ranges {
+    for range in ranges {
         if used_chars >= MAX_TOTAL_CHARS {
             break;
         }
         let remaining = MAX_TOTAL_CHARS - used_chars;
         let max_chars = MAX_WINDOW_CHARS.min(remaining);
-        let mut line_start = start + 1;
-        let mut line_end = end + 1;
-        let mut text = lines[start..=end].join("\n");
-        let mut truncated_before = start > 0;
-        let mut truncated_after = end + 1 < lines.len();
+        let mut line_start = range.start + 1;
+        let mut line_end = range.end + 1;
+        let mut text = lines[range.start..=range.end].join("\n");
+        let mut truncated_before = range.start > 0;
+        let mut truncated_after = range.end + 1 < lines.len();
         if text.chars().count() > max_chars {
-            line_start = focus + 1;
-            line_end = focus + 1;
+            line_start = range.focus + 1;
+            line_end = range.focus + 1;
             let (focused_text, cropped_before, cropped_after) =
-                crop_line_around_terms(lines[focus], &terms, max_chars);
+                crop_line_around_terms(lines[range.focus], &terms, max_chars);
             text = focused_text;
-            truncated_before = focus > 0 || cropped_before;
-            truncated_after = focus + 1 < lines.len() || cropped_after;
+            truncated_before = range.focus > 0 || cropped_before;
+            truncated_after = range.focus + 1 < lines.len() || cropped_after;
         }
         let truncated = truncated_before || truncated_after;
         used_chars += text.chars().count();
@@ -998,11 +1182,12 @@ fn best_snippets(
             truncated,
             truncated_before,
             truncated_after,
+            context: enclosing_context(&lines, range.focus),
         });
     }
 
-    let line_start = snippets.first().map(|snippet| snippet.line_start);
-    let line_end = snippets.last().map(|snippet| snippet.line_end);
+    let line_start = snippets.iter().map(|snippet| snippet.line_start).min();
+    let line_end = snippets.iter().map(|snippet| snippet.line_end).max();
     (legacy_line, legacy_snippet, snippets, line_start, line_end)
 }
 
@@ -1086,4 +1271,98 @@ fn print_query_error(msg: &str) {
         error: Some(msg.to_string()),
     };
     println!("{}", serde_json::to_string(&resp).unwrap());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snippets_prefer_dense_definition_window_over_first_match() {
+        let body = r#"alpha appears once up here
+noise
+noise
+noise
+export function runAlpha() {
+  alpha beta
+  beta alpha
+}
+"#;
+        let (line, legacy, snippets, _, _) = best_snippets(body, "alpha beta");
+        assert_eq!(line, Some(7));
+        assert_eq!(legacy, "beta alpha");
+        assert_eq!(snippets[0].line_start, 5);
+        assert!(snippets[0].text.contains("export function runAlpha"));
+        assert!(snippets[0].text.contains("beta alpha"));
+    }
+
+    #[test]
+    fn snippets_include_enclosing_context_metadata() {
+        let body = r#"class Searcher {
+  helper() {
+    const needle = "alpha";
+  }
+}
+"#;
+        let (_, _, snippets, _, _) = best_snippets(body, "alpha");
+        assert_eq!(
+            snippets[0].context,
+            Some(SnippetContext {
+                kind: "class".into(),
+                name: "Searcher".into(),
+                line: 1
+            })
+        );
+    }
+
+    #[test]
+    fn snippets_detect_heading_context() {
+        let body = "# Indexing Guide\n\nUse alpha terms here.\n";
+        let (_, _, snippets, _, _) = best_snippets(body, "alpha");
+        assert_eq!(
+            snippets[0].context,
+            Some(SnippetContext {
+                kind: "heading".into(),
+                name: "Indexing Guide".into(),
+                line: 1
+            })
+        );
+    }
+
+    #[test]
+    fn aggregate_line_range_uses_min_and_max_snippet_ranges() {
+        let body = r#"alpha
+noise
+noise
+noise
+noise
+noise
+noise
+function run() {
+ alpha beta
+ beta alpha
+}
+"#;
+        let (_, _, snippets, line_start, line_end) = best_snippets(body, "alpha beta");
+        assert_eq!(snippets[0].line_start, 8);
+        assert_eq!(line_start, Some(1));
+        assert_eq!(line_end, Some(11));
+    }
+
+    #[test]
+    fn export_const_context_uses_binding_name() {
+        let body = r#"export const runAlpha = () => {
+  return alpha;
+};
+"#;
+        let (_, _, snippets, _, _) = best_snippets(body, "alpha");
+        assert_eq!(
+            snippets[0].context,
+            Some(SnippetContext {
+                kind: "export".into(),
+                name: "runAlpha".into(),
+                line: 1
+            })
+        );
+    }
 }

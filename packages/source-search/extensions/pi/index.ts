@@ -36,11 +36,11 @@ export function buildSourceSearchTools() {
   return [defineTool({
     name: "ranked_search",
     label: "Ranked Search",
-    description: "Ranked lexical/BM25 discovery across the current git checkout. Returns evidence packets with paths, matched fields, and structured snippet windows; use grep/read for exact evidence after selecting promising paths.",
-    promptSnippet: "ranked_search: broad ranked lexical repo discovery; not semantic. Returns compact evidence packets (path/score, fields, snippet windows). Use first when Source Search is available, optionally with boosts/excludeTerms for ranking noise control, then confirm exact evidence with grep/read.",
+    description: "Ranked lexical/BM25 discovery across the current git checkout. Returns evidence packets with paths, matched fields, structured snippet windows, and optional enclosing context; use grep/read for exact evidence after selecting promising paths.",
+    promptSnippet: "ranked_search: broad ranked lexical repo discovery; not semantic. Returns compact evidence packets (path/score, fields, selected snippet windows, optional context). Use first when Source Search is available, optionally with boosts/excludeTerms for ranking noise control, then confirm exact evidence with grep/read.",
     promptGuidelines: [
       "Use ranked_search for broad lexical source discovery; it is BM25 lexical search, not semantic search.",
-      "Read result evidence packets as ranked paths with matchedFields (filename/path/content) and structured snippet line windows; inspect with read/grep before citing.",
+      "Read result evidence packets as ranked paths with matchedFields (filename/path/content), selected snippet line windows, and optional enclosing context; inspect with read/grep before citing.",
       "Use boosts when some query terms matter more or less: weight >1 ranks matching files higher, weight <1 ranks them lower, and boosts never filter results. If a phrase/down-weight warning says reranking used a bounded candidate set, broaden/adjust the query when recall matters.",
       "Use excludeTerms only for clearly unwanted noise topics; it filters results and is not proof of absence.",
       "Do not put boost, boolean, or field syntax in query. Pass plain query terms plus typed boosts/excludeTerms instead.",

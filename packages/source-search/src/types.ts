@@ -1,5 +1,11 @@
 export const PROTOCOL_VERSION = 1;
 
+export interface SearchSnippetContext {
+  kind: string;
+  name: string;
+  line?: number;
+}
+
 export interface SearchSnippetWindow {
   lineStart: number;
   lineEnd: number;
@@ -8,6 +14,7 @@ export interface SearchSnippetWindow {
   truncated?: boolean;
   truncatedBefore?: boolean;
   truncatedAfter?: boolean;
+  context?: SearchSnippetContext;
 }
 
 export interface SearchHit {

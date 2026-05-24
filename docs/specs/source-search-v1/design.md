@@ -155,7 +155,7 @@ Normal flow:
 4. Tool loads repo config.
 5. Tool creates or incrementally refreshes the Tantivy index within configured budgets, updating new/changed files and deleting removed or newly excluded files; incompatible indexes/manifests/configs fall back to a full rebuild.
 6. Tool queries index.
-7. Tool returns compact evidence packets: ranked paths/scores, matched fields, and structured snippet windows.
+7. Tool returns compact evidence packets: ranked paths/scores, matched fields, selected structured snippet windows, and optional enclosing context.
 8. Agent uses `read` or exact `grep` to inspect/confirm promising results.
 
 The agent should not need to know about Tantivy segments, cache paths, mtimes, locks, or manifest internals for normal use.
@@ -457,7 +457,7 @@ The chosen strategy must report freshness caveats:
 - If snippets come from indexed content, they reflect index state and may lag current disk until refresh.
 - If snippets come from current files, they can disagree with ranked indexed hits when files changed after indexing.
 
-`lineStart` and `lineEnd` are optional. Omit them when reliable mapping is unavailable. Structured snippet windows may include `truncatedBefore` / `truncatedAfter` booleans plus a legacy `truncated` summary flag. `matchedFields` should use the public names `filename`, `path`, and `content` when populated from reliable query/scoring explanation; otherwise omit or return a conservative field list.
+`lineStart` and `lineEnd` are optional. Omit them when reliable mapping is unavailable. Structured snippet windows may include `truncatedBefore` / `truncatedAfter` booleans plus a legacy `truncated` summary flag, and may include deterministic enclosing `context` metadata such as `function`, `class`, or `heading` when cheaply detectable. Snippet selection should prefer useful evidence windows by term coverage, match density, and lightweight structure rather than mechanically returning only first occurrences. `matchedFields` should use the public names `filename`, `path`, and `content` when populated from reliable query/scoring explanation; otherwise omit or return a conservative field list.
 
 ## Passive indexing and budgets
 
@@ -557,7 +557,7 @@ Required fields per result:
 - `score`
 - legacy `snippet` (compatibility summary)
 - optional legacy `line`
-- optional `snippets`: structured line windows with `lineStart`, `lineEnd`, `text`, and truncation metadata (`truncatedBefore`, `truncatedAfter`, legacy `truncated`)
+- optional `snippets`: selected structured line windows with `lineStart`, `lineEnd`, `text`, optional enclosing `context`, and truncation metadata (`truncatedBefore`, `truncatedAfter`, legacy `truncated`)
 - optional result-level `lineStart` / `lineEnd`
 - optional `matchedFields` using `filename`, `path`, and `content`
 

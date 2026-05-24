@@ -20,7 +20,7 @@ function runCliRaw(args: string[]) {
 function runCli(args: string[]) {
   const result = runCliRaw(args);
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  return JSON.parse(result.stdout.trim()) as { ok: boolean; error?: string; indexedFiles?: number; warnings?: string[]; cacheDir?: string; hits?: Array<{ path: string; score: number; line?: number | null; snippet?: string; snippets?: Array<{ lineStart: number; lineEnd: number; text: string; truncated: boolean; truncatedBefore?: boolean; truncatedAfter?: boolean }>; lineStart?: number | null; lineEnd?: number | null; matchedFields?: string[] }>; boosts?: Array<{ term: string; weight: number }>; excludeTerms?: string[] };
+  return JSON.parse(result.stdout.trim()) as { ok: boolean; error?: string; indexedFiles?: number; warnings?: string[]; cacheDir?: string; hits?: Array<{ path: string; score: number; line?: number | null; snippet?: string; snippets?: Array<{ lineStart: number; lineEnd: number; text: string; truncated: boolean; truncatedBefore?: boolean; truncatedAfter?: boolean; context?: { kind: string; name: string; line?: number } }>; lineStart?: number | null; lineEnd?: number | null; matchedFields?: string[] }>; boosts?: Array<{ term: string; weight: number }>; excludeTerms?: string[] };
 }
 
 function runCliError(args: string[]) {
@@ -81,6 +81,19 @@ test("query emits structured snippet windows and legacy snippet fields", async (
   assert.equal(hit.snippets?.[0]?.truncatedBefore, false);
   assert.equal(hit.snippets?.[0]?.truncatedAfter, true);
   assert.match(hit.snippets?.[0]?.text ?? "", /one\n  two\n    target alpha\(\);\n  four\nfive/);
+});
+
+test("query prefers dense definition snippets and emits context metadata", async () => {
+  const repo = await createRepo();
+  await writeFile(join(repo, "src", "dense.ts"), "alpha appears once here\nnoise\nnoise\nnoise\nexport function runAlpha() {\n  alpha beta\n  beta alpha\n}\n");
+
+  const result = runCli(["query", "--repo", repo, "--query", "alpha beta", "--limit", "5", "--json"]);
+  assert.equal(result.ok, true);
+  const hit = result.hits?.find((candidate) => candidate.path === "src/dense.ts");
+  assert.ok(hit);
+  assert.notEqual(hit.line, 1);
+  assert.match(hit.snippets?.[0]?.text ?? "", /export function runAlpha/);
+  assert.deepEqual(hit.snippets?.[0]?.context, { kind: "function", name: "runAlpha", line: 5 });
 });
 
 test("query reports filename matched field", async () => {

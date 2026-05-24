@@ -9,7 +9,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json && cargo build --manifest-path sidecar/Cargo.toml",
     "build:sidecar:release": "cargo build --manifest-path sidecar/Cargo.toml --release",
-    "test": "npm run build && node --test dist/test/*.test.js"
+    "test": "npm run build && cargo test --manifest-path sidecar/Cargo.toml && node --test dist/test/*.test.js"
   },
   "bin": {
     "source-search": "./dist/src/cli.js"

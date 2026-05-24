@@ -9,7 +9,7 @@ Use this skill when setting up or debugging Source Search.
 
 - `ranked_search` is broad lexical/BM25 repository discovery, not semantic search. Try synonyms, identifiers, filenames, and related terms.
 - Prefer `ranked_search` first when the startup prompt says Source Search is available, then use `read` or `grep` for exact evidence.
-- Treat results as evidence packets: ranked path/score, matched fields (`filename`, `path`, `content`), and structured line-window snippets. Use the path and line range to inspect the source before citing conclusions.
+- Treat results as evidence packets: ranked path/score, matched fields (`filename`, `path`, `content`), and structured line-window snippets with optional enclosing context (`function`, `class`, `heading`, etc.). Snippets are chosen for match density/useful structure, but still inspect the source before citing conclusions.
 - Use `boosts` for ranking influence only: weights above 1 prefer matching files, weights below 1 down-rank matching files, and boosts do not filter. If a phrase/down-weight warning says reranking used a bounded candidate set, broaden/adjust the query when recall matters.
 - Use `excludeTerms` only for clearly unwanted noise topics. It filters results, but it is not proof of absence.
 - Do not put boost, boolean, fielded, or Lucene/Tantivy syntax in `query`; pass plain terms plus typed `boosts`/`excludeTerms`.
