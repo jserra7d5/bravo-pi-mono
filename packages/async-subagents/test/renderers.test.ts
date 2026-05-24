@@ -96,12 +96,17 @@ test("visWidth treats CJK and emoji as 2 cells and ignores ANSI escapes", () => 
   assert.equal(visWidth("中文"), 4);
   assert.equal(visWidth("\x1b[31mhello\x1b[0m"), 5);
   assert.equal(visWidth("a🛰️b"), 4);
+  assert.equal(visWidth("✅"), 2);
+  assert.equal(visWidth("✓"), 1);
+  assert.equal(visWidth("⚠"), 1);
+  assert.equal(visWidth("⚠️"), 2);
 });
 
 test("truncAnsi caps visible width and appends an ellipsis", () => {
   const out = truncAnsi("the quick brown fox", 10);
   assert.ok(out.endsWith("…\x1b[0m"));
   assert.ok(visWidth(out) <= 10);
+  assert.ok(visWidth(truncAnsi("ok ⚠️ done", 7)) <= 7);
 });
 
 test("widget row hierarchy: urgent overrides identity color, done dims, active uses identity", () => {
@@ -247,6 +252,21 @@ test("result card shows summary, metrics, artifacts, and duration in the badge",
   assert.ok(text.includes("Found three issues"));
   assert.ok(text.includes("12.4k in"));
   assert.ok(text.includes("notes/auth.md"));
+});
+
+test("result card holds width when body lines contain default-wide emoji", () => {
+  const card = renderResultCard({
+    width: 93,
+    displayName: "Gray",
+    role: "reviewer",
+    state: "completed",
+    duration: "35s",
+    summary: "No blockers found.",
+    body: "Checks run:\n- `cargo test --manifest-path packages/source-search/sidecar/Cargo.toml` ✅\n- `npm test --workspace packages/source-search` ✅ 13/13 passed",
+  });
+  for (const line of card) {
+    assert.equal(visWidth(line), 93, `expected width 93 at line "${stripAnsi(line)}"`);
+  }
 });
 
 test("wake card kind picks the correct badge and affordances", () => {

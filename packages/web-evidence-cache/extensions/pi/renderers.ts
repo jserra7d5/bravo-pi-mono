@@ -31,12 +31,48 @@ export function stripAnsi(value: string): string {
 }
 
 export function visWidth(value: string): number {
-  return Array.from(stripAnsi(value)).reduce((sum, char) => sum + codePointWidth(char.codePointAt(0) ?? 0), 0);
+  const chars = Array.from(stripAnsi(value));
+  let width = 0;
+  for (let i = 0; i < chars.length; i++) {
+    width += codePointWidth(chars[i].codePointAt(0) ?? 0, chars[i + 1]?.codePointAt(0));
+  }
+  return width;
 }
 
-function codePointWidth(cp: number): number {
+function isDefaultEmojiWide(cp: number): boolean {
+  return (
+    cp === 0x00a9 || cp === 0x00ae ||
+    cp === 0x203c || cp === 0x2049 ||
+    (cp >= 0x231a && cp <= 0x231b) ||
+    (cp >= 0x23e9 && cp <= 0x23ec) ||
+    cp === 0x23f0 || cp === 0x23f3 ||
+    (cp >= 0x25fd && cp <= 0x25fe) ||
+    (cp >= 0x2614 && cp <= 0x2615) ||
+    (cp >= 0x2648 && cp <= 0x2653) ||
+    cp === 0x267f || cp === 0x2693 || cp === 0x26a1 ||
+    (cp >= 0x26aa && cp <= 0x26ab) ||
+    (cp >= 0x26bd && cp <= 0x26be) ||
+    (cp >= 0x26c4 && cp <= 0x26c5) ||
+    cp === 0x26ce || cp === 0x26d4 || cp === 0x26ea ||
+    (cp >= 0x26f2 && cp <= 0x26f3) ||
+    cp === 0x26f5 || cp === 0x26fa || cp === 0x26fd ||
+    cp === 0x2705 || (cp >= 0x270a && cp <= 0x270b) ||
+    cp === 0x2728 || cp === 0x274c || cp === 0x274e ||
+    (cp >= 0x2753 && cp <= 0x2755) || cp === 0x2757 ||
+    (cp >= 0x2795 && cp <= 0x2797) || cp === 0x27b0 || cp === 0x27bf ||
+    (cp >= 0x2b1b && cp <= 0x2b1c) || cp === 0x2b50 || cp === 0x2b55 ||
+    (cp >= 0x1f000 && cp <= 0x1faff)
+  );
+}
+
+function canTakeEmojiPresentation(cp: number): boolean {
+  return isDefaultEmojiWide(cp) || (cp >= 0x2600 && cp <= 0x27bf) || (cp >= 0x2b00 && cp <= 0x2bff);
+}
+
+function codePointWidth(cp: number, nextCp?: number): number {
   if (cp < 32 || (cp >= 0x7f && cp < 0xa0) || (cp >= 0x300 && cp <= 0x36f) || cp === 0x200d || (cp >= 0xfe00 && cp <= 0xfe0f)) return 0;
-  if ((cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0x1f300 && cp <= 0x1faff)) return 2;
+  if ((nextCp === 0xfe0f && canTakeEmojiPresentation(cp)) || isDefaultEmojiWide(cp)) return 2;
+  if ((cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3)) return 2;
   return 1;
 }
 
@@ -52,11 +88,16 @@ function truncateEnd(value: string, width: number): string {
   if (width <= 1) return "…";
   let out = "";
   let used = 0;
-  for (const char of value) {
-    const w = codePointWidth(char.codePointAt(0) ?? 0);
+  const chars = Array.from(value);
+  for (let i = 0; i < chars.length; i++) {
+    const cp = chars[i].codePointAt(0) ?? 0;
+    const nextCp = chars[i + 1]?.codePointAt(0);
+    const cluster = nextCp === 0xfe0f && canTakeEmojiPresentation(cp) ? chars[i] + chars[i + 1] : chars[i];
+    const w = visWidth(cluster);
     if (used + w > width - 1) break;
-    out += char;
+    out += cluster;
     used += w;
+    if (cluster.length > chars[i].length) i++;
   }
   return `${out}…`;
 }

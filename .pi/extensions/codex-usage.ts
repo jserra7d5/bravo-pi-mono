@@ -315,8 +315,65 @@ export function stripAnsi(s: string): string {
 	return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+function isDefaultEmojiWide(cp: number): boolean {
+	return (
+		cp === 0x00a9 || cp === 0x00ae ||
+		cp === 0x203c || cp === 0x2049 ||
+		(cp >= 0x231a && cp <= 0x231b) ||
+		(cp >= 0x23e9 && cp <= 0x23ec) ||
+		cp === 0x23f0 || cp === 0x23f3 ||
+		(cp >= 0x25fd && cp <= 0x25fe) ||
+		(cp >= 0x2614 && cp <= 0x2615) ||
+		(cp >= 0x2648 && cp <= 0x2653) ||
+		cp === 0x267f || cp === 0x2693 || cp === 0x26a1 ||
+		(cp >= 0x26aa && cp <= 0x26ab) ||
+		(cp >= 0x26bd && cp <= 0x26be) ||
+		(cp >= 0x26c4 && cp <= 0x26c5) ||
+		cp === 0x26ce || cp === 0x26d4 || cp === 0x26ea ||
+		(cp >= 0x26f2 && cp <= 0x26f3) ||
+		cp === 0x26f5 || cp === 0x26fa || cp === 0x26fd ||
+		cp === 0x2705 || (cp >= 0x270a && cp <= 0x270b) ||
+		cp === 0x2728 || cp === 0x274c || cp === 0x274e ||
+		(cp >= 0x2753 && cp <= 0x2755) || cp === 0x2757 ||
+		(cp >= 0x2795 && cp <= 0x2797) || cp === 0x27b0 || cp === 0x27bf ||
+		(cp >= 0x2b1b && cp <= 0x2b1c) || cp === 0x2b50 || cp === 0x2b55 ||
+		(cp >= 0x1f000 && cp <= 0x1faff)
+	);
+}
+
+function canTakeEmojiPresentation(cp: number): boolean {
+	return (
+		isDefaultEmojiWide(cp) ||
+		(cp >= 0x2600 && cp <= 0x27bf) ||
+		(cp >= 0x2b00 && cp <= 0x2bff)
+	);
+}
+
 export function visWidth(s: string): number {
-	return stripAnsi(s).length;
+	const chars = [...stripAnsi(s)];
+	let width = 0;
+	for (let i = 0; i < chars.length; i++) {
+		const cp = chars[i].codePointAt(0) ?? 0;
+		if (cp === 0x200d || (cp >= 0xfe00 && cp <= 0xfe0f)) continue;
+		const nextCp = chars[i + 1]?.codePointAt(0);
+		if (
+			(nextCp === 0xfe0f && canTakeEmojiPresentation(cp)) ||
+			isDefaultEmojiWide(cp) ||
+			(cp >= 0x1100 && (
+				cp <= 0x115f ||
+				(cp >= 0x2e80 && cp <= 0x303e) ||
+				(cp >= 0x3041 && cp <= 0x33ff) ||
+				(cp >= 0x3400 && cp <= 0x4dbf) ||
+				(cp >= 0x4e00 && cp <= 0x9fff) ||
+				(cp >= 0xac00 && cp <= 0xd7a3)
+			))
+		) {
+			width += 2;
+		} else {
+			width += 1;
+		}
+	}
+	return width;
 }
 
 export function identitySlot(name: string): number {
@@ -366,9 +423,23 @@ function truncMid(s: string, max: number): string {
 }
 
 function truncEnd(s: string, max: number): string {
-	if (s.length <= max) return s;
-	if (max <= 1) return s.slice(0, max);
-	return `${s.slice(0, max - 1)}…`;
+	if (visWidth(s) <= max) return s;
+	if (max <= 1) return "…";
+	const limit = max - 1;
+	const chars = [...s];
+	let out = "";
+	let used = 0;
+	for (let i = 0; i < chars.length; i++) {
+		const cp = chars[i].codePointAt(0) ?? 0;
+		const nextCp = chars[i + 1]?.codePointAt(0);
+		const cluster = nextCp === 0xfe0f && canTakeEmojiPresentation(cp) ? chars[i] + chars[i + 1] : chars[i];
+		const width = visWidth(cluster);
+		if (used + width > limit) break;
+		out += cluster;
+		used += width;
+		if (cluster.length > chars[i].length) i++;
+	}
+	return `${out}…`;
 }
 
 function clampLine(line: string, width: number): string {

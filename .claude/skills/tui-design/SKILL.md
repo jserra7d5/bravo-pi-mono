@@ -154,6 +154,8 @@ const visWidth = (s) => stripAnsi(s).length;
 
 But there's more. Emoji and CJK characters are 2 cells. ZWJ (U+200D) and variation selectors (U+FE00–U+FE0F) are 0 cells. If your card has any emoji content (state glyphs in some terminals, user-supplied content), you need the full visWidth function from `references/ansi-and-widths.md`. Otherwise chrome will misalign for half your users.
 
+**Crash-class trap:** do not treat all Dingbats as width 1 or all Dingbats as width 2. Terminals commonly render `✓` as 1 cell but `✅` as 2 cells; `⚠` may be 1 cell while `⚠️` with U+FE0F is 2. If your width helper undercounts default-wide emoji by one, exact-width container rows get one extra pad cell and Pi exits with `Rendered line N exceeds terminal width`. Add regression tests with `✅`, plain `✓`, plain `⚠`, and `⚠️` for any custom width helper.
+
 Truncation must preserve ANSI escapes. Naive `slice(0, max)` will cut an escape sequence in half and color the rest of your terminal red. Use `truncAnsi(str, maxCells)` from the reference.
 
 Mid-truncation for paths (`/long/path/to/file.ts` → `/long/path/…o/file.ts`): keep head and tail, `…` in the middle. End-truncation for everything else: `… ` at the end.
@@ -215,4 +217,5 @@ Agents must work on disjoint files. If two agents touch the same file in paralle
 - Comments only where WHY is non-obvious. Don't narrate WHAT — names do that.
 - Tests for: identity stability + distribution, threshold boundaries, layout cutoffs, chrome holding declared width.
 - ANSI handling: never measure raw strings; always go through `visWidth`.
+- Emoji width handling: test default-wide emoji separately from text dingbats (`✅` must be 2 cells; `✓` must stay 1; `⚠️` must be 2 because of variation selector). This is a Pi crash vector, not just cosmetic misalignment.
 - Don't `process.stdout.columns`. Use the width pi passes.

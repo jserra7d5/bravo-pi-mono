@@ -171,6 +171,19 @@ test("c.id palette is byte-identical to async-subagents IDENTITY_PALETTE", () =>
 	}
 });
 
+// ── width math ─────────────────────────────────────────────────────────────
+
+test("visWidth handles emoji, text dingbats, variation selectors, and zero-width joiners", () => {
+	assert.equal(visWidth("hello"), 5);
+	assert.equal(visWidth("中文"), 4);
+	assert.equal(visWidth("\x1b[31mhello\x1b[0m"), 5);
+	assert.equal(visWidth("✅"), 2);
+	assert.equal(visWidth("✓"), 1);
+	assert.equal(visWidth("⚠"), 1);
+	assert.equal(visWidth("⚠️"), 2);
+	assert.equal(visWidth("‍"), 0);
+});
+
 // ── bar ────────────────────────────────────────────────────────────────────
 
 test("bar fills the correct cell count and preserves total width", () => {

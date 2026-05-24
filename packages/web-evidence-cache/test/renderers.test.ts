@@ -9,6 +9,18 @@ test("renderer cards hold declared width at common cutoffs", () => {
   }
 });
 
+test("visWidth handles emoji, text dingbats, and variation selectors", () => {
+  assert.equal(visWidth("✅"), 2);
+  assert.equal(visWidth("✓"), 1);
+  assert.equal(visWidth("⚠"), 1);
+  assert.equal(visWidth("⚠️"), 2);
+});
+
+test("truncateEnd path through card rows keeps variation-selector emoji within width", () => {
+  const [line] = renderCardForTest(44, "✓ Emoji", ["status ⚠️ ".repeat(12)]).slice(1, 2);
+  assert.equal(visWidth(line), 44);
+});
+
 test("truncateMiddle keeps path head and tail", () => {
   const value = "/tmp/pi-web-cache/workspace/session/pages/page/page.semantic.html";
   const out = truncateMiddle(value, 24);

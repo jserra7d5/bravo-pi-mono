@@ -112,16 +112,21 @@ test("idBar override replaces the identity color with the supplied ANSI", () => 
 	assert.ok(!overridden.includes(identityColor("any-id")));
 });
 
-test("visWidth ignores ANSI escapes and treats CJK as 2 cells", () => {
+test("visWidth ignores ANSI escapes and treats CJK/emoji widths correctly", () => {
 	assert.equal(visWidth("hello"), 5);
 	assert.equal(visWidth("中文"), 4);
 	assert.equal(visWidth("\x1b[31mhello\x1b[0m"), 5);
+	assert.equal(visWidth("✅"), 2);
+	assert.equal(visWidth("✓"), 1);
+	assert.equal(visWidth("⚠"), 1);
+	assert.equal(visWidth("⚠️"), 2);
 });
 
 test("truncAnsi caps visible width and appends an ellipsis", () => {
 	const out = truncAnsi("the quick brown fox", 10);
 	assert.ok(out.endsWith("…\x1b[0m"));
 	assert.ok(visWidth(out) <= 10);
+	assert.ok(visWidth(truncAnsi("ok ⚠️ done", 7)) <= 7);
 });
 
 test("renderTaskReceiptReadyCall produces a title-bar with bold colored # title and tool name", () => {
