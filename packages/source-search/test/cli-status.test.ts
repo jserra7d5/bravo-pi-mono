@@ -14,7 +14,7 @@ function run(command: string, args: string[], cwd?: string) {
 
 function runCli(args: string[]) {
   const cli = new URL("../src/cli.js", import.meta.url);
-  return JSON.parse(run(process.execPath, [cli.pathname, ...args])) as { ok: boolean; indexedFiles: number; warnings?: string[]; cacheDir?: string };
+  return JSON.parse(run(process.execPath, [cli.pathname, ...args])) as { ok: boolean; indexedFiles?: number; warnings?: string[]; cacheDir?: string };
 }
 
 async function createRepo() {
@@ -41,6 +41,14 @@ test("status reports manifest indexed count and keeps cacheDir out of warnings",
   assert.equal(status.indexedFiles, indexed.indexedFiles);
   assert.ok(status.cacheDir);
   assert.deepEqual(status.warnings ?? [], []);
+});
+
+test("config validate does not report misleading index status", async () => {
+  const repo = await createRepo();
+  const validation = runCli(["config", "validate", "--repo", repo, "--json"]);
+  assert.equal(validation.ok, true);
+  assert.equal(Object.hasOwn(validation, "indexedFiles"), false);
+  assert.deepEqual(validation.warnings ?? [], []);
 });
 
 test("extension injects source-search CLI into bash tool PATH", async () => {

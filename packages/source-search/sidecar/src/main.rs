@@ -69,8 +69,8 @@ struct StatusResponse {
     repo_root: Option<String>,
     #[serde(rename = "cacheDir")]
     cache_dir: Option<String>,
-    #[serde(rename = "indexedFiles")]
-    indexed_files: usize,
+    #[serde(rename = "indexedFiles", skip_serializing_if = "Option::is_none")]
+    indexed_files: Option<usize>,
     warnings: Vec<String>,
     error: Option<String>,
 }
@@ -289,14 +289,15 @@ fn status_cmd(args: &[String]) -> Result<i32> {
     };
     status_print(repo, n, warnings)
 }
-fn purge_cmd(args: &[String]) -> Result<i32> { let repo = repo_arg(args)?; let dir = cache_dir(&repo)?; if dir.exists() { fs::remove_dir_all(&dir)?; } let resp = StatusResponse{protocol_version:PROTOCOL_VERSION,ok:true,repo_root:Some(repo.display().to_string()),cache_dir:Some(dir.display().to_string()),indexed_files:0,warnings:vec![],error:None}; println!("{}", serde_json::to_string(&resp)?); Ok(0) }
+fn purge_cmd(args: &[String]) -> Result<i32> { let repo = repo_arg(args)?; let dir = cache_dir(&repo)?; if dir.exists() { fs::remove_dir_all(&dir)?; } let resp = StatusResponse{protocol_version:PROTOCOL_VERSION,ok:true,repo_root:Some(repo.display().to_string()),cache_dir:Some(dir.display().to_string()),indexed_files:Some(0),warnings:vec![],error:None}; println!("{}", serde_json::to_string(&resp)?); Ok(0) }
 fn config_cmd(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str) != Some("validate") { print_query_error("only config validate is implemented"); return Ok(2); }
     let repo = repo_arg(&args[1..])?;
     let cfg = load_config(&repo)?;
     let mut warnings = vec![];
     if !cfg.enabled { warnings.push("Source Search is disabled by config".into()); }
-    status_print(repo, 0, warnings)
+    status_print_optional(repo, None, warnings)
 }
-fn status_print(repo: PathBuf, n: usize, warnings: Vec<String>) -> Result<i32> { let resp = StatusResponse{protocol_version:PROTOCOL_VERSION,ok:true,repo_root:Some(repo.display().to_string()),cache_dir:Some(cache_dir(&repo)?.display().to_string()),indexed_files:n,warnings,error:None}; println!("{}", serde_json::to_string(&resp)?); Ok(0) }
+fn status_print(repo: PathBuf, n: usize, warnings: Vec<String>) -> Result<i32> { status_print_optional(repo, Some(n), warnings) }
+fn status_print_optional(repo: PathBuf, n: Option<usize>, warnings: Vec<String>) -> Result<i32> { let resp = StatusResponse{protocol_version:PROTOCOL_VERSION,ok:true,repo_root:Some(repo.display().to_string()),cache_dir:Some(cache_dir(&repo)?.display().to_string()),indexed_files:n,warnings,error:None}; println!("{}", serde_json::to_string(&resp)?); Ok(0) }
 fn print_query_error(msg: &str) { let resp = QueryResponse{protocol_version:PROTOCOL_VERSION,ok:false,repo_root:None,query:None,hits:vec![],count:0,index_freshness:None,warnings:vec![],error:Some(msg.to_string())}; println!("{}", serde_json::to_string(&resp).unwrap()); }
