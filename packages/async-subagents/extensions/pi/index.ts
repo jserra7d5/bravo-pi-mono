@@ -60,7 +60,10 @@ function sendWakeup(pi: ExtensionAPI, wakeup: WakeupMessage): void {
       display: true,
       details: wakeup,
     },
-    { triggerTurn: true, deliverAs: "followUp" },
+    // Steering wakes an idle parent like follow-up does, but if the parent is
+    // already running tools it is delivered before the next model step instead
+    // of being queued as a new post-summary turn.
+    { triggerTurn: true, deliverAs: "steer" },
   );
 }
 

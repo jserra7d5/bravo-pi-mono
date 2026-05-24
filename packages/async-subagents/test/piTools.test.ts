@@ -4,6 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { buildSubagentTools } from "../extensions/pi/tools.js";
+import { pollWakeups } from "../extensions/pi/wakeups.js";
+import { acquireRootSessionLease } from "../src/leases.js";
 import { createRunResult } from "../src/result.js";
 import { createRootSession } from "../src/rootSession.js";
 import { RunStore } from "../src/runStore.js";
@@ -55,6 +57,55 @@ test("subagent_status tool defaults to root session direct children", async () =
   assert.equal(result.isError, undefined);
   assert.equal((result.details.rows as Array<{ runId: string }>)[0]?.runId, w.runId);
   assert.equal((result.details.counts as { active: number }).active, 1);
+});
+
+test("subagent_start marks waited terminal results handled before subscribing wakeups", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const status = store.readStatus(w.runId);
+  const runDir = store.pathsFor({ runId: w.runId }).runDir;
+  const terminalResult = createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", summary: "Done", body: "Full body" });
+  const built = Object.fromEntries(
+    buildSubagentTools({
+      getRootIdentity() {
+        return w.identity;
+      },
+      async startSubagent() {
+        store.writeResult(terminalResult);
+        store.writeStatus({ ...status, state: "completed", resultReady: true, summary: "Done" });
+        return {
+          runId: w.runId,
+          runDir,
+          agentName: "scout",
+          state: "completed",
+          started: true,
+          waited: true,
+          waitResult: {
+            state: "ready",
+            mode: "race",
+            readyRunIds: [w.runId],
+            events: [],
+            results: [terminalResult],
+            statuses: [{ runId: w.runId, state: "completed", summary: "Done" }],
+            cursors: {},
+            remainingRunIds: [],
+            timedOut: false,
+            next: [],
+          },
+          contextPolicy: "fresh",
+          sessionPolicy: "record",
+          next: [{ tool: "subagent_result", args: { runId: w.runId } }],
+        };
+      },
+    }).map((tool) => [tool.name, tool]),
+  );
+
+  const result = await built.subagent_start.execute("call", { agent: "scout", task: "review", mode: "sync" }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(store.readStatus(w.runId).resultReady, false);
+  acquireRootSessionLease({ cwd: w.root, rootSessionId: w.identity.rootSessionId, ownerId: "owner_a", ttlMs: 10_000 });
+  assert.equal(pollWakeups({ store, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId, ownerId: "owner_a", modelFollowUpOnly: true }).length, 0);
 });
 
 test("subagent_message appends inbox messages and waits for child-control acknowledgement", async () => {

@@ -11,7 +11,7 @@ import { RunStore } from "../../src/runStore.js";
 import { isTerminalRunState, isThinkingLevel } from "../../src/schemas.js";
 import { startSubagent, type StartSubagentInput } from "../../src/start.js";
 import { readSubagentStatus, updateRunStatus } from "../../src/status.js";
-import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult, type WaitCursorMap } from "../../src/types.js";
+import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult, type SubagentWaitResult, type WaitCursorMap } from "../../src/types.js";
 import { waitSubagents } from "../../src/wait.js";
 import { finalizeTerminalRun } from "../../src/lifecycle.js";
 import { readParentPiSessionRef } from "../../src/piSession.js";
@@ -264,6 +264,12 @@ function markResultCollected(store: RunStore, parentRunId: string, runId: string
     // Best-effort cleanup: result reads should not fail just because a recovered
     // runDir is missing from this workspace's status index.
   }
+}
+
+function markWaitResultCollected(store: RunStore, parentRunId: string, waitResult: SubagentWaitResult | undefined): void {
+  if (!waitResult) return;
+  for (const event of waitResult.events) markWakeupKeyHandled(store, event.parentRunId ?? parentRunId, eventDeliveryKey(event));
+  for (const result of waitResult.results) markResultCollected(store, result.parentRunId ?? parentRunId, result.runId);
 }
 
 function compactEvents(events: unknown[], maxEvents: number): unknown[] {
@@ -555,6 +561,7 @@ async function startTerminalContinuation(input: {
       thinkingLevel: isThinkingLevel(input.params.thinkingLevel) ? input.params.thinkingLevel : input.status.thinkingLevel,
     });
     const notifyOn = Array.isArray(input.params.notifyOn) ? (input.params.notifyOn.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined;
+    markWaitResultCollected(input.store, input.root.parentRunId, result.waitResult);
     writeDeliverySubscription(input.store, {
       schemaVersion: SCHEMA_VERSION,
       parentRunId: input.root.parentRunId,
@@ -611,7 +618,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           const message = error instanceof Error ? error.message : String(error);
           return response(message, { code: "INVALID_SKILL_NAME" }, true);
         }
-        const result = await startSubagent({
+        const launcher = runtime.startSubagent ?? startSubagent;
+        const result = await launcher({
           agent: String(params.agent),
           variant: typeof params.variant === "string" && params.variant ? params.variant : undefined,
           task: String(params.task),
@@ -636,7 +644,9 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           },
           thinkingLevel: isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined,
         });
-        writeDeliverySubscription(storeFor(sessionCwd), {
+        const sessionStore = storeFor(sessionCwd);
+        markWaitResultCollected(sessionStore, root.parentRunId, result.waitResult);
+        writeDeliverySubscription(sessionStore, {
           schemaVersion: SCHEMA_VERSION,
           parentRunId: root.parentRunId,
           runId: result.runId,
