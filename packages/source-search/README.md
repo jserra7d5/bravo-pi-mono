@@ -21,7 +21,7 @@ source-search config validate --repo /path/to/repo --json
 source-search purge --repo /path/to/repo --json
 ```
 
-Indexes are stored under `~/.cache/pi-coding-agent/source-search` with owner-only permissions where supported. The corpus is based on `git ls-files -z -co --exclude-standard`, never indexes `.git/`, validates paths against the repo root, and applies conservative secret/noise denies.
+Indexes are stored under `~/.cache/pi-coding-agent/source-search` with owner-only permissions where supported. `query` refreshes the existing index incrementally (new, changed, and deleted files) and falls back to a full rebuild when the index, manifest, schema, or config is incompatible; `index --force` performs a full rebuild. The corpus is based on `git ls-files -z -co --exclude-standard`, never indexes `.git/`, validates paths against the repo root, and applies conservative secret/noise denies.
 
 ## Configuration
 

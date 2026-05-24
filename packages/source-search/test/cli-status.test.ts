@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -61,6 +61,66 @@ test("config validate does not report misleading index status", async () => {
   assert.equal(validation.ok, true);
   assert.equal(Object.hasOwn(validation, "indexedFiles"), false);
   assert.deepEqual(validation.warnings ?? [], []);
+});
+
+test("query refreshes incrementally for added, modified, deleted, and newly excluded files", async () => {
+  const repo = await createRepo();
+  runCli(["index", "--repo", repo, "--force", "--json"]);
+
+  await writeFile(join(repo, "src", "added.ts"), "fresh incremental needle\n");
+  let result = runCli(["query", "--repo", repo, "--query", "fresh incremental", "--limit", "10", "--json"]);
+  assert.equal(result.ok, true);
+  assert.equal(result.hits?.some((hit) => hit.path === "src/added.ts"), true);
+
+  await writeFile(join(repo, "src", "a.ts"), "export const alpha = 'modified incremental';\n");
+  result = runCli(["query", "--repo", repo, "--query", "modified incremental", "--limit", "10", "--json"]);
+  assert.equal(result.hits?.some((hit) => hit.path === "src/a.ts"), true);
+  result = runCli(["query", "--repo", repo, "--query", "1", "--limit", "10", "--json"]);
+  assert.equal(result.hits?.some((hit) => hit.path === "src/a.ts"), false);
+
+  await rm(join(repo, "src", "added.ts"));
+  result = runCli(["query", "--repo", repo, "--query", "fresh incremental", "--limit", "10", "--json"]);
+  assert.equal(result.hits?.some((hit) => hit.path === "src/added.ts"), false);
+
+  await writeFile(join(repo, ".bravo", "source-search.json"), JSON.stringify({ enabled: true, exclude: ["dist/**", "src/a.ts"], maxFileBytes: 1048576 }));
+  result = runCli(["query", "--repo", repo, "--query", "modified incremental", "--limit", "10", "--json"]);
+  assert.equal(result.hits?.some((hit) => hit.path === "src/a.ts"), false);
+
+  const status = runCli(["status", "--repo", repo, "--json"]);
+  assert.equal(status.ok, true);
+  assert.equal(status.indexedFiles, 1);
+});
+
+test("config excludes wildcard patterns with embedded stars", async () => {
+  const repo = await createRepo();
+  await mkdir(join(repo, "foo-bar"), { recursive: true });
+  await writeFile(join(repo, ".bravo", "source-search.json"), JSON.stringify({ enabled: true, exclude: ["pi-session-*.html", "foo-*/**"], maxFileBytes: 1048576 }));
+  await writeFile(join(repo, "pi-session-demo.html"), "secret needle in session\n");
+  await writeFile(join(repo, "foo-bar", "a.txt"), "glob leak needle\n");
+
+  const session = runCli(["query", "--repo", repo, "--query", "secret needle", "--limit", "10", "--json"]);
+  assert.equal(session.ok, true);
+  assert.equal(session.hits?.some((hit) => hit.path === "pi-session-demo.html"), false);
+
+  const nested = runCli(["query", "--repo", repo, "--query", "glob leak", "--limit", "10", "--json"]);
+  assert.equal(nested.ok, true);
+  assert.equal(nested.hits?.some((hit) => hit.path === "foo-bar/a.txt"), false);
+});
+
+test("query refresh detects same-size edits with preserved mtime", async () => {
+  const repo = await createRepo();
+  const file = join(repo, "src", "same-size.txt");
+  await writeFile(file, "alpha oldxx\n");
+  runCli(["index", "--repo", repo, "--force", "--json"]);
+  const before = await stat(file);
+
+  await writeFile(file, "alpha newxx\n");
+  await utimes(file, before.atime, before.mtime);
+
+  let result = runCli(["query", "--repo", repo, "--query", "oldxx", "--limit", "10", "--json"]);
+  assert.equal(result.hits?.some((hit) => hit.path === "src/same-size.txt"), false);
+  result = runCli(["query", "--repo", repo, "--query", "newxx", "--limit", "10", "--json"]);
+  assert.equal(result.hits?.some((hit) => hit.path === "src/same-size.txt"), true);
 });
 
 test("query boosts rerank and excludeTerms filter without query DSL", async () => {

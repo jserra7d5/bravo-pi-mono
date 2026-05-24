@@ -153,7 +153,7 @@ Normal flow:
 2. Agent calls `ranked_search` first for broad lexical discovery when supported.
 3. Tool detects git/workspace scope.
 4. Tool loads repo config.
-5. Tool creates or refreshes Tantivy index within configured budgets.
+5. Tool creates or incrementally refreshes the Tantivy index within configured budgets, updating new/changed files and deleting removed or newly excluded files; incompatible indexes/manifests/configs fall back to a full rebuild.
 6. Tool queries index.
 7. Tool returns compact ranked snippets and paths.
 8. Agent uses `read` or exact `grep` to inspect/confirm promising results.

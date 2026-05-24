@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "exclude": [
+    "dist/**",
+    "build/**",
+    "coverage/**",
+    "node_modules/**",
+    "target/**",
+    "packages/*/dist/**",
+    "packages/*/target/**",
+    "packages/tango/dashboard/dist/**",
+    "pi-session-*.html"
+  ],
+  "maxFileBytes": 1048576
+}
