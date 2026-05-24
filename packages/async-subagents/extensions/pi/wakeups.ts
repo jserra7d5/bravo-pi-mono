@@ -4,7 +4,7 @@ import { atomicWriteJson } from "../../src/jsonl.js";
 import { ownsRootSessionLease } from "../../src/leases.js";
 import { isInterestingEvent } from "../../src/schemas.js";
 import { RunStore } from "../../src/runStore.js";
-import type { DeliverySubscription, EventType, RunEvent, RunResult } from "../../src/types.js";
+import type { DeliverySubscription, EventType, RunEvent, RunIndexRecord, RunResult } from "../../src/types.js";
 import { SCHEMA_VERSION } from "../../src/types.js";
 import type { WakeupMessage } from "./renderers.js";
 
@@ -23,6 +23,7 @@ export interface WakeupPollInput {
   nowMs?: number;
   limit?: number;
   modelFollowUpOnly?: boolean;
+  records?: RunIndexRecord[];
 }
 
 export interface WakeupDelivery {
@@ -217,7 +218,7 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
   const deliveries: WakeupDelivery[] = [];
   const subscriptions = new Map(readDeliverySubscriptions(input.store, input.parentRunId).map((item) => [item.runId, item]));
   const records = subscriptions.size
-    ? input.store.listDirectChildren(input.parentRunId).filter((record) => subscriptions.has(record.runId))
+    ? (input.records ?? input.store.listDirectChildren(input.parentRunId)).filter((record) => subscriptions.has(record.runId))
     : [];
   for (const record of records) {
     const subscription = subscriptions.get(record.runId);

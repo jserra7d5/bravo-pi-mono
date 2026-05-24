@@ -4,7 +4,7 @@ import { acquireRootSessionLease } from "../../src/leases.js";
 import { NAME_PACKS, readNamePackSelection, writeNamePackSelection, type NamePackId } from "../../src/namePacks.js";
 import { createRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
-import type { RootSessionIdentity } from "../../src/types.js";
+import type { RootSessionIdentity, RunIndexRecord } from "../../src/types.js";
 import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from "./compactionReminder.js";
 import { clearLiveWidget, updateLiveWidget } from "./liveWidget.js";
 import { renderDiscoveredAgentCatalog } from "./agentCatalog.js";
@@ -16,8 +16,7 @@ import { isResultWakeupCurrent, isWakeupKeyHandled, pollWakeups } from "./wakeup
 const OWNER_ID = `pi-${process.pid}-${Date.now().toString(36)}`;
 const roots = new Map<string, RootSessionIdentity>();
 
-let uiTimer: ReturnType<typeof setInterval> | undefined;
-let wakeupTimer: ReturnType<typeof setInterval> | undefined;
+let piTimer: ReturnType<typeof setInterval> | undefined;
 let leaseTimer: ReturnType<typeof setInterval> | undefined;
 let currentCtx: ExtensionContext | undefined;
 
@@ -60,21 +59,27 @@ function sendWakeup(pi: ExtensionAPI, wakeup: WakeupMessage): void {
       display: true,
       details: wakeup,
     },
-    // Steering wakes an idle parent like follow-up does, but if the parent is
-    // already running tools it is delivered before the next model step instead
-    // of being queued as a new post-summary turn.
-    { triggerTurn: true, deliverAs: "steer" },
+    // Result wakeups should still wake the parent, but they do not need to be
+    // steered into an active turn while the user is typing. Questions/blocked
+    // events remain steerable because they can require immediate parent input.
+    { triggerTurn: true, deliverAs: wakeup.result ? "followUp" : "steer" },
   );
 }
 
-function pollAndSendWakeups(pi: ExtensionAPI, ctx: ExtensionContext): void {
-  const cwd = cwdOf(ctx);
-  const identity = ensureRoot(cwd);
-  const store = new RunStore({ cwd });
-  for (const delivery of pollWakeups({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, ownerId: OWNER_ID, modelFollowUpOnly: true })) {
+function pollAndSendWakeups(pi: ExtensionAPI, store: RunStore, identity: RootSessionIdentity, records?: RunIndexRecord[]): void {
+  for (const delivery of pollWakeups({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, ownerId: OWNER_ID, modelFollowUpOnly: true, records })) {
     if (isWakeupKeyHandled(store, identity.parentRunId, delivery.deliveryKey)) continue;
     sendWakeup(pi, delivery.message);
   }
+}
+
+function tickPi(pi: ExtensionAPI, ctx: ExtensionContext): void {
+  const cwd = cwdOf(ctx);
+  const identity = ensureRoot(cwd);
+  const store = new RunStore({ cwd });
+  const records = store.listRecentRuns({ parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
+  pollAndSendWakeups(pi, store, identity, records);
+  if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, records });
 }
 
 function isNamePackId(value: string): value is NamePackId {
@@ -115,8 +120,7 @@ function startTimers(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const cwd = cwdOf(ctx);
   const identity = ensureRoot(cwd);
   acquireLease(cwd, identity);
-  refreshUi(ctx);
-  pollAndSendWakeups(pi, ctx);
+  tickPi(pi, ctx);
 
   leaseTimer = setInterval(() => {
     const active = currentCtx;
@@ -124,24 +128,18 @@ function startTimers(pi: ExtensionAPI, ctx: ExtensionContext): void {
     const activeCwd = cwdOf(active);
     acquireLease(activeCwd, ensureRoot(activeCwd));
   }, 5_000);
-  uiTimer = setInterval(() => {
-    if (currentCtx) refreshUi(currentCtx);
-  }, 2_000);
-  wakeupTimer = setInterval(() => {
-    if (currentCtx) pollAndSendWakeups(pi, currentCtx);
+  piTimer = setInterval(() => {
+    if (currentCtx) tickPi(pi, currentCtx);
   }, 2_000);
   leaseTimer.unref?.();
-  uiTimer.unref?.();
-  wakeupTimer.unref?.();
+  piTimer.unref?.();
 }
 
 function stopTimers(ctx?: ExtensionContext): void {
   if (leaseTimer) clearInterval(leaseTimer);
-  if (uiTimer) clearInterval(uiTimer);
-  if (wakeupTimer) clearInterval(wakeupTimer);
+  if (piTimer) clearInterval(piTimer);
   leaseTimer = undefined;
-  uiTimer = undefined;
-  wakeupTimer = undefined;
+  piTimer = undefined;
   if (ctx) {
     clearLiveWidget(ctx);
   }

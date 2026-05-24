@@ -30,6 +30,9 @@ export interface ReadWatcherSnapshotInput {
   parentRunId?: string;
   rootSessionId?: string;
   limit?: number;
+  nowMs?: number;
+  completedVisibleMs?: number;
+  records?: RunIndexRecord[];
 }
 
 function safeStatus(store: RunStore, record: RunIndexRecord): RunStatus | undefined {
@@ -57,11 +60,16 @@ function priority(row: RunSummaryRow): number {
 }
 
 export function readWatcherSnapshot(store: RunStore, input: ReadWatcherSnapshotInput = {}): WatcherSnapshot {
-  const records = store.listRecentRuns({ parentRunId: input.parentRunId, rootSessionId: input.rootSessionId });
+  const records = input.records ?? store.listRecentRuns({ parentRunId: input.parentRunId, rootSessionId: input.rootSessionId });
+  const nowMs = input.nowMs ?? Date.now();
   const rows: RunSummaryRow[] = records
     .flatMap((record) => {
       const status = safeStatus(store, record);
       if (!status) return [];
+      if (status.state === "completed" && typeof input.completedVisibleMs === "number") {
+        const updatedAtMs = Date.parse(status.updatedAt);
+        if (Number.isFinite(updatedAtMs) && nowMs - updatedAtMs > input.completedVisibleMs) return [];
+      }
       const result = store.readResult(record.runId);
       const row: RunSummaryRow = {
         runId: record.runId,

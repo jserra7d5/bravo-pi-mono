@@ -126,6 +126,23 @@ test("live widget returns no lines when no rows are visible", () => {
   assert.deepEqual(lines, []);
 });
 
+test("live widget hides completed runs older than the default one minute horizon", () => {
+  const w = workspace();
+  addRun({ ...w, displayName: "OldDone", state: "completed", summary: "old completed", updatedAt: isoAgo(61_000) });
+
+  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
+  assert.deepEqual(lines, []);
+});
+
+test("live widget honors an explicit longer completed visibility horizon", () => {
+  const w = workspace();
+  addRun({ ...w, displayName: "OldDone", state: "completed", summary: "old completed", updatedAt: isoAgo(61_000) });
+
+  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, terminalCompletedVisibleMs: 5 * 60_000, width: 72 });
+  const body = lines.map(stripAnsi).join("\n");
+  assert.ok(body.includes("@OldDone"));
+});
+
 test("live widget header sums cost across mixed terminal + active rows", () => {
   const w = workspace();
   // Terminal run with cost on status (mirrors what finalizeTerminalRun writes).

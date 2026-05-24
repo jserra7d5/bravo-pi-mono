@@ -1,4 +1,5 @@
 import { RunStore } from "../../src/runStore.js";
+import type { RunIndexRecord } from "../../src/types.js";
 import { readWatcherSnapshot, type RunSummaryRow } from "../../src/watcher.js";
 import { renderWidgetCard, widgetRowFromSummary, type WidgetRowInput } from "./renderers.js";
 import { isResultWakeupCurrent } from "./wakeups.js";
@@ -9,6 +10,7 @@ export interface LiveWidgetInput {
   rootSessionId?: string;
   maxRows?: number;
   terminalCompletedVisibleMs?: number;
+  records?: RunIndexRecord[];
   // Optional explicit width — when omitted (the production path), pi tells the
   // widget its real container width via the Component.render(width) callback.
   // This is required: pi's widget container is narrower than the full terminal,
@@ -22,12 +24,16 @@ function isTerminal(row: RunSummaryRow): boolean {
   return TERMINAL_STATES.has(row.state);
 }
 
+function visibleState(state: string, updatedAt: string, now: number, terminalCompletedVisibleMs: number): boolean {
+  if (!TERMINAL_STATES.has(state)) return ["created", "queued", "running", "idle", "waiting_for_input", "blocked", "stalled", "paused"].includes(state);
+  if (state !== "completed") return true;
+  const updatedAtMs = Date.parse(updatedAt);
+  if (!Number.isFinite(updatedAtMs)) return true;
+  return now - updatedAtMs <= terminalCompletedVisibleMs;
+}
+
 function visible(row: RunSummaryRow, now: number, terminalCompletedVisibleMs: number): boolean {
-  if (!isTerminal(row)) return ["created", "queued", "running", "idle", "waiting_for_input", "blocked", "stalled", "paused"].includes(row.state);
-  if (row.state !== "completed") return true;
-  const updatedAt = Date.parse(row.updatedAt);
-  if (!Number.isFinite(updatedAt)) return true;
-  return now - updatedAt <= terminalCompletedVisibleMs;
+  return visibleState(row.state, row.updatedAt, now, terminalCompletedVisibleMs);
 }
 
 function rowPriority(row: RunSummaryRow): number {
@@ -60,6 +66,9 @@ function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVis
   const snapshot = readWatcherSnapshot(input.store, {
     parentRunId: input.parentRunId,
     rootSessionId: input.rootSessionId,
+    nowMs: now,
+    completedVisibleMs: terminalCompletedVisibleMs,
+    records: input.records,
   });
   const rows = snapshot.rows
     .map((row) => rowWithCurrentResultReady(input, row))
@@ -79,11 +88,25 @@ function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVis
 
 function renderAt(input: LiveWidgetInput, width: number, now: number): string[] {
   const maxRows = input.maxRows ?? 5;
-  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 5 * 60_000;
+  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
   const { rows, totalCost } = buildSnapshot(input, now, terminalCompletedVisibleMs);
   if (!rows.length) return [];
   const widgetRows: WidgetRowInput[] = rows.map((row) => widgetRowFromSummary(row, now));
   return renderWidgetCard({ width: clampWidth(width), rows: widgetRows, maxRows, totalCost });
+}
+
+function hasVisibleRows(input: LiveWidgetInput, now: number): boolean {
+  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
+  const records = input.records ?? input.store.listRecentRuns({ parentRunId: input.parentRunId, rootSessionId: input.rootSessionId });
+  for (const record of records) {
+    try {
+      const status = input.store.readStatus(record.runId);
+      if (visibleState(status.state, status.updatedAt, now, terminalCompletedVisibleMs)) return true;
+    } catch {
+      // Ignore partially-created or concurrently removed runs.
+    }
+  }
+  return false;
 }
 
 // Exposed for tests and the few callers that want a one-shot static render
@@ -150,12 +173,10 @@ export function clearLiveWidget(ctx: unknown): void {
 export function updateLiveWidget(ctx: unknown, input: LiveWidgetInput): void {
   const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
   if (!ui?.setWidget) return;
-  // Cheap probe so we can drop the widget entirely when there's nothing to
-  // show — pi keeps showing the previous content otherwise. The probe uses a
-  // 64-wide render purely for the visibility check; the component below will
-  // re-evaluate at the real container width.
-  const probeLines = renderAt(input, 64, Date.now());
-  if (!probeLines.length) {
+  // Cheap status-only probe so we can drop the widget entirely when there's
+  // nothing to show — pi keeps showing the previous content otherwise. Avoid a
+  // full render probe here because render reads per-run result/events files.
+  if (!hasVisibleRows(input, Date.now())) {
     clearLiveWidget(ctx);
     return;
   }

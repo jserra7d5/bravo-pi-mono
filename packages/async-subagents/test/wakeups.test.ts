@@ -16,21 +16,24 @@ function workspace() {
   return { root, store };
 }
 
-function createCompletedRun(store: RunStore, cwd: string, parentRunId: string): string {
+function createCompletedRun(store: RunStore, cwd: string, parentRunId: string, updatedAt?: string): string {
   const { runId } = store.createRunDirectory({ cwd, parentRunId, rootSessionId: parentRunId });
+  const status = createInitialStatus({
+    runId,
+    parentRunId,
+    rootSessionId: parentRunId,
+    agentName: "scout",
+    agentSource: "builtin",
+    definitionPath: "/builtin/scout.md",
+    mode: "oneshot",
+    cwd,
+    state: "completed",
+  });
   store.writeStatus({
-    ...createInitialStatus({
-      runId,
-      parentRunId,
-      rootSessionId: parentRunId,
-      agentName: "scout",
-      agentSource: "builtin",
-      definitionPath: "/builtin/scout.md",
-      mode: "oneshot",
-      cwd,
-      state: "completed",
-    }),
+    ...status,
     resultReady: true,
+    updatedAt: updatedAt ?? status.updatedAt,
+    lastActivityAt: updatedAt ?? status.lastActivityAt,
   });
   store.writeResult(createRunResult({ runId, parentRunId, agentName: "scout", state: "completed", summary: "Done" }));
   writeDeliverySubscription(store, {
@@ -130,6 +133,16 @@ test("model follow-up polling delivers terminal results once", () => {
 
   const normalPoll = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" });
   assert.equal(normalPoll.length, 0);
+});
+
+test("model follow-up polling still delivers old completed results", () => {
+  const { root, store } = workspace();
+  createCompletedRun(store, root, "root_test", new Date(Date.now() - 61_000).toISOString());
+  acquireRootSessionLease({ cwd: root, rootSessionId: "root_test", ownerId: "owner_a", ttlMs: 10_000 });
+
+  const modelPoll = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a", modelFollowUpOnly: true });
+  assert.equal(modelPoll.length, 1);
+  assert.match(modelPoll[0]?.deliveryKey ?? "", /^terminal:/);
 });
 
 test("pollWakeups remaps a question event onto waiting_for_input so the wake card badge picks 'needs you'", () => {
