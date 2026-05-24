@@ -1,6 +1,6 @@
 # @bravo/source-search
 
-Source Search adds a Pi `ranked_search` tool backed by a local Tantivy index. It is for broad lexical/BM25 discovery across a git checkout; use `grep` and `read` to confirm exact evidence.
+Source Search adds a Pi `ranked_search` tool backed by a local Tantivy index. It is for broad lexical/BM25 discovery across a git checkout; use typed `boosts`/`excludeTerms` for ranking noise control, and use `grep` and `read` to confirm exact evidence.
 
 ## Build
 
@@ -14,6 +14,7 @@ This compiles TypeScript and the Rust `source-search-sidecar`.
 
 ```bash
 source-search query --repo /path/to/repo --query "terms" --limit 20 --json
+source-search query --repo /path/to/repo --query "labor location" --boosts '[{"term":"labor","weight":2},{"term":"location","weight":0.5}]' --exclude-terms '["fixture"]' --json
 source-search index --repo /path/to/repo --force --json
 source-search status --repo /path/to/repo --json
 source-search config validate --repo /path/to/repo --json

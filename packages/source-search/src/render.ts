@@ -9,7 +9,12 @@ export function renderQueryResult(result: QueryResponse): string {
     const warningText = result.warnings?.length ? ` Warnings: ${result.warnings.join("; ")}` : "";
     return `No ranked_search matches for ${JSON.stringify(result.query ?? "")}. Try broader terms or synonyms, then use grep for exact confirmation.${warningText}`;
   }
-  const lines = [`ranked_search found ${result.hits.length} match${result.hits.length === 1 ? "" : "es"}${result.indexFreshness ? ` (${result.indexFreshness})` : ""}:`];
+  const modifiers = [
+    ...(result.boosts?.length ? [`boosts: ${result.boosts.map((boost) => `${boost.term}×${boost.weight}`).join(", ")}`] : []),
+    ...(result.excludeTerms?.length ? [`excluded: ${result.excludeTerms.join(", ")}`] : []),
+  ];
+  const status = [result.indexFreshness, ...modifiers].filter(Boolean).join("; ");
+  const lines = [`ranked_search found ${result.hits.length} match${result.hits.length === 1 ? "" : "es"}${status ? ` (${status})` : ""}:`];
   for (const hit of result.hits) {
     const loc = hit.line ? `${hit.path}:${hit.line}` : hit.path;
     lines.push(`- ${loc} [${hit.score.toFixed(3)}] ${hit.snippet.replace(/\s+/g, " ").slice(0, 240)}`);

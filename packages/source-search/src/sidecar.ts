@@ -3,7 +3,7 @@ import { access, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { QueryResponse, StatusResponse } from "./types.js";
+import type { QueryResponse, StatusResponse, TermBoost } from "./types.js";
 import { PROTOCOL_VERSION } from "./types.js";
 
 export class SidecarUnavailableError extends Error {}
@@ -92,9 +92,11 @@ export async function runSidecar<T>(args: string[], timeoutMs = 120_000): Promis
   });
 }
 
-export async function queryRepo(repo: string, query: string, limit: number, pathPrefix?: string): Promise<QueryResponse> {
+export async function queryRepo(repo: string, query: string, limit: number, pathPrefix?: string, boosts?: TermBoost[], excludeTerms?: string[]): Promise<QueryResponse> {
   const args = ["query", "--repo", repo, "--query", query, "--limit", String(limit), "--json"];
   if (pathPrefix) args.push("--path-prefix", pathPrefix);
+  if (boosts?.length) args.push("--boosts", JSON.stringify(boosts));
+  if (excludeTerms?.length) args.push("--exclude-terms", JSON.stringify(excludeTerms));
   return runSidecar<QueryResponse>(args);
 }
 

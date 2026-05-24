@@ -37,10 +37,10 @@ export async function discoverSourceSearch(cwd: string): Promise<Discovery> {
 
 export function renderDiscoveryPrompt(discovery: Discovery): string {
   if (discovery.kind === "repo") {
-    return "## Source Search\n\nranked_search is available for this git checkout. Use it as the default first-pass discovery tool for broad lexical repo search, then use read or grep to inspect exact evidence. The Source Search index is managed automatically on first use.";
+    return "## Source Search\n\nranked_search is available for this git checkout. Use it as the default first-pass discovery tool for broad lexical repo search, then use read or grep to inspect exact evidence. Use typed boosts/excludeTerms for ranking noise control; do not put boost or boolean syntax in the query string. The Source Search index is managed automatically on first use.";
   }
   if (discovery.kind === "workspace") {
-    return `## Source Search\n\nranked_search is available for this workspace. Configured child checkouts: ${discovery.workspaceRepos?.join(", ")}. Use ranked_search as the default first-pass discovery tool across configured child checkouts, then use read or grep for exact evidence. Configure dev/prod/worktree variants as separate checkout paths.`;
+    return `## Source Search\n\nranked_search is available for this workspace. Configured child checkouts: ${discovery.workspaceRepos?.join(", ")}. Use ranked_search as the default first-pass discovery tool across configured child checkouts, then use read or grep for exact evidence. Use typed boosts/excludeTerms for ranking noise control; do not put boost or boolean syntax in the query string. Configure dev/prod/worktree variants as separate checkout paths.`;
   }
   if (discovery.kind === "workspace-candidates") {
     return `## Source Search\n\nSource Search is installed, but this directory is not a git checkout and has no workspace registry. Detected child git checkouts are candidates only, not default search scope: ${discovery.childCandidates?.join(", ")}. Use the source-search skill to configure workspace.repos before relying on ranked workspace search.`;

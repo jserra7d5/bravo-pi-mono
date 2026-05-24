@@ -435,11 +435,13 @@ Query language V1:
 - Punctuation is tokenized by the configured analyzer; code symbols may need alternate spellings.
 - Default operator should favor recall, e.g. OR across terms with BM25 ranking, unless implementation chooses an explicit query parser mode documented in tool help.
 - Quoted phrases may be supported only if Tantivy query/parser configuration supports them reliably; otherwise quotes are treated as punctuation and documented as such.
-- Fielded queries, regex, fuzzy matching, and semantic expansion are out of scope for the native tool contract in V1.
-- Invalid query syntax must return `QueryError`, not empty results.
+- Agents must not write fielded, boolean, boost, regex, fuzzy, or semantic syntax in `query`; use typed parameters for supported ranking controls.
+- `boosts` is the supported ranking-control surface. A boost is a plain lexical term or short phrase plus a positive weight. Weights above 1 prefer matching results, weights below 1 down-rank matching results, and boosts never filter inclusion. V1 may apply phrase controls and down-weight reranking after retrieving a bounded BM25 candidate set and must warn when it does.
+- `excludeTerms` is the supported exclusion surface for clearly unwanted noise topics. It filters matching results and must not be treated as proof of absence.
+- Invalid query syntax or invalid ranking-control parameters must return `QueryError`, not empty results.
 - Enforce max query length, e.g. 512 characters, with a clear error.
 
-Field weights are applied by the sidecar query builder, not by asking agents to write fielded queries.
+Field weights and term boosts are applied by the sidecar query builder/scorer, not by asking agents to write fielded or backend query syntax.
 
 ## Snippets and line numbers
 
@@ -529,15 +531,19 @@ Parameters V1:
 {
   query: string,
   path?: string,
-  limit?: number
+  limit?: number,
+  boosts?: Array<{ term: string, weight: number }>,
+  excludeTerms?: string[]
 }
 ```
 
 Parameter semantics:
 
-- `query`: plain lexical search text, max 512 characters.
+- `query`: plain lexical search text, max 512 characters. Do not put boost, boolean, fielded, regex, fuzzy, or backend query syntax here.
 - `path`: optional repo-relative file or directory prefix restricting search results and refresh scope. No glob semantics in V1. Must resolve inside repo root. Absolute paths and `..` escape attempts are rejected.
 - `limit`: maximum results to return. Default 10. Hard max 50.
+- `boosts`: optional ranking multipliers for plain lexical terms or short phrases. `weight > 1` ranks matching results higher, `0 < weight < 1` ranks matching results lower, and boosts do not filter results. Negative or zero weights are invalid. If V1 applies phrase controls or down-weighting after collecting a bounded candidate set, the response must warn.
+- `excludeTerms`: optional plain lexical terms or short phrases to filter out clearly unwanted noise topics. Exclusion is a recall-control convenience, not proof of absence.
 
 Keep parameters minimal. Consider `refresh?: "auto" | "force"` only if real usage shows agents need it. Default should remain automatic.
 
@@ -558,6 +564,7 @@ Required envelope fields:
 - `repoRoot`
 - `indexFreshness`: `fresh`, `updated`, `stale`, `missing`, or `partial`
 - indexed file count or compact status summary
+- applied `boosts` / `excludeTerms` when present
 - `results`
 - `truncated`
 - `warnings`
@@ -615,7 +622,7 @@ Never return “no results” for an index failure. Empty results and failed ret
 The tool-coupled prompt fragment should be small:
 
 ```text
-Use ranked_search as the default first-pass tool for broad ranked lexical discovery when Source Search startup discovery says the current repo or workspace supports it. It searches the current git checkout or configured workspace child checkouts and manages its Tantivy indexes automatically. It is not semantic search; try synonyms when terminology may differ. Use grep for exact strings/regex and read for known files. Configure dev/prod/worktree variants as separate checkout paths. If ranked_search reports config/index failure, use the source-search skill or source-search CLI for setup/debug.
+Use ranked_search as the default first-pass tool for broad ranked lexical discovery when Source Search startup discovery says the current repo or workspace supports it. It searches the current git checkout or configured workspace child checkouts and manages its Tantivy indexes automatically. It is not semantic search; try synonyms when terminology may differ. Use typed boosts when some terms should rank higher/lower and excludeTerms only for clearly unwanted noise topics; do not put boost, boolean, or field syntax in the query string. Use grep for exact strings/regex and read for known files. Configure dev/prod/worktree variants as separate checkout paths. If ranked_search reports config/index failure, use the source-search skill or source-search CLI for setup/debug.
 ```
 
 Detailed configuration and troubleshooting live in the skill, not the always-loaded prompt.

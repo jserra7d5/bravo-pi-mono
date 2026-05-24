@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, QueryParser};
 use tantivy::schema::{Schema, Value, STORED, TEXT};
 use tantivy::{doc, Index, IndexWriter, TantivyDocument};
 
@@ -35,6 +35,9 @@ struct EffectiveConfig {
     max_file_bytes: u64,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct TermBoost { term: String, weight: f32 }
+
 #[derive(Serialize)]
 struct Hit { path: String, score: f32, line: Option<usize>, snippet: String }
 
@@ -46,6 +49,10 @@ struct QueryResponse {
     #[serde(rename = "repoRoot")]
     repo_root: Option<String>,
     query: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    boosts: Vec<TermBoost>,
+    #[serde(rename = "excludeTerms", skip_serializing_if = "Vec::is_empty")]
+    exclude_terms: Vec<String>,
     hits: Vec<Hit>,
     count: usize,
     #[serde(rename = "indexFreshness")]
@@ -105,6 +112,45 @@ fn run() -> Result<i32> {
 
 fn arg(args: &[String], name: &str) -> Option<String> { args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone()) }
 fn repo_arg(args: &[String]) -> Result<PathBuf> { Ok(fs::canonicalize(arg(args, "--repo").ok_or_else(|| anyhow!("--repo is required"))?)?) }
+
+fn validate_plain_text(value: &str, label: &str) -> Result<()> {
+    if value.chars().count() > 512 { bail!("QueryError: {label} is too long"); }
+    let has_query_syntax = value.chars().any(|ch| matches!(ch, ':' | '^' | '~' | '*' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\\'))
+        || value.split_whitespace().any(|token| matches!(token, "AND" | "OR" | "NOT") || token.starts_with('+') || token.starts_with('-'));
+    if has_query_syntax { bail!("QueryError: {label} must use plain lexical terms; pass boosts/excludeTerms as typed parameters instead of query syntax"); }
+    Ok(())
+}
+
+fn parse_boosts(raw: Option<String>) -> Result<Vec<TermBoost>> {
+    let Some(raw) = raw else { return Ok(vec![]); };
+    let parsed: Vec<TermBoost> = serde_json::from_str(&raw).context("QueryError: --boosts must be a JSON array of {term, weight}")?;
+    if parsed.len() > 20 { bail!("QueryError: --boosts supports at most 20 entries"); }
+    let mut cleaned = Vec::new();
+    for boost in parsed {
+        let term = boost.term.trim();
+        if term.is_empty() { bail!("QueryError: boost term must not be empty"); }
+        if term.chars().count() > 100 { bail!("QueryError: boost term is too long; use a short lexical term or phrase"); }
+        validate_plain_text(term, "boost term")?;
+        if !boost.weight.is_finite() || boost.weight <= 0.0 || boost.weight > 10.0 { bail!("QueryError: boost weight must be > 0 and <= 10"); }
+        cleaned.push(TermBoost { term: term.to_string(), weight: boost.weight });
+    }
+    Ok(cleaned)
+}
+
+fn parse_exclude_terms(raw: Option<String>) -> Result<Vec<String>> {
+    let Some(raw) = raw else { return Ok(vec![]); };
+    let parsed: Vec<String> = serde_json::from_str(&raw).context("QueryError: --exclude-terms must be a JSON array of strings")?;
+    if parsed.len() > 20 { bail!("QueryError: --exclude-terms supports at most 20 entries"); }
+    let mut cleaned = Vec::new();
+    for term in parsed {
+        let term = term.trim();
+        if term.is_empty() { bail!("QueryError: exclude term must not be empty"); }
+        if term.chars().count() > 100 { bail!("QueryError: exclude term is too long; use a short lexical term or phrase"); }
+        validate_plain_text(term, "exclude term")?;
+        cleaned.push(term.to_string());
+    }
+    Ok(cleaned)
+}
 
 fn manifest_path(repo: &Path) -> Result<PathBuf> { Ok(cache_dir(repo)?.join("manifest.json")) }
 
@@ -237,17 +283,34 @@ fn rebuild(repo: &Path) -> Result<usize> {
 fn query_cmd(args: &[String]) -> Result<i32> {
     let repo = repo_arg(args)?;
     let q = arg(args, "--query").ok_or_else(|| anyhow!("--query is required"))?;
+    validate_plain_text(&q, "query")?;
     let limit: usize = arg(args, "--limit").and_then(|v| v.parse().ok()).unwrap_or(10).clamp(1, 50);
     let path_prefix = arg(args, "--path-prefix");
+    let boosts = parse_boosts(arg(args, "--boosts"))?;
+    let exclude_terms = parse_exclude_terms(arg(args, "--exclude-terms"))?;
     rebuild(&repo)?;
     let (index, fields) = open_or_create_index(&repo)?;
     let reader = index.reader()?;
     let searcher = reader.searcher();
     let mut parser = QueryParser::for_index(&index, vec![fields.body, fields.path]);
     parser.set_field_boost(fields.path, 2.0);
-    let (query, query_warnings) = parser.parse_query_lenient(&q);
-    let top_limit = if path_prefix.is_some() { 1000.max(limit * 20) } else { limit * 3 };
+    let base_query = parser.parse_query(&q).map_err(|e| anyhow!("QueryError: query must use plain lexical terms: {e}"))?;
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, base_query)];
+    for boost in boosts.iter().filter(|boost| boost.weight > 1.0 && !is_phrase(&boost.term)) {
+        let boost_query = parser.parse_query(&boost.term).map_err(|e| anyhow!("QueryError: invalid boost term {:?}: {e}", boost.term))?;
+        clauses.push((Occur::Should, Box::new(BoostQuery::new(boost_query, boost.weight))));
+    }
+    for term in exclude_terms.iter().filter(|term| !is_phrase(term)) {
+        let exclude_query = parser.parse_query(term).map_err(|e| anyhow!("QueryError: invalid exclude term {term:?}: {e}"))?;
+        clauses.push((Occur::MustNot, exclude_query));
+    }
+    let query: Box<dyn Query> = if clauses.len() == 1 { clauses.remove(0).1 } else { Box::new(BooleanQuery::new(clauses)) };
+    let has_post_scored_boosts = boosts.iter().any(|boost| boost.weight < 1.0 || is_phrase(&boost.term));
+    let has_post_filtered_excludes = exclude_terms.iter().any(|term| is_phrase(term));
+    let top_limit = if path_prefix.is_some() || has_post_scored_boosts || has_post_filtered_excludes { 1000.max(limit * 20) } else { limit * 3 };
     let top = searcher.search(&query, &TopDocs::with_limit(top_limit).order_by_score())?;
+    let boost_needles: Vec<(String, f32)> = boosts.iter().map(|b| (b.term.to_lowercase(), b.weight)).collect();
+    let exclude_needles: Vec<String> = exclude_terms.iter().map(|t| t.to_lowercase()).collect();
     let mut hits = Vec::new();
     for (score, addr) in top {
         let doc: TantivyDocument = searcher.doc(addr)?;
@@ -257,20 +320,42 @@ fn query_cmd(args: &[String]) -> Result<i32> {
             if path != normalized_prefix && !path.starts_with(&format!("{normalized_prefix}/")) { continue; }
         }
         let body = doc.get_first(fields.body).and_then(|v| v.as_str()).unwrap_or("");
+        let haystack = format!("{}\n{}", path, body).to_lowercase();
+        if exclude_needles.iter().any(|term| contains_plain_term(&haystack, term)) { continue; }
+        let adjusted_score = boost_needles.iter().fold(score, |current, (term, weight)| {
+            if contains_plain_term(&haystack, term) { current * *weight } else { current }
+        });
         let (line, snippet) = best_snippet(body, &q);
-        hits.push(Hit { path, score, line, snippet });
-        if hits.len() >= limit { break; }
+        hits.push(Hit { path, score: adjusted_score, line, snippet });
     }
-    let warnings = query_warnings.into_iter().map(|w| format!("query parser warning: {w}")).collect();
-    let resp = QueryResponse { protocol_version: PROTOCOL_VERSION, ok: true, repo_root: Some(repo.display().to_string()), query: Some(q), count: hits.len(), hits, index_freshness: Some("fresh".into()), warnings, error: None };
+    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.truncate(limit);
+    let mut warnings = vec![];
+    if has_post_scored_boosts || has_post_filtered_excludes { warnings.push(format!("phrase controls or down-weight boosts are applied after retrieving a bounded top-{top_limit} BM25 candidate set")); }
+    let resp = QueryResponse { protocol_version: PROTOCOL_VERSION, ok: true, repo_root: Some(repo.display().to_string()), query: Some(q), boosts, exclude_terms, count: hits.len(), hits, index_freshness: Some("fresh".into()), warnings, error: None };
     println!("{}", serde_json::to_string(&resp)?); Ok(0)
+}
+
+fn is_word_byte(byte: u8) -> bool { byte.is_ascii_alphanumeric() || byte == b'_' }
+
+fn is_phrase(value: &str) -> bool { value.split_whitespace().count() > 1 }
+
+fn contains_plain_term(haystack_lower: &str, needle_lower: &str) -> bool {
+    if is_phrase(needle_lower) { return haystack_lower.contains(needle_lower); }
+    for (start, _) in haystack_lower.match_indices(needle_lower) {
+        let end = start + needle_lower.len();
+        let before_ok = start == 0 || !is_word_byte(haystack_lower.as_bytes()[start - 1]);
+        let after_ok = end == haystack_lower.len() || !is_word_byte(haystack_lower.as_bytes()[end]);
+        if before_ok && after_ok { return true; }
+    }
+    false
 }
 
 fn best_snippet(body: &str, q: &str) -> (Option<usize>, String) {
     let terms: Vec<String> = q.split_whitespace().map(|s| s.to_lowercase()).collect();
     for (i, line) in body.lines().enumerate() {
         let lower = line.to_lowercase();
-        if terms.iter().any(|t| lower.contains(t)) { return (Some(i + 1), line.trim().chars().take(300).collect()); }
+        if terms.iter().any(|t| contains_plain_term(&lower, t)) { return (Some(i + 1), line.trim().chars().take(300).collect()); }
     }
     (None, body.chars().take(300).collect())
 }
@@ -300,4 +385,4 @@ fn config_cmd(args: &[String]) -> Result<i32> {
 }
 fn status_print(repo: PathBuf, n: usize, warnings: Vec<String>) -> Result<i32> { status_print_optional(repo, Some(n), warnings) }
 fn status_print_optional(repo: PathBuf, n: Option<usize>, warnings: Vec<String>) -> Result<i32> { let resp = StatusResponse{protocol_version:PROTOCOL_VERSION,ok:true,repo_root:Some(repo.display().to_string()),cache_dir:Some(cache_dir(&repo)?.display().to_string()),indexed_files:n,warnings,error:None}; println!("{}", serde_json::to_string(&resp)?); Ok(0) }
-fn print_query_error(msg: &str) { let resp = QueryResponse{protocol_version:PROTOCOL_VERSION,ok:false,repo_root:None,query:None,hits:vec![],count:0,index_freshness:None,warnings:vec![],error:Some(msg.to_string())}; println!("{}", serde_json::to_string(&resp).unwrap()); }
+fn print_query_error(msg: &str) { let resp = QueryResponse{protocol_version:PROTOCOL_VERSION,ok:false,repo_root:None,query:None,boosts:vec![],exclude_terms:vec![],hits:vec![],count:0,index_freshness:None,warnings:vec![],error:Some(msg.to_string())}; println!("{}", serde_json::to_string(&resp).unwrap()); }

@@ -8,11 +8,18 @@ export interface SearchHit {
   snippet: string;
 }
 
+export interface TermBoost {
+  term: string;
+  weight: number;
+}
+
 export interface QueryResponse {
   protocolVersion: number;
   ok: boolean;
   repoRoot?: string;
   query?: string;
+  boosts?: TermBoost[];
+  excludeTerms?: string[];
   hits: SearchHit[];
   count: number;
   indexFreshness?: string;

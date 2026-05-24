@@ -12,9 +12,21 @@ function run(command: string, args: string[], cwd?: string) {
   return result.stdout.trim();
 }
 
-function runCli(args: string[]) {
+function runCliRaw(args: string[]) {
   const cli = new URL("../src/cli.js", import.meta.url);
-  return JSON.parse(run(process.execPath, [cli.pathname, ...args])) as { ok: boolean; indexedFiles?: number; warnings?: string[]; cacheDir?: string };
+  return spawnSync(process.execPath, [cli.pathname, ...args], { encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+}
+
+function runCli(args: string[]) {
+  const result = runCliRaw(args);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return JSON.parse(result.stdout.trim()) as { ok: boolean; error?: string; indexedFiles?: number; warnings?: string[]; cacheDir?: string; hits?: Array<{ path: string; score: number }>; boosts?: Array<{ term: string; weight: number }>; excludeTerms?: string[] };
+}
+
+function runCliError(args: string[]) {
+  const result = runCliRaw(args);
+  assert.notEqual(result.status, 0, result.stdout);
+  return JSON.parse(result.stdout.trim()) as { ok: boolean; error?: string };
 }
 
 async function createRepo() {
@@ -49,6 +61,75 @@ test("config validate does not report misleading index status", async () => {
   assert.equal(validation.ok, true);
   assert.equal(Object.hasOwn(validation, "indexedFiles"), false);
   assert.deepEqual(validation.warnings ?? [], []);
+});
+
+test("query boosts rerank and excludeTerms filter without query DSL", async () => {
+  const repo = await createRepo();
+  await writeFile(join(repo, "src", "labor.ts"), "common topic about labor scheduling\n");
+  await writeFile(join(repo, "src", "location.ts"), "common topic about location setup\n");
+  await writeFile(join(repo, "src", "fixture.ts"), "common topic about labor fixture noise\n");
+
+  const result = runCli([
+    "query", "--repo", repo,
+    "--query", "common topic",
+    "--boosts", JSON.stringify([{ term: "labor", weight: 2 }, { term: "location", weight: 0.5 }]),
+    "--exclude-terms", JSON.stringify(["fixture"]),
+    "--limit", "5",
+    "--json",
+  ]);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.boosts, [{ term: "labor", weight: 2 }, { term: "location", weight: 0.5 }]);
+  assert.deepEqual(result.excludeTerms, ["fixture"]);
+  assert.equal(result.hits?.some((hit) => hit.path === "src/fixture.ts"), false);
+  assert.equal(result.hits?.[0]?.path, "src/labor.ts");
+});
+
+test("query rejects backend syntax and invalid boost weights", async () => {
+  const repo = await createRepo();
+
+  const syntax = runCliError(["query", "--repo", repo, "--query", "path:src OR alpha", "--json"]);
+  assert.equal(syntax.ok, false);
+  assert.match(syntax.error ?? "", /QueryError/);
+
+  const badWeight = runCliError([
+    "query", "--repo", repo,
+    "--query", "alpha",
+    "--boosts", JSON.stringify([{ term: "alpha", weight: 0 }]),
+    "--json",
+  ]);
+  assert.equal(badWeight.ok, false);
+  assert.match(badWeight.error ?? "", /boost weight/);
+});
+
+test("excludeTerms use word-boundary matching for single terms", async () => {
+  const repo = await createRepo();
+  await writeFile(join(repo, "src", "contest.ts"), "common contest result\n");
+  await writeFile(join(repo, "src", "test.ts"), "common test result\n");
+
+  const result = runCli(["query", "--repo", repo, "--query", "common result", "--exclude-terms", JSON.stringify(["test"]), "--limit", "10", "--json"]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.hits?.some((hit) => hit.path === "src/test.ts"), false);
+  assert.equal(result.hits?.some((hit) => hit.path === "src/contest.ts"), true);
+});
+
+test("short phrase boosts and excludes require phrase matches", async () => {
+  const repo = await createRepo();
+  await writeFile(join(repo, "src", "alpha.ts"), "common alpha only\n");
+  await writeFile(join(repo, "src", "beta.ts"), "common beta only\n");
+  await writeFile(join(repo, "src", "phrase.ts"), "common alpha beta phrase\n");
+
+  const excluded = runCli(["query", "--repo", repo, "--query", "common", "--exclude-terms", JSON.stringify(["alpha beta"]), "--limit", "10", "--json"]);
+  assert.equal(excluded.ok, true);
+  assert.equal(excluded.hits?.some((hit) => hit.path === "src/phrase.ts"), false);
+  assert.equal(excluded.hits?.some((hit) => hit.path === "src/alpha.ts"), true);
+  assert.equal(excluded.hits?.some((hit) => hit.path === "src/beta.ts"), true);
+
+  const boosted = runCli(["query", "--repo", repo, "--query", "common", "--boosts", JSON.stringify([{ term: "alpha beta", weight: 10 }]), "--limit", "10", "--json"]);
+  assert.equal(boosted.ok, true);
+  assert.equal(boosted.hits?.[0]?.path, "src/phrase.ts");
+  assert.match(boosted.warnings?.join("\n") ?? "", /bounded top-/);
 });
 
 test("extension injects source-search CLI into bash tool PATH", async () => {
