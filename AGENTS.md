@@ -27,6 +27,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - Async subagents are intentionally Pi-only and async-first in v1. Keep parent-child messaging, wait/result semantics, prompt isolation, and durable run files simple; do not reintroduce Tango-style chains, DAGs, peer intercom, worktree orchestration, or cross-harness adapters.
 - Async subagent built-ins should use fully-qualified `openai-codex/...` model ids so child Pi processes use Codex OAuth and do not drift to another provider.
 - Treat project-local executable extension code as trusted-code only.
+- Project-local Pi footer/model-speed customizations live in `.pi/extensions/codex-usage.ts`; see `.pi/extensions/README.md`. Use `/fast on|off|status` in interactive Pi sessions to persist fast mode for this project. Fast mode is intentionally UI-scoped so async/noninteractive child Pi launches do not inherit it by default.
 - Keep prompts, roles, and package instructions concise and composable; avoid duplicating detailed orchestration docs here.
 
 ## Common Commands

@@ -11,6 +11,7 @@ dist/
 !.env.example
 
 # Runtime state and transient reports
+.pi/model-speed.json
 .subagents/
 _audits/
 bug_reports/

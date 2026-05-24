@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import {
 	c,
 	bar,
+	applyModelSpeedToPayload,
 	codexThreshold,
 	codexWindowSegment,
 	costSegment,
@@ -12,6 +13,7 @@ import {
 	formatTokens,
 	identityColor,
 	identitySlot,
+	parseFastCommand,
 	pickLayoutWidths,
 	renderFooter,
 	renderStatsLine,
@@ -35,6 +37,7 @@ function makeState(overrides: Partial<FooterRenderState> = {}): FooterRenderStat
 		provider: "openai-codex",
 		providerCount: 2,
 		thinking: "medium",
+		fast: false,
 		ctxPct: 12,
 		ctxUsed: 33_000,
 		ctxWindow: 272_000,
@@ -350,6 +353,19 @@ test("renderTopLine omits thinking label when null", () => {
 	assert.ok(!plain.includes("thinking"));
 });
 
+test("renderTopLine shows fast status only when enabled", () => {
+	assert.ok(stripAnsi(renderTopLine(120, makeState({ fast: true }))).includes("speed fast"));
+	assert.ok(!stripAnsi(renderTopLine(120, makeState({ fast: false }))).includes("speed fast"));
+});
+
+test("renderTopLine keeps fast status visible and responsive at narrow widths", () => {
+	for (const width of [40, 50, 60, 80]) {
+		const line = renderTopLine(width, makeState({ fast: true, model: "very-long-model-name-for-fast-mode" }));
+		assert.ok(visWidth(line) <= width, `line too wide at ${width}: ${visWidth(line)}`);
+		assert.ok(stripAnsi(line).includes("speed fast"), `missing speed indicator at ${width}: ${stripAnsi(line)}`);
+	}
+});
+
 test("renderTopLine renders session name with separator", () => {
 	const state = makeState({ sessionName: "footer-work" });
 	const plain = stripAnsi(renderTopLine(120, state));
@@ -431,6 +447,36 @@ test("renderFooter at width=40 keeps ctx and drops codex windows", () => {
 	assert.ok(stats.includes("ctx"), "ctx must remain at width=40");
 	assert.ok(!stats.includes("wk "), "wk dropped at width=40");
 	assert.ok(!stats.includes("5h "), "5h dropped at width=40");
+});
+
+// ── model speed mode ──────────────────────────────────────────────────────
+
+test("parseFastCommand accepts on, off, status, and rejects unknown args", () => {
+	assert.equal(parseFastCommand("on"), "on");
+	assert.equal(parseFastCommand("enable"), "on");
+	assert.equal(parseFastCommand("off"), "off");
+	assert.equal(parseFastCommand("disable"), "off");
+	assert.equal(parseFastCommand(""), "status");
+	assert.equal(parseFastCommand("status"), "status");
+	assert.equal(parseFastCommand("turbo"), "help");
+	assert.equal(parseFastCommand("on extra"), "help");
+	assert.equal(parseFastCommand("status extra"), "help");
+});
+
+test("applyModelSpeedToPayload maps Codex fast mode to priority service tier", () => {
+	const model = { provider: "openai-codex", api: "openai-codex-responses" } as any;
+	assert.deepEqual(applyModelSpeedToPayload({ model: "gpt-5.5" }, model, true), {
+		model: "gpt-5.5",
+		service_tier: "priority",
+	});
+});
+
+test("applyModelSpeedToPayload omits service tier when off or not Codex", () => {
+	const codex = { provider: "openai-codex", api: "openai-codex-responses" } as any;
+	const other = { provider: "anthropic", api: "anthropic-messages" } as any;
+	assert.equal(applyModelSpeedToPayload({ model: "gpt-5.5" }, codex, false), undefined);
+	assert.equal(applyModelSpeedToPayload({ model: "claude" }, other, true), undefined);
+	assert.equal(applyModelSpeedToPayload(["not", "record"], codex, true), undefined);
 });
 
 // ── threshold sanity at exact boundary values ──────────────────────────────

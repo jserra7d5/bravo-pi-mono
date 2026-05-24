@@ -8,6 +8,8 @@
 // The Codex rate-limit fetching logic is preserved from the previous
 // setStatus()-based version; only the rendering path changed.
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -23,6 +25,8 @@ const POLL_INTERVAL_MS = 5 * 60 * 1000;
 const MIN_REFRESH_MS = 30 * 1000;
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
+const MODEL_SPEED_CONFIG_PATH = join(process.cwd(), ".pi", "model-speed.json");
+const FAST_SERVICE_TIER = "priority";
 
 type UsageWindow = {
 	label: "primary" | "secondary";
@@ -38,6 +42,49 @@ type CodexUsage = {
 
 function isCodexModel(model: Model<any> | undefined): boolean {
 	return model?.provider === "openai-codex" || model?.api === "openai-codex-responses";
+}
+
+function readFastModeSetting(): boolean {
+	try {
+		if (!existsSync(MODEL_SPEED_CONFIG_PATH)) return false;
+		const parsed = JSON.parse(readFileSync(MODEL_SPEED_CONFIG_PATH, "utf8")) as { fast?: unknown };
+		return parsed.fast === true;
+	} catch {
+		return false;
+	}
+}
+
+function writeFastModeSetting(enabled: boolean): void {
+	mkdirSync(dirname(MODEL_SPEED_CONFIG_PATH), { recursive: true });
+	writeFileSync(
+		MODEL_SPEED_CONFIG_PATH,
+		`${JSON.stringify({ fast: enabled, mode: enabled ? "fast" : "normal" }, null, 2)}\n`,
+		"utf8",
+	);
+}
+
+export function parseFastCommand(args: string): "on" | "off" | "status" | "help" {
+	const tokens = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
+	if (tokens.length === 0) return "status";
+	if (tokens.length > 1) return "help";
+	const [first] = tokens;
+	if (first === "on" || first === "enable" || first === "enabled" || first === "true") return "on";
+	if (first === "off" || first === "disable" || first === "disabled" || first === "false") return "off";
+	if (first === "status") return "status";
+	return "help";
+}
+
+function isPayloadRecord(payload: unknown): payload is Record<string, unknown> {
+	return payload !== null && typeof payload === "object" && !Array.isArray(payload);
+}
+
+export function applyModelSpeedToPayload(
+	payload: unknown,
+	model: Model<any> | undefined,
+	fastEnabled: boolean,
+): unknown | undefined {
+	if (!fastEnabled || !isCodexModel(model) || !isPayloadRecord(payload)) return undefined;
+	return { ...payload, service_tier: FAST_SERVICE_TIER };
 }
 
 function decodeJwtPayload(token: string): Record<string, any> | undefined {
@@ -324,6 +371,10 @@ function truncEnd(s: string, max: number): string {
 	return `${s.slice(0, max - 1)}…`;
 }
 
+function clampLine(line: string, width: number): string {
+	return visWidth(line) <= width ? line : `${c.dim}${truncEnd(stripAnsi(line), width)}${R}`;
+}
+
 // ── footer state & layout ──────────────────────────────────────────────────
 
 export interface FooterRenderState {
@@ -334,6 +385,7 @@ export interface FooterRenderState {
 	provider: string | null;
 	providerCount: number;
 	thinking: string | null;
+	fast: boolean;
 	ctxPct: number;
 	ctxUsed: number;
 	ctxWindow: number;
@@ -361,34 +413,41 @@ export function pickLayoutWidths(width: number): LayoutWidths {
 }
 
 export function renderTopLine(width: number, s: FooterRenderState): string {
-	// Right side first so we know how much room is left for the left side.
+	// Right side first so the status segment is protected and the path yields.
+	const maxRight = Math.max(10, width - 10);
 	let right: string;
 	if (s.model) {
-		const modelColor = identityColor(s.model);
-		const prov = s.providerCount > 1 && s.provider ? `${c.dim}${s.provider}${R}${c.dim} · ${R}` : "";
+		let prov = s.providerCount > 1 && s.provider ? `${c.dim}${s.provider}${R}${c.dim} · ${R}` : "";
 		const thinkStr = s.thinking ? `${c.dim}  thinking ${R}${c.text}${s.thinking}${R}` : "";
-		right = `${prov}${modelColor}${s.model}${R}${thinkStr}`;
+		const fastStr = s.fast ? `${c.dim}  speed ${R}${c.ok}fast${R}` : "";
+		const suffix = `${thinkStr}${fastStr}`;
+		let modelMax = maxRight - visWidth(prov) - visWidth(suffix);
+		if (modelMax < 4 && prov) {
+			prov = "";
+			modelMax = maxRight - visWidth(suffix);
+		}
+		const modelText = modelMax > 0 ? truncEnd(s.model, modelMax) : "";
+		right = `${prov}${identityColor(s.model)}${modelText}${R}${suffix}`;
 	} else {
-		right = `${c.dim}no model${R}`;
+		right = s.fast ? `${c.dim}no model  speed ${R}${c.ok}fast${R}` : `${c.dim}no model${R}`;
 	}
+	if (visWidth(right) > maxRight) right = `${c.dim}${truncEnd(stripAnsi(right), maxRight)}${R}`;
 
 	const branchStr = s.branch ? ` ${c.branch}${s.branch}${R}` : "";
 	const sessStr = s.sessionName ? `${c.dim} • ${s.sessionName}${R}` : "";
-	const plainLeftLen = s.cwd.length + (s.branch ? 1 + s.branch.length : 0) + (s.sessionName ? 3 + s.sessionName.length : 0);
-
+	const leftPlain = `${s.cwd}${s.branch ? ` ${s.branch}` : ""}${s.sessionName ? ` • ${s.sessionName}` : ""}`;
 	const availForLeft = width - visWidth(right) - 2;
-	if (plainLeftLen > availForLeft) {
-		const tail = (s.branch ? ` ${s.branch}` : "") + (s.sessionName ? ` • ${s.sessionName}` : "");
-		const cwdMax = Math.max(8, availForLeft - tail.length);
-		const truncCwd = truncMid(s.cwd, cwdMax);
-		const left = `${c.muted}${truncCwd}${R}${branchStr}${sessStr}`;
-		const pad = Math.max(2, width - visWidth(left) - visWidth(right));
-		return `${left}${" ".repeat(pad)}${right}`;
+	if (availForLeft <= 0) return clampLine(right, width);
+
+	let left: string;
+	if (leftPlain.length > availForLeft) {
+		left = `${c.muted}${truncMid(leftPlain, availForLeft)}${R}`;
+	} else {
+		left = `${c.muted}${s.cwd}${R}${branchStr}${sessStr}`;
 	}
 
-	const left = `${c.muted}${s.cwd}${R}${branchStr}${sessStr}`;
-	const pad = Math.max(2, width - visWidth(left) - visWidth(right));
-	return `${left}${" ".repeat(pad)}${right}`;
+	const pad = Math.max(1, width - visWidth(left) - visWidth(right));
+	return clampLine(`${left}${" ".repeat(pad)}${right}`, width);
 }
 
 export function ctxSegment(ctxPct: number, ctxUsed: number, ctxWindow: number, barW: number, known: boolean): string {
@@ -485,6 +544,7 @@ function collectState(
 	ctx: ExtensionContext,
 	footerData: ReadonlyFooterDataProvider,
 	thinkingLevel: string,
+	fastEnabled: boolean,
 	codexUsage: CodexUsage | undefined,
 ): FooterRenderState {
 	let totalCost = 0;
@@ -522,6 +582,7 @@ function collectState(
 		provider,
 		providerCount,
 		thinking,
+		fast: fastEnabled,
 		ctxPct,
 		ctxUsed,
 		ctxWindow: contextWindow,
@@ -540,6 +601,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 	let inFlight = false;
 	let codexUsage: CodexUsage | undefined;
 	let thinkingLevel = "off";
+	let fastEnabled = false;
 	let tuiRef: TUI | undefined;
 	let footerInstalled = false;
 	let unsubBranch: (() => void) | undefined;
@@ -582,7 +644,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 
 			const component: Component & { dispose?(): void } = {
 				render(width: number): string[] {
-					const state = collectState(ctx, footerData, thinkingLevel, codexUsage);
+					const state = collectState(ctx, footerData, thinkingLevel, fastEnabled, codexUsage);
 					return renderFooter(state, Math.max(20, width));
 				},
 				invalidate(): void {
@@ -600,9 +662,31 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 		});
 	};
 
+	pi.registerCommand("fast", {
+		description: "Toggle interactive model fast mode (/fast on|off|status).",
+		handler: async (args, ctx) => {
+			const action = parseFastCommand(args);
+			if (action === "help") {
+				ctx.ui.notify("Usage: /fast on|off|status", "error");
+				return;
+			}
+			if (action === "on" || action === "off") {
+				if (!ctx.hasUI) {
+					ctx.ui.notify("Fast mode is only applied to interactive UI sessions.", "info");
+					return;
+				}
+				fastEnabled = action === "on";
+				writeFastModeSetting(fastEnabled);
+				requestRender();
+			}
+			ctx.ui.notify(`Model fast mode: ${fastEnabled ? "on" : "off"}`, "info");
+		},
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (timer) clearInterval(timer);
 		thinkingLevel = pi.getThinkingLevel?.() ?? "off";
+		fastEnabled = ctx.hasUI ? readFastModeSetting() : false;
 		installFooter(ctx);
 		refresh(ctx, true);
 		timer = setInterval(() => refresh(ctx), POLL_INTERVAL_MS);
@@ -617,6 +701,11 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 	pi.on("thinking_level_select", async (event) => {
 		thinkingLevel = event.level;
 		requestRender();
+	});
+
+	pi.on("before_provider_request", async (event, ctx) => {
+		const payload = applyModelSpeedToPayload(event.payload, ctx.model, ctx.hasUI && fastEnabled);
+		return payload;
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
