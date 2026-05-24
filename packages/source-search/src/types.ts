@@ -1,11 +1,25 @@
 export const PROTOCOL_VERSION = 1;
 
+export interface SearchSnippetWindow {
+  lineStart: number;
+  lineEnd: number;
+  text: string;
+  /** Legacy summary flag; true when the snippet window was shortened. */
+  truncated?: boolean;
+  truncatedBefore?: boolean;
+  truncatedAfter?: boolean;
+}
+
 export interface SearchHit {
   repo?: string;
   path: string;
   score: number;
   line?: number | null;
   snippet: string;
+  snippets?: SearchSnippetWindow[];
+  lineStart?: number | null;
+  lineEnd?: number | null;
+  matchedFields?: string[];
 }
 
 export interface TermBoost {

@@ -16,7 +16,7 @@ use tantivy::schema::{Schema, Value, STORED, STRING, TEXT};
 use tantivy::{doc, Index, IndexWriter, TantivyDocument, Term};
 
 const PROTOCOL_VERSION: u32 = 1;
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Default, Deserialize)]
@@ -43,11 +43,32 @@ struct TermBoost {
 }
 
 #[derive(Serialize)]
+struct SnippetWindow {
+    #[serde(rename = "lineStart")]
+    line_start: usize,
+    #[serde(rename = "lineEnd")]
+    line_end: usize,
+    text: String,
+    truncated: bool,
+    #[serde(rename = "truncatedBefore")]
+    truncated_before: bool,
+    #[serde(rename = "truncatedAfter")]
+    truncated_after: bool,
+}
+
+#[derive(Serialize)]
 struct Hit {
     path: String,
     score: f32,
     line: Option<usize>,
     snippet: String,
+    snippets: Vec<SnippetWindow>,
+    #[serde(rename = "lineStart")]
+    line_start: Option<usize>,
+    #[serde(rename = "lineEnd")]
+    line_end: Option<usize>,
+    #[serde(rename = "matchedFields")]
+    matched_fields: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -122,6 +143,7 @@ struct StatusResponse {
 struct Fields {
     path_exact: tantivy::schema::Field,
     path: tantivy::schema::Field,
+    filename: tantivy::schema::Field,
     body: tantivy::schema::Field,
 }
 
@@ -129,12 +151,14 @@ fn schema() -> (Schema, Fields) {
     let mut b = Schema::builder();
     let path_exact = b.add_text_field("path_exact", STRING | STORED);
     let path = b.add_text_field("path", TEXT | STORED);
+    let filename = b.add_text_field("filename", TEXT | STORED);
     let body = b.add_text_field("body", TEXT | STORED);
     (
         b.build(),
         Fields {
             path_exact,
             path,
+            filename,
             body,
         },
     )
@@ -510,6 +534,13 @@ fn open_or_create_index(repo: &Path) -> Result<(Index, Fields)> {
     Ok((index, fields))
 }
 
+fn file_name(rel_s: &str) -> String {
+    Path::new(rel_s)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| rel_s.to_string())
+}
+
 fn index_is_compatible(repo: &Path) -> Result<bool> {
     let dir = cache_dir(repo)?.join("tantivy");
     if !dir.exists() {
@@ -522,6 +553,7 @@ fn index_is_compatible(repo: &Path) -> Result<bool> {
     let schema = index.schema();
     Ok(schema.get_field("path_exact").is_ok()
         && schema.get_field("path").is_ok()
+        && schema.get_field("filename").is_ok()
         && schema.get_field("body").is_ok())
 }
 
@@ -547,7 +579,8 @@ fn rebuild(repo: &Path) -> Result<usize> {
             continue;
         }
         if let Some((text, meta)) = safe_text_with_meta(repo, &rel, &cfg)? {
-            writer.add_document(doc!(fields.path_exact => rel_s.clone(), fields.path => rel_s.clone(), fields.body => text))?;
+            let filename = file_name(&rel_s);
+            writer.add_document(doc!(fields.path_exact => rel_s.clone(), fields.path => rel_s.clone(), fields.filename => filename, fields.body => text))?;
             files.insert(rel_s, meta);
             count += 1;
         }
@@ -630,7 +663,8 @@ fn refresh(repo: &Path) -> Result<usize> {
         let w = writer.as_mut().unwrap();
         w.delete_term(Term::from_field_text(fields.path_exact, rel_s));
         if let Some(text) = changed_text.remove(rel_s) {
-            w.add_document(doc!(fields.path_exact => rel_s.clone(), fields.path => rel_s.clone(), fields.body => text))?;
+            let filename = file_name(rel_s);
+            w.add_document(doc!(fields.path_exact => rel_s.clone(), fields.path => rel_s.clone(), fields.filename => filename, fields.body => text))?;
             files.insert(rel_s.clone(), meta.clone());
         } else {
             files.remove(rel_s);
@@ -669,8 +703,10 @@ fn query_cmd(args: &[String]) -> Result<i32> {
     let (index, fields) = open_or_create_index(&repo)?;
     let reader = index.reader()?;
     let searcher = reader.searcher();
-    let mut parser = QueryParser::for_index(&index, vec![fields.body, fields.path]);
+    let mut parser =
+        QueryParser::for_index(&index, vec![fields.body, fields.path, fields.filename]);
     parser.set_field_boost(fields.path, 2.0);
+    parser.set_field_boost(fields.filename, 3.0);
     let base_query = parser
         .parse_query(&q)
         .map_err(|e| anyhow!("QueryError: query must use plain lexical terms: {e}"))?;
@@ -746,12 +782,17 @@ fn query_cmd(args: &[String]) -> Result<i32> {
                 current
             }
         });
-        let (line, snippet) = best_snippet(body, &q);
+        let matched_fields = matched_fields(&path, body, &q);
+        let (line, snippet, snippets, line_start, line_end) = best_snippets(body, &q);
         hits.push(Hit {
             path,
             score: adjusted_score,
             line,
             snippet,
+            snippets,
+            line_start,
+            line_end,
+            matched_fields,
         });
     }
     hits.sort_by(|a, b| {
@@ -790,13 +831,30 @@ fn is_phrase(value: &str) -> bool {
 }
 
 fn contains_plain_term(haystack_lower: &str, needle_lower: &str) -> bool {
+    contains_term_with_boundary(haystack_lower, needle_lower, is_word_byte)
+}
+
+fn is_analyzer_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+}
+
+fn contains_analyzed_term(haystack_lower: &str, needle_lower: &str) -> bool {
+    contains_term_with_boundary(haystack_lower, needle_lower, is_analyzer_token_byte)
+}
+
+fn contains_term_with_boundary(
+    haystack_lower: &str,
+    needle_lower: &str,
+    is_token_byte: fn(u8) -> bool,
+) -> bool {
     if is_phrase(needle_lower) {
         return haystack_lower.contains(needle_lower);
     }
     for (start, _) in haystack_lower.match_indices(needle_lower) {
         let end = start + needle_lower.len();
-        let before_ok = start == 0 || !is_word_byte(haystack_lower.as_bytes()[start - 1]);
-        let after_ok = end == haystack_lower.len() || !is_word_byte(haystack_lower.as_bytes()[end]);
+        let before_ok = start == 0 || !is_token_byte(haystack_lower.as_bytes()[start - 1]);
+        let after_ok =
+            end == haystack_lower.len() || !is_token_byte(haystack_lower.as_bytes()[end]);
         if before_ok && after_ok {
             return true;
         }
@@ -804,15 +862,148 @@ fn contains_plain_term(haystack_lower: &str, needle_lower: &str) -> bool {
     false
 }
 
-fn best_snippet(body: &str, q: &str) -> (Option<usize>, String) {
+fn matched_fields(path: &str, body: &str, q: &str) -> Vec<String> {
     let terms: Vec<String> = q.split_whitespace().map(|s| s.to_lowercase()).collect();
-    for (i, line) in body.lines().enumerate() {
+    let path_lower = path.to_lowercase();
+    let filename_lower = file_name(path).to_lowercase();
+    let body_lower = body.to_lowercase();
+    let mut fields = Vec::new();
+    if terms
+        .iter()
+        .any(|term| contains_analyzed_term(&filename_lower, term))
+    {
+        fields.push("filename".to_string());
+    }
+    if terms
+        .iter()
+        .any(|term| contains_analyzed_term(&path_lower, term))
+    {
+        fields.push("path".to_string());
+    }
+    if terms
+        .iter()
+        .any(|term| contains_analyzed_term(&body_lower, term))
+    {
+        fields.push("content".to_string());
+    }
+    fields
+}
+
+fn crop_line_around_terms(line: &str, terms: &[String], max_chars: usize) -> (String, bool, bool) {
+    let char_count = line.chars().count();
+    if char_count <= max_chars {
+        return (line.to_string(), false, false);
+    }
+    let lower = line.to_lowercase();
+    let match_char = terms
+        .iter()
+        .filter_map(|term| {
+            lower
+                .find(term)
+                .map(|byte_idx| line[..byte_idx].chars().count())
+        })
+        .min()
+        .unwrap_or(0);
+    let half_window = max_chars / 2;
+    let start_char = match_char.saturating_sub(half_window);
+    let text: String = line.chars().skip(start_char).take(max_chars).collect();
+    let end_char = start_char + text.chars().count();
+    (text, start_char > 0, end_char < char_count)
+}
+
+fn best_snippets(
+    body: &str,
+    q: &str,
+) -> (
+    Option<usize>,
+    String,
+    Vec<SnippetWindow>,
+    Option<usize>,
+    Option<usize>,
+) {
+    const CONTEXT_LINES: usize = 2;
+    const MAX_WINDOWS: usize = 3;
+    const MAX_WINDOW_CHARS: usize = 600;
+    const MAX_TOTAL_CHARS: usize = 1400;
+
+    let terms: Vec<String> = q.split_whitespace().map(|s| s.to_lowercase()).collect();
+    let lines: Vec<&str> = body.lines().collect();
+    if lines.is_empty() {
+        return (None, String::new(), Vec::new(), None, None);
+    }
+
+    let mut matches = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
         let lower = line.to_lowercase();
-        if terms.iter().any(|t| contains_plain_term(&lower, t)) {
-            return (Some(i + 1), line.trim().chars().take(300).collect());
+        if terms.iter().any(|t| contains_analyzed_term(&lower, t)) {
+            matches.push(i);
         }
     }
-    (None, body.chars().take(300).collect())
+
+    let legacy_line = matches.first().map(|i| i + 1);
+    let legacy_snippet = matches
+        .first()
+        .map(|i| lines[*i].trim().chars().take(300).collect())
+        .unwrap_or_else(|| body.chars().take(300).collect());
+
+    let seed_lines: Vec<usize> = if matches.is_empty() {
+        vec![0]
+    } else {
+        matches.into_iter().take(MAX_WINDOWS).collect()
+    };
+    let mut ranges: Vec<(usize, usize, usize)> = Vec::new();
+    for idx in seed_lines {
+        let start = idx.saturating_sub(CONTEXT_LINES);
+        let end = (idx + CONTEXT_LINES).min(lines.len() - 1);
+        if let Some((_, prev_end, _)) = ranges.last_mut() {
+            if start <= *prev_end + 1 {
+                *prev_end = (*prev_end).max(end);
+                continue;
+            }
+        }
+        ranges.push((start, end, idx));
+        if ranges.len() >= MAX_WINDOWS {
+            break;
+        }
+    }
+
+    let mut snippets = Vec::new();
+    let mut used_chars = 0usize;
+    for (start, end, focus) in ranges {
+        if used_chars >= MAX_TOTAL_CHARS {
+            break;
+        }
+        let remaining = MAX_TOTAL_CHARS - used_chars;
+        let max_chars = MAX_WINDOW_CHARS.min(remaining);
+        let mut line_start = start + 1;
+        let mut line_end = end + 1;
+        let mut text = lines[start..=end].join("\n");
+        let mut truncated_before = start > 0;
+        let mut truncated_after = end + 1 < lines.len();
+        if text.chars().count() > max_chars {
+            line_start = focus + 1;
+            line_end = focus + 1;
+            let (focused_text, cropped_before, cropped_after) =
+                crop_line_around_terms(lines[focus], &terms, max_chars);
+            text = focused_text;
+            truncated_before = focus > 0 || cropped_before;
+            truncated_after = focus + 1 < lines.len() || cropped_after;
+        }
+        let truncated = truncated_before || truncated_after;
+        used_chars += text.chars().count();
+        snippets.push(SnippetWindow {
+            line_start,
+            line_end,
+            text,
+            truncated,
+            truncated_before,
+            truncated_after,
+        });
+    }
+
+    let line_start = snippets.first().map(|snippet| snippet.line_start);
+    let line_end = snippets.last().map(|snippet| snippet.line_end);
+    (legacy_line, legacy_snippet, snippets, line_start, line_end)
 }
 
 fn index_cmd(args: &[String]) -> Result<i32> {

@@ -2,6 +2,8 @@
 
 Source Search adds a Pi `ranked_search` tool backed by a local Tantivy index. It is for broad lexical/BM25 discovery across a git checkout; use typed `boosts`/`excludeTerms` for ranking noise control, and use `grep` and `read` to confirm exact evidence.
 
+Results are compact evidence packets: ranked paths/scores, `matchedFields` using `filename`, `path`, and `content`, and structured snippet windows with `lineStart`/`lineEnd`, text, and before/after truncation flags. Legacy `snippet`/`line` fields remain for compatibility.
+
 ## Build
 
 ```bash

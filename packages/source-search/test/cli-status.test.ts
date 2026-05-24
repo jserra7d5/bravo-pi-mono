@@ -20,7 +20,7 @@ function runCliRaw(args: string[]) {
 function runCli(args: string[]) {
   const result = runCliRaw(args);
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  return JSON.parse(result.stdout.trim()) as { ok: boolean; error?: string; indexedFiles?: number; warnings?: string[]; cacheDir?: string; hits?: Array<{ path: string; score: number }>; boosts?: Array<{ term: string; weight: number }>; excludeTerms?: string[] };
+  return JSON.parse(result.stdout.trim()) as { ok: boolean; error?: string; indexedFiles?: number; warnings?: string[]; cacheDir?: string; hits?: Array<{ path: string; score: number; line?: number | null; snippet?: string; snippets?: Array<{ lineStart: number; lineEnd: number; text: string; truncated: boolean; truncatedBefore?: boolean; truncatedAfter?: boolean }>; lineStart?: number | null; lineEnd?: number | null; matchedFields?: string[] }>; boosts?: Array<{ term: string; weight: number }>; excludeTerms?: string[] };
 }
 
 function runCliError(args: string[]) {
@@ -61,6 +61,76 @@ test("config validate does not report misleading index status", async () => {
   assert.equal(validation.ok, true);
   assert.equal(Object.hasOwn(validation, "indexedFiles"), false);
   assert.deepEqual(validation.warnings ?? [], []);
+});
+
+test("query emits structured snippet windows and legacy snippet fields", async () => {
+  const repo = await createRepo();
+  await writeFile(join(repo, "src", "context.ts"), "one\n  two\n    target alpha();\n  four\nfive\nsix\n");
+
+  const result = runCli(["query", "--repo", repo, "--query", "target alpha", "--limit", "5", "--json"]);
+  assert.equal(result.ok, true);
+  const hit = result.hits?.find((candidate) => candidate.path === "src/context.ts");
+  assert.ok(hit);
+  assert.equal(hit.line, 3);
+  assert.equal(hit.snippet, "target alpha();");
+  assert.equal(hit.lineStart, 1);
+  assert.equal(hit.lineEnd, 5);
+  assert.deepEqual(hit.matchedFields, ["content"]);
+  assert.equal(hit.snippets?.[0]?.lineStart, 1);
+  assert.equal(hit.snippets?.[0]?.lineEnd, 5);
+  assert.equal(hit.snippets?.[0]?.truncatedBefore, false);
+  assert.equal(hit.snippets?.[0]?.truncatedAfter, true);
+  assert.match(hit.snippets?.[0]?.text ?? "", /one\n  two\n    target alpha\(\);\n  four\nfive/);
+});
+
+test("query reports filename matched field", async () => {
+  const repo = await createRepo();
+  await writeFile(join(repo, "src", "needle-filename.ts"), "export const unrelated = true;\n");
+
+  const result = runCli(["query", "--repo", repo, "--query", "needle filename", "--limit", "5", "--json"]);
+  assert.equal(result.ok, true);
+  const hit = result.hits?.find((candidate) => candidate.path === "src/needle-filename.ts");
+  assert.ok(hit);
+  assert.deepEqual(hit.matchedFields, ["filename", "path"]);
+});
+
+test("query snippets match analyzer token boundaries for underscored identifiers", async () => {
+  const repo = await createRepo();
+  await writeFile(join(repo, "src", "identifier.ts"), `${Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join("\n")}\nconst x = ranked_search();\n`);
+
+  const result = runCli(["query", "--repo", repo, "--query", "ranked", "--limit", "5", "--json"]);
+  assert.equal(result.ok, true);
+  const hit = result.hits?.find((candidate) => candidate.path === "src/identifier.ts");
+  assert.ok(hit);
+  assert.equal(hit.line, 21);
+  assert.deepEqual(hit.matchedFields, ["content"]);
+  assert.match(hit.snippets?.[0]?.text ?? "", /ranked_search/);
+});
+
+test("query lineEnd reflects text included after character truncation", async () => {
+  const repo = await createRepo();
+  await writeFile(join(repo, "src", "long.ts"), `${"target ".repeat(200)}\nsecond line\nthird line\n`);
+
+  const result = runCli(["query", "--repo", repo, "--query", "target", "--limit", "5", "--json"]);
+  assert.equal(result.ok, true);
+  const hit = result.hits?.find((candidate) => candidate.path === "src/long.ts");
+  assert.ok(hit);
+  assert.equal(hit.snippets?.[0]?.lineStart, 1);
+  assert.equal(hit.snippets?.[0]?.lineEnd, 1);
+  assert.equal(hit.snippets?.[0]?.truncatedAfter, true);
+});
+
+test("query truncates long snippet windows around the matched line", async () => {
+  const repo = await createRepo();
+  await writeFile(join(repo, "src", "long-context.ts"), `${"context ".repeat(200)}\nshort context\nconst x = target_value;\n`);
+
+  const result = runCli(["query", "--repo", repo, "--query", "target", "--limit", "5", "--json"]);
+  assert.equal(result.ok, true);
+  const hit = result.hits?.find((candidate) => candidate.path === "src/long-context.ts");
+  assert.ok(hit);
+  assert.equal(hit.snippets?.[0]?.lineStart, 3);
+  assert.equal(hit.snippets?.[0]?.lineEnd, 3);
+  assert.match(hit.snippets?.[0]?.text ?? "", /target_value/);
 });
 
 test("query refreshes incrementally for added, modified, deleted, and newly excluded files", async () => {
