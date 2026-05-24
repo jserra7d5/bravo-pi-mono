@@ -1,3 +1,8 @@
+---
+name: source-search
+description: Set up or debug Source Search ranked_search for a repo or Bravo workspace, including .bravo/source-search.json config, workspace registries, exclude/noise choices, CLI status/index/purge recovery, and when to use ranked_search versus grep/read.
+---
+
 # Source Search
 
 Use this skill when setting up or debugging Source Search.
