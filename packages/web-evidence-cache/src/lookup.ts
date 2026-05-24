@@ -6,7 +6,7 @@ export function lookupContentSummary(results: WebLookupResultItem[]): string {
     `web_lookup found ${results.length} recall-oriented match${results.length === 1 ? "" : "es"} in already-fetched evidence. READ NEXT: open each best_path at the shown line when present, inspect surrounding artifact context before citing, and do not treat missing hits as proof of absence. Other artifact paths remain in result details for alternate views.`,
     ...results.map((r) => {
       const line = r.line_start ? `:${r.line_start}` : "";
-      return `[${r.page_id}:${r.chunk_id}] ${r.title}${r.heading_path ? ` > ${r.heading_path}` : ""}\nREAD NEXT (${r.best_format}): ${r.best_path}${line}\nmatched (${r.matched_terms.length ? r.match_mode : "none"}): ${r.matched_terms.join(", ") || "—"}\norientation snippet (not citable): ${r.snippet}\nnext step: read READ NEXT/best_path and verify the surrounding artifact text before using as evidence.`;
+      return `[${r.page_id}:${r.chunk_id}] ${r.title}${r.heading_path ? ` > ${r.heading_path}` : ""}\nREAD NEXT (${r.best_format}): ${r.best_path}${line}\nmatched (${r.matched_terms.length ? `recall:${r.match_mode}` : "none"}): ${r.matched_terms.join(", ") || "—"}\norientation snippet (not citable): ${r.snippet}\nnext step: read READ NEXT/best_path and verify the surrounding artifact text before using as evidence.`;
     }),
   ].join("\n\n");
 }

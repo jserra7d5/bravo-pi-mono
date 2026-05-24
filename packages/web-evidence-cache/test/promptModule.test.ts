@@ -9,10 +9,11 @@ test("appendWebEvidencePrompt appends the compact web evidence module once", () 
 
   assert.equal(twice, once);
   assert.ok(once.startsWith("Base prompt\n\n## Web Evidence"));
-  assert.ok(once.includes("Use `web_search` when you need candidate pages from the public web."));
-  assert.ok(once.includes("Use `web_fetch` when a result or URL is worth reading, citing, or searching."));
-  assert.ok(once.includes("Use `web_lookup` to search within pages already fetched in this session"));
-  assert.ok(once.includes("Do not cite claims from search snippets alone"));
+  assert.ok(once.includes("Use web evidence tools as a three-step workflow:"));
+  assert.ok(once.includes("`web_search` discovers candidate public web pages only."));
+  assert.ok(once.includes("Normally call it with only `{ refs }`"));
+  assert.ok(once.includes("Default `match_mode: \"any\"` is recall, not verification"));
+  assert.ok(once.includes("Do not cite search snippets, lookup snippets, or orientation previews"));
 });
 
 test("web evidence prompt module stays compact and selection-prior focused", () => {

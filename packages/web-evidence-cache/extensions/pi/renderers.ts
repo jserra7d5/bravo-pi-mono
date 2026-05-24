@@ -158,7 +158,7 @@ export function renderLookupResult(result: AgentToolResult<WebLookupResult>, _op
   return new EvidenceCard("web_lookup", "✓ Web Lookup", details.results.slice(0, 8).flatMap((r) => [
     `[${shortId(r.page_id)}:${shortId(r.chunk_id)}] ${r.title}${r.heading_path ? ` > ${r.heading_path}` : ""}`,
     `READ NEXT ${r.best_format} ${truncateMiddle(`${r.best_path}${r.line_start ? `:${r.line_start}` : ""}`, 108)}`,
-    `matched ${r.match_mode} ${r.matched_terms.join(", ") || "—"}`,
+    `matched recall:${r.match_mode} ${r.matched_terms.join(", ") || "—"}`,
     `snippet   ${truncateEnd(r.snippet.replace(/\s+/g, " ").trim(), 120)} (not citable)`,
   ]));
 }

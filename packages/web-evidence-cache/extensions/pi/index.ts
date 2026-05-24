@@ -131,7 +131,7 @@ export function buildWebEvidenceTools() {
     defineTool({
       name: "web_fetch",
       label: "Web Fetch",
-      description: "Fetch selected URLs, web_search result refs, or fetched page UUIDs into local readable artifacts and index them; returns visually prioritized READ NEXT/best_path plus all artifact paths in details.",
+      description: "Fetch selected URLs, web_search result refs, or fetched page UUIDs into local readable artifacts and index them. Normally pass only refs; returns visually prioritized READ NEXT/best_path plus all artifact paths in details.",
       promptSnippet: "web_fetch: use after selecting promising leads; normally pass only { refs }; format/refresh are optional advanced knobs that default to auto. Read READ NEXT/best_path first and verify partial/weak extraction warnings before citing.",
       promptGuidelines: SHARED_GUIDANCE,
       parameters: webFetchSchema,
@@ -153,7 +153,7 @@ export function buildWebEvidenceTools() {
     defineTool({
       name: "web_lookup",
       label: "Web Lookup",
-      description: "Recall-oriented search only over already-fetched local web evidence artifacts; optional match_mode any/all/phrase controls noisy broad hits; no matches are not proof of absence.",
+      description: "Recall-oriented search only over already-fetched local web evidence artifacts. Default match_mode any is recall, not verification; use all/phrase for noisy broad hits. No matches are not proof of absence.",
       promptSnippet: "web_lookup: BM25 lookup inside local artifacts already created by web_fetch; match_mode defaults to any, use all/phrase when common terms create noisy hits; read READ NEXT/best_path context, and treat no matches as a cue to broaden/fetch more, not proof of absence.",
       promptGuidelines: SHARED_GUIDANCE,
       parameters: webLookupSchema,

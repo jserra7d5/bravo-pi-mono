@@ -1,14 +1,12 @@
 export const WEB_EVIDENCE_PROMPT_MODULE = `## Web Evidence
 
-When web evidence tools are available, use them for live web discovery and local evidence collection.
+Use web evidence tools as a three-step workflow:
 
-Use \`web_search\` when you need candidate pages from the public web. Treat snippets as leads, not evidence.
+1. \`web_search\` discovers candidate public web pages only. Titles and snippets are navigation leads, not evidence.
+2. \`web_fetch\` materializes selected URLs or search result refs into local artifacts. Normally call it with only \`{ refs }\`; omit \`format\` and \`refresh\` unless you specifically need an alternate view or forced refetch. Read \`READ NEXT\` / \`best_path\` before citing.
+3. \`web_lookup\` searches only already-fetched artifacts. Default \`match_mode: "any"\` is recall, not verification; use \`"all"\` or \`"phrase"\` when common terms make hits noisy. No matches are not proof of absence; broaden terms or fetch more sources.
 
-Use \`web_fetch\` when a result or URL is worth reading, citing, or searching. Fetched pages become temporary local artifacts; read returned paths with normal filesystem tools.
-
-Use \`web_lookup\` to search within pages already fetched in this session, especially for exact terms, identifiers, API names, error strings, and quoted phrases.
-
-Prefer primary sources and official documentation when they are available. Do not cite claims from search snippets alone; cite the fetched/read artifact or the source URL.`;
+Prefer primary and official sources. Do not cite search snippets, lookup snippets, or orientation previews; cite only after reading the fetched artifact or source page.`;
 
 export function appendWebEvidencePrompt(systemPrompt: string): string {
   if (systemPrompt.includes("## Web Evidence")) return systemPrompt;
