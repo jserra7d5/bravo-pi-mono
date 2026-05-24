@@ -1,7 +1,6 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync } from "node:fs";
 import { atomicWriteJson } from "./jsonl.js";
 import type { ContextPolicy, SessionPolicy, ThinkingLevel } from "./types.js";
 
@@ -18,6 +17,8 @@ export interface BuildPiCommandInput {
   runtimeBuiltinTools?: string[];
   runtimeExtensionPaths?: string[];
   skills: string[];
+  defaultExtensionPaths?: string[];
+  defaultExtensionTools?: string[];
   extensions: string[];
   model?: string;
   thinkingLevel?: ThinkingLevel;
@@ -59,10 +60,23 @@ function findPackageRoot(start: string): string {
 
 export const childControlExtensionPath = join(findPackageRoot(here), "extensions", "child-control");
 
+function dedupeExtensionsByRealpath(extensions: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const extension of extensions) {
+    const key = existsSync(extension) ? `real:${realpathSync(extension)}` : `literal:${extension}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(extension);
+  }
+  return result;
+}
+
 export function buildPiCommand(input: BuildPiCommandInput): PiCommand {
   const runtimeBuiltinTools = input.runtimeBuiltinTools ?? [childControlEventTool];
   const runtimeExtensionPaths = input.runtimeExtensionPaths ?? [childControlExtensionPath];
-  const toolAllowlist = [...new Set([...input.userBuiltinTools, ...runtimeBuiltinTools])];
+  const toolAllowlist = [...new Set([...input.userBuiltinTools, ...(input.defaultExtensionTools ?? []), ...runtimeBuiltinTools])];
+  const extensionPaths = dedupeExtensionsByRealpath([...(input.defaultExtensionPaths ?? []), ...input.extensions, ...runtimeExtensionPaths]);
   const args = [
     ...(input.sessionPolicy === "record" ? ["--session", input.piSessionPath ?? input.requestedPiSessionPath ?? join(input.runDir, "pi-session", "session.jsonl")] : ["--no-session"]),
     "--no-context-files",
@@ -76,7 +90,7 @@ export function buildPiCommand(input: BuildPiCommandInput): PiCommand {
   ];
   args.push("--tools", toolAllowlist.join(","));
   for (const skill of input.skills) args.push("--skill", skill);
-  for (const extension of [...input.extensions, ...runtimeExtensionPaths]) args.push("-e", extension);
+  for (const extension of extensionPaths) args.push("-e", extension);
   if (input.model) args.push("--model", input.model);
   if (input.thinkingLevel) args.push("--thinking", input.thinkingLevel);
   args.push("--mode", "text", "-p", input.useAtFilePrompt === false ? input.taskPath : `@${input.taskPath}`);

@@ -3,6 +3,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyAgentVariant, resolveAgentDefinition } from "./agentDefinitions.js";
+import { loadAsyncSubagentsConfig } from "./config.js";
 import { buildPiCommand, childControlEventTool, childControlExtensionPath, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
 import { assemblePrompt } from "./promptAssembly.js";
 import { finalizeTerminalRun } from "./lifecycle.js";
@@ -400,6 +401,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     });
   }
 
+  const asyncSubagentsConfig = loadAsyncSubagentsConfig({ cwd, env: { ...process.env, ...(input.env ?? {}) } });
+
   const prompt = assemblePrompt({
     definition,
     runPaths: paths,
@@ -426,6 +429,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     runtimeBuiltinTools,
     runtimeExtensionPaths,
     skills: prompt.skills,
+    defaultExtensionPaths: asyncSubagentsConfig.defaultExtensions.map((extension) => extension.realPath),
+    defaultExtensionTools: asyncSubagentsConfig.defaultExtensions.flatMap((extension) => extension.tools),
     extensions: prompt.extensions,
     model: prompt.model,
     thinkingLevel: selectedThinkingLevel,
@@ -447,6 +452,9 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     runtimeBuiltinTools,
     runtimeExtensionPaths,
     skills: prompt.skills,
+    defaultExtensionsConfigPath: asyncSubagentsConfig.configPath,
+    defaultExtensions: asyncSubagentsConfig.defaultExtensions,
+    defaultExtensionTools: asyncSubagentsConfig.defaultExtensions.flatMap((extension) => extension.tools),
     extensions: prompt.extensions,
     contextPolicy,
     sessionPolicy,

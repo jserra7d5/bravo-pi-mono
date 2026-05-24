@@ -12,6 +12,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `packages/caveman/` contains the Pi extension for session-scoped terse response mode (`/caveman`, `/normal`).
 - `packages/showcase/` contains the Pi extension package that registers the `showcase` tool for inline TUI rendering of requested file slices.
 - `packages/web-evidence-cache/` contains the Pi extension package for Brave-backed web discovery, temporary local web evidence artifacts, and SQLite FTS5 lookup; read `packages/web-evidence-cache/README.md` before changing web search, fetch safety, extraction, artifact, or lookup behavior.
+- `packages/source-search/` contains the Pi extension package for Tantivy-backed `ranked_search`, the `source-search` CLI/sidecar, and the source-search skill; read `packages/source-search/README.md` and `docs/specs/source-search-v1/design.md` before changing indexing, corpus selection, workspace registry, or ranked-search behavior.
 - `packages/gemini-code-assist/` contains the direct Antigravity Code Assist Pi provider for `antigravity-code-assist/gemini-3.5-flash`; read `packages/gemini-code-assist/README.md` before changing OAuth, model ids, reasoning controls, or provider behavior.
 - `docs/specs/` contains design specs. Each spec should live under a slug directory, e.g. `docs/specs/tango-v1/design.md`.
 - Package-specific source, docs, roles, includes, and extensions should live inside the relevant package directory.
@@ -43,6 +44,8 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `npm test --workspace @bravo/gemini-code-assist` — build and run Gemini/Antigravity Code Assist tests.
 - `npm run check --workspace @bravo/web-evidence-cache` — type-check the Web Evidence Cache Pi extension.
 - `npm test --workspace @bravo/web-evidence-cache` — build and run Web Evidence Cache tests.
+- `npm run check --workspace @bravo/source-search` — type-check the Source Search Pi extension.
+- `npm test --workspace @bravo/source-search` — build and run Source Search tests.
 - `npm run antigravity:proof --workspace @bravo/gemini-code-assist -- --mode sweep` — live-proof the direct Antigravity provider and thinking controls.
 - `npm test --workspace @bravo/loom` — run Loom's vertical-slice tests.
 - `tango roles list` — inspect available Tango roles when the CLI is on PATH.
