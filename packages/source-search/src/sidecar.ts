@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { QueryResponse, StatusResponse } from "./types.js";
 import { PROTOCOL_VERSION } from "./types.js";
@@ -13,10 +13,38 @@ async function executable(path: string): Promise<boolean> {
   try { await access(path, constants.X_OK); return true; } catch { return false; }
 }
 
+async function fileExists(path: string): Promise<boolean> {
+  try { await access(path, constants.F_OK); return true; } catch { return false; }
+}
+
+export async function sourceSearchPackageRoot(): Promise<string> {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 8; i += 1) {
+    const pkgJson = join(dir, "package.json");
+    try {
+      const raw = await readFile(pkgJson, "utf8");
+      const parsed = JSON.parse(raw) as { name?: unknown };
+      if (parsed.name === "@bravo/source-search") return dir;
+    } catch {
+      // Keep walking upward; this also handles TS source loaded through jiti.
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new SidecarUnavailableError("Could not locate @bravo/source-search package root from extension runtime.");
+}
+
+export async function sourceSearchCliPath(): Promise<string> {
+  const root = await sourceSearchPackageRoot();
+  const candidates = [join(root, "dist", "src", "cli.js")];
+  for (const candidate of candidates) if (await fileExists(candidate)) return candidate;
+  throw new SidecarUnavailableError("Source Search CLI was not found. Run `npm run build --workspace @bravo/source-search`.");
+}
+
 export async function findSidecar(): Promise<string> {
   if (process.env.SOURCE_SEARCH_SIDECAR) return process.env.SOURCE_SEARCH_SIDECAR;
-  const here = dirname(fileURLToPath(import.meta.url));
-  const pkg = resolve(here, "..", "..");
+  const pkg = await sourceSearchPackageRoot();
   const platform = `${process.platform}-${process.arch}`;
   const exe = process.platform === "win32" ? "source-search-sidecar.exe" : "source-search-sidecar";
   const candidates = [

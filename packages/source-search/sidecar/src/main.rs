@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::Read;
+use std::time::UNIX_EPOCH;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,12 @@ struct QueryResponse {
     error: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct IndexManifest {
+    #[serde(rename = "indexedFiles")]
+    indexed_files: usize,
+}
+
 #[derive(Serialize)]
 struct StatusResponse {
     #[serde(rename = "protocolVersion")]
@@ -98,6 +105,16 @@ fn run() -> Result<i32> {
 
 fn arg(args: &[String], name: &str) -> Option<String> { args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone()) }
 fn repo_arg(args: &[String]) -> Result<PathBuf> { Ok(fs::canonicalize(arg(args, "--repo").ok_or_else(|| anyhow!("--repo is required"))?)?) }
+
+fn manifest_path(repo: &Path) -> Result<PathBuf> { Ok(cache_dir(repo)?.join("manifest.json")) }
+
+fn read_manifest(repo: &Path) -> Result<Option<IndexManifest>> {
+    let path = manifest_path(repo)?;
+    if !path.exists() { return Ok(None); }
+    let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let manifest: IndexManifest = serde_json::from_str(&raw).with_context(|| format!("invalid Source Search manifest {}", path.display()))?;
+    Ok(Some(manifest))
+}
 
 fn cache_dir(repo: &Path) -> Result<PathBuf> {
     let mut h = Sha256::new(); h.update(repo.to_string_lossy().as_bytes());
@@ -207,8 +224,13 @@ fn rebuild(repo: &Path) -> Result<usize> {
         }
     }
     writer.commit()?;
-    fs::write(cache_dir(repo)?.join("manifest.json"), serde_json::json!({"indexedFiles":count}).to_string())?;
-    #[cfg(unix)] fs::set_permissions(cache_dir(repo)?.join("manifest.json"), fs::Permissions::from_mode(0o600))?;
+    let manifest = serde_json::json!({
+        "indexedFiles": count,
+        "lastIndexedAtUnixMs": UNIX_EPOCH.elapsed().map(|d| d.as_millis()).unwrap_or_default()
+    });
+    let path = manifest_path(repo)?;
+    fs::write(&path, manifest.to_string())?;
+    #[cfg(unix)] fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     Ok(count)
 }
 
@@ -254,7 +276,19 @@ fn best_snippet(body: &str, q: &str) -> (Option<usize>, String) {
 }
 
 fn index_cmd(args: &[String]) -> Result<i32> { let repo = repo_arg(args)?; let n = rebuild(&repo)?; status_print(repo, n, vec![]) }
-fn status_cmd(args: &[String]) -> Result<i32> { let repo = repo_arg(args)?; let dir = cache_dir(&repo)?; let n = git_files(&repo).map(|v| v.len()).unwrap_or(0); status_print(repo, n, vec![format!("cacheDir={}", dir.display())]) }
+fn status_cmd(args: &[String]) -> Result<i32> {
+    let repo = repo_arg(args)?;
+    let _cfg = load_config(&repo)?;
+    let mut warnings = vec![];
+    let n = match read_manifest(&repo)? {
+        Some(manifest) => manifest.indexed_files,
+        None => {
+            warnings.push("index has not been built yet; run `source-search index --repo <path> --force --json` or use ranked_search to build on demand".into());
+            0
+        }
+    };
+    status_print(repo, n, warnings)
+}
 fn purge_cmd(args: &[String]) -> Result<i32> { let repo = repo_arg(args)?; let dir = cache_dir(&repo)?; if dir.exists() { fs::remove_dir_all(&dir)?; } let resp = StatusResponse{protocol_version:PROTOCOL_VERSION,ok:true,repo_root:Some(repo.display().to_string()),cache_dir:Some(dir.display().to_string()),indexed_files:0,warnings:vec![],error:None}; println!("{}", serde_json::to_string(&resp)?); Ok(0) }
 fn config_cmd(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str) != Some("validate") { print_query_error("only config validate is implemented"); return Ok(2); }

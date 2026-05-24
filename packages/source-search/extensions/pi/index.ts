@@ -1,8 +1,11 @@
-import { defineTool, type AgentToolResult, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { createBashTool, defineTool, type AgentToolResult, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { discoverSourceSearch, appendSourceSearchPrompt } from "../../src/discovery.js";
 import { renderQueryResult } from "../../src/render.js";
-import { queryRepo } from "../../src/sidecar.js";
+import { findSidecar, queryRepo, sourceSearchCliPath } from "../../src/sidecar.js";
 import { resolveRepoPath, resolveWorkspaceSearch } from "../../src/workspace.js";
 import type { QueryResponse } from "../../src/types.js";
 
@@ -16,6 +19,12 @@ type RankedSearchArgs = Static<typeof rankedSearchSchema>;
 
 function response(content: string, details: QueryResponse): AgentToolResult<QueryResponse> {
   return { content: [{ type: "text", text: content }], details };
+}
+
+function failureSummary(warnings: string[]): string | undefined {
+  const failures = warnings.filter((warning) => /: /.test(warning));
+  if (!failures.length) return undefined;
+  return `Workspace ranked_search failed for all configured repos: ${failures.join("; ")}`;
 }
 
 export function buildSourceSearchTools() {
@@ -60,7 +69,18 @@ export function buildSourceSearchTools() {
           ...(result.warnings ?? []).map((w) => `${repo.name}: ${w}`),
           ...(result.ok ? [] : [`${repo.name}: ${result.error ?? "search failed"}`]),
         ]);
-        const result: QueryResponse = { protocolVersion: 1, ok: hits.length > 0 || warnings.length < responses.length, repoRoot: workspace.workspaceRoot, query: params.query, hits, count: hits.length, indexFreshness: warnings.length ? "partial" : "fresh", warnings };
+        const allReposFailed = hits.length === 0 && responses.every(({ result }) => !result.ok);
+        const result: QueryResponse = {
+          protocolVersion: 1,
+          ok: !allReposFailed,
+          repoRoot: workspace.workspaceRoot,
+          query: params.query,
+          hits,
+          count: hits.length,
+          indexFreshness: warnings.length ? "partial" : "fresh",
+          warnings,
+          error: allReposFailed ? failureSummary(warnings) ?? "Workspace ranked_search failed for all configured repos." : undefined,
+        };
         return response(renderQueryResult(result), result);
       }
 
@@ -75,8 +95,51 @@ function cwdOf(ctx: unknown): string {
   return typeof cwd === "string" ? cwd : process.cwd();
 }
 
-export default function sourceSearchExtension(pi: ExtensionAPI): void {
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+async function ensureCliShim(cliPath: string): Promise<string> {
+  const dir = join(homedir(), ".cache", "pi-coding-agent", "source-search", "bin");
+  const shim = join(dir, "source-search");
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await writeFile(shim, `#!/usr/bin/env bash\nexec node ${shellQuote(cliPath)} "$@"\n`, { mode: 0o700 });
+  await chmod(shim, 0o700);
+  return dir;
+}
+
+function prependPath(pathValue: string | undefined, dir: string): string {
+  const parts = (pathValue ?? "").split(":").filter(Boolean);
+  return [dir, ...parts.filter((part) => part !== dir)].join(":");
+}
+
+export default async function sourceSearchExtension(pi: ExtensionAPI): Promise<void> {
   for (const tool of buildSourceSearchTools()) pi.registerTool(tool as never);
+
+  const cliPath = await sourceSearchCliPath();
+  const sidecarPath = await findSidecar();
+  const shimDir = await ensureCliShim(cliPath);
+  process.env.SOURCE_SEARCH_CLI = cliPath;
+  process.env.SOURCE_SEARCH_SIDECAR = sidecarPath;
+  process.env.PATH = prependPath(process.env.PATH, shimDir);
+
+  const bashTool = createBashTool(process.cwd(), {
+    spawnHook: ({ command, cwd, env }) => ({
+      command,
+      cwd,
+      env: {
+        ...env,
+        SOURCE_SEARCH_CLI: cliPath,
+        SOURCE_SEARCH_SIDECAR: sidecarPath,
+        PATH: prependPath(env.PATH, shimDir),
+      },
+    }),
+  });
+  pi.registerTool({
+    ...bashTool,
+    execute: async (id, params, signal, onUpdate, _ctx) => bashTool.execute(id, params, signal, onUpdate),
+  });
+
   pi.on("before_agent_start", async (event, ctx) => {
     const discovery = await discoverSourceSearch(cwdOf(ctx));
     return { systemPrompt: appendSourceSearchPrompt(event.systemPrompt, discovery) };
