@@ -5,14 +5,13 @@ Use this skill when setting up or debugging Source Search.
 - `ranked_search` is broad lexical/BM25 repository discovery, not semantic search. Try synonyms, identifiers, filenames, and related terms.
 - Prefer `ranked_search` first when the startup prompt says Source Search is available, then use `read` or `grep` for exact evidence.
 - Use `grep` for exact strings/regex and `read` for known files.
-- Do not parse `AGENTS.md` as Source Search configuration. Use explicit `.pi/source-search.json` or `.pi-local/source-search.json`.
+- Do not parse `AGENTS.md` as Source Search configuration. Use explicit `.bravo/source-search.json` config.
 
 ## Config
 
-Repo config paths:
+Repo or parent-workspace config path:
 
-- `.pi/source-search.json` for shareable project defaults
-- `.pi-local/source-search.json` for local overrides
+- `.bravo/source-search.json` for Bravo-owned Source Search config and workspace registries
 
 Example:
 

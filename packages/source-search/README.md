@@ -24,7 +24,7 @@ Indexes are stored under `~/.cache/pi-coding-agent/source-search` with owner-onl
 
 ## Configuration
 
-Optional repo config lives at `.pi/source-search.json` and `.pi-local/source-search.json`. Parent workspaces can use the same files with a `workspace.repos` registry of concrete child checkouts.
+Optional repo or parent-workspace config lives at `.bravo/source-search.json`. Parent workspaces use this file with a `workspace.repos` registry of concrete child checkouts.
 
 ```json
 {

@@ -278,25 +278,23 @@ Branch/checkout safety:
 Support repo-specific config:
 
 ```text
-.pi/source-search.json
-.pi-local/source-search.json
+.bravo/source-search.json
 ```
 
 Recommended behavior:
 
-- `.pi/source-search.json`: shareable project config.
-- `.pi-local/source-search.json`: local override, often gitignored.
-- Merge local override after project config.
+- `.bravo/source-search.json` is the canonical Bravo-owned Source Search config for a repo or parent workspace.
+- Source Search intentionally targets the existing `.bravo` workspace root instead of introducing `.pi` / `.pi-local` config roots.
 
-Deterministic merge rules:
+Deterministic config rules:
 
 - Unknown keys are `ConfigError`.
 - `enabled: false` disables automatic indexing/search for that repo or workspace; startup discovery reports it as disabled and `ranked_search` returns an actionable disabled message rather than building an index.
-- `workspace.repos` entries are concrete checkout paths with stable names; local config can add entries but should not silently remove project entries unless it explicitly replaces the workspace block.
+- `workspace.repos` entries are concrete checkout paths with stable names; workspace entries are declared directly in the Bravo-owned Source Search config.
 - `workspace.defaultRepos` limits default multi-repo search scope; if absent, all configured repos are default unless count exceeds a safety cap.
-- `allowlist` and `exclude` arrays replace defaults when present in a file, then project/local arrays concatenate in project-then-local order.
-- `fields` deep-merges by field name; local values override project values.
-- `maxFileBytes`, budgets, and scalar options use local-over-project-over-default precedence.
+- `allowlist` and `exclude` arrays replace defaults when present in `.bravo/source-search.json`.
+- `fields` deep-merges by field name; configured values override defaults.
+- `maxFileBytes`, budgets, and scalar options use config-over-default precedence.
 - Invalid globs are `ConfigError`.
 - Paths/globs must be repo-relative; absolute paths are rejected in V1.
 

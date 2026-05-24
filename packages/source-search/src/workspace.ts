@@ -46,14 +46,7 @@ function workspaceFrom(raw: unknown): WorkspaceConfig | null {
 }
 
 export function loadWorkspaceConfig(cwd: string): WorkspaceConfig | null {
-  const project = workspaceFrom(readJson(join(cwd, ".pi", "source-search.json")));
-  const local = workspaceFrom(readJson(join(cwd, ".pi-local", "source-search.json")));
-  if (!project) return local;
-  if (!local) return project;
-  const byName = new Map(project.repos.map((r) => [r.name, r] as const));
-  for (const repo of local.repos) byName.set(repo.name, repo);
-  const repos = [...byName.values()];
-  return { repos, defaultRepos: local.defaultRepos.length ? local.defaultRepos : project.defaultRepos };
+  return workspaceFrom(readJson(join(cwd, ".bravo", "source-search.json")));
 }
 
 export async function resolveRepoPath(cwd: string, inputPath?: string): Promise<{ repoRoot: string; pathPrefix?: string } | null> {
@@ -92,5 +85,5 @@ export async function resolveWorkspaceSearch(cwd: string, inputPath?: string): P
 }
 
 export function sourceSearchConfigExists(dir: string): boolean {
-  return existsSync(join(dir, ".pi", "source-search.json")) || existsSync(join(dir, ".pi-local", "source-search.json"));
+  return existsSync(join(dir, ".bravo", "source-search.json"));
 }

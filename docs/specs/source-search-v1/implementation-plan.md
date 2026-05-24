@@ -277,7 +277,7 @@ Skill should cover:
 - Use `grep` for exact/regex confirmation.
 - Use `read` for known files.
 - Source Search is lexical BM25, not semantic search; try synonyms.
-- How to create/edit `.pi/source-search.json` and `.pi-local/source-search.json`.
+- How to create/edit `.bravo/source-search.json`.
 - How to configure parent workspaces.
 - How to configure dev/prod/worktree variants as separate checkout paths.
 - Do not parse `AGENTS.md` as config; use explicit workspace registry.
@@ -294,15 +294,14 @@ Add a `config resolve` CLI command if needed:
 source-search config resolve --root /path --json
 ```
 
-Golden fixtures must cover unknown keys, local overrides, array concatenation, workspace replacement, invalid globs, absolute paths, and `enabled:false`.
+Golden fixtures must cover unknown keys, workspace registries, invalid globs, absolute paths, and `enabled:false`.
 
 ### Repo config
 
 Paths:
 
 ```text
-.pi/source-search.json
-.pi-local/source-search.json
+.bravo/source-search.json
 ```
 
 Initial Quantiiv-Playbooks repo config candidate:
@@ -334,7 +333,7 @@ Initial Quantiiv-Playbooks repo config candidate:
 }
 ```
 
-Note: do not commit or write this to Quantiiv-Playbooks until implementation is ready and user approves. Initial testing can use `.pi-local/source-search.json`.
+Note: do not commit or write this to Quantiiv-Playbooks until implementation is ready and user approves. Initial testing can use `.bravo/source-search.json`.
 
 ### Parent workspace config
 
@@ -344,7 +343,7 @@ Target parent:
 /home/joe/Documents/Quantiiv
 ```
 
-This parent is not itself a git repository. Source Search must support non-git workspace roots by looking for `.pi/source-search.json` and `.pi-local/source-search.json` in cwd. It must not recursively index or search arbitrary sibling repos unless they are configured in `workspace.repos`. Bounded immediate child checkout detection is prompt/setup guidance only, not active scope.
+This parent is not itself a git repository. Source Search must support non-git workspace roots by looking for `.bravo/source-search.json` in cwd. It must not recursively index or search arbitrary sibling repos unless they are configured in `workspace.repos`. Bounded immediate child checkout detection is prompt/setup guidance only, not active scope.
 
 Initial parent config should point only to Quantiiv-Playbooks for first validation:
 
@@ -620,7 +619,7 @@ Set up parent workspace config for Quantiiv with Playbooks only.
 Target file candidate:
 
 ```text
-/home/joe/Documents/Quantiiv/.pi-local/source-search.json
+/home/joe/Documents/Quantiiv/.bravo/source-search.json
 ```
 
 Content:
@@ -786,8 +785,8 @@ Expected behavior:
 
 ## Open decisions
 
-1. Should local validation configs be written under `.pi-local/` or temporary external config path first?
-   - Recommendation: `.pi-local/source-search.json` after user approval.
+1. Should validation configs be written under `.bravo/` or a temporary external config path first?
+   - Recommendation: `.bravo/source-search.json` after user approval; Source Search targets Bravo-owned workspace config, not `.pi` / `.pi-local`.
 2. Should `ranked_search` support explicit `repos?: string[]` in V1?
    - Recommendation: no; use `path` and workspace defaults first.
 3. Should generated Playbooks output be excluded or indexed for comparison workflows?

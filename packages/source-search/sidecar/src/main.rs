@@ -121,7 +121,7 @@ fn git_files(repo: &Path) -> Result<Vec<PathBuf>> {
 
 fn load_config(repo: &Path) -> Result<EffectiveConfig> {
     let mut cfg = EffectiveConfig { enabled: true, exclude: vec![], max_file_bytes: MAX_FILE_BYTES };
-    for rel in [".pi/source-search.json", ".pi-local/source-search.json"] {
+    for rel in [".bravo/source-search.json"] {
         let path = repo.join(rel);
         if !path.exists() { continue; }
         let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {}", rel))?;
