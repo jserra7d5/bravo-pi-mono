@@ -981,18 +981,19 @@ export function summarizeStartResult(result: SubagentStartResult): string {
   return `Subagent ${result.runId} ${action}: ${label} (${result.state})`;
 }
 
-function formatResultSummary(result: RunResult): string {
+function formatResultSummary(result: RunResult, options?: { includeSummary?: boolean; useLiteralState?: boolean }): string {
   const agent = result.variant ? `${result.agentName}/${result.variant}` : result.agentName;
   const label = result.displayName ? `@${result.displayName} ${agent}` : agent;
   const duration = typeof result.durationMs === "number" ? ` in ${compactDuration(result.durationMs)}` : "";
-  const summary = result.summary ? ` - ${preview(result.summary, 96)}` : "";
-  return `${label} ${stateGlyph(result.state).label}${duration}${summary}`;
+  const state = options?.useLiteralState ? result.state : stateGlyph(result.state).label;
+  const summary = options?.includeSummary === false || !result.summary ? "" : ` - ${preview(result.summary, 96)}`;
+  return `${label} ${state}${duration}${summary}`;
 }
 
 export function summarizeWaitResult(result: SubagentWaitResult): string {
   if (result.state === "timeout") return `No subagent updates before timeout (${result.remainingRunIds.length} remaining)`;
   if (result.results.length) {
-    const shown = result.results.slice(0, 2).map((readyResult) => formatResultSummary(readyResult)).join("; ");
+    const shown = result.results.slice(0, 2).map((readyResult) => formatResultSummary(readyResult, { includeSummary: false, useLiteralState: true })).join("; ");
     const more = result.results.length > 2 ? `; +${result.results.length - 2} more` : "";
     return `Subagent wait: ${result.results.length} result${result.results.length === 1 ? "" : "s"} - ${shown}${more}`;
   }

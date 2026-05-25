@@ -481,6 +481,44 @@ test("subagent_wait returns usable result bodies with truncation metadata", asyn
   assert.equal(store.readStatus(w.runId).resultReady, false);
 });
 
+test("subagent_wait wraps terminal bodies in an explicit child-result envelope", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const firstStatus = store.readStatus(w.runId);
+  const second = store.createRunDirectory({ cwd: w.root, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId });
+  store.writeStatus({
+    ...createInitialStatus({
+      runId: second.runId,
+      parentRunId: w.identity.parentRunId,
+      rootSessionId: w.identity.rootSessionId,
+      agentName: "scout",
+      agentSource: "builtin",
+      definitionPath: "/builtin/scout.md",
+      mode: "oneshot",
+      cwd: w.root,
+      state: "completed",
+      displayName: "Harper",
+    }),
+    summary: "### Summary",
+  });
+  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", displayName: "Gray", summary: "### Summary", body: "### Summary\n\nGray full body" }));
+  store.writeStatus({ ...firstStatus, state: "completed", resultReady: true, displayName: "Gray", summary: "### Summary" });
+  store.writeResult(createRunResult({ runId: second.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", displayName: "Harper", summary: "### Summary", body: "### Summary\n\nHarper full body" }));
+
+  const built = tools(w.identity);
+  const result = await built.subagent_wait.execute("call", { runIds: [w.runId, second.runId], mode: "all", until: "result" }, undefined, undefined, { cwd: w.root });
+  const content = result.content[0]?.text ?? "";
+
+  assert.equal(result.isError, undefined);
+  assert.match(content, /^Subagent wait: 2 results - @Gray scout completed; @Harper scout completed/);
+  assert.match(content, /child-agent results, not user input/);
+  assert.match(content, /## Result: @Gray scout completed/);
+  assert.match(content, /Gray full body/);
+  assert.match(content, /## Result: @Harper scout completed/);
+  assert.match(content, /Harper full body/);
+  assert.doesNotMatch(content.split("\n", 1)[0] ?? "", /### Summary/);
+});
+
 test("subagent_wait omits model-facing bodies when includeResult is false", async () => {
   const w = workspace();
   const store = new RunStore({ cwd: w.root });

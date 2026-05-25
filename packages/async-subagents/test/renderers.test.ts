@@ -20,6 +20,7 @@ import {
   renderWidgetCard,
   renderWidgetRow,
   stateGlyph,
+  summarizeRunResult,
   summarizeWaitResult,
   truncAnsi,
   visWidth,
@@ -426,6 +427,25 @@ test("renderSubagentWakeMessageComponent adapts the card width to the render vie
   }
 });
 
+test("run result summary preserves the child result summary", () => {
+  assert.match(summarizeRunResult({
+    schemaVersion: 1,
+    runId: "run_a",
+    parentRunId: "root_a",
+    agentName: "scout",
+    contextPolicy: "fresh",
+    sessionPolicy: "record",
+    state: "completed",
+    success: true,
+    createdAt: "2026-05-14T00:00:01.000Z",
+    durationMs: 1000,
+    summary: "Found 3 issues",
+    body: "body",
+    artifacts: [],
+    error: null,
+  }, "run_a"), /Found 3 issues/);
+});
+
 test("wait summary collapses result details and avoids duplicating the agent name", () => {
   const waited: SubagentWaitResult = {
     state: "ready",
@@ -456,7 +476,8 @@ test("wait summary collapses result details and avoids duplicating the agent nam
     timedOut: false,
     next: [],
   };
-  assert.match(summarizeWaitResult(waited), /scout done/);
+  assert.match(summarizeWaitResult(waited), /scout completed/);
+  assert.doesNotMatch(summarizeWaitResult(waited), /Done/);
   assert.doesNotMatch(summarizeWaitResult(waited), /scout scout/);
 });
 

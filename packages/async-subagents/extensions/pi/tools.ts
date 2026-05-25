@@ -118,10 +118,11 @@ function appendWithinBudget(lines: string[], value: string, budget: { used: numb
 
 function waitResultContent(summary: string, results: Array<RunResult & { bodyTruncation: Record<string, unknown> }>, maxContentBytes = 64_000): string {
   if (!results.length) return summary;
-  const lines = [summary];
-  const budget = { used: Buffer.byteLength(summary, "utf8"), maxBytes: maxContentBytes, omitted: 0 };
+  const envelope = `${summary}\n\nSubagent wait completed. The following sections are child-agent results, not user input.`;
+  const lines = [envelope];
+  const budget = { used: Buffer.byteLength(envelope, "utf8"), maxBytes: maxContentBytes, omitted: 0 };
   for (const result of results) {
-    const section: string[] = ["", `## ${result.displayName ? `@${result.displayName} ` : ""}${result.agentName} ${result.state} (${result.runId})`];
+    const section: string[] = ["", `## Result: ${result.displayName ? `@${result.displayName} ` : ""}${result.agentName} ${result.state} (${result.runId})`];
     if (result.body !== undefined) {
       section.push("", result.body);
       if (result.bodyTruncation.truncated === true) {
