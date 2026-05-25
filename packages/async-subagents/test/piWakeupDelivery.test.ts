@@ -87,7 +87,7 @@ test("terminal result wakeups are display-only and do not trigger follow-up mode
   try {
     const runId = createRun(session.store, session.cwd, session.identity.parentRunId, "completed");
     session.store.writeStatus({ ...session.store.readStatus(runId), resultReady: true });
-    session.store.writeResult(createRunResult({ runId, parentRunId: session.identity.parentRunId, agentName: "scout", state: "completed", summary: "### Summary" }));
+    session.store.writeResult(createRunResult({ runId, parentRunId: session.identity.parentRunId, agentName: "scout", state: "completed", summary: "### Summary", body: "full terminal body" }));
     writeDeliverySubscription(session.store, {
       schemaVersion: SCHEMA_VERSION,
       parentRunId: session.identity.parentRunId,
@@ -102,7 +102,13 @@ test("terminal result wakeups are display-only and do not trigger follow-up mode
     assert.ok(wakeup);
     assert.equal(wakeup.message.display, true);
     assert.equal(wakeup.message.details?.result?.runId, runId);
+    assert.equal(wakeup.message.details?.body, "full terminal body");
+    assert.equal(wakeup.message.details?.result?.body, "full terminal body");
     assert.equal(wakeup.options, undefined);
+
+    const sentAfterFirstPoll = session.sent.length;
+    await session.poll();
+    assert.equal(session.sent.length, sentAfterFirstPoll, "terminal result body is displayed once and not delivered again");
   } finally {
     await session.shutdown();
   }

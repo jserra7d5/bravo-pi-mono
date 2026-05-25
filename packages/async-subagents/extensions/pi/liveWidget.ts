@@ -56,9 +56,11 @@ interface BuildResult {
 }
 
 function rowWithCurrentResultReady(input: LiveWidgetInput, row: RunSummaryRow): RunSummaryRow {
-  if (!row.resultReady || !row.result) return row;
-  const parentRunId = input.parentRunId ?? row.result.parentRunId;
-  if (isResultWakeupCurrent(input.store, parentRunId, row.runId, row.result)) return row;
+  if (!row.resultReady) return row;
+  const result = row.result ?? input.store.readResult(row.runId);
+  if (!result) return row;
+  const parentRunId = input.parentRunId ?? result.parentRunId;
+  if (isResultWakeupCurrent(input.store, parentRunId, row.runId, result)) return { ...row, result };
   return { ...row, resultReady: false };
 }
 
@@ -97,14 +99,11 @@ function renderAt(input: LiveWidgetInput, width: number, now: number): string[] 
 
 function hasVisibleRows(input: LiveWidgetInput, now: number): boolean {
   const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
-  const records = input.records ?? input.store.listRecentRuns({ parentRunId: input.parentRunId, rootSessionId: input.rootSessionId });
-  for (const record of records) {
-    try {
-      const status = input.store.readStatus(record.runId);
-      if (visibleState(status.state, status.updatedAt, now, terminalCompletedVisibleMs)) return true;
-    } catch {
-      // Ignore partially-created or concurrently removed runs.
-    }
+  const summaries = input.records
+    ? input.records.flatMap((record) => input.store.readRunSummary(record.runId) ?? [])
+    : input.store.readRunSummaries({ parentRunId: input.parentRunId, rootSessionId: input.rootSessionId });
+  for (const summary of summaries) {
+    if (visibleState(summary.state, summary.updatedAt, now, terminalCompletedVisibleMs)) return true;
   }
   return false;
 }

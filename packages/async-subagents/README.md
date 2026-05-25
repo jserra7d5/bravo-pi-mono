@@ -8,7 +8,7 @@ The runtime is file-backed. By default, each child run gets a durable directory 
 ~/.async-subagents/projects/<project-hash>/runs/<runId>/
 ```
 
-Set `ASYNC_SUBAGENTS_HOME` to move that cache root. Explicit `runRoot` callers can still choose a custom location. For run-id recovery across cwd changes, new runs are also appended to a harness-level lookup index at `~/.async-subagents/run-index.jsonl`; legacy project-local `.subagents/run-index.jsonl` files remain readable.
+Set `ASYNC_SUBAGENTS_HOME` to move that cache root. Explicit `runRoot` callers can still choose a custom location. For run-id recovery across cwd changes, new runs are also appended to a harness-level lookup index at `~/.async-subagents/run-index.jsonl`; legacy project-local `.subagents/run-index.jsonl` files remain readable. A derived `run-index-cache.json` is maintained next to the project run index so direct-child and root-session lookups avoid repeatedly scanning historical JSONL.
 
 Each run directory contains:
 
@@ -16,6 +16,7 @@ Each run directory contains:
 - `events.jsonl`
 - `inbox.jsonl`
 - `result.json` after terminal completion
+- `summary.json` compact derived read model for hot polling paths
 - `artifacts/`
 - `logs/`
 - `pi-session/`
@@ -90,6 +91,16 @@ parent leaf with `SessionManager.open(...).createBranchedSession(leafId)` and
 launches the child with the generated branch path as `piSessionPath`. It does
 not use Pi CLI `--fork`, and it fails clearly unless `allowFreshFallback: true`
 is explicitly set.
+
+## Performance read models and retention
+
+The canonical files remain `run-index.jsonl`, `status.json`, `events.jsonl`, `inbox.jsonl`, and `result.json`. Hot Pi paths use derived projections instead:
+
+- `run-index-cache.json` contains latest records plus parent/root-session maps. It is rebuilt automatically when stale and can be rebuilt explicitly with `RunStore.rebuildDerivedIndexes()`.
+- Per-run `summary.json` is updated by status, event, and result mutations. Widgets, compaction reminders, and wake-up polling use this compact summary for broad discovery and avoid scanning full event/result files for every historical run. They still open canonical files in bounded cases: result-ready rows may read `result.json` for current display/handled checks, subscribed wake polling may scan `events.jsonl` to deliver every pending question/blocked event exactly once, and terminal result wakeups read the full result body for the once-only display.
+- `pruneRuns(store, { olderThanMs, dryRun })` provides conservative manual retention. It never prunes active runs, `resultReady` runs, or runs with delivered-but-unhandled wakeups. `dryRun` defaults to true.
+
+Terminal result wakeups intentionally include the full terminal result body in the delivered/displayed details so the parent/lead agent does not need to call `subagent_result` just to see the answer. That full-body wakeup is claimed and recorded as delivered once; after delivery/handling, the same body must not be displayed again. Do not replace this with summary-only fetch-on-demand behavior.
 
 ## Parent Tools
 

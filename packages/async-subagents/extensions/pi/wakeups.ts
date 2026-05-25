@@ -116,6 +116,8 @@ function eventDelivery(event: RunEvent, status?: { agentName?: string; displayNa
 }
 
 function statusForRun(store: RunStore, runId: string): { agentName?: string; displayName?: string } | undefined {
+  const summary = store.readRunSummary(runId);
+  if (summary) return { agentName: summary.agentName, displayName: summary.displayName };
   try {
     const status = store.readStatus(runId);
     return { agentName: status.agent?.name, displayName: status.displayName };
@@ -144,13 +146,22 @@ export function isResultWakeupCurrent(store: RunStore, parentRunId: string, runI
 
 function pendingForRun(store: RunStore, parentRunId: string, runId: string, notifyOn?: EventType[]): WakeupDelivery[] {
   const allowed = notifyOn ? new Set(notifyOn) : undefined;
-  const result = store.readResult(runId);
-  if (result && isResultWakeupCurrent(store, parentRunId, runId, result) && (!allowed || allowed.has("result") || allowed.has(result.state))) return [resultDelivery(runId, result)];
-  const events = store.readEvents(runId).records.filter((event) => isInterestingEvent(event.type, event.wake) && (!allowed || allowed.has(event.type)));
-  const status = events.length ? statusForRun(store, runId) : undefined;
-  return events
-    .filter((event) => !["result", "completed", "failed", "cancelled", "expired"].includes(event.type))
-    .map((event) => eventDelivery(event, status));
+  const deliveries: WakeupDelivery[] = [];
+  const summary = store.readRunSummary(runId);
+  if (summary?.resultReady && (!allowed || allowed.has("result") || (summary.resultState && allowed.has(summary.resultState)))) {
+    const result = store.readResult(runId);
+    if (result && isResultWakeupCurrent(store, parentRunId, runId, result)) deliveries.push(resultDelivery(runId, result));
+  }
+  const shouldScanEvents = !allowed || [...allowed].some((type) => !["result", "completed", "failed", "cancelled", "expired"].includes(type));
+  if (shouldScanEvents) {
+    const status = statusForRun(store, runId);
+    for (const event of store.readEvents(runId).records) {
+      if (["result", "completed", "failed", "cancelled", "expired"].includes(event.type)) continue;
+      if (!isInterestingEvent(event.type, event.wake) || (allowed && !allowed.has(event.type))) continue;
+      deliveries.push(eventDelivery(event, status));
+    }
+  }
+  return deliveries;
 }
 
 function claimDelivery(store: RunStore, deliveryKey: string, ownerId: string, nowMs?: number): boolean {

@@ -1,6 +1,7 @@
-import { isInterestingEvent, isTerminalRunState } from "./schemas.js";
+import { isTerminalRunState } from "./schemas.js";
 import { RunStore } from "./runStore.js";
-import type { EventType, RunEvent, RunIndexRecord, RunMetrics, RunResult, RunState, RunStatus } from "./types.js";
+import type { RunSummaryReadModel } from "./readModels.js";
+import type { EventType, RunEvent, RunIndexRecord, RunMetrics, RunResult, RunState } from "./types.js";
 
 export interface RunSummaryRow {
   runId: string;
@@ -35,23 +36,6 @@ export interface ReadWatcherSnapshotInput {
   records?: RunIndexRecord[];
 }
 
-function safeStatus(store: RunStore, record: RunIndexRecord): RunStatus | undefined {
-  try {
-    return store.readStatus(record.runId);
-  } catch {
-    return undefined;
-  }
-}
-
-function latestInterestingEvent(store: RunStore, runId: string): RunEvent | undefined {
-  try {
-    const events = store.readEvents(runId).records;
-    return events.filter((event) => isInterestingEvent(event.type, event.wake)).at(-1);
-  } catch {
-    return undefined;
-  }
-}
-
 function priority(row: RunSummaryRow): number {
   if (row.resultReady) return 0;
   if (row.state === "blocked" || row.state === "waiting_for_input") return 1;
@@ -60,34 +44,32 @@ function priority(row: RunSummaryRow): number {
 }
 
 export function readWatcherSnapshot(store: RunStore, input: ReadWatcherSnapshotInput = {}): WatcherSnapshot {
-  const records = input.records ?? store.listRecentRuns({ parentRunId: input.parentRunId, rootSessionId: input.rootSessionId });
+  const summaries: RunSummaryReadModel[] = input.records
+    ? input.records.flatMap((record) => store.readRunSummary(record.runId) ?? [])
+    : store.readRunSummaries({ parentRunId: input.parentRunId, rootSessionId: input.rootSessionId });
   const nowMs = input.nowMs ?? Date.now();
-  const rows: RunSummaryRow[] = records
-    .flatMap((record) => {
-      const status = safeStatus(store, record);
-      if (!status) return [];
-      if (status.state === "completed" && typeof input.completedVisibleMs === "number") {
-        const updatedAtMs = Date.parse(status.updatedAt);
+  const rows: RunSummaryRow[] = summaries
+    .flatMap((summary) => {
+      if (summary.state === "completed" && typeof input.completedVisibleMs === "number") {
+        const updatedAtMs = Date.parse(summary.updatedAt);
         if (Number.isFinite(updatedAtMs) && nowMs - updatedAtMs > input.completedVisibleMs) return [];
       }
-      const result = store.readResult(record.runId);
+      const result = summary.resultReady ? store.readResult(summary.runId) : undefined;
       const row: RunSummaryRow = {
-        runId: record.runId,
-        runDir: record.runDir,
-        agentName: status.agent.name,
-        displayName: status.displayName,
-        namePack: status.namePack,
-        state: status.state,
-        summary: status.summary,
-        needs: status.needs,
-        resultReady: status.resultReady,
-        updatedAt: status.updatedAt,
-        lastActivityAt: status.lastActivityAt,
-        event: latestInterestingEvent(store, record.runId),
+        runId: summary.runId,
+        runDir: summary.runDir,
+        agentName: summary.agentName ?? summary.resultAgentName ?? "subagent",
+        displayName: summary.displayName,
+        namePack: summary.namePack,
+        state: summary.state,
+        summary: summary.summary,
+        needs: summary.needs,
+        resultReady: summary.resultReady,
+        updatedAt: summary.updatedAt,
+        lastActivityAt: summary.lastActivityAt,
+        event: summary.latestWakeEvent,
         result,
-        // Prefer terminal result metrics (final) over the live status copy; either
-        // surface may carry `cost.total`.
-        metrics: result?.metrics ?? status.metrics,
+        metrics: result?.metrics ?? summary.metrics,
       };
       return [row];
     })

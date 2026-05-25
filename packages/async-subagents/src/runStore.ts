@@ -1,10 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { asyncSubagentsHome, defaultRunRoot, findProjectRoot } from "./config.js";
 import { SubagentError } from "./errors.js";
 import { appendJsonl, atomicWriteJson, readJsonl } from "./jsonl.js";
 import { newRunId } from "./ids.js";
 import { nowIso } from "./time.js";
+import { applyEventToSummary, applyResultToSummary, readSummaryFile, summaryFromStatus, summaryPathForRunDir, type RunIndexCache, type RunSummaryReadModel } from "./readModels.js";
 import type { InboxMessage, RunEvent, RunIndexRecord, RunPaths, RunResult, RunStatus, WaitCursor } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
@@ -53,6 +54,14 @@ export class RunStore {
 
   globalIndexPath(): string {
     return join(asyncSubagentsHome(this.env), "run-index.jsonl");
+  }
+
+  indexCachePath(): string {
+    return join(this.runRoot, "..", "run-index-cache.json");
+  }
+
+  summaryPath(runId: string): string {
+    return summaryPathForRunDir(this.pathsFor({ runId }).runDir);
   }
 
   pathsFor(runRef: { runId: string } | { runDir: string }): RunPaths {
@@ -107,6 +116,7 @@ export class RunStore {
   appendRunIndex(record: RunIndexRecord): void {
     appendJsonl(this.indexPath(), record);
     if (resolve(this.globalIndexPath()) !== resolve(this.indexPath())) appendJsonl(this.globalIndexPath(), record);
+    this.writeIndexCache(this.buildIndexCache(this.readRunIndexUncached()));
   }
 
   fallbackIndexPaths(): string[] {
@@ -121,7 +131,7 @@ export class RunStore {
     return [...new Set([this.indexPath(), this.globalIndexPath(), ...this.fallbackIndexPaths()].map((path) => resolve(path)))];
   }
 
-  readRunIndex(): RunIndexRecord[] {
+  private readRunIndexUncached(): RunIndexRecord[] {
     const records = readJsonl<RunIndexRecord>(this.indexPath()).records;
     for (const path of this.fallbackIndexPaths()) {
       if (existsSync(path)) records.push(...readJsonl<RunIndexRecord>(path).records);
@@ -129,23 +139,108 @@ export class RunStore {
     return records;
   }
 
+  private buildIndexCache(records: RunIndexRecord[]): RunIndexCache {
+    const byRunId: Record<string, RunIndexRecord> = {};
+    const childrenByParentRunId: Record<string, string[]> = {};
+    const byRootSessionId: Record<string, string[]> = {};
+    for (const record of records) {
+      byRunId[record.runId] = record;
+      (childrenByParentRunId[record.parentRunId] ??= []).push(record.runId);
+      if (record.rootSessionId) (byRootSessionId[record.rootSessionId] ??= []).push(record.runId);
+    }
+    const sourcePath = this.indexPath();
+    const sourceMtimeMs = existsSync(sourcePath) ? statSync(sourcePath).mtimeMs : 0;
+    return { schemaVersion: SCHEMA_VERSION, rebuiltAt: nowIso(), sourcePath, sourceMtimeMs, records, byRunId, childrenByParentRunId, byRootSessionId };
+  }
+
+  private writeIndexCache(cache: RunIndexCache): void {
+    atomicWriteJson(this.indexCachePath(), cache);
+  }
+
+  readIndexCache(): RunIndexCache {
+    const cachePath = this.indexCachePath();
+    const sourceMtimeMs = existsSync(this.indexPath()) ? statSync(this.indexPath()).mtimeMs : 0;
+    if (existsSync(cachePath)) {
+      try {
+        const cache = JSON.parse(readFileSync(cachePath, "utf8")) as RunIndexCache;
+        if (cache.schemaVersion === SCHEMA_VERSION && cache.sourceMtimeMs >= sourceMtimeMs) return cache;
+      } catch {
+        // Rebuild below.
+      }
+    }
+    const cache = this.buildIndexCache(this.readRunIndexUncached());
+    this.writeIndexCache(cache);
+    return cache;
+  }
+
+  rebuildDerivedIndexes(): RunIndexCache {
+    const cache = this.buildIndexCache(this.readRunIndexUncached());
+    this.writeIndexCache(cache);
+    for (const record of cache.records) {
+      const summary = this.rebuildSummaryByRunDir(record.runDir, this.readSummaryByRunDir(record.runDir));
+      if (summary) atomicWriteJson(summaryPathForRunDir(record.runDir), summary);
+    }
+    return cache;
+  }
+
+  readRunIndex(): RunIndexRecord[] {
+    return this.readIndexCache().records;
+  }
+
   readLookupRunIndex(): RunIndexRecord[] {
-    const records: RunIndexRecord[] = [];
-    for (const path of this.lookupIndexPaths()) {
-      if (existsSync(path)) records.push(...readJsonl<RunIndexRecord>(path).records);
+    const primary = this.readIndexCache().records;
+    const records: RunIndexRecord[] = [...primary];
+    for (const path of [this.globalIndexPath(), ...this.fallbackIndexPaths()].map((path) => resolve(path))) {
+      if (path !== resolve(this.indexPath()) && existsSync(path)) records.push(...readJsonl<RunIndexRecord>(path).records);
     }
     return records;
   }
 
   resolveRunDir(runId: string): string {
+    const cached = this.readIndexCache().byRunId[runId];
+    if (cached) return cached.runDir;
     const records = this.readLookupRunIndex().filter((record) => record.runId === runId);
     const latest = records.at(-1);
     if (!latest) throw new SubagentError("RUN_NOT_FOUND", `run not found: ${runId}`, { runId, indexPath: this.indexPath() });
     return latest.runDir;
   }
 
+  private rebuildSummaryByRunDir(runDir: string, previous?: RunSummaryReadModel): RunSummaryReadModel | undefined {
+    const paths = this.pathsFor({ runDir });
+    if (!existsSync(paths.statusPath)) return undefined;
+    let summary = summaryFromStatus(JSON.parse(readFileSync(paths.statusPath, "utf8")) as RunStatus, runDir, previous);
+    if (existsSync(paths.eventsPath)) {
+      for (const event of readJsonl<RunEvent>(paths.eventsPath).records) summary = applyEventToSummary(summary, event);
+    }
+    if (existsSync(paths.resultPath)) summary = applyResultToSummary(summary, JSON.parse(readFileSync(paths.resultPath, "utf8")) as RunResult);
+    return summary;
+  }
+
+  private readSummaryByRunDir(runDir: string): RunSummaryReadModel | undefined {
+    return readSummaryFile(summaryPathForRunDir(runDir)) ?? this.rebuildSummaryByRunDir(runDir);
+  }
+
+  readRunSummary(runId: string): RunSummaryReadModel | undefined {
+    return this.readSummaryByRunDir(this.pathsFor({ runId }).runDir);
+  }
+
+  readRunSummaries(filter: Partial<Pick<RunIndexRecord, "parentRunId" | "rootSessionId">> = {}): RunSummaryReadModel[] {
+    const cache = this.readIndexCache();
+    const records = filter.parentRunId
+      ? (cache.childrenByParentRunId[filter.parentRunId] ?? []).map((runId) => cache.byRunId[runId]).filter(Boolean)
+      : filter.rootSessionId
+        ? (cache.byRootSessionId[filter.rootSessionId] ?? []).map((runId) => cache.byRunId[runId]).filter(Boolean)
+        : cache.records;
+    return records.flatMap((record) => {
+      const summary = this.readSummaryByRunDir(record.runDir);
+      return summary ? [summary] : [];
+    });
+  }
+
   writeStatus(status: RunStatus): void {
-    atomicWriteJson(this.pathsFor({ runId: status.runId }).statusPath, status);
+    const paths = this.pathsFor({ runId: status.runId });
+    atomicWriteJson(paths.statusPath, status);
+    atomicWriteJson(summaryPathForRunDir(paths.runDir), summaryFromStatus(status, paths.runDir, this.readSummaryByRunDir(paths.runDir)));
   }
 
   readStatus(runId: string): RunStatus {
@@ -155,7 +250,10 @@ export class RunStore {
   }
 
   appendEvent(runId: string, event: RunEvent): void {
-    appendJsonl(this.pathsFor({ runId }).eventsPath, event);
+    const paths = this.pathsFor({ runId });
+    appendJsonl(paths.eventsPath, event);
+    const previous = this.readSummaryByRunDir(paths.runDir);
+    if (previous) atomicWriteJson(summaryPathForRunDir(paths.runDir), applyEventToSummary(previous, event));
   }
 
   readEvents(runId: string, cursor?: WaitCursor): { records: RunEvent[]; cursor: WaitCursor } {
@@ -173,7 +271,10 @@ export class RunStore {
   }
 
   writeResult(result: RunResult): void {
-    atomicWriteJson(this.pathsFor({ runId: result.runId }).resultPath, result);
+    const paths = this.pathsFor({ runId: result.runId });
+    atomicWriteJson(paths.resultPath, result);
+    const previous = this.readSummaryByRunDir(paths.runDir);
+    if (previous) atomicWriteJson(summaryPathForRunDir(paths.runDir), applyResultToSummary(previous, result));
   }
 
   readResult(runId: string): RunResult | undefined {
@@ -183,14 +284,14 @@ export class RunStore {
   }
 
   listDirectChildren(parentRunId: string): RunIndexRecord[] {
-    return this.readRunIndex().filter((record) => record.parentRunId === parentRunId);
+    const cache = this.readIndexCache();
+    return (cache.childrenByParentRunId[parentRunId] ?? []).map((runId) => cache.byRunId[runId]).filter(Boolean);
   }
 
   listRecentRuns(filter: Partial<Pick<RunIndexRecord, "parentRunId" | "rootSessionId">> = {}): RunIndexRecord[] {
-    return this.readRunIndex().filter((record) => {
-      if (filter.parentRunId && record.parentRunId !== filter.parentRunId) return false;
-      if (filter.rootSessionId && record.rootSessionId !== filter.rootSessionId) return false;
-      return true;
-    });
+    if (filter.parentRunId) return this.listDirectChildren(filter.parentRunId).filter((record) => !filter.rootSessionId || record.rootSessionId === filter.rootSessionId);
+    const cache = this.readIndexCache();
+    if (filter.rootSessionId) return (cache.byRootSessionId[filter.rootSessionId] ?? []).map((runId) => cache.byRunId[runId]).filter(Boolean);
+    return cache.records;
   }
 }
