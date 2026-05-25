@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import sourceSearchExtension from "../extensions/pi/index.js";
+import { resolveWorkspaceSearch } from "../src/workspace.js";
 
 function run(command: string, args: string[], cwd?: string) {
   const result = spawnSync(command, args, { cwd, encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
@@ -12,9 +13,9 @@ function run(command: string, args: string[], cwd?: string) {
   return result.stdout.trim();
 }
 
-function runCliRaw(args: string[]) {
+function runCliRaw(args: string[], env: Record<string, string> = {}) {
   const cli = new URL("../src/cli.js", import.meta.url);
-  return spawnSync(process.execPath, [cli.pathname, ...args], { encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+  return spawnSync(process.execPath, [cli.pathname, ...args], { encoding: "utf8", env: { ...process.env, ...env, GIT_TERMINAL_PROMPT: "0" } });
 }
 
 function runCli(args: string[]) {
@@ -40,6 +41,71 @@ async function createRepo() {
   await writeFile(join(repo, ".bravo", "source-search.json"), JSON.stringify({ enabled: true, exclude: ["dist/**"], maxFileBytes: 1048576 }));
   return repo;
 }
+
+test("query works without source-search config and honors agent ignore files", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "source-search-live-"));
+  run("git", ["init"], repo);
+  await mkdir(join(repo, "src"), { recursive: true });
+  await writeFile(join(repo, "src", "visible.ts"), "export const liveNeedle = true;\n");
+  await writeFile(join(repo, "src", "hidden.ts"), "export const ignoredNeedle = true;\n");
+  await writeFile(join(repo, ".agentignore"), "src/hidden.ts\n");
+
+  const visible = runCli(["query", "--repo", repo, "--query", "liveNeedle", "--limit", "5", "--json"]);
+  assert.equal(visible.ok, true);
+  assert.equal(visible.hits?.some((hit) => hit.path === "src/visible.ts"), true);
+
+  const hidden = runCli(["query", "--repo", repo, "--query", "ignoredNeedle", "--limit", "5", "--json"]);
+  assert.equal(hidden.ok, true);
+  assert.equal(hidden.hits?.some((hit) => hit.path === "src/hidden.ts"), false);
+});
+
+test("live fallback searches without cache access and honors directory agent ignores", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "source-search-live-fallback-"));
+  const blockedHome = join(repo, "home-is-a-file");
+  run("git", ["init"], repo);
+  await mkdir(join(repo, "src"), { recursive: true });
+  await writeFile(blockedHome, "not a directory\n");
+  await writeFile(join(repo, "src", "visible.ts"), "export const liveFallbackNeedle = true;\n");
+  await writeFile(join(repo, "src", "hidden.ts"), "export const directoryIgnoredNeedle = true;\n");
+  await writeFile(join(repo, ".agentignore"), "src/hidden.ts\nignored-dir/\n");
+  await writeFile(join(repo, ".piignore"), "pi-hidden/\n");
+  await mkdir(join(repo, "ignored-dir"), { recursive: true });
+  await mkdir(join(repo, "src", "ignored-dir"), { recursive: true });
+  await mkdir(join(repo, "nested", "pi-hidden"), { recursive: true });
+  await writeFile(join(repo, "ignored-dir", "secret.ts"), "export const directoryIgnoredNeedle = true;\n");
+  await writeFile(join(repo, "src", "ignored-dir", "secret.ts"), "export const directoryIgnoredNeedle = true;\n");
+  await writeFile(join(repo, "nested", "pi-hidden", "secret.ts"), "export const directoryIgnoredNeedle = true;\n");
+
+  const cli = new URL("../src/cli.js", import.meta.url);
+  const visibleRaw = spawnSync(process.execPath, [cli.pathname, "query", "--repo", repo, "--query", "liveFallbackNeedle", "--limit", "5", "--json"], { encoding: "utf8", env: { ...process.env, HOME: blockedHome, GIT_TERMINAL_PROMPT: "0" } });
+  assert.equal(visibleRaw.status, 0, visibleRaw.stderr || visibleRaw.stdout);
+  const visible = JSON.parse(visibleRaw.stdout.trim()) as { ok: boolean; indexFreshness?: string; warnings?: string[]; hits?: Array<{ path: string }> };
+  assert.equal(visible.ok, true);
+  assert.equal(visible.indexFreshness, "live");
+  assert.equal(visible.hits?.some((hit) => hit.path === "src/visible.ts"), true);
+  assert.equal(visible.warnings?.some((warning) => warning.includes("live scan fallback used")), true);
+
+  const hiddenRaw = spawnSync(process.execPath, [cli.pathname, "query", "--repo", repo, "--query", "directoryIgnoredNeedle", "--limit", "5", "--json"], { encoding: "utf8", env: { ...process.env, HOME: blockedHome, GIT_TERMINAL_PROMPT: "0" } });
+  assert.equal(hiddenRaw.status, 0, hiddenRaw.stderr || hiddenRaw.stdout);
+  const hidden = JSON.parse(hiddenRaw.stdout.trim()) as { ok: boolean; hits?: Array<{ path: string }> };
+  assert.equal(hidden.ok, true);
+  assert.equal(hidden.hits?.some((hit) => hit.path === "src/hidden.ts"), false);
+  assert.equal(hidden.hits?.some((hit) => hit.path === "ignored-dir/secret.ts"), false);
+  assert.equal(hidden.hits?.some((hit) => hit.path === "src/ignored-dir/secret.ts"), false);
+  assert.equal(hidden.hits?.some((hit) => hit.path === "nested/pi-hidden/secret.ts"), false);
+});
+
+test("workspace search can resolve opportunistic immediate child git repos without config", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "source-search-workspace-"));
+  const child = join(workspace, "child-repo");
+  await mkdir(child, { recursive: true });
+  run("git", ["init"], child);
+
+  const resolved = await resolveWorkspaceSearch(workspace);
+  assert.equal(resolved?.opportunistic, true);
+  assert.equal(resolved?.repos.length, 1);
+  assert.equal(resolved?.repos[0]?.name, "child-repo");
+});
 
 test("status reports manifest indexed count and keeps cacheDir out of warnings", async () => {
   const repo = await createRepo();

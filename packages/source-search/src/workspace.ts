@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -60,9 +61,27 @@ export async function resolveRepoPath(cwd: string, inputPath?: string): Promise<
   return { repoRoot: canonicalRoot, pathPrefix: rel && rel !== "." ? rel : undefined };
 }
 
-export async function resolveWorkspaceSearch(cwd: string, inputPath?: string): Promise<{ workspaceRoot: string; repos: Array<{ name: string; repoRoot: string; pathPrefix?: string }> } | null> {
+export async function discoverChildGitRepos(cwd: string, maxRepos = 8): Promise<Array<{ name: string; repoRoot: string }>> {
+  const repos: Array<{ name: string; repoRoot: string }> = [];
+  const entries = await readdir(cwd, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries.slice(0, 100)) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    const child = join(cwd, entry.name);
+    if (!(await stat(join(child, ".git")).catch(() => null))) continue;
+    const repoRoot = await realpath(child).catch(() => null);
+    if (repoRoot && await gitRoot(repoRoot)) repos.push({ name: entry.name, repoRoot });
+    if (repos.length >= maxRepos) break;
+  }
+  return repos;
+}
+
+export async function resolveWorkspaceSearch(cwd: string, inputPath?: string): Promise<{ workspaceRoot: string; repos: Array<{ name: string; repoRoot: string; pathPrefix?: string }>; opportunistic?: boolean } | null> {
   const config = loadWorkspaceConfig(cwd);
-  if (!config) return null;
+  if (!config) {
+    if (inputPath) return null;
+    const repos = await discoverChildGitRepos(cwd);
+    return repos.length ? { workspaceRoot: cwd, repos, opportunistic: true } : null;
+  }
   if (inputPath) {
     const abs = resolve(cwd, inputPath);
     for (const repo of config.repos) {

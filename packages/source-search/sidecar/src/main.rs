@@ -418,6 +418,14 @@ fn load_config(repo: &Path) -> Result<EffectiveConfig> {
             bail!("ignored-path allowlist is not implemented in this build; remove allowlist entries or rebuild after allowlist support lands");
         }
     }
+    for rel in [".agentignore", ".piignore"] {
+        let path = repo.join(rel);
+        if !path.exists() {
+            continue;
+        }
+        let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {}", rel))?;
+        cfg.exclude.extend(raw.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).map(str::to_string));
+    }
     Ok(cfg)
 }
 
@@ -448,7 +456,16 @@ fn simple_star_match(pattern: &str, path: &str) -> bool {
     }
 }
 
+fn path_has_dir_component(path: &str, dir_pattern: &str) -> bool {
+    path == dir_pattern
+        || path.starts_with(&format!("{dir_pattern}/"))
+        || path.contains(&format!("/{dir_pattern}/"))
+}
+
 fn simple_match(pattern: &str, path: &str) -> bool {
+    if let Some(dir_pattern) = pattern.strip_suffix('/') {
+        return path_has_dir_component(path, dir_pattern);
+    }
     if let Some(prefix_pattern) = pattern.strip_suffix("/**") {
         if simple_star_match(prefix_pattern, path) {
             return true;
@@ -708,8 +725,28 @@ fn query_cmd(args: &[String]) -> Result<i32> {
     let path_prefix = arg(args, "--path-prefix");
     let boosts = parse_boosts(arg(args, "--boosts"))?;
     let exclude_terms = parse_exclude_terms(arg(args, "--exclude-terms"))?;
-    refresh(&repo)?;
-    let (index, fields) = open_or_create_index(&repo)?;
+    let mut warnings = vec![];
+    match refresh(&repo).and_then(|_| indexed_query_response(&repo, q.clone(), limit, path_prefix.clone(), boosts.clone(), exclude_terms.clone())) {
+        Ok(resp) => {
+            println!("{}", serde_json::to_string(&resp)?);
+            return Ok(0);
+        }
+        Err(error) => warnings.push(format!("index unavailable; live scan fallback used: {error}")),
+    }
+    let resp = live_query_response(&repo, q, limit, path_prefix, boosts, exclude_terms, warnings)?;
+    println!("{}", serde_json::to_string(&resp)?);
+    Ok(0)
+}
+
+fn indexed_query_response(
+    repo: &Path,
+    q: String,
+    limit: usize,
+    path_prefix: Option<String>,
+    boosts: Vec<TermBoost>,
+    exclude_terms: Vec<String>,
+) -> Result<QueryResponse> {
+    let (index, fields) = open_or_create_index(repo)?;
     let reader = index.reader()?;
     let searcher = reader.searcher();
     let mut parser =
@@ -827,8 +864,54 @@ fn query_cmd(args: &[String]) -> Result<i32> {
         warnings,
         error: None,
     };
-    println!("{}", serde_json::to_string(&resp)?);
-    Ok(0)
+    Ok(resp)
+}
+
+fn live_query_response(
+    repo: &Path,
+    q: String,
+    limit: usize,
+    path_prefix: Option<String>,
+    boosts: Vec<TermBoost>,
+    exclude_terms: Vec<String>,
+    mut warnings: Vec<String>,
+) -> Result<QueryResponse> {
+    let cfg = load_config(repo)?;
+    if !cfg.enabled {
+        bail!("Source Search is disabled by config");
+    }
+    let terms: Vec<String> = q.split_whitespace().map(|s| s.to_lowercase()).collect();
+    let boost_needles: Vec<(String, f32)> = boosts.iter().map(|b| (b.term.to_lowercase(), b.weight)).collect();
+    let exclude_needles: Vec<String> = exclude_terms.iter().map(|t| t.to_lowercase()).collect();
+    let mut hits = Vec::new();
+    let mut seen = HashSet::new();
+    for rel in git_files(repo)? {
+        let rel_s = rel.to_string_lossy().replace('\\', "/");
+        if !seen.insert(rel_s.clone()) { continue; }
+        if let Some(prefix) = &path_prefix {
+            let normalized_prefix = prefix.trim_end_matches('/');
+            if rel_s != normalized_prefix && !rel_s.starts_with(&format!("{normalized_prefix}/")) { continue; }
+        }
+        let Some((text, _meta)) = safe_text_with_meta(repo, &rel, &cfg)? else { continue; };
+        let haystack = format!("{}\n{}", rel_s, text).to_lowercase();
+        if exclude_needles.iter().any(|term| contains_plain_term(&haystack, term)) { continue; }
+        let matched = terms.iter().filter(|term| contains_plain_term(&haystack, term)).count();
+        if matched == 0 { continue; }
+        let mut score = matched as f32;
+        for term in &terms {
+            if rel_s.to_lowercase().contains(term) { score += 2.0; }
+        }
+        score = boost_needles.iter().fold(score, |current, (term, weight)| {
+            if contains_plain_term(&haystack, term) { current * *weight } else { current }
+        });
+        let matched_fields = matched_fields(&rel_s, &text, &q);
+        let (line, snippet, snippets, line_start, line_end) = best_snippets(&text, &q);
+        hits.push(Hit { path: rel_s, score, line, snippet, snippets, line_start, line_end, matched_fields });
+    }
+    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.path.cmp(&b.path)));
+    hits.truncate(limit);
+    warnings.push("live scan fallback is bounded by git ls-files and agent ignore filters; ranking is approximate".into());
+    Ok(QueryResponse { protocol_version: PROTOCOL_VERSION, ok: true, repo_root: Some(repo.display().to_string()), query: Some(q), boosts, exclude_terms, count: hits.len(), hits, index_freshness: Some("live".into()), warnings, error: None })
 }
 
 fn is_word_byte(byte: u8) -> bool {

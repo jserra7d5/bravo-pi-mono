@@ -1,6 +1,6 @@
 # @bravo/source-search
 
-Source Search adds a Pi `ranked_search` tool backed by a local Tantivy index. It is for broad lexical/BM25 discovery across a git checkout; use typed `boosts`/`excludeTerms` for ranking noise control, and use `grep` and `read` to confirm exact evidence.
+Source Search adds a Pi `ranked_search` tool for broad lexical/BM25 discovery across a git checkout. A local Tantivy index is an optional fast cache; basic search works without repo config or an existing cache by falling back to live `git ls-files` scanning. Use typed `boosts`/`excludeTerms` for ranking noise control, and use `grep` and `read` to confirm exact evidence.
 
 Results are compact evidence packets: ranked paths/scores, `matchedFields` using `filename`, `path`, and `content`, and structured snippet windows with `lineStart`/`lineEnd`, text, optional enclosing `context`, and before/after truncation flags. Snippet windows are selected by match density and lightweight structural cues rather than simply first occurrence. Legacy `snippet`/`line` fields remain for compatibility.
 
@@ -23,11 +23,11 @@ source-search config validate --repo /path/to/repo --json
 source-search purge --repo /path/to/repo --json
 ```
 
-Indexes are stored under `~/.cache/pi-coding-agent/source-search` with owner-only permissions where supported. `query` refreshes the existing index incrementally (new, changed, and deleted files) and falls back to a full rebuild when the index, manifest, schema, or config is incompatible; `index --force` performs a full rebuild. The corpus is based on `git ls-files -z -co --exclude-standard`, never indexes `.git/`, validates paths against the repo root, and applies conservative secret/noise denies.
+Indexes are stored under `~/.cache/pi-coding-agent/source-search` with owner-only permissions where supported. `query` refreshes the index incrementally when possible and falls back to live scanning if index creation/refresh is unavailable. `index --force` performs an explicit full rebuild. The corpus is based on `git ls-files -z -co --exclude-standard`, never indexes `.git/`, validates paths against the repo root, and applies conservative secret/noise denies plus repo-root `.agentignore`/`.piignore` deny globs.
 
 ## Configuration
 
-Optional repo or parent-workspace config lives at `.bravo/source-search.json`. Parent workspaces use this file with a `workspace.repos` registry of concrete child checkouts.
+Optional repo or parent-workspace config lives at `.bravo/source-search.json`. It is for curated workspace scope, additional excludes, max file size, and performance—not required for basic single-checkout search. Parent workspaces can use this file with a `workspace.repos` registry of concrete child checkouts; without config, immediate child git checkouts may be searched opportunistically with conservative caps.
 
 ```json
 {

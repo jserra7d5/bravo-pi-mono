@@ -2,7 +2,7 @@
 
 ## Summary
 
-Build **Source Search**, a Pi extension/package that adds one native agent tool, `ranked_search`, backed by a Tantivy index. The tool provides ranked lexical/full-text discovery across the current git repository or configured workspace checkouts while managing indexing automatically. Exact search remains the responsibility of existing `grep`/`bash`/`read` workflows.
+Build **Source Search**, a Pi extension/package that adds one native agent tool, `ranked_search`. The tool provides ranked lexical/full-text discovery across the current git repository or workspace checkouts. A Tantivy index is an optional fast cache; basic search must also work via live git-aware scanning when no index/config exists or index refresh fails. Exact search remains the responsibility of existing `grep`/`bash`/`read` workflows.
 
 V1 is not a knowledge graph, graph database, semantic vector index, or code-intelligence system. It is a practical ranked retrieval layer over repository files.
 
@@ -11,7 +11,7 @@ V1 is not a knowledge graph, graph database, semantic vector index, or code-inte
 - Provide stronger repo discovery than raw `ripgrep` for broad ranked lexical searches.
 - Use Tantivy in V1, not as a deferred backend.
 - Keep the native agent tool surface small: ideally only `ranked_search`.
-- Hide index lifecycle details from the agent during normal search.
+- Hide index lifecycle details from the agent during normal search; config/index are not prerequisites for basic search.
 - Respect git ignore behavior by default.
 - Allow repo-specific configuration for explicitly indexed ignored paths and excluded noisy paths.
 - Keep `grep` as the exact/regex evidence tool.
@@ -107,14 +107,14 @@ Startup discovery checks:
 2. Current cwd is a configured workspace root with child checkout entries.
 3. Current cwd has existing ranked-search config files.
 4. Existing cache/index manifests for the current checkout or configured child checkouts.
-5. Obvious immediate child git checkouts only as a bounded fallback, reported as unconfigured candidates rather than automatically enabled scope.
+5. Obvious immediate child git checkouts as a bounded opportunistic fallback when no workspace config exists, with explicit warnings and conservative caps.
 
 The injected prompt should tell the agent:
 
 - whether `ranked_search` is available for the current checkout/workspace
 - which configured child checkout names are searchable when running from a parent workspace
-- whether indexes already exist, are missing, or have unknown freshness
-- that the tool will manage refresh/build on first use
+- whether search is configured or opportunistic
+- that the tool may use an index/cache when available, but can fall back to live git-aware scanning
 - to prefer `ranked_search` for broad ranked lexical discovery when available
 - to use `grep` for exact string/regex confirmation
 - to use the `source-search` skill or `source-search` CLI only for setup/debug failures
@@ -124,7 +124,7 @@ Example prompt section for a single repo:
 ```text
 ## Source Search
 
-ranked_search is available for this git checkout. Use it as the default first-pass discovery tool for broad lexical repo search, then use read or grep to inspect exact evidence. The Source Search index is managed automatically on first use.
+ranked_search is available for this git checkout. Use it as the default first-pass discovery tool for broad lexical repo search, then use read or grep to inspect exact evidence. A Source Search index/cache is optional; if unavailable, ranked_search falls back to live git-aware scanning.
 ```
 
 Example prompt section for a parent workspace:
@@ -135,12 +135,12 @@ Example prompt section for a parent workspace:
 ranked_search is available for this workspace. Configured child checkouts: lib, switchyard, skills, playbooks, gateway, roger, tooling. Use ranked_search as the default first-pass discovery tool across configured child checkouts, then use read or grep for exact evidence. Configure dev/prod/worktree variants as separate checkout paths.
 ```
 
-Example prompt section when no configured scope exists but candidates are detected:
+Example prompt section when no configured scope exists but child checkouts are detected:
 
 ```text
 ## Source Search
 
-Source Search is installed, but this directory is not a git checkout and has no workspace registry. Detected child git checkouts are candidates only, not default search scope. Use the source-search skill to configure workspace.repos before relying on ranked workspace search.
+ranked_search can opportunistically search detected immediate child git checkouts from this directory (conservative scope): lib, app, tooling. For stable names/default repos, curated excludes, and performance, configure workspace.repos in .bravo/source-search.json.
 ```
 
 Keep this section compact. Do not inject full config, cache paths, manifest contents, or troubleshooting docs.
@@ -151,14 +151,14 @@ Normal flow:
 
 1. Startup discovery tells the agent whether ranked search is supported for this session scope.
 2. Agent calls `ranked_search` first for broad lexical discovery when supported.
-3. Tool detects git/workspace scope.
-4. Tool loads repo config.
-5. Tool creates or incrementally refreshes the Tantivy index within configured budgets, updating new/changed files and deleting removed or newly excluded files; incompatible indexes/manifests/configs fall back to a full rebuild.
-6. Tool queries index.
-7. Tool returns compact evidence packets: ranked paths/scores, matched fields, selected structured snippet windows, and optional enclosing context.
+3. Tool detects git/workspace scope, including bounded opportunistic immediate-child checkout scope when no workspace config exists.
+4. Tool loads optional repo config and additional agent ignore files.
+5. Tool tries to use or refresh the Tantivy cache when available, updating new/changed files and deleting removed or newly excluded files.
+6. If cache/index creation, refresh, or query is unavailable, tool falls back to live git-aware scanning instead of failing basic search.
+7. Tool returns compact evidence packets: ranked paths/scores, matched fields, selected structured snippet windows, optional enclosing context, and cache/live freshness warnings when relevant.
 8. Agent uses `read` or exact `grep` to inspect/confirm promising results.
 
-The agent should not need to know about Tantivy segments, cache paths, mtimes, locks, or manifest internals for normal use.
+The agent should not need to know about Tantivy segments, cache paths, mtimes, locks, or manifest internals for normal use. Index/cache health affects performance and ranking quality, not basic search availability.
 
 ## Security and privacy
 
@@ -230,7 +230,8 @@ Scope resolution for `ranked_search`:
 1. If `path` resolves inside a configured child checkout, search that checkout and restrict to the path prefix.
 2. Else if cwd is inside a git checkout, search that checkout.
 3. Else if cwd is a configured workspace root, search configured default child checkouts.
-4. Else return a setup-oriented message and, at most, bounded immediate child checkout candidates.
+4. Else if cwd has bounded immediate child git checkouts, search them opportunistically with explicit warnings and conservative caps.
+5. Else return a setup-oriented message.
 
 Default corpus for each checkout should be all text-like files visible to git ignore rules. Implement enumeration with NUL-delimited output or an equivalent safe library call:
 
@@ -461,30 +462,31 @@ The chosen strategy must report freshness caveats:
 
 ## Passive indexing and budgets
 
-`ranked_search` owns passive indexing. Default refresh mode is automatic but bounded.
+`ranked_search` owns passive indexing as an optional fast path. Default refresh mode is automatic but bounded, and cache/index failure must not prevent basic live search.
 
 On query:
 
-1. Find git root.
-2. Load and validate config.
+1. Find git root or resolved workspace child checkout.
+2. Load and validate optional config and additional agent ignore files.
 3. Compute config hash.
-4. Open index cache for repo hash.
-5. If index missing, build within `initialIndexBudgetMs`.
-6. If schema/config version changed, rebuild within budget or return partial/stale warning.
+4. Try to open index cache for repo hash.
+5. If index is missing, try to build within `initialIndexBudgetMs`.
+6. If schema/config version changed, try to rebuild within budget.
 7. Else scan file metadata within `refreshBudgetMs`.
 8. Delete removed docs.
 9. Reindex changed docs.
 10. Commit Tantivy writer.
-11. Execute query.
+11. Execute indexed query when the cache path succeeds.
+12. If cache open/build/refresh/query fails, execute live git-aware scanning and return `indexFreshness: live` plus a warning.
 
 Bounded behavior:
 
-- If initial indexing exceeds budget, return partial results only if a usable partial index exists; otherwise return `IndexUnavailableError` with CLI rebuild guidance.
-- If refresh exceeds budget and an existing index is usable, query stale index and return `indexFreshness: stale` plus warning.
-- If file count exceeds `maxFiles` or total candidate bytes exceeds `maxIndexBytes`, index the safe subset only when deterministic and report `CorpusTooLargeWarning`; otherwise require config narrowing or CLI full index.
+- If initial indexing exceeds budget, use a safe existing/partial index when available; otherwise fall back to live scan with CLI rebuild guidance in warnings.
+- If refresh exceeds budget and an existing index is usable, query stale index and return `indexFreshness: stale` plus warning; otherwise fall back to live scan.
+- If file count exceeds `maxFiles` or total candidate bytes exceeds `maxIndexBytes`, index the safe subset only when deterministic and report `CorpusTooLargeWarning`; otherwise fall back to live scan or require config narrowing when live scan would be unsafe.
 - Tool calls must respect cancellation signals and terminate/kill sidecar work promptly.
 
-If another process holds the write lock, use the existing index when safe and return `LockBusyWarning` that refresh was skipped.
+If another process holds the write lock, use the existing index when safe and return `LockBusyWarning` that refresh was skipped, or fall back to live scan when no safe index is available.
 
 ## Locking and recovery
 
@@ -495,7 +497,7 @@ Use an atomic lock implementation suitable for local filesystems. V1 expectation
 - Manifest writes are atomic: write temp file, fsync where practical, then rename.
 - Tantivy commits complete before manifest claims files are indexed.
 - Stale locks include PID/start-time or timestamp metadata and can be broken only after timeout and process-nonexistence checks.
-- Corrupt index open failures trigger one automatic rebuild attempt. If rebuild fails, return `IndexUnavailableError` and suggest `source-search purge`.
+- Corrupt index open failures trigger one automatic rebuild attempt. If rebuild fails, fall back to live scan and suggest `source-search purge` only for cache cleanup/performance recovery.
 - Disk full and permission errors must be explicit errors, not empty results.
 - Version mismatch between wrapper and sidecar is explicit `VersionMismatchError`.
 
@@ -509,7 +511,7 @@ ranked_search
 
 Description:
 
-> Search the current git repository with ranked lexical full-text retrieval. Use for relevance discovery when exact terms, filenames, or related keywords may appear across many files. The tool manages its Tantivy index automatically and respects gitignore plus repo config allowlists.
+> Search the current git repository with ranked lexical full-text retrieval. Use for relevance discovery when exact terms, filenames, or related keywords may appear across many files. The tool respects gitignore plus agent ignore/config excludes, and can use an optional Tantivy cache or live git-aware scanning.
 
 Use when:
 
@@ -564,7 +566,7 @@ Required fields per result:
 Required envelope fields:
 
 - `repoRoot`
-- `indexFreshness`: `fresh`, `updated`, `stale`, `missing`, or `partial`
+- `indexFreshness`: `fresh`, `updated`, `stale`, `missing`, `partial`, `live`, or workspace aggregate values such as `mixed-live`
 - indexed file count or compact status summary
 - applied `boosts` / `excludeTerms` when present
 - `results`
@@ -608,11 +610,11 @@ Errors should teach recovery.
 - `NotGitRepoError`: ranked search requires a git repo. Use exact grep/bash or pass a path inside a repo.
 - `ConfigError`: Source Search config is invalid. Report file path and line/field if possible.
 - `QueryError`: query is invalid or too long. Simplify terms or remove unsupported syntax.
-- `IndexUnavailableError`: index build/query failed. Exact grep remains available.
+- `IndexUnavailableError`: index build/query failed and live fallback could not complete. Exact grep remains available.
 - `CorpusTooLargeWarning`: only a subset was indexed. Refine path/config or inspect CLI status.
 - `LockBusyWarning`: existing index used; refresh skipped because another process is updating it.
 - `CheckoutChangedError`: checkout `HEAD` changed and refresh could not complete safely. Use exact grep or run `source-search index --force`; configure separate worktrees for persistent dev/prod variants.
-- `NoWorkspaceRegistry`: current directory is not a git checkout and no workspace registry exists. Configure child checkout paths with the Source Search skill.
+- No searchable scope: current directory is not a git checkout and no bounded immediate child checkout or workspace registry exists. Run from a repo or configure child checkout paths with the Source Search skill.
 - `VersionMismatchError`: Pi wrapper and sidecar protocol versions differ. Reinstall/rebuild package.
 - `PermissionError`: cache or repo path cannot be read/written with current permissions.
 - `DiskFullError`: index cannot be written because storage is exhausted.
@@ -624,7 +626,7 @@ Never return “no results” for an index failure. Empty results and failed ret
 The tool-coupled prompt fragment should be small:
 
 ```text
-Use ranked_search as the default first-pass tool for broad ranked lexical discovery when Source Search startup discovery says the current repo or workspace supports it. It searches the current git checkout or configured workspace child checkouts and manages its Tantivy indexes automatically. It is not semantic search; try synonyms when terminology may differ. Use typed boosts when some terms should rank higher/lower and excludeTerms only for clearly unwanted noise topics; do not put boost, boolean, or field syntax in the query string. Use grep for exact strings/regex and read for known files. Configure dev/prod/worktree variants as separate checkout paths. If ranked_search reports config/index failure, use the source-search skill or source-search CLI for setup/debug.
+Use ranked_search as the default first-pass tool for broad ranked lexical discovery when Source Search startup discovery says the current repo or workspace supports it. It searches the current git checkout, configured workspace child checkouts, or bounded opportunistic immediate child checkouts. It may use a Tantivy cache for speed, but basic search can fall back to live git-aware scanning. It is not semantic search; try synonyms when terminology may differ. Use typed boosts when some terms should rank higher/lower and excludeTerms only for clearly unwanted noise topics; do not put boost, boolean, or field syntax in the query string. Use grep for exact strings/regex and read for known files. Configure dev/prod/worktree variants as separate checkout paths. Use the source-search skill or CLI only for setup/debug or cache-performance recovery.
 ```
 
 Detailed configuration and troubleshooting live in the skill, not the always-loaded prompt.

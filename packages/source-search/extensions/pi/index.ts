@@ -74,11 +74,22 @@ export function buildSourceSearchTools() {
           }
         }));
         const hits = responses.flatMap(({ repo, result }) => result.hits.map((hit) => ({ ...hit, repo: repo.name, path: `${repo.name}/${hit.path}` }))).sort((a, b) => b.score - a.score).slice(0, limit);
-        const warnings = responses.flatMap(({ repo, result }) => [
-          ...(result.warnings ?? []).map((w) => `${repo.name}: ${w}`),
-          ...(result.ok ? [] : [`${repo.name}: ${result.error ?? "search failed"}`]),
-        ]);
+        const warnings = [
+          ...(workspace.opportunistic ? ["Using opportunistic immediate child git checkout scope because no .bravo/source-search.json workspace config was found; configure workspace.repos for stable names/default repos and curated excludes."] : []),
+          ...responses.flatMap(({ repo, result }) => [
+            ...(result.warnings ?? []).map((w) => `${repo.name}: ${w}`),
+            ...(result.ok ? [] : [`${repo.name}: ${result.error ?? "search failed"}`]),
+          ]),
+        ];
         const allReposFailed = hits.length === 0 && responses.every(({ result }) => !result.ok);
+        const childFreshness = new Set(responses.map(({ result }) => result.indexFreshness).filter(Boolean));
+        const indexFreshness = responses.some(({ result }) => !result.ok)
+          ? "partial"
+          : childFreshness.size === 1
+            ? [...childFreshness][0]
+            : childFreshness.has("live")
+              ? "mixed-live"
+              : "fresh";
         const result: QueryResponse = {
           protocolVersion: 1,
           ok: !allReposFailed,
@@ -88,7 +99,7 @@ export function buildSourceSearchTools() {
           excludeTerms: params.excludeTerms,
           hits,
           count: hits.length,
-          indexFreshness: responses.some(({ result }) => !result.ok) ? "partial" : "fresh",
+          indexFreshness,
           warnings,
           error: allReposFailed ? failureSummary(warnings) ?? "Workspace ranked_search failed for all configured repos." : undefined,
         };
