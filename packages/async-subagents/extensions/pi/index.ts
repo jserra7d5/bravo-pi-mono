@@ -52,18 +52,21 @@ function refreshUi(ctx: ExtensionContext): void {
 }
 
 function sendWakeup(pi: ExtensionAPI, wakeup: WakeupMessage): void {
-  pi.sendMessage(
-    {
-      customType: "async-subagent-message",
-      content: wakeup.summary ?? wakeup.title,
-      display: true,
-      details: wakeup,
-    },
-    // Result wakeups should still wake the parent, but they do not need to be
-    // steered into an active turn while the user is typing. Questions/blocked
-    // events remain steerable because they can require immediate parent input.
-    { triggerTurn: true, deliverAs: wakeup.result ? "followUp" : "steer" },
-  );
+  const message = {
+    customType: "async-subagent-message",
+    content: wakeup.summary ?? wakeup.title,
+    display: true,
+    details: wakeup,
+  };
+  // Terminal results are UI notifications only. Sending them as triggerTurn +
+  // followUp persists the custom-message content as model-visible user input,
+  // which can create a phantom parent turn after the main final answer.
+  if (wakeup.result) {
+    pi.sendMessage(message);
+    return;
+  }
+  // Questions/blocked events remain steerable because they require parent action.
+  pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" });
 }
 
 function pollAndSendWakeups(pi: ExtensionAPI, store: RunStore, identity: RootSessionIdentity, records?: RunIndexRecord[]): void {
