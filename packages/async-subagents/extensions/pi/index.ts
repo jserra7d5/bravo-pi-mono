@@ -58,14 +58,9 @@ function sendWakeup(pi: ExtensionAPI, wakeup: WakeupMessage): void {
     display: true,
     details: wakeup,
   };
-  // Terminal results are UI notifications only. Sending them as triggerTurn +
-  // followUp persists the custom-message content as model-visible user input,
-  // which can create a phantom parent turn after the main final answer.
-  if (wakeup.result) {
-    pi.sendMessage(message);
-    return;
-  }
-  // Questions/blocked events remain steerable because they require parent action.
+  // Terminal results must wake the parent even when it is idle; autonomous
+  // subagent flows depend on the parent receiving each result exactly once.
+  // Once-only delivery is enforced by durable delivery keys/claims in wakeups.ts.
   pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" });
 }
 

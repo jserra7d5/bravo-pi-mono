@@ -49,7 +49,7 @@ async function withStartedExtension() {
     store,
     identity,
     sent: harness.sent,
-    poll: async () => handlersMustGet(harness.handlers, "session_start")({}, { cwd, hasUI: false }),
+    poll: async (ctxOverride: Record<string, unknown> = {}) => handlersMustGet(harness.handlers, "session_start")({}, { cwd, hasUI: false, ...ctxOverride }),
     shutdown: async () => {
       await handlersMustGet(harness.handlers, "session_shutdown")();
       if (previousHome === undefined) delete process.env.ASYNC_SUBAGENTS_HOME;
@@ -82,7 +82,7 @@ function createRun(store: RunStore, cwd: string, parentRunId: string, state: Run
   return runId;
 }
 
-test("terminal result wakeups are display-only and do not trigger follow-up model turns", async () => {
+test("idle terminal result wakeups trigger the parent once", async () => {
   const session = await withStartedExtension();
   try {
     const runId = createRun(session.store, session.cwd, session.identity.parentRunId, "completed");
@@ -104,11 +104,36 @@ test("terminal result wakeups are display-only and do not trigger follow-up mode
     assert.equal(wakeup.message.details?.result?.runId, runId);
     assert.equal(wakeup.message.details?.body, "full terminal body");
     assert.equal(wakeup.message.details?.result?.body, "full terminal body");
-    assert.equal(wakeup.options, undefined);
+    assert.deepEqual(wakeup.options, { triggerTurn: true, deliverAs: "steer" });
 
     const sentAfterFirstPoll = session.sent.length;
     await session.poll();
     assert.equal(session.sent.length, sentAfterFirstPoll, "terminal result body is displayed once and not delivered again");
+  } finally {
+    await session.shutdown();
+  }
+});
+
+test("active terminal result wakeups also steer into the running parent turn", async () => {
+  const session = await withStartedExtension();
+  try {
+    const runId = createRun(session.store, session.cwd, session.identity.parentRunId, "completed");
+    session.store.writeStatus({ ...session.store.readStatus(runId), resultReady: true });
+    session.store.writeResult(createRunResult({ runId, parentRunId: session.identity.parentRunId, agentName: "scout", state: "completed", summary: "### Summary", body: "full terminal body" }));
+    writeDeliverySubscription(session.store, {
+      schemaVersion: SCHEMA_VERSION,
+      parentRunId: session.identity.parentRunId,
+      runId,
+      notifyOn: ["result", "completed", "failed", "cancelled", "expired"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await session.poll({ isIdle: () => false });
+
+    const wakeup = session.sent.find((item) => item.message?.customType === "async-subagent-message");
+    assert.ok(wakeup);
+    assert.equal(wakeup.message.details?.result?.runId, runId);
+    assert.deepEqual(wakeup.options, { triggerTurn: true, deliverAs: "steer" });
   } finally {
     await session.shutdown();
   }
