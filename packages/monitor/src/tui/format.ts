@@ -28,6 +28,7 @@ function stateIcon(state: string): string {
     case "triggered": return "!";
     case "failed": return "✗";
     case "succeeded": return "✓";
+    case "completed": return "✓";
     case "stopped": return "■";
     default: return "○";
   }

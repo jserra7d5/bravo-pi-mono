@@ -2,22 +2,29 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { JsonlMonitorStore } from "../store/jsonl-store.js";
 import type { MonitorStatusService } from "../runtime/status.js";
-import { NotFoundError } from "../errors.js";
+import { MonitorError, NotFoundError } from "../errors.js";
 import { generateEventId } from "../ids.js";
 import { nowISO } from "../time.js";
+import type { StreamMonitorManager } from "../stream/stream-manager.js";
 
-export function buildStopTool(_pi: ExtensionAPI, store: JsonlMonitorStore, status?: MonitorStatusService) {
+export function buildStopTool(_pi: ExtensionAPI, store: JsonlMonitorStore, status?: MonitorStatusService, streams?: StreamMonitorManager) {
   return {
     name: "monitor_stop",
     label: "Monitor Stop",
-    description: "Stop a monitor permanently. Preserves result history.",
+    description: "Stop a durable monitor permanently. For command monitors, terminates the command process group before persisting stopped state; preserves result/output history.",
     parameters: Type.Object({
       monitor_id: Type.String(),
     }),
     async execute(_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: any, ctx: any) {
       const m = await store.get(params.monitor_id);
       if (!m) throw new NotFoundError(`Monitor ${params.monitor_id} not found`);
-      const updated = await store.update(params.monitor_id, undefined, { state: "stopped", next_run_at: undefined });
+      if ((m.check as any).type === "command") {
+        const outcome = await streams?.stopAndWait(params.monitor_id, 5000);
+        if (outcome?.found && outcome.wasRunning && !outcome.stopped) {
+          throw new MonitorError(`Monitor ${params.monitor_id} did not stop after SIGTERM/SIGKILL timeout`, "STOP_TIMEOUT", 409);
+        }
+      }
+      const updated = await store.update(params.monitor_id, undefined, { state: "stopped", next_run_at: undefined, lease_id: undefined, lease_expires_at: undefined });
       await store.appendEvent({
         event_id: generateEventId(),
         monitor_id: params.monitor_id,
@@ -27,7 +34,7 @@ export function buildStopTool(_pi: ExtensionAPI, store: JsonlMonitorStore, statu
       await status?.refresh(ctx);
       return {
         content: [{ type: "text" as const, text: `Monitor ${updated.monitor_id} stopped` }],
-        details: { monitor_id: updated.monitor_id, state: updated.state },
+        details: { ok: true, message: `Monitor ${updated.monitor_id} stopped`, monitor_id: updated.monitor_id, task_type: (m.check as any).type, command: (m.check as any).command, state: "stopped" },
       };
     },
   };

@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { JsonlMonitorStore } from "../store/jsonl-store.js";
 import { getRuntimeIdentity, monitorBelongsToRuntime } from "../runtime/identity.js";
+import { monitorRow } from "./format.js";
 
 export function buildListTool(_pi: ExtensionAPI, store: JsonlMonitorStore) {
   return {
@@ -10,7 +11,7 @@ export function buildListTool(_pi: ExtensionAPI, store: JsonlMonitorStore) {
     label: "Monitor List",
     description: "List durable monitors with optional filters.",
     parameters: Type.Object({
-      states: Type.Optional(Type.Array(StringEnum(["created", "running", "paused", "triggered", "succeeded", "failed", "stopped", "canceled", "expired", "archived"] as const))),
+      states: Type.Optional(Type.Array(StringEnum(["created", "running", "paused", "triggered", "succeeded", "completed", "failed", "stopped", "canceled", "expired", "archived"] as const))),
       scope: Type.Optional(StringEnum(["session", "root_session", "workspace"] as const)),
       labels: Type.Optional(Type.Record(Type.String(), Type.String())),
       include_archived: Type.Optional(Type.Boolean({ default: false })),
@@ -28,9 +29,10 @@ export function buildListTool(_pi: ExtensionAPI, store: JsonlMonitorStore) {
       });
       if (!params.include_all_sessions) items = items.filter((m) => monitorBelongsToRuntime(m, identity)).slice(0, params.limit ?? 50);
 
+      const rows = items.map(monitorRow);
       return {
-        content: [{ type: "text" as const, text: `Found ${items.length} monitor(s)` }],
-        details: { monitors: items.map((m) => ({ monitor_id: m.monitor_id, name: m.name, state: m.state, next_run_at: m.next_run_at })) },
+        content: [{ type: "text" as const, text: [`Found ${items.length} monitor(s)`, ...rows].join("\n") }],
+        details: { monitors: items.map((m) => ({ monitor_id: m.monitor_id, name: m.name, state: m.state, next_run_at: m.next_run_at, check_type: (m.check as any).type, task_type: (m.check as any).type, command: (m.check as any).command })) },
       };
     },
   };

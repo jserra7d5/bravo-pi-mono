@@ -80,9 +80,11 @@ V1 tools:
 - `monitor_resume`
 - `monitor_stop`
 - `monitor_result`
+- `monitor_output`
+- `monitor_attention`
 - `monitor_ack`
 
-All monitors are addressable by `monitor_id`; tools must work across later turns in the same session/root-session when authorized.
+All monitors are addressable by `monitor_id`; tools must work across later turns in the same session/root-session when authorized. Command monitors use the same durable identity: start them with `monitor_start` and `check.type: "command"`, then read stdout/stderr with `monitor_output`.
 
 ## CLI/command surface
 
@@ -94,6 +96,8 @@ Pi extension commands:
 - `/monitors resume <id>`
 - `/monitors stop <id>`
 - `/monitors ack <id|all>`
+
+Native tools are the primary interface for command output. `/monitors` may remain compact; agents should use `monitor_output` for command logs.
 
 If a standalone CLI is useful later, add `pi-monitor` or `monitor` commands, but V1 can be extension/tool-first.
 
@@ -129,7 +133,7 @@ V1 panel:
 ```txt
 Monitors
 > ● build output       running    next 8s      file exists dist/app.js
-  ! child complete     triggered  2m ago      command exited 0
+  ✓ child complete     completed  2m ago      command exited 0
   ⏸ slow poll          paused     —           http GET /health
 
 Enter: details  p: pause/resume  a: ack  s: stop  r: refresh  Esc: close
@@ -142,6 +146,7 @@ Details view:
 - last result summary
 - next run time
 - recent result history
+- command output file and exit code/signal when applicable
 - actions: pause/resume/stop/ack
 
 Implementation notes:

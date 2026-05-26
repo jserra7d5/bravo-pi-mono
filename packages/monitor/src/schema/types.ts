@@ -4,6 +4,7 @@ export type MonitorState =
   | "paused"
   | "triggered"
   | "succeeded"
+  | "completed"
   | "failed"
   | "stopped"
   | "canceled"
@@ -20,6 +21,18 @@ export type MonitorOwner = {
 
 export type TimerCheckSpec = { type: "timer" };
 
+export type CommandCheckSpec = {
+  type: "command";
+  command: string;
+  cwd?: string;
+  mode?: "stream" | "exit";
+  shell?: boolean;
+  timeout_ms?: number;
+  event_throttle_ms?: number;
+  max_lines_per_turn?: number;
+  tail_bytes?: number;
+};
+
 export type FileCheckSpec = {
   type: "file";
   path: string;
@@ -28,7 +41,7 @@ export type FileCheckSpec = {
   encoding?: "utf8";
 };
 
-export type CheckSpec = TimerCheckSpec | FileCheckSpec;
+export type CheckSpec = TimerCheckSpec | FileCheckSpec | CommandCheckSpec;
 
 export type ScheduleSpec = {
   start_at?: string;
@@ -130,6 +143,7 @@ export type MonitorEventType =
   | "triggered"
   | "failed"
   | "succeeded"
+  | "completed"
   | "ack"
   | "expired"
   | "archived";

@@ -4,6 +4,24 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { JsonlMonitorStore } from "../store/jsonl-store.js";
 import { getRuntimeIdentity, monitorBelongsToRuntime } from "../runtime/identity.js";
 
+function value(v: unknown): string | undefined {
+  if (v === undefined || v === null || v === "") return undefined;
+  return String(v);
+}
+
+function attentionRow(item: any): string {
+  const parts = [
+    `monitor=${item.monitor_id}`,
+    value(item.name) ? `name=${value(item.name)}` : undefined,
+    `state=${item.state}`,
+    `status=${item.status}`,
+    value(item.message) ? `message=${value(item.message)}` : undefined,
+    value(item.severity) ? `severity=${value(item.severity)}` : undefined,
+    `result=${item.result_id}`,
+  ].filter(Boolean);
+  return `- ${parts.join(" ")}`;
+}
+
 export function buildAttentionTool(_pi: ExtensionAPI, store: JsonlMonitorStore) {
   return {
     name: "monitor_attention",
@@ -32,6 +50,7 @@ export function buildAttentionTool(_pi: ExtensionAPI, store: JsonlMonitorStore) 
             triggered: r.triggered,
             created_at: r.created_at,
             message: r.attention_delivery?.message ?? m.attention.message,
+            severity: r.attention_delivery?.severity,
             wake_delivered: r.attention_delivery?.wake_delivered,
             wake_error: r.attention_delivery?.wake_error,
             notify_delivered: r.attention_delivery?.notify_delivered,
@@ -41,8 +60,11 @@ export function buildAttentionTool(_pi: ExtensionAPI, store: JsonlMonitorStore) 
       }
       items.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
       const limited = items.slice(0, params.limit ?? 20);
+      const text = limited.length
+        ? `Found ${limited.length} pending monitor attention item(s)\n${limited.map(attentionRow).join("\n")}`
+        : "No pending monitor attention.";
       return {
-        content: [{ type: "text" as const, text: limited.length ? `Found ${limited.length} pending monitor attention item(s)` : "No pending monitor attention." }],
+        content: [{ type: "text" as const, text }],
         details: { attention: limited },
       };
     },

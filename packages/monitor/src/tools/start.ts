@@ -4,6 +4,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { JsonlMonitorStore } from "../store/jsonl-store.js";
 import type { MonitorStatusService } from "../runtime/status.js";
 import type { MonitorRecord } from "../schema/types.js";
+import type { StreamMonitorManager } from "../stream/stream-manager.js";
 import { generateMonitorId } from "../ids.js";
 import { nowISO } from "../time.js";
 import { validateCheck, validateSchedule, validateCondition, validateAttention, validateRetention, validateLabels, validateStateTransition } from "../validation.js";
@@ -12,19 +13,38 @@ import { getRuntimeIdentity, monitorBelongsToRuntime } from "../runtime/identity
 const DEFAULT_ATTENTION = { notify: true, wake_agent: false, throttle_ms: 30000 };
 const DEFAULT_RETENTION = { max_results: 100, max_events: 500 };
 
-export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, status?: MonitorStatusService) {
+function startMessage(monitorId: string, record: MonitorRecord, nextRunAt?: string, outputFile?: string): string {
+  const lines = [`Monitor ${monitorId} created`, `state=${record.state} version=${record.version}`];
+  if (record.check.type === "command") {
+    lines.push(`next: use monitor_output monitor_id=${monitorId}`);
+    if (outputFile) lines.push(`output_file=${outputFile}`);
+    lines.push(`notify=${record.attention.notify} wake_agent=${record.attention.wake_agent}`);
+  } else if (nextRunAt) {
+    lines.push(`next_run_at=${nextRunAt}`);
+  }
+  return lines.join("\n");
+}
+
+export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, status?: MonitorStatusService, streams?: StreamMonitorManager) {
   return {
     name: "monitor_start",
     label: "Monitor Start",
-    description: "Create a durable background monitor with a schedule and check.",
+    description: "Create a durable background monitor. Use check.type='timer' or 'file' for scheduled checks; use check.type='command' for durable shell-command monitors with output read through monitor_output.",
     parameters: Type.Object({
       name: Type.Optional(Type.String({ description: "Human-readable monitor name" })),
       description: Type.Optional(Type.String()),
       scope: Type.Optional(StringEnum(["session", "root_session", "workspace"] as const)),
       check: Type.Object({
-        type: StringEnum(["timer", "file"] as const),
+        type: StringEnum(["timer", "file", "command"] as const),
+        command: Type.Optional(Type.String({ description: "Shell command for check.type='command'. Use monitor_output to read captured stdout/stderr." })),
+        cwd: Type.Optional(Type.String({ description: "Working directory for command monitors." })),
+        shell: Type.Optional(Type.Boolean({ description: "Whether to run command through a shell. Defaults to true." })),
+        timeout_ms: Type.Optional(Type.Number({ description: "Optional command runtime timeout in milliseconds." })),
+        event_throttle_ms: Type.Optional(Type.Number({ description: "Minimum batching delay before command output wakes the agent." })),
+        max_lines_per_turn: Type.Optional(Type.Number({ description: "Maximum command output lines batched into one wake-up." })),
+        tail_bytes: Type.Optional(Type.Number({ description: "Default tail size for monitor_output." })),
         path: Type.Optional(Type.String()),
-        mode: Type.Optional(StringEnum(["exists", "missing", "modified_since_start", "contains"] as const)),
+        mode: Type.Optional(StringEnum(["exists", "missing", "modified_since_start", "contains", "stream", "exit"] as const)),
         pattern: Type.Optional(Type.String()),
         encoding: Type.Optional(Type.String({ default: "utf8" })),
       }),
@@ -61,6 +81,10 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
     }),
     async execute(_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: any, ctx: any) {
       const check: any = { type: params.check.type };
+      if (params.check.command) check.command = params.check.command;
+      if (params.check.cwd) check.cwd = params.check.cwd;
+      if (params.check.shell !== undefined) check.shell = params.check.shell;
+      for (const k of ["timeout_ms", "event_throttle_ms", "max_lines_per_turn", "tail_bytes"] as const) if (params.check[k] !== undefined) check[k] = params.check[k];
       if (params.check.path) check.path = params.check.path;
       if (params.check.mode) check.mode = params.check.mode;
       if (params.check.pattern) check.pattern = params.check.pattern;
@@ -92,14 +116,16 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
       const now = nowISO();
 
       let nextRunAt: string | undefined;
-      if (params.schedule.start_at) {
-        nextRunAt = params.schedule.start_at;
-      } else if (typeof params.schedule.delay_ms === "number") {
-        nextRunAt = new Date(Date.now() + params.schedule.delay_ms).toISOString();
-      } else if (typeof params.schedule.interval_ms === "number") {
-        nextRunAt = new Date(Date.now() + params.schedule.interval_ms).toISOString();
-      } else {
-        nextRunAt = now;
+      if (check.type !== "command") {
+        if (params.schedule.start_at) {
+          nextRunAt = params.schedule.start_at;
+        } else if (typeof params.schedule.delay_ms === "number") {
+          nextRunAt = new Date(Date.now() + params.schedule.delay_ms).toISOString();
+        } else if (typeof params.schedule.interval_ms === "number") {
+          nextRunAt = new Date(Date.now() + params.schedule.interval_ms).toISOString();
+        } else {
+          nextRunAt = now;
+        }
       }
 
       const record: MonitorRecord = {
@@ -132,11 +158,16 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
       };
 
       await store.create(record);
+      let streamState: any;
+      if (check.type === "command") {
+        if (!streams) throw new Error("Command monitors are not available");
+        streamState = streams.start({ command: check.command, description: params.description ?? params.name ?? monitorId, cwd: check.cwd, timeout_ms: check.timeout_ms, notify: record.attention.notify, wake_agent: record.attention.wake_agent, event_throttle_ms: check.event_throttle_ms, max_lines_per_turn: check.max_lines_per_turn, shell: check.shell, stream_id: monitorId, monitor_id: monitorId, store }, ctx);
+      }
       await status?.refresh(ctx);
 
       return {
-        content: [{ type: "text" as const, text: `Monitor ${monitorId} created` }],
-        details: { monitor_id: monitorId, state: record.state, next_run_at: nextRunAt },
+        content: [{ type: "text" as const, text: startMessage(monitorId, record, nextRunAt, streamState?.output_file) }],
+        details: { ok: true, monitor_id: monitorId, state: record.state, next_run_at: nextRunAt, output_file: streamState?.output_file },
       };
     },
   };

@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { JsonlMonitorStore } from "../store/jsonl-store.js";
 import { NotFoundError } from "../errors.js";
+import { monitorLookText } from "./format.js";
 
 export function buildLookTool(_pi: ExtensionAPI, store: JsonlMonitorStore) {
   return {
@@ -17,7 +18,7 @@ export function buildLookTool(_pi: ExtensionAPI, store: JsonlMonitorStore) {
       if (!m) throw new NotFoundError(`Monitor ${params.monitor_id} not found`);
       const results = await store.listResults(params.monitor_id, { limit: params.include_results ?? 5 });
       return {
-        content: [{ type: "text" as const, text: `Monitor ${m.monitor_id} state=${m.state}` }],
+        content: [{ type: "text" as const, text: monitorLookText(m, results) }],
         details: { monitor: m, results },
       };
     },

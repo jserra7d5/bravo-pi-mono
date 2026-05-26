@@ -15,6 +15,17 @@ export function validateCheck(check: CheckSpec): void {
       }
       return;
     }
+    case "command": {
+      const c = check as any;
+      if (!c.command || typeof c.command !== "string" || c.command.trim().length === 0) throw new ValidationError("Command check requires non-empty command");
+      if (c.mode !== undefined && c.mode !== "stream" && c.mode !== "exit") throw new ValidationError(`Invalid command mode: ${c.mode}`);
+      for (const key of ["timeout_ms", "event_throttle_ms", "tail_bytes"] as const) {
+        if (c[key] !== undefined && (!Number.isFinite(c[key]) || c[key] < 0 || c[key] > 24 * 60 * 60 * 1000)) throw new ValidationError(`${key} is out of bounds`);
+      }
+      if (c.max_lines_per_turn !== undefined && (!Number.isInteger(c.max_lines_per_turn) || c.max_lines_per_turn < 1 || c.max_lines_per_turn > 1000)) throw new ValidationError("max_lines_per_turn is out of bounds");
+      if (c.shell !== undefined && typeof c.shell !== "boolean") throw new ValidationError("shell must be boolean");
+      return;
+    }
     default:
       throw new ValidationError(`Unsupported check type: ${(check as any).type}`);
   }
@@ -110,7 +121,7 @@ export function validateOwner(owner: MonitorOwner): void {
 }
 
 export function validateStateTransition(from: MonitorState, to: MonitorState): void {
-  const terminal = new Set(["stopped", "canceled", "expired", "archived"]);
+  const terminal = new Set(["completed", "stopped", "canceled", "expired", "archived"]);
   if (terminal.has(from) && from !== to) {
     throw new ValidationError(`Cannot transition from terminal state ${from} to ${to}`);
   }

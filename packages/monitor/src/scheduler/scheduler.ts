@@ -64,7 +64,7 @@ export class MonitorScheduler {
       const due = await this.store.claimDue(
         now,
         { lease_id: generateLeaseId(), ttl_ms: this.opts.leaseTtlMs },
-        (monitor) => monitorBelongsToRuntime(monitor, identity)
+        (monitor) => monitorBelongsToRuntime(monitor, identity) && monitor.check.type !== "command"
       );
       for (const m of due) {
         if (this.activeRuns.size >= this.opts.maxConcurrentRuns) break;
@@ -81,6 +81,11 @@ export class MonitorScheduler {
   }
 
   private async runOne(monitor: MonitorRecord): Promise<void> {
+    if (monitor.check.type === "command") {
+      await this.store.releaseLease(monitor.monitor_id, monitor.lease_id ?? "", undefined);
+      return;
+    }
+
     const startAt = nowISO();
     let result: MonitorResult;
     try {
@@ -102,22 +107,32 @@ export class MonitorScheduler {
     result.condition_matched = conditionMatched;
     result.triggered = conditionMatched && result.status === "matched";
 
-    await this.store.appendResult(result);
+    const current = await this.store.get(monitor.monitor_id);
+    if (!current || current.lease_id !== monitor.lease_id || current.state !== "running") return;
 
-    const nextState = this.computeNextState(monitor, result);
-    const nextRunAt = this.computeNextRun(monitor, result);
-    const failureCount = result.status === "error" ? monitor.failure_count + 1 : monitor.failure_count;
-    const consecutiveFailureCount = result.status === "error" ? monitor.consecutive_failure_count + 1 : 0;
-    const runCount = monitor.run_count + 1;
+    const nextState = this.computeNextState(current, result);
+    const nextRunAt = this.computeNextRun(current, result);
+    const failureCount = result.status === "error" ? current.failure_count + 1 : current.failure_count;
+    const consecutiveFailureCount = result.status === "error" ? current.consecutive_failure_count + 1 : 0;
+    const runCount = current.run_count + 1;
 
-    await this.store.update(monitor.monitor_id, undefined, {
+    await this.store.update(current.monitor_id, current.version, {
       state: nextState,
       last_run_at: startAt,
       next_run_at: nextRunAt,
       failure_count: failureCount,
       consecutive_failure_count: consecutiveFailureCount,
       run_count: runCount,
+      lease_id: undefined,
+      lease_expires_at: undefined,
     });
+
+    if (result.triggered || result.status === "error") {
+      const attention_delivery = await this.statusService?.deliverAttention(current, result, this.ctx);
+      if (attention_delivery) result.attention_delivery = attention_delivery;
+    }
+
+    await this.store.appendResult(result);
 
     if (result.triggered) {
       await this.store.appendEvent({
@@ -137,14 +152,7 @@ export class MonitorScheduler {
       });
     }
 
-    if (result.triggered || result.status === "error") {
-      const attention_delivery = await this.statusService?.deliverAttention(monitor, result, this.ctx);
-      if (attention_delivery) await this.store.updateResult(monitor.monitor_id, result.result_id, { attention_delivery });
-    }
-
     await this.statusService?.refresh(this.ctx);
-
-    await this.store.releaseLease(monitor.monitor_id, monitor.lease_id ?? "", nextRunAt);
   }
 
   private async executeCheck(monitor: MonitorRecord): Promise<MonitorResult> {
@@ -162,7 +170,7 @@ export class MonitorScheduler {
     if (result.triggered) return "triggered";
     if (result.status === "error") return "failed";
 
-    const terminalStates = new Set(["stopped", "canceled", "expired", "archived"]);
+    const terminalStates = new Set(["completed", "stopped", "canceled", "expired", "archived"]);
     if (terminalStates.has(monitor.state)) return monitor.state;
 
     // Check max_runs
@@ -178,7 +186,7 @@ export class MonitorScheduler {
   }
 
   private computeNextRun(monitor: MonitorRecord, result: MonitorResult): string | undefined {
-    const terminalStates = new Set(["stopped", "canceled", "expired", "archived", "succeeded"]);
+    const terminalStates = new Set(["completed", "stopped", "canceled", "expired", "archived", "succeeded"]);
     if (terminalStates.has(monitor.state as string)) return undefined;
     if (monitor.schedule.max_runs && monitor.run_count + 1 >= monitor.schedule.max_runs) return undefined;
     if (monitor.schedule.deadline_at && Date.parse(monitor.schedule.deadline_at) <= Date.now()) return undefined;

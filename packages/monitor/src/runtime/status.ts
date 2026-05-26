@@ -23,7 +23,7 @@ export class MonitorStatusService {
     if (text) ctx.ui.setStatus("monitors", text);
   }
 
-  async deliverAttention(monitor: MonitorRecord, result: MonitorResult, ctx?: any): Promise<AttentionDelivery> {
+  async deliverAttention(monitor: MonitorRecord, result: MonitorResult, ctx?: any, options?: { notify?: boolean; wake?: boolean; previous?: AttentionDelivery }): Promise<AttentionDelivery> {
     const severity = result.triggered ? "warning" : "error";
     const message =
       monitor.attention.message ??
@@ -31,9 +31,9 @@ export class MonitorStatusService {
     const delivery: AttentionDelivery = {
       message,
       severity,
-      notify_attempted: monitor.attention.notify !== false,
+      notify_attempted: (options?.notify ?? true) && monitor.attention.notify !== false,
       notify_delivered: false,
-      wake_attempted: monitor.attention.wake_agent === true,
+      wake_attempted: (options?.wake ?? true) && monitor.attention.wake_agent === true,
       wake_delivered: false,
       target_session_id: monitor.owner.session_id,
       target_root_session_id: monitor.owner.root_session_id,
@@ -48,8 +48,8 @@ export class MonitorStatusService {
         delivery.notify_error = "ui.notify unavailable";
       } else {
         try {
-          this.lastNotifyTime.set(monitor.monitor_id, Date.now());
           ctx.ui.notify(message, severity);
+          this.lastNotifyTime.set(monitor.monitor_id, Date.now());
           delivery.notify_delivered = true;
         } catch (err: any) {
           delivery.notify_error = err?.message ?? String(err);
@@ -79,7 +79,28 @@ export class MonitorStatusService {
     }
 
     if (delivery.notify_delivered || delivery.wake_delivered) delivery.delivered_at = new Date().toISOString();
-    return delivery;
+    return this.mergeDelivery(options?.previous, delivery);
+  }
+
+  private mergeDelivery(previous: AttentionDelivery | undefined, next: AttentionDelivery): AttentionDelivery {
+    if (!previous) return next;
+    const merged: AttentionDelivery = { ...previous, ...next };
+    if (previous.notify_delivered) {
+      merged.notify_delivered = true;
+      merged.notify_error = previous.notify_error;
+    }
+    if (previous.wake_delivered) {
+      merged.wake_delivered = true;
+      merged.wake_error = previous.wake_error;
+    }
+    if (previous.delivered_at && (previous.notify_delivered || previous.wake_delivered)) {
+      merged.delivered_at = previous.delivered_at;
+    } else if (!merged.delivered_at && (merged.notify_delivered || merged.wake_delivered)) {
+      merged.delivered_at = new Date().toISOString();
+    }
+    merged.notify_attempted = previous.notify_attempted || next.notify_attempted;
+    merged.wake_attempted = previous.wake_attempted || next.wake_attempted;
+    return merged;
   }
 
   async backfillPending(ctx?: any): Promise<number> {
@@ -94,7 +115,7 @@ export class MonitorStatusService {
         const wakeNeeded = monitor.attention.wake_agent === true && previous?.wake_delivered !== true;
         const notifyNeeded = monitor.attention.notify !== false && previous?.notify_delivered !== true;
         if (!wakeNeeded && !notifyNeeded) continue;
-        const attention_delivery = await this.deliverAttention(monitor, result, ctx);
+        const attention_delivery = await this.deliverAttention(monitor, result, ctx, { notify: notifyNeeded, wake: wakeNeeded, previous });
         await this.store.updateResult(monitor.monitor_id, result.result_id, { attention_delivery });
         if (attention_delivery.wake_delivered || attention_delivery.notify_delivered) delivered++;
       }

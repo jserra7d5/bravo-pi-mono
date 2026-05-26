@@ -146,6 +146,8 @@ monitor_pause
 monitor_resume
 monitor_stop
 monitor_result
+monitor_output
+monitor_attention
 monitor_ack
 ```
 
@@ -170,8 +172,16 @@ type MonitorStartInput = {
 Returns:
 
 ```ts
-{ monitor_id: string; state: MonitorState; next_run_at?: string }
+{
+  ok: true;
+  monitor_id: string;
+  state: MonitorState;
+  next_run_at?: string;
+  output_file?: string; // command monitors
+}
 ```
+
+Command monitors are durable command tasks keyed by `monitor_id`. Use `monitor_start` with `check.type: "command"` and `schedule: {}`; read stdout/stderr with `monitor_output`. `attention.notify` controls UI notifications and `attention.wake_agent` controls follow-up messages. Quiet command monitors still capture output to `output_file`.
 
 ### Other tools
 
@@ -179,8 +189,10 @@ Returns:
 - `monitor_look`: full monitor config plus optional recent results.
 - `monitor_update`: mutable fields only; optimistic `expected_version` optional.
 - `monitor_pause` / `monitor_resume`: non-destructive state transitions.
-- `monitor_stop`: terminal stop/cancel; preserve result history.
-- `monitor_result`: latest/historical results.
+- `monitor_stop`: terminal stop/cancel; for command monitors, stop the process group before persisting stopped state; preserve result/output history.
+- `monitor_result`: latest/historical timer/file results and command completion metadata; use `monitor_output` for command stdout/stderr.
+- `monitor_output`: read stdout/stderr captured by a durable command monitor; supports bounded blocking and state-specific empty/timeout messages.
+- `monitor_attention`: list unacked triggered/error results with row-oriented visible output.
 - `monitor_ack`: acknowledge latest/all triggered or failed results.
 
 Ack input should require exactly one of `monitor_id`, `result_id`, or `all`.
@@ -194,6 +206,7 @@ type MonitorState =
   | "paused"
   | "triggered"
   | "succeeded"
+  | "completed"
   | "failed"
   | "stopped"
   | "canceled"
@@ -240,7 +253,7 @@ type MonitorRecord = {
 V1 check types:
 
 ```ts
-type CheckSpec = TimerCheckSpec | FileCheckSpec;
+type CheckSpec = TimerCheckSpec | FileCheckSpec | CommandCheckSpec;
 
 type TimerCheckSpec = { type: "timer" };
 
@@ -251,9 +264,21 @@ type FileCheckSpec = {
   pattern?: string;
   encoding?: "utf8";
 };
+
+type CommandCheckSpec = {
+  type: "command";
+  command: string;
+  cwd?: string;
+  mode?: "stream" | "exit";
+  shell?: boolean;
+  timeout_ms?: number;
+  event_throttle_ms?: number;
+  max_lines_per_turn?: number;
+  tail_bytes?: number;
+};
 ```
 
-Later check types: HTTP, process, command.
+Later check types: HTTP, process.
 
 ```ts
 type ScheduleSpec = {
@@ -273,7 +298,8 @@ type ScheduleSpec = {
 
 V1 schedule rules:
 
-- require one of `delay_ms`, `interval_ms`, or `start_at`;
+- timer/file checks may use `delay_ms`, `interval_ms`, or `start_at`; an empty schedule runs immediately;
+- command monitors ignore scheduler polling and start immediately from `monitor_start`;
 - enforce finite positive values;
 - enforce minimum interval, e.g. 1s;
 - default timeout, e.g. 10s.

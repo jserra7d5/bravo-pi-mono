@@ -151,6 +151,7 @@ export class JsonlMonitorStore {
       case "triggered":
       case "failed":
       case "succeeded":
+      case "completed":
       case "expired":
       case "archived":
       case "ack": {
@@ -180,6 +181,9 @@ export class JsonlMonitorStore {
             break;
           case "succeeded":
             m.state = "succeeded";
+            break;
+          case "completed":
+            m.state = "completed";
             break;
           case "expired":
             m.state = "expired";
@@ -443,7 +447,7 @@ export class JsonlMonitorStore {
     // Archive very old terminal monitors (older than 30 days)
     const archiveThreshold = 30 * 24 * 60 * 60 * 1000;
     for (const m of this.monitors.values()) {
-      const terminal = new Set(["stopped", "canceled", "expired", "succeeded"]);
+      const terminal = new Set(["completed", "stopped", "canceled", "expired", "succeeded"]);
       if (terminal.has(m.state) && Date.parse(m.updated_at) < _now.getTime() - archiveThreshold) {
         m.state = "archived";
         m.updated_at = nowISO();
