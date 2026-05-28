@@ -66,6 +66,35 @@ Use the default by omitting `variant`; use a variant with `subagent_start({ agen
 
 Provider-backed variants must include the provider extension that registers the model because child Pi launches are intentionally isolated with `--no-extensions`. Point `extensions` at a loadable Pi extension module file, such as `extensions/pi/index.ts` or `dist/extensions/pi/index.js`; a package extension directory may not be enough when async-subagents passes it through Pi's `-e` CLI flag.
 
+## Codex auth balancer
+
+Async subagents can optionally launch Codex-backed children through the process-boundary auth balancer implemented by `authswap`. The balancer does not expose arbitrary child env to agents; it internally prepares isolated auth homes and injects only:
+
+- `PI_CODING_AGENT_DIR=<runDir>/auth/codex-balancer/pi-agent`
+- `CODEX_HOME=<runDir>/auth/codex-balancer/codex`
+
+Enable it in `~/.async-subagents/config.json`:
+
+```json
+{
+  "version": 1,
+  "defaultExtensions": [],
+  "codexAuthBalancer": {
+    "enabled": true,
+    "provider": "authswap",
+    "authswapPath": "/home/joe/.local/bin/authswap",
+    "mode": "process-env",
+    "timeoutMs": 10000,
+    "failClosed": true,
+    "onlyForProviders": ["openai-codex", "openai-codex-responses"]
+  }
+}
+```
+
+`authswapPath` is optional when `AUTHSWAP_BIN` or `authswap` on `PATH` resolves to a compatible binary. The binary must support `authswap --version --json` and the Codex V1 capabilities. Balancing is fail-closed by default: if prepare-launch fails, the child run fails rather than silently using the parent's auth. Set `failClosed: false` only for explicit maintenance/debug fallback.
+
+The supervisor runs `authswap codex --sync-back --json` after child exit so refreshed OAuth tokens are copied back safely. If sync-back times out or reports a conflict, the isolated auth directory is retained with `ASYNC_SUBAGENTS_RETAINED.json` and must be inspected or cleaned up explicitly.
+
 Recorded children launch Pi with:
 
 ```sh

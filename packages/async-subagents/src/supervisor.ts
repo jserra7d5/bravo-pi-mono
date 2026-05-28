@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process";
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFile, spawn } from "node:child_process";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createStartedEvent } from "./events.js";
 import { finalizeTerminalRun } from "./lifecycle.js";
 import { RunStore } from "./runStore.js";
@@ -27,6 +27,13 @@ export interface SupervisorInput {
   command: PiCommand;
   maxRunMs?: number;
   fake?: SupervisorFakeInput;
+  codexAuthBalancer?: {
+    authswapPath: string;
+    isolatedDir: string;
+    selectedSlot: string;
+    timeoutMs: number;
+    metadata?: Record<string, unknown>;
+  };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -70,7 +77,46 @@ export function augmentChildFailureDiagnostics(command: PiCommand, stderr: strin
   };
 }
 
+function authswapExitClassification(error: unknown): { classification: string; retryable: boolean; safeCleanup: boolean; message: string } {
+  if (!error) return { classification: "success", retryable: false, safeCleanup: true, message: "sync-back completed" };
+  const nodeError = error as NodeJS.ErrnoException & { code?: unknown; killed?: boolean; signal?: unknown };
+  const message = nodeError.message ?? String(error);
+  const code = String(nodeError.code ?? "");
+  if (nodeError.killed || /timed out|timeout/i.test(message) || code === "6" || code === "124") return { classification: "timeout", retryable: true, safeCleanup: false, message };
+  if (/conflict|generation|hash|changed|mismatch/i.test(message) || code === "65" || code === "409") return { classification: "conflict", retryable: false, safeCleanup: false, message };
+  return { classification: code ? `exit-${code}` : "failed", retryable: false, safeCleanup: false, message };
+}
+
+function writeAuthswapRetentionMarker(balancer: NonNullable<SupervisorInput["codexAuthBalancer"]>, result: { classification: string; message: string }): void {
+  const marker = join(balancer.isolatedDir, "ASYNC_SUBAGENTS_RETAINED.json");
+  try {
+    mkdirSync(dirname(marker), { recursive: true, mode: 0o700 });
+    writeFileSync(marker, `${JSON.stringify({ schemaVersion: 1, provider: "authswap", classification: result.classification, retainUntil: "manual-cleanup-after-sync-back", isolatedDir: balancer.isolatedDir, slot: balancer.selectedSlot, message: result.message.replace(/[A-Za-z0-9+/=._-]{24,}/g, "<redacted>") }, null, 2)}\n`, { mode: 0o600 });
+  } catch { /* best-effort marker */ }
+}
+
+export function authswapSyncBackAndCleanup(input: Pick<SupervisorInput, "codexAuthBalancer">): Promise<void> {
+  const balancer = input.codexAuthBalancer;
+  if (!balancer) return Promise.resolve();
+  const args = ["codex", "--sync-back", "--json", "--isolated-dir", balancer.isolatedDir, "--slot", balancer.selectedSlot];
+  const attempt = (remaining: number): Promise<{ classification: string; retryable: boolean; safeCleanup: boolean; message: string }> => new Promise((resolve) => {
+    execFile(balancer.authswapPath, args, { timeout: balancer.timeoutMs, maxBuffer: 64 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (error) => {
+      const result = authswapExitClassification(error);
+      if (error && remaining > 0 && result.retryable) setTimeout(() => void attempt(remaining - 1).then(resolve), 250);
+      else resolve(result);
+    });
+  });
+  return attempt(1).then((result) => {
+    if (result.safeCleanup) {
+      try { rmSync(balancer.isolatedDir, { recursive: true, force: true }); } catch { writeAuthswapRetentionMarker(balancer, { classification: "cleanup-failed", message: "sync-back succeeded but cleanup failed" }); }
+    } else {
+      writeAuthswapRetentionMarker(balancer, result);
+    }
+  });
+}
+
 async function finalizeRun(input: SupervisorInput, output: { state: TerminalRunState; stdout?: string; stderr?: string; error?: RunResult["error"] }): Promise<RunResult> {
+  await authswapSyncBackAndCleanup(input);
   const store = new RunStore({ cwd: input.cwd, runRoot: input.runRoot });
   const status = store.readStatus(input.runId);
   const body = output.stdout?.trim() || output.stderr?.trim() || undefined;

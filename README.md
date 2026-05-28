@@ -80,6 +80,7 @@ The async-subagents Pi package exposes the parent tools for starting, waiting on
 
 Design/spec docs:
 
+- `docs/specs/codex-auth-balancer/` — Codex/authswap account monitoring and process-boundary launch balancing for Pi, async subagents, and authswap.
 - `docs/specs/tango-v1/design.md` / `plan.md` — v1.0 baseline
 - `docs/specs/tango-v1/design-v1.1.md` / `plan-v1.1.md` — tool-first Pi UX and CLI-first core follow-up
 - `docs/specs/loom-v1/` — Loom v1 durable graph design, contracts, operations, testing, and implementation plan

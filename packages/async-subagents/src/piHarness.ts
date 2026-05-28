@@ -115,7 +115,7 @@ export function writeLaunchLogWithMetadata(runDir: string, command: PiCommand, m
     command: command.command,
     args: command.args,
     cwd: command.cwd,
-    env: Object.fromEntries(Object.entries(command.env).map(([key, value]) => [key, key.includes("TOKEN") || key.includes("SECRET") ? "<redacted>" : value])),
+    env: Object.fromEntries(Object.entries(command.env).map(([key, value]) => [key, /TOKEN|SECRET|PASSWORD|COOKIE|AUTH|KEY/i.test(key) ? "<redacted>" : value])),
     ...metadata,
   });
   return path;

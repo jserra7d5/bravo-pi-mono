@@ -2,9 +2,13 @@
 
 This directory contains Pi extensions that are auto-discovered when running `pi` from this repository. Reload them in a live interactive session with `/reload`.
 
-## Codex usage footer + model speed
+## Codex accounts footer + model speed
 
-`codex-usage.ts` owns the custom two-line footer and the interactive `/fast` command.
+`codex-usage.ts` owns the custom two-line footer, the interactive `/fast` command, and cache-only Codex account usage display.
+
+When the selected model is Codex-backed, the footer reads account/usage state from `authswap codex --usage --json`. Footer rendering and normal startup/turn refreshes are cache-only: they do not call the live ChatGPT usage endpoint, mutate global auth files, or probe accounts. Invalid, stale, or unavailable cache output renders as unknown/stale instead of guessing.
+
+Use `/codex-accounts status` to show the cached account state. Use `/codex-accounts refresh` to explicitly run the isolated authswap refresh path (`authswap codex --refresh-usage --json --isolated-dir ... --all`) and then reread the cache.
 
 ### `/fast`
 

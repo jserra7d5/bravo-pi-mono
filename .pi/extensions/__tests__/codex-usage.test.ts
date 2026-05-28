@@ -20,6 +20,8 @@ import {
 	renderTopLine,
 	stripAnsi,
 	threshold,
+	parseAuthswapUsage,
+	redactCodexAccountLabel,
 	visWidth,
 	type FooterRenderState,
 } from "../codex-usage.ts";
@@ -501,4 +503,91 @@ test("codexThreshold at exact boundaries 10 and 30", () => {
 	assert.equal(codexThreshold(10), c.bad);
 	assert.equal(codexThreshold(10.0), c.bad);
 	assert.equal(codexThreshold(10.1), c.warn);
+});
+
+// ── authswap Codex accounts ───────────────────────────────────────────────
+
+function validAuthswapPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
+		schema_version: 1,
+		generated_at: 1_000,
+		stale_after_ms: 300_000,
+		accounts: [{
+			slot: "work",
+			label: "Work",
+			email: "person@example.com",
+			account_id_hash: "hash-not-raw-id",
+			active_pi: false,
+			active_codex: true,
+			status: "ok",
+			usage: {
+				primary: { name: "primary", label: "5h", remaining_percent: 72, reset_in_seconds: 3600 },
+				secondary: { name: "secondary", label: "wk", remaining_percent: 41, reset_at: 10_000 },
+				updated_at: 900,
+				source: "cache",
+			},
+		}],
+		...overrides,
+	};
+}
+
+test("parseAuthswapUsage parses cache-only multi-account schema", () => {
+	const parsed = parseAuthswapUsage(validAuthswapPayload({ cache_path: "/tmp/usage.json", refreshed_slots: ["work"], failures: [] }), 1_000);
+	assert.equal(parsed?.accounts.length, 1);
+	assert.equal(parsed?.accounts[0].usage?.primary?.remainingPercent, 72);
+	assert.equal(parsed?.accounts[0].activeCodex, true);
+});
+
+test("parseAuthswapUsage strictly rejects malformed documented schema", () => {
+	const account = (patch: Record<string, unknown>) => ({ ...(validAuthswapPayload().accounts as any)[0], ...patch });
+	const usage = (patch: Record<string, unknown>) => account({ usage: { ...((validAuthswapPayload().accounts as any)[0].usage), ...patch } });
+	const window = (patch: Record<string, unknown>) => usage({ primary: { ...((validAuthswapPayload().accounts as any)[0].usage.primary), ...patch } });
+	const invalids = [
+		validAuthswapPayload({ extra: true }),
+		validAuthswapPayload({ schema_version: 2 }),
+		validAuthswapPayload({ generated_at: undefined }),
+		validAuthswapPayload({ accounts: [account({ extra: true })] }),
+		validAuthswapPayload({ accounts: [account({ account_id: "raw" })] }),
+		validAuthswapPayload({ accounts: [account({ accountId: "raw" })] }),
+		validAuthswapPayload({ accounts: [account({ status: "weird" })] }),
+		validAuthswapPayload({ accounts: [usage({ extra: true })] }),
+		validAuthswapPayload({ accounts: [window({ remaining_percent: 101 })] }),
+		validAuthswapPayload({ accounts: [window({ reset_at: "soon" })] }),
+		validAuthswapPayload({ accounts: [account({ problem: { code: "x" } })] }),
+	];
+	for (const payload of invalids) assert.equal(parseAuthswapUsage(payload), undefined);
+});
+
+test("renderStatsLine renders compact multi-account Codex usage with active marker", () => {
+	const line = stripAnsi(renderStatsLine(120, makeState({ codex: { accounts: [
+		{ label: "work", active: true, status: "ok", primary: 72, primaryReset: "1h", secondary: 41, secondaryReset: "2d", stale: false },
+		{ label: "alt", active: false, status: "limited", primary: 8, primaryReset: "10m", secondary: null, secondaryReset: null, stale: true },
+	] } } as any)));
+	assert.ok(line.includes("cx*"));
+	assert.ok(line.includes("work"));
+	assert.ok(line.includes("72%"));
+	assert.ok(line.includes("stale"));
+});
+
+test("renderStatsLine degrades account usage before dropping active account identity", () => {
+	const state = makeState({ codex: { accounts: [
+		{ label: "active", active: true, status: "ok", primary: 72, primaryReset: "1h", secondary: 41, secondaryReset: "2d", stale: false },
+		{ label: "inactive", active: false, status: "limited", primary: 8, primaryReset: "10m", secondary: 90, secondaryReset: "5d", stale: true },
+	] } } as any);
+	const line = stripAnsi(renderStatsLine(64, state));
+	assert.ok(line.includes("cx*active"), "active account identity should survive");
+	assert.ok(!line.includes("wk"), "secondary windows should drop first");
+	assert.ok(!line.includes("inactive"), "non-active accounts should drop before active segment");
+});
+
+test("renderStatsLine renders unavailable cache state without exceeding width", () => {
+	const line = renderStatsLine(60, makeState({ codex: { accounts: [], unavailable: true } as any }));
+	assert.ok(stripAnsi(line).includes("codex usage ?"));
+	assert.ok(visWidth(line) <= 60);
+});
+
+test("redactCodexAccountLabel avoids raw emails and long ids", () => {
+	assert.equal(redactCodexAccountLabel({ slot: "s1", label: "user@example.com", email: "user@example.com" }), "s1");
+	assert.equal(redactCodexAccountLabel({ slot: "s2", label: "abcdefghijklmnopqrstuvwxyz0123456789" }), "s2");
+	assert.equal(redactCodexAccountLabel({ slot: "s3", label: "Team" }), "Team");
 });

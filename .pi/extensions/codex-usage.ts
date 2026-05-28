@@ -5,10 +5,12 @@
 // rate-limit windows (when on a Codex model). Replaces the built-in
 // "↑↓R$ ctx% (provider) model • thinking" footer.
 //
-// The Codex rate-limit fetching logic is preserved from the previous
-// setStatus()-based version; only the rendering path changed.
+// Codex account usage is cache-only: renders/status reads call authswap
+// codex --usage --json; live probing is only via /codex-accounts refresh.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type {
 	ExtensionAPI,
@@ -19,25 +21,47 @@ import type {
 import type { Model } from "@earendil-works/pi-ai";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 
-// ── codex usage fetch (preserved from previous version) ────────────────────
+// ── codex usage via authswap cache ─────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 const MIN_REFRESH_MS = 30 * 1000;
-const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
-const JWT_CLAIM_PATH = "https://api.openai.com/auth";
+const AUTHSWAP_TIMEOUT_MS = 10_000;
 const MODEL_SPEED_CONFIG_PATH = join(process.cwd(), ".pi", "model-speed.json");
 const FAST_SERVICE_TIER = "priority";
 
-type UsageWindow = {
-	label: "primary" | "secondary";
+export type UsageWindow = {
+	label: "primary" | "secondary" | string;
 	remainingPercent?: number;
 	resetAt?: number;
-	windowSeconds?: number;
+	resetInSeconds?: number;
+	stale?: boolean;
 };
 
-type CodexUsage = {
-	primary?: UsageWindow;
-	secondary?: UsageWindow;
+export type CodexAccountStatus = "ok" | "limited" | "broken" | "unknown";
+
+export interface CodexAccountSlot {
+	slot: string;
+	label?: string;
+	email?: string;
+	accountIdHash?: string;
+	activePi: boolean;
+	activeCodex: boolean;
+	status: CodexAccountStatus;
+	usage?: {
+		primary?: UsageWindow;
+		secondary?: UsageWindow;
+		updatedAt?: number;
+		source?: "cache" | "probe" | "unknown";
+	};
+	problem?: { code: string; message: string };
+}
+
+export type CodexUsage = {
+	accounts: CodexAccountSlot[];
+	generatedAt?: number;
+	staleAfterMs?: number;
+	unavailable?: boolean;
+	error?: string;
 };
 
 function isCodexModel(model: Model<any> | undefined): boolean {
@@ -87,166 +111,110 @@ export function applyModelSpeedToPayload(
 	return { ...payload, service_tier: FAST_SERVICE_TIER };
 }
 
-function decodeJwtPayload(token: string): Record<string, any> | undefined {
-	try {
-		const payload = token.split(".")[1];
-		if (!payload) return undefined;
-		const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
-		const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-		return JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as Record<string, any>;
-	} catch {
-		return undefined;
-	}
-}
-
-function getAccountId(token: string): string | undefined {
-	const payload = decodeJwtPayload(token);
-	const accountId = payload?.[JWT_CLAIM_PATH]?.chatgpt_account_id;
-	return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
-}
-
 function asRecord(value: unknown): Record<string, any> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, any>) : undefined;
 }
 
 function asNumber(value: unknown): number | undefined {
-	if (typeof value === "number" && Number.isFinite(value)) return value;
-	if (typeof value === "string" && value.trim() !== "") {
-		const parsed = Number(value);
-		if (Number.isFinite(parsed)) return parsed;
-	}
-	return undefined;
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function asTimestampMs(value: unknown): number | undefined {
-	const numberValue = asNumber(value);
-	if (numberValue !== undefined) return numberValue < 10_000_000_000 ? numberValue * 1000 : numberValue;
-	if (typeof value === "string") {
-		const parsed = Date.parse(value);
-		if (Number.isFinite(parsed)) return parsed;
-	}
-	return undefined;
+function hasOnlyKeys(r: Record<string, unknown>, allowed: readonly string[]): boolean {
+	return Object.keys(r).every((key) => allowed.includes(key));
 }
 
-function clampPercent(value: number): number {
-	return Math.max(0, Math.min(100, value));
+function parseUsageWindow(value: unknown): UsageWindow | undefined {
+	const r = asRecord(value);
+	if (!r || !hasOnlyKeys(r, ["label", "name", "remaining_percent", "reset_at", "reset_in_seconds", "stale"])) return undefined;
+	if (!("remaining_percent" in r)) return undefined;
+	const remaining = asNumber(r.remaining_percent);
+	if (remaining == null || remaining < 0 || remaining > 100) return undefined;
+	const label = typeof r.label === "string" ? r.label : typeof r.name === "string" ? r.name : "usage";
+	const resetAt = "reset_at" in r ? asNumber(r.reset_at) : undefined;
+	const resetInSeconds = "reset_in_seconds" in r ? asNumber(r.reset_in_seconds) : undefined;
+	if (("reset_at" in r && resetAt == null) || ("reset_in_seconds" in r && resetInSeconds == null)) return undefined;
+	if ("stale" in r && typeof r.stale !== "boolean") return undefined;
+	return { label, remainingPercent: remaining, resetAt, resetInSeconds, stale: r.stale === true };
 }
 
-function firstNumber(record: Record<string, any>, keys: string[]): number | undefined {
-	for (const key of keys) {
-		const value = asNumber(record[key]);
-		if (value !== undefined) return value;
-	}
-	return undefined;
+export function redactCodexAccountLabel(account: Pick<CodexAccountSlot, "slot" | "label" | "email" | "accountIdHash">): string {
+	const raw = account.label || account.slot || account.accountIdHash || "?";
+	if (account.email || /@/.test(raw)) return account.slot;
+	if (/^[A-Za-z0-9_-]{24,}$/.test(raw)) return account.slot;
+	return raw.slice(0, 16);
 }
 
-function firstTimestamp(record: Record<string, any>, keys: string[]): number | undefined {
-	for (const key of keys) {
-		const value = asTimestampMs(record[key]);
-		if (value !== undefined) return value;
-	}
-	return undefined;
-}
-
-function parseWindow(label: UsageWindow["label"], value: unknown): UsageWindow | undefined {
-	const record = asRecord(value);
-	if (!record) return undefined;
-
-	let remainingPercent = firstNumber(record, [
-		"remaining_percent",
-		"remainingPercent",
-		"percent_remaining",
-		"percentRemaining",
-	]);
-
-	if (remainingPercent === undefined) {
-		const usedPercent = firstNumber(record, ["used_percent", "usedPercent", "percent_used", "percentUsed"]);
-		if (usedPercent !== undefined) remainingPercent = 100 - usedPercent;
-	}
-
-	if (remainingPercent === undefined) {
-		const remaining = firstNumber(record, ["remaining", "remaining_tokens", "remainingTokens", "available"]);
-		const limit = firstNumber(record, ["limit", "quota", "total", "max"]);
-		const used = firstNumber(record, ["used", "current", "usage", "consumed"]);
-		if (remaining !== undefined && limit && limit > 0) remainingPercent = (remaining / limit) * 100;
-		else if (used !== undefined && limit && limit > 0) remainingPercent = 100 - (used / limit) * 100;
-	}
-
-	let resetAt = firstTimestamp(record, [
-		"reset_at",
-		"resetAt",
-		"resets_at",
-		"resetsAt",
-		"reset_time",
-		"resetTime",
-		"end_time",
-		"endTime",
-		"end",
-	]);
-	if (resetAt === undefined) {
-		const resetAfterSeconds = firstNumber(record, ["reset_after_seconds", "resetAfterSeconds"]);
-		if (resetAfterSeconds !== undefined) resetAt = Date.now() + resetAfterSeconds * 1000;
-	}
-	const windowSeconds = firstNumber(record, [
-		"limit_window_seconds",
-		"limitWindowSeconds",
-		"window_seconds",
-		"windowSeconds",
-	]);
-
-	if (remainingPercent === undefined && resetAt === undefined) return undefined;
-	return {
-		label,
-		remainingPercent: remainingPercent === undefined ? undefined : clampPercent(remainingPercent),
-		resetAt,
-		windowSeconds,
-	};
-}
-
-function findNamedWindow(payload: unknown, name: UsageWindow["label"], seen = new Set<unknown>()): UsageWindow | undefined {
-	if (!payload || typeof payload !== "object" || seen.has(payload)) return undefined;
-	seen.add(payload);
-
-	if (Array.isArray(payload)) {
-		for (const item of payload) {
-			const record = asRecord(item);
-			const windowName = record?.name ?? record?.type ?? record?.window ?? record?.label;
-			if (typeof windowName === "string" && windowName.toLowerCase() === name) {
-				const parsed = parseWindow(name, item);
-				if (parsed) return parsed;
-			}
-			const nested = findNamedWindow(item, name, seen);
-			if (nested) return nested;
+export function parseAuthswapUsage(payload: unknown, now = Date.now()): CodexUsage | undefined {
+	const r = asRecord(payload);
+	if (!r || !hasOnlyKeys(r, ["schema_version", "generated_at", "stale_after_ms", "accounts", "cache_path", "refreshed_slots", "failures"])) return undefined;
+	if (r.schema_version !== 1 || !Array.isArray(r.accounts)) return undefined;
+	const generatedAt = asNumber(r.generated_at);
+	const staleAfterMs = asNumber(r.stale_after_ms);
+	if (generatedAt == null || staleAfterMs == null) return undefined;
+	const staleByAge = now - generatedAt > staleAfterMs;
+	const accounts: CodexAccountSlot[] = [];
+	for (const item of r.accounts) {
+		const a = asRecord(item);
+		if (!a || !hasOnlyKeys(a, ["slot", "label", "email", "account_id_hash", "active_pi", "active_codex", "status", "usage", "problem"])) return undefined;
+		if ("account_id" in a || "accountId" in a) return undefined;
+		if (typeof a.slot !== "string" || typeof a.active_pi !== "boolean" || typeof a.active_codex !== "boolean") return undefined;
+		if (!["ok", "limited", "broken", "unknown"].includes(String(a.status))) return undefined;
+		if (("label" in a && typeof a.label !== "string") || ("email" in a && typeof a.email !== "string") || ("account_id_hash" in a && typeof a.account_id_hash !== "string")) return undefined;
+		const problem = a.problem == null ? undefined : asRecord(a.problem);
+		if (a.problem != null && (!problem || !hasOnlyKeys(problem, ["code", "message"]) || typeof problem.code !== "string" || typeof problem.message !== "string")) return undefined;
+		let usage: CodexAccountSlot["usage"];
+		if (a.usage != null) {
+			const u = asRecord(a.usage);
+			if (!u || !hasOnlyKeys(u, ["primary", "secondary", "updated_at", "source"])) return undefined;
+			const primary = u.primary == null ? undefined : parseUsageWindow(u.primary);
+			const secondary = u.secondary == null ? undefined : parseUsageWindow(u.secondary);
+			const updatedAt = "updated_at" in u ? asNumber(u.updated_at) : undefined;
+			if ((u.primary != null && !primary) || (u.secondary != null && !secondary) || ("updated_at" in u && updatedAt == null)) return undefined;
+			if ("source" in u && u.source !== "cache" && u.source !== "probe" && u.source !== "unknown") return undefined;
+			usage = { primary, secondary, updatedAt, source: u.source as "cache" | "probe" | "unknown" | undefined };
 		}
-		return undefined;
+		accounts.push({
+			slot: a.slot,
+			label: a.label,
+			email: a.email,
+			accountIdHash: a.account_id_hash,
+			activePi: a.active_pi,
+			activeCodex: a.active_codex,
+			status: a.status as CodexAccountStatus,
+			usage,
+			problem: problem ? { code: problem.code, message: problem.message } : undefined,
+		});
 	}
-
-	const record = payload as Record<string, any>;
-	for (const key of Object.keys(record)) {
-		if (key.toLowerCase() === name) {
-			const parsed = parseWindow(name, record[key]);
-			if (parsed) return parsed;
-		}
-	}
-	for (const value of Object.values(record)) {
-		const nested = findNamedWindow(value, name, seen);
-		if (nested) return nested;
-	}
-	return undefined;
+	return { accounts, generatedAt, staleAfterMs, unavailable: false, error: staleByAge ? "stale" : undefined };
 }
 
-function parseUsage(payload: unknown): CodexUsage | undefined {
-	const record = asRecord(payload);
-	const rateLimit = asRecord(record?.rate_limit);
-	const usage: CodexUsage = {
-		primary:
-			parseWindow("primary", rateLimit?.primary_window ?? rateLimit?.primaryWindow) ??
-			findNamedWindow(payload, "primary"),
-		secondary:
-			parseWindow("secondary", rateLimit?.secondary_window ?? rateLimit?.secondaryWindow) ??
-			findNamedWindow(payload, "secondary"),
-	};
-	return usage.primary || usage.secondary ? usage : undefined;
+function runAuthswap(args: string[], timeoutMs = AUTHSWAP_TIMEOUT_MS): Promise<unknown> {
+	return new Promise((resolve, reject) => {
+		const bin = process.env.AUTHSWAP_BIN || "authswap";
+		execFile(bin, args, { timeout: timeoutMs, maxBuffer: 256 * 1024 }, (err, stdout) => {
+			if (err) { reject(err); return; }
+			try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
+		});
+	});
+}
+
+async function readCodexUsageCache(): Promise<CodexUsage> {
+	try {
+		const payload = await runAuthswap(["codex", "--usage", "--json"]);
+		return parseAuthswapUsage(payload) ?? { accounts: [], unavailable: true, error: "invalid cache" };
+	} catch {
+		return { accounts: [], unavailable: true, error: "unavailable" };
+	}
+}
+
+async function refreshCodexUsageCache(): Promise<CodexUsage> {
+	const dir = mkdtempSync(join(tmpdir(), "pi-codex-usage-"));
+	try {
+		const payload = await runAuthswap(["codex", "--refresh-usage", "--json", "--isolated-dir", dir, "--all"], 20_000);
+		return parseAuthswapUsage(payload) ?? { accounts: [], unavailable: true, error: "invalid refresh" };
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 }
 
 function formatReset(resetAt: number | undefined, now = Date.now()): string | undefined {
@@ -260,27 +228,6 @@ function formatReset(resetAt: number | undefined, now = Date.now()): string | un
 	const days = Math.floor(hours / 24);
 	const remainingHours = hours % 24;
 	return remainingHours > 0 ? `${days}d${remainingHours}h` : `${days}d`;
-}
-
-async function fetchCodexUsage(ctx: ExtensionContext): Promise<CodexUsage | undefined> {
-	if (!isCodexModel(ctx.model)) return undefined;
-
-	const token = await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
-	if (!token) return undefined;
-
-	const accountId = getAccountId(token);
-	const headers: Record<string, string> = {
-		Authorization: `Bearer ${token}`,
-		originator: "pi",
-		accept: "application/json",
-	};
-	if (accountId) headers["chatgpt-account-id"] = accountId;
-
-	const response = await fetch(CODEX_USAGE_URL, { headers, signal: ctx.signal });
-	if (!response.ok) return undefined;
-
-	const payload = (await response.json()) as unknown;
-	return parseUsage(payload);
 }
 
 // ── rendering helpers (pure) ───────────────────────────────────────────────
@@ -464,10 +411,13 @@ export interface FooterRenderState {
 	cost: number | null;
 	sub: boolean;
 	codex: {
-		primary: number | null;
-		primaryReset: string | null;
-		secondary: number | null;
-		secondaryReset: string | null;
+		primary?: number | null;
+		primaryReset?: string | null;
+		secondary?: number | null;
+		secondaryReset?: string | null;
+		accounts?: Array<{ label: string; active: boolean; status: CodexAccountStatus; primary: number | null; primaryReset: string | null; secondary: number | null; secondaryReset: string | null; stale: boolean }>;
+		unavailable?: boolean;
+		stale?: boolean;
 	} | null;
 }
 
@@ -556,10 +506,42 @@ export function renderStatsLine(width: number, s: FooterRenderState): string {
 	if (costSeg) parts.push(costSeg);
 
 	if (s.codex) {
-		const p = codexWindowSegment("5h", s.codex.primary, s.codex.primaryReset, codexBar);
-		const sec = codexWindowSegment("wk", s.codex.secondary, s.codex.secondaryReset, codexBar);
-		if (p) parts.push(p);
-		if (sec) parts.push(sec);
+		if (!s.codex.accounts && (s.codex.primary != null || s.codex.secondary != null)) {
+			const p = codexWindowSegment("5h", s.codex.primary ?? null, s.codex.primaryReset ?? null, codexBar);
+			const sec = codexWindowSegment("wk", s.codex.secondary ?? null, s.codex.secondaryReset ?? null, codexBar);
+			if (p) parts.push(p);
+			if (sec) parts.push(sec);
+		} else if (s.codex.unavailable) {
+			parts.push(`${c.warn}codex usage ?${R}`);
+		} else if (s.codex.accounts && s.codex.accounts.length > 0) {
+			const sortedAccounts = [...s.codex.accounts].sort((a, b) => Number(b.active) - Number(a.active));
+			const limit = width >= 100 ? 3 : 2;
+			const renderAccounts = (mode: "full" | "noSecondary" | "identity", activeOnly: boolean): string[] => {
+				return sortedAccounts
+					.filter((account) => !activeOnly || account.active)
+					.slice(0, limit)
+					.map((account) => {
+						const mark = account.active ? "*" : "";
+						const status = account.status === "broken" ? `${c.bad}!${R}` : account.status === "limited" ? `${c.warn}!${R}` : "";
+						const stale = account.stale ? `${c.warn} stale${R}` : "";
+						const head = `${c.dim}cx${mark}${R}${status}${c.text}${account.label}${R}`;
+						if (mode === "identity") return `${head}${stale}`;
+						const p = account.primary == null ? "?" : `${Math.round(account.primary)}%`;
+						const primary = ` ${c.dim}5h${R} ${p}${account.primaryReset ? `${c.dim}/${account.primaryReset}${R}` : ""}`;
+						if (mode === "noSecondary") return `${head}${primary}${stale}`;
+						const sec = account.secondary == null ? "?" : `${Math.round(account.secondary)}%`;
+						return `${head}${primary} ${c.dim}wk${R} ${sec}${account.secondaryReset ? `${c.dim}/${account.secondaryReset}${R}` : ""}${stale}`;
+					});
+			};
+			parts.push(...renderAccounts("full", false));
+			for (const [mode, activeOnly] of [["noSecondary", false], ["identity", false], ["identity", true]] as const) {
+				if (visWidth(parts.join(`${c.dim}   ${R}`)) <= width) break;
+				while (parts.length > 0 && stripAnsi(parts[parts.length - 1]).startsWith("cx")) parts.pop();
+				parts.push(...renderAccounts(mode, activeOnly));
+			}
+		} else {
+			parts.push(`${c.warn}codex usage unknown${R}`);
+		}
 	}
 
 	const gutter = `${c.dim}   ${R}`;
@@ -595,20 +577,30 @@ function withTilde(p: string): string {
 	return p;
 }
 
+function resetFor(w: UsageWindow | undefined, now: number): string | null {
+	if (!w) return null;
+	if (w.resetAt) return formatReset(w.resetAt, now) ?? null;
+	if (w.resetInSeconds != null) return formatReset(now + w.resetInSeconds * 1000, now) ?? null;
+	return null;
+}
+
 function buildCodexState(
 	usage: CodexUsage | undefined,
 	now = Date.now(),
 ): FooterRenderState["codex"] {
 	if (!usage) return null;
-	const primary = usage.primary?.remainingPercent;
-	const secondary = usage.secondary?.remainingPercent;
-	if (primary == null && secondary == null) return null;
-	return {
-		primary: primary == null ? null : primary,
-		primaryReset: usage.primary ? formatReset(usage.primary.resetAt, now) ?? null : null,
-		secondary: secondary == null ? null : secondary,
-		secondaryReset: usage.secondary ? formatReset(usage.secondary.resetAt, now) ?? null : null,
-	};
+	if (usage.unavailable) return { accounts: [], unavailable: true };
+	const accounts = usage.accounts.map((a) => ({
+		label: redactCodexAccountLabel(a),
+		active: a.activeCodex || a.activePi,
+		status: a.status,
+		primary: a.usage?.primary?.remainingPercent ?? null,
+		primaryReset: resetFor(a.usage?.primary, now),
+		secondary: a.usage?.secondary?.remainingPercent ?? null,
+		secondaryReset: resetFor(a.usage?.secondary, now),
+		stale: usage.error === "stale" || a.usage?.primary?.stale === true || a.usage?.secondary?.stale === true,
+	}));
+	return { accounts, stale: usage.error === "stale" };
 }
 
 function collectState(
@@ -687,7 +679,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 		if (!force && now - lastRefresh < MIN_REFRESH_MS) return;
 		lastRefresh = now;
 		inFlight = true;
-		void fetchCodexUsage(ctx)
+		void readCodexUsageCache()
 			.then((usage) => {
 				if (isCodexModel(ctx.model)) {
 					codexUsage = usage;
@@ -751,6 +743,27 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 				requestRender();
 			}
 			ctx.ui.notify(`Model fast mode: ${fastEnabled ? "on" : "off"}`, "info");
+		},
+	});
+
+	pi.registerCommand("codex-accounts", {
+		description: "Show Codex authswap account usage; /codex-accounts refresh probes explicitly.",
+		handler: async (args, ctx) => {
+			const action = args.trim().toLowerCase();
+			if (action === "refresh") {
+				ctx.ui.notify("Refreshing Codex account usage…", "info");
+				codexUsage = await refreshCodexUsageCache();
+				requestRender();
+				ctx.ui.notify(codexUsage.unavailable ? "Codex account usage refresh failed." : "Codex account usage refreshed.", codexUsage.unavailable ? "error" : "info");
+				return;
+			}
+			if (action && action !== "status") {
+				ctx.ui.notify("Usage: /codex-accounts [status|refresh]", "error");
+				return;
+			}
+			codexUsage = await readCodexUsageCache();
+			requestRender();
+			ctx.ui.notify(codexUsage.unavailable ? "Codex account usage cache unavailable." : `Codex accounts: ${codexUsage.accounts.length}`, codexUsage.unavailable ? "error" : "info");
 		},
 	});
 
