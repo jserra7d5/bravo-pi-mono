@@ -9,11 +9,15 @@
     "async-subagents": "./dist/src/cli.js"
   },
   "scripts": {
+    "prebuild": "npm run build --workspace @bravo/codex-auth-balancer",
     "build": "tsc -p tsconfig.json",
+    "precheck": "npm run build --workspace @bravo/codex-auth-balancer",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@bravo/codex-auth-balancer": "file:../codex-auth-balancer"
+  },
   "devDependencies": {
     "@types/node": "latest",
     "typescript": "latest"

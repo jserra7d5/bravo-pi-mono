@@ -5,12 +5,12 @@
 // rate-limit windows (when on a Codex model). Replaces the built-in
 // "↑↓R$ ctx% (provider) model • thinking" footer.
 //
-// Codex account usage is cache-only: renders/status reads call authswap
-// codex --usage --json; live probing is only via /codex-accounts refresh.
+// Codex account usage is cache-only through @bravo/codex-auth-balancer;
+// /codex-accounts refresh explicitly refreshes the owned cache state.
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { execFile } from "node:child_process";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { getUsage, refreshUsage } from "../../packages/codex-auth-balancer/src/index.ts";
+import type { CodexUsage, CodexAccountSlot, UsageWindow } from "../../packages/codex-auth-balancer/src/index.ts";
 import { dirname, join } from "node:path";
 import type {
 	ExtensionAPI,
@@ -21,48 +21,12 @@ import type {
 import type { Model } from "@earendil-works/pi-ai";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 
-// ── codex usage via authswap cache ─────────────────────────────────────────
+// ── codex usage via Codex auth balancer cache ──────────────────────────────
 
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 const MIN_REFRESH_MS = 30 * 1000;
-const AUTHSWAP_TIMEOUT_MS = 10_000;
 const MODEL_SPEED_CONFIG_PATH = join(process.cwd(), ".pi", "model-speed.json");
 const FAST_SERVICE_TIER = "priority";
-
-export type UsageWindow = {
-	label: "primary" | "secondary" | string;
-	remainingPercent?: number;
-	resetAt?: number;
-	resetInSeconds?: number;
-	stale?: boolean;
-};
-
-export type CodexAccountStatus = "ok" | "limited" | "broken" | "unknown";
-
-export interface CodexAccountSlot {
-	slot: string;
-	label?: string;
-	email?: string;
-	accountIdHash?: string;
-	activePi: boolean;
-	activeCodex: boolean;
-	status: CodexAccountStatus;
-	usage?: {
-		primary?: UsageWindow;
-		secondary?: UsageWindow;
-		updatedAt?: number;
-		source?: "cache" | "probe" | "unknown";
-	};
-	problem?: { code: string; message: string };
-}
-
-export type CodexUsage = {
-	accounts: CodexAccountSlot[];
-	generatedAt?: number;
-	staleAfterMs?: number;
-	unavailable?: boolean;
-	error?: string;
-};
 
 function isCodexModel(model: Model<any> | undefined): boolean {
 	return model?.provider === "openai-codex" || model?.api === "openai-codex-responses";
@@ -144,7 +108,7 @@ export function redactCodexAccountLabel(account: Pick<CodexAccountSlot, "slot" |
 	return raw.slice(0, 16);
 }
 
-export function parseAuthswapUsage(payload: unknown, now = Date.now()): CodexUsage | undefined {
+export function parseCodexUsage(payload: unknown, now = Date.now()): CodexUsage | undefined {
 	const r = asRecord(payload);
 	if (!r || !hasOnlyKeys(r, ["schema_version", "generated_at", "stale_after_ms", "accounts", "cache_path", "refreshed_slots", "failures"])) return undefined;
 	if (r.schema_version !== 1 || !Array.isArray(r.accounts)) return undefined;
@@ -188,33 +152,12 @@ export function parseAuthswapUsage(payload: unknown, now = Date.now()): CodexUsa
 	return { accounts, generatedAt, staleAfterMs, unavailable: false, error: staleByAge ? "stale" : undefined };
 }
 
-function runAuthswap(args: string[], timeoutMs = AUTHSWAP_TIMEOUT_MS): Promise<unknown> {
-	return new Promise((resolve, reject) => {
-		const bin = process.env.AUTHSWAP_BIN || "authswap";
-		execFile(bin, args, { timeout: timeoutMs, maxBuffer: 256 * 1024 }, (err, stdout) => {
-			if (err) { reject(err); return; }
-			try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
-		});
-	});
-}
-
 async function readCodexUsageCache(): Promise<CodexUsage> {
-	try {
-		const payload = await runAuthswap(["codex", "--usage", "--json"]);
-		return parseAuthswapUsage(payload) ?? { accounts: [], unavailable: true, error: "invalid cache" };
-	} catch {
-		return { accounts: [], unavailable: true, error: "unavailable" };
-	}
+	return getUsage();
 }
 
 async function refreshCodexUsageCache(): Promise<CodexUsage> {
-	const dir = mkdtempSync(join(tmpdir(), "pi-codex-usage-"));
-	try {
-		const payload = await runAuthswap(["codex", "--refresh-usage", "--json", "--isolated-dir", dir, "--all"], 20_000);
-		return parseAuthswapUsage(payload) ?? { accounts: [], unavailable: true, error: "invalid refresh" };
-	} finally {
-		rmSync(dir, { recursive: true, force: true });
-	}
+	return refreshUsage({ all: true });
 }
 
 function formatReset(resetAt: number | undefined, now = Date.now()): string | undefined {
@@ -747,7 +690,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("codex-accounts", {
-		description: "Show Codex authswap account usage; /codex-accounts refresh probes explicitly.",
+		description: "Show Codex auth balancer account usage; /codex-accounts refresh probes explicitly.",
 		handler: async (args, ctx) => {
 			const action = args.trim().toLowerCase();
 			if (action === "refresh") {

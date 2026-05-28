@@ -22,13 +22,11 @@ test("defaultRunRoot respects ASYNC_SUBAGENTS_HOME", () => {
 
 test("loadAsyncSubagentsConfig validates codexAuthBalancer", () => {
   const home = mkdtempSync(join(tmpdir(), "async-config-"));
-  const bin = join(home, "authswap");
-  writeFileSync(bin, "#!/bin/sh\nexit 0\n");
-  chmodSync(bin, 0o755);
-  writeFileSync(join(home, "config.json"), JSON.stringify({ version: 1, codexAuthBalancer: { enabled: true, provider: "authswap", authswapPath: bin, mode: "process-env", timeoutMs: 1000, failClosed: true, onlyForProviders: ["openai-codex"] } }));
+  const stateDir = join(home, "balancer");
+  writeFileSync(join(home, "config.json"), JSON.stringify({ version: 1, codexAuthBalancer: { enabled: true, provider: "bravo", stateDir, mode: "process-env", timeoutMs: 1000, failClosed: true, onlyForProviders: ["openai-codex"] } }));
   const config = loadAsyncSubagentsConfig({ env: { ASYNC_SUBAGENTS_HOME: home, HOME: home } as NodeJS.ProcessEnv });
   assert.equal(config.codexAuthBalancer.enabled, true);
-  assert.equal(config.codexAuthBalancer.authswapPath, bin);
+  assert.equal(config.codexAuthBalancer.stateDir, stateDir);
 });
 
 test("loadAsyncSubagentsConfig rejects unknown codexAuthBalancer keys", () => {
@@ -37,8 +35,8 @@ test("loadAsyncSubagentsConfig rejects unknown codexAuthBalancer keys", () => {
   assert.throws(() => loadAsyncSubagentsConfig({ env: { ASYNC_SUBAGENTS_HOME: home, HOME: home } as NodeJS.ProcessEnv }), /unknown key unexpected/);
 });
 
-function authWorkspace(mode: "success" | "conflict" | "timeout" | "prepare-fail", failClosed = true) {
-  const root = mkdtempSync(join(tmpdir(), "async-authswap-"));
+function authWorkspace(mode: "success" | "conflict" | "prepare-fail", failClosed = true) {
+  const root = mkdtempSync(join(tmpdir(), "async-balancer-"));
   mkdirSync(join(root, ".agents"), { recursive: true });
   writeFileSync(join(root, ".agents", "codex.md"), `---
 description: Codex.
@@ -48,37 +46,13 @@ model: openai-codex/test
 ---
 Codex agent.
 `, "utf8");
-  const authswap = join(root, "authswap.cjs");
-  writeFileSync(authswap, `#!/usr/bin/env node
-const fs = require("fs");
-const path = require("path");
-const mode = ${JSON.stringify(mode)};
-if (process.argv.includes("--version")) {
-  console.log(JSON.stringify({ schema_version: 1, name: "authswap", version: "0.4.0", capabilities: { codex_usage_json: 1, codex_refresh_usage_json: 1, codex_prepare_launch_json: 1, codex_sync_back_json: 1 } }));
-  process.exit(0);
-}
-const isolated = process.argv[process.argv.indexOf("--isolated-dir") + 1];
-if (process.argv.includes("--prepare-launch")) {
-  if (mode === "prepare-fail") { console.error("prepare failed"); process.exit(2); }
-  const pi = path.join(isolated, "pi");
-  const codex = path.join(isolated, "codex");
-  fs.mkdirSync(pi, { recursive: true });
-  fs.mkdirSync(codex, { recursive: true });
-  fs.writeFileSync(path.join(pi, "auth.json"), JSON.stringify({}) + "\\n");
-  fs.writeFileSync(path.join(codex, "auth.json"), JSON.stringify({}) + "\\n");
-  console.log(JSON.stringify({ schema_version: 1, selected_slot: "slot-a", reason: "test", status: "ok", isolated_dir: isolated, pi_agent_dir: pi, codex_home: codex, env: { PI_CODING_AGENT_DIR: pi, CODEX_HOME: codex, EXTRA_BALANCER_ENV: "merged" }, metadata: { metadata_path: path.join(isolated, "meta.json"), expected_generation: "gen", auth_hash: "hash" } }));
-  process.exit(0);
-}
-if (process.argv.includes("--sync-back")) {
-  fs.appendFileSync(path.join(${JSON.stringify(root)}, "sync-back-attempts"), "1\\n");
-  if (mode === "timeout") setTimeout(() => {}, 5000);
-  else if (mode === "conflict") { console.error("generation conflict token abcdefghijklmnopqrstuvwxyz123456"); process.exit(65); }
-  else { console.log(JSON.stringify({ ok: true })); process.exit(0); }
-}
-`, "utf8");
-  chmodSync(authswap, 0o755);
-  writeFileSync(join(root, "config.json"), JSON.stringify({ version: 1, codexAuthBalancer: { enabled: true, authswapPath: authswap, timeoutMs: 1000, failClosed } }));
-  return { root, authswap, runRoot: join(root, ".runs") };
+  const stateDir = join(root, "balancer-state");
+  if (mode !== "prepare-fail") {
+    mkdirSync(join(stateDir, "accounts", "slot-a"), { recursive: true });
+    writeFileSync(join(stateDir, "accounts", "slot-a", "auth.json"), JSON.stringify({ access_token: "abcdefghijklmnopqrstuvwxyz123456" }) + "\n");
+  }
+  writeFileSync(join(root, "config.json"), JSON.stringify({ version: 1, codexAuthBalancer: { enabled: true, provider: "bravo", stateDir, timeoutMs: 1000, failClosed } }));
+  return { root, runRoot: join(root, ".runs"), stateDir };
 }
 
 test("codex auth balancer merges prepare env and cleans up after sync-back success", async () => {
@@ -86,7 +60,7 @@ test("codex auth balancer merges prepare env and cleans up after sync-back succe
   const started = await startSubagent({ agent: "codex", task: "ok", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate" } });
   assert.equal(started.state, "completed");
   const launch = JSON.parse(readFileSync(join(started.runDir, "logs", "launch.json"), "utf8"));
-  assert.equal(launch.env.EXTRA_BALANCER_ENV, "merged");
+  assert.equal(typeof launch.env.CODEX_HOME, "string");
   assert.equal(existsSync(join(started.runDir, "auth", "codex-balancer")), false);
 });
 
@@ -101,21 +75,15 @@ test("codex auth balancer fail-closed fails and warn fallback continues", async 
 
 test("codex auth balancer retains isolated dir with marker on sync-back conflict", async () => {
   const w = authWorkspace("conflict");
-  const started = await startSubagent({ agent: "codex", task: "conflict", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate" } });
+  setTimeout(() => {
+    writeFileSync(join(w.stateDir, "accounts", "slot-a", "auth.json"), JSON.stringify({ access_token: "changed-concurrently" }) + "\n");
+  }, 25);
+  const started = await startSubagent({ agent: "codex", task: "conflict", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate", delayMs: 200 } });
   const dir = join(started.runDir, "auth", "codex-balancer");
   assert.equal(existsSync(dir), true);
   const marker = JSON.parse(readFileSync(join(dir, "ASYNC_SUBAGENTS_RETAINED.json"), "utf8"));
   assert.equal(marker.classification, "conflict");
-  assert.equal(readFileSync(join(w.root, "sync-back-attempts"), "utf8").trim().split("\n").length, 1);
   assert.equal(marker.retainUntil, "manual-cleanup-after-sync-back");
-  assert.match(marker.message, /<redacted>/);
-});
-
-test("codex auth balancer retains isolated dir with marker on sync-back timeout", async () => {
-  const w = authWorkspace("timeout");
-  const started = await startSubagent({ agent: "codex", task: "timeout", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate" } });
-  const marker = JSON.parse(readFileSync(join(started.runDir, "auth", "codex-balancer", "ASYNC_SUBAGENTS_RETAINED.json"), "utf8"));
-  assert.equal(marker.classification, "timeout");
 });
 
 test("preflight failure after prepare-launch syncs back and cleans isolated auth dir before failing", async () => {

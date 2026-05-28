@@ -20,7 +20,7 @@ import {
 	renderTopLine,
 	stripAnsi,
 	threshold,
-	parseAuthswapUsage,
+	parseCodexUsage,
 	redactCodexAccountLabel,
 	visWidth,
 	type FooterRenderState,
@@ -505,9 +505,9 @@ test("codexThreshold at exact boundaries 10 and 30", () => {
 	assert.equal(codexThreshold(10.1), c.warn);
 });
 
-// ── authswap Codex accounts ───────────────────────────────────────────────
+// ── Codex account usage schema ────────────────────────────────────────────
 
-function validAuthswapPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function validCodexUsagePayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
 		schema_version: 1,
 		generated_at: 1_000,
@@ -531,31 +531,31 @@ function validAuthswapPayload(overrides: Record<string, unknown> = {}): Record<s
 	};
 }
 
-test("parseAuthswapUsage parses cache-only multi-account schema", () => {
-	const parsed = parseAuthswapUsage(validAuthswapPayload({ cache_path: "/tmp/usage.json", refreshed_slots: ["work"], failures: [] }), 1_000);
+test("parseCodexUsage parses cache-only multi-account schema", () => {
+	const parsed = parseCodexUsage(validCodexUsagePayload({ cache_path: "/tmp/usage.json", refreshed_slots: ["work"], failures: [] }), 1_000);
 	assert.equal(parsed?.accounts.length, 1);
 	assert.equal(parsed?.accounts[0].usage?.primary?.remainingPercent, 72);
 	assert.equal(parsed?.accounts[0].activeCodex, true);
 });
 
-test("parseAuthswapUsage strictly rejects malformed documented schema", () => {
-	const account = (patch: Record<string, unknown>) => ({ ...(validAuthswapPayload().accounts as any)[0], ...patch });
-	const usage = (patch: Record<string, unknown>) => account({ usage: { ...((validAuthswapPayload().accounts as any)[0].usage), ...patch } });
-	const window = (patch: Record<string, unknown>) => usage({ primary: { ...((validAuthswapPayload().accounts as any)[0].usage.primary), ...patch } });
+test("parseCodexUsage strictly rejects malformed documented schema", () => {
+	const account = (patch: Record<string, unknown>) => ({ ...(validCodexUsagePayload().accounts as any)[0], ...patch });
+	const usage = (patch: Record<string, unknown>) => account({ usage: { ...((validCodexUsagePayload().accounts as any)[0].usage), ...patch } });
+	const window = (patch: Record<string, unknown>) => usage({ primary: { ...((validCodexUsagePayload().accounts as any)[0].usage.primary), ...patch } });
 	const invalids = [
-		validAuthswapPayload({ extra: true }),
-		validAuthswapPayload({ schema_version: 2 }),
-		validAuthswapPayload({ generated_at: undefined }),
-		validAuthswapPayload({ accounts: [account({ extra: true })] }),
-		validAuthswapPayload({ accounts: [account({ account_id: "raw" })] }),
-		validAuthswapPayload({ accounts: [account({ accountId: "raw" })] }),
-		validAuthswapPayload({ accounts: [account({ status: "weird" })] }),
-		validAuthswapPayload({ accounts: [usage({ extra: true })] }),
-		validAuthswapPayload({ accounts: [window({ remaining_percent: 101 })] }),
-		validAuthswapPayload({ accounts: [window({ reset_at: "soon" })] }),
-		validAuthswapPayload({ accounts: [account({ problem: { code: "x" } })] }),
+		validCodexUsagePayload({ extra: true }),
+		validCodexUsagePayload({ schema_version: 2 }),
+		validCodexUsagePayload({ generated_at: undefined }),
+		validCodexUsagePayload({ accounts: [account({ extra: true })] }),
+		validCodexUsagePayload({ accounts: [account({ account_id: "raw" })] }),
+		validCodexUsagePayload({ accounts: [account({ accountId: "raw" })] }),
+		validCodexUsagePayload({ accounts: [account({ status: "weird" })] }),
+		validCodexUsagePayload({ accounts: [usage({ extra: true })] }),
+		validCodexUsagePayload({ accounts: [window({ remaining_percent: 101 })] }),
+		validCodexUsagePayload({ accounts: [window({ reset_at: "soon" })] }),
+		validCodexUsagePayload({ accounts: [account({ problem: { code: "x" } })] }),
 	];
-	for (const payload of invalids) assert.equal(parseAuthswapUsage(payload), undefined);
+	for (const payload of invalids) assert.equal(parseCodexUsage(payload), undefined);
 });
 
 test("renderStatsLine renders compact multi-account Codex usage with active marker", () => {

@@ -6,9 +6,9 @@ This directory contains Pi extensions that are auto-discovered when running `pi`
 
 `codex-usage.ts` owns the custom two-line footer, the interactive `/fast` command, and cache-only Codex account usage display.
 
-When the selected model is Codex-backed, the footer reads account/usage state from `authswap codex --usage --json`. Footer rendering and normal startup/turn refreshes are cache-only: they do not call the live ChatGPT usage endpoint, mutate global auth files, or probe accounts. Invalid, stale, or unavailable cache output renders as unknown/stale instead of guessing.
+When the selected model is Codex-backed, the footer reads normalized account/usage state from `@bravo/codex-auth-balancer`. Footer rendering and normal startup/turn refreshes are cache-only: they do not mutate global auth files or probe accounts. Invalid, stale, or unavailable cache output renders as unknown/stale instead of guessing.
 
-Use `/codex-accounts status` to show the cached account state. Use `/codex-accounts refresh` to explicitly run the isolated authswap refresh path (`authswap codex --refresh-usage --json --isolated-dir ... --all`) and then reread the cache.
+Use `/codex-accounts status` to show the cached account state. Use `/codex-accounts refresh` to explicitly refresh through the Codex auth balancer package and then reread the cache.
 
 ### `/fast`
 

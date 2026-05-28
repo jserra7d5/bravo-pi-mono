@@ -1,0 +1,29 @@
+{
+  "name": "@bravo/codex-auth-balancer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Owned-state Codex auth balancer library and CLI.",
+  "keywords": ["pi-package"],
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "bin": {
+    "codex-auth-balancer": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  },
+  "engines": { "node": ">=22.13" }
+}

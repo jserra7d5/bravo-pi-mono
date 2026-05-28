@@ -68,7 +68,7 @@ Provider-backed variants must include the provider extension that registers the 
 
 ## Codex auth balancer
 
-Async subagents can optionally launch Codex-backed children through the process-boundary auth balancer implemented by `authswap`. The balancer does not expose arbitrary child env to agents; it internally prepares isolated auth homes and injects only:
+Async subagents can optionally launch Codex-backed children through `@bravo/codex-auth-balancer`. The balancer does not expose arbitrary child env to agents; it internally prepares isolated auth homes and injects only:
 
 - `PI_CODING_AGENT_DIR=<runDir>/auth/codex-balancer/pi-agent`
 - `CODEX_HOME=<runDir>/auth/codex-balancer/codex`
@@ -81,8 +81,8 @@ Enable it in `~/.async-subagents/config.json`:
   "defaultExtensions": [],
   "codexAuthBalancer": {
     "enabled": true,
-    "provider": "authswap",
-    "authswapPath": "/home/joe/.local/bin/authswap",
+    "provider": "bravo",
+    "stateDir": "/home/joe/.bravo/codex-auth-balancer",
     "mode": "process-env",
     "timeoutMs": 10000,
     "failClosed": true,
@@ -91,9 +91,9 @@ Enable it in `~/.async-subagents/config.json`:
 }
 ```
 
-`authswapPath` is optional when `AUTHSWAP_BIN` or `authswap` on `PATH` resolves to a compatible binary. The binary must support `authswap --version --json` and the Codex V1 capabilities. Balancing is fail-closed by default: if prepare-launch fails, the child run fails rather than silently using the parent's auth. Set `failClosed: false` only for explicit maintenance/debug fallback.
+`stateDir` is optional; it defaults to `CODEX_AUTH_BALANCER_HOME` or `~/.bravo/codex-auth-balancer`. Use the package's `import-authswap` command for one-time migration from authswap-owned state. Balancing is fail-closed by default: if prepare-launch fails, the child run fails rather than silently using the parent's auth. Set `failClosed: false` only for explicit maintenance/debug fallback.
 
-The supervisor runs `authswap codex --sync-back --json` after child exit so refreshed OAuth tokens are copied back safely. If sync-back times out or reports a conflict, the isolated auth directory is retained with `ASYNC_SUBAGENTS_RETAINED.json` and must be inspected or cleaned up explicitly.
+The supervisor calls the package `syncBack` API after child exit so refreshed OAuth tokens are copied back safely, then `cleanupLaunch` on success. If sync-back reports a conflict, the isolated auth directory is retained with `ASYNC_SUBAGENTS_RETAINED.json` and must be inspected or cleaned up explicitly.
 
 Recorded children launch Pi with:
 

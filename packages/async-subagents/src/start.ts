@@ -1,6 +1,6 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyAgentVariant, resolveAgentDefinition } from "./agentDefinitions.js";
 import { loadAsyncSubagentsConfig, type CodexAuthBalancerConfig } from "./config.js";
@@ -12,9 +12,10 @@ import { branchPiSession, type BranchPiSession, type ParentPiSessionRef } from "
 import { createRootSession, readRootSession } from "./rootSession.js";
 import { RunStore } from "./runStore.js";
 import { createInitialStatus } from "./status.js";
-import { authswapSyncBackAndCleanup, runSupervisor, type SupervisorFakeInput, type SupervisorInput } from "./supervisor.js";
+import { codexBalancerSyncBackAndCleanup, runSupervisor, type SupervisorFakeInput, type SupervisorInput } from "./supervisor.js";
 import { waitSubagents } from "./wait.js";
 import type { ContextPolicy, SessionPolicy, SubagentStartResult, SubagentWaitResult, TerminalRunState, ThinkingLevel } from "./types.js";
+import { prepareLaunch } from "@bravo/codex-auth-balancer";
 
 export interface StartFakeChildInput {
   mode: "child";
@@ -236,66 +237,20 @@ function delay(ms: number): Promise<void> {
 
 interface CodexBalancerLaunch {
   enabled: true;
-  authswapPath: string;
   isolatedDir: string;
   selectedSlot: string;
   env: Record<string, string>;
   metadata: Record<string, unknown>;
 }
 
-function parseOneJson(stdout: string): unknown {
-  const trimmed = stdout.trim();
-  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) throw new Error("authswap returned malformed JSON");
-  return JSON.parse(trimmed);
-}
-
-function pathWithin(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  return Boolean(candidate) && isAbsolute(candidate) && (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel)));
-}
-
-function runAuthswap(bin: string, args: string[], timeoutMs: number): Promise<unknown> {
-  return new Promise((resolvePromise, reject) => {
-    const child = execFile(bin, args, { timeout: timeoutMs, maxBuffer: 64 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (error, stdout) => {
-      if (error) reject(error);
-      else {
-        try { resolvePromise(parseOneJson(stdout)); } catch (parseError) { reject(parseError); }
-      }
-    });
-    child.stdin?.end();
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
   });
-}
-
-function validatePrepare(value: unknown, isolatedDir: string): CodexBalancerLaunch {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("authswap prepare-launch JSON must be an object");
-  const object = value as Record<string, unknown>;
-  const allowed = new Set(["schema_version", "selected_slot", "label", "reason", "status", "primary_remaining_percent", "secondary_remaining_percent", "isolated_dir", "pi_agent_dir", "codex_home", "env", "metadata"]);
-  for (const key of Object.keys(object)) if (!allowed.has(key)) throw new Error(`authswap prepare-launch JSON contains unexpected key ${key}`);
-  if (object.schema_version !== 1 || typeof object.selected_slot !== "string" || typeof object.reason !== "string" || !["ok", "limited", "unknown"].includes(String(object.status))) throw new Error("authswap prepare-launch JSON failed schema validation");
-  if (typeof object.pi_agent_dir !== "string" || typeof object.codex_home !== "string" || !pathWithin(isolatedDir, object.pi_agent_dir) || !pathWithin(isolatedDir, object.codex_home)) throw new Error("authswap prepare-launch returned paths outside isolated dir");
-  const env = object.env as Record<string, unknown>;
-  if (!env || typeof env !== "object" || Array.isArray(env) || env.PI_CODING_AGENT_DIR !== object.pi_agent_dir || env.CODEX_HOME !== object.codex_home || Object.values(env).some((value) => typeof value !== "string")) throw new Error("authswap prepare-launch returned invalid env");
-  const meta = object.metadata as Record<string, unknown>;
-  if (!meta || typeof meta !== "object" || Array.isArray(meta) || typeof meta.metadata_path !== "string" || typeof meta.expected_generation !== "string" || typeof meta.auth_hash !== "string") throw new Error("authswap prepare-launch returned invalid metadata");
-  if (!existsSync(join(object.pi_agent_dir, "auth.json")) || !existsSync(join(object.codex_home, "auth.json"))) throw new Error("authswap prepare-launch did not create required auth.json files");
-  return { enabled: true, authswapPath: "", isolatedDir, selectedSlot: object.selected_slot, env: Object.fromEntries(Object.entries(env).map(([key, value]) => [key, String(value)])), metadata: { enabled: true, provider: "authswap", mode: "process-env", selectedSlot: object.selected_slot, label: object.label, reason: object.reason, status: object.status, primaryRemainingPercent: object.primary_remaining_percent, secondaryRemainingPercent: object.secondary_remaining_percent } };
-}
-
-function semverAtLeast(version: string, minimum: string): boolean {
-  const parse = (value: string) => value.split(/[.-]/).slice(0, 3).map((part) => Number(part));
-  const [a = 0, b = 0, c = 0] = parse(version);
-  const [x = 0, y = 0, z = 0] = parse(minimum);
-  return a > x || (a === x && (b > y || (b === y && c >= z)));
-}
-
-function validateAuthswapVersion(value: unknown): void {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("authswap version JSON must be an object");
-  const object = value as Record<string, unknown>;
-  if (object.schema_version !== 1 || object.name !== "authswap" || typeof object.version !== "string" || !semverAtLeast(object.version, "0.4.0")) throw new Error("authswap unsupported version");
-  const capabilities = object.capabilities as Record<string, unknown> | undefined;
-  for (const name of ["codex_usage_json", "codex_refresh_usage_json", "codex_prepare_launch_json", "codex_sync_back_json"]) {
-    if (capabilities?.[name] !== 1) throw new Error(`authswap missing capability ${name}`);
-  }
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 async function prepareCodexBalancer(config: CodexAuthBalancerConfig, model: string | undefined, runDir: string): Promise<CodexBalancerLaunch | undefined> {
@@ -303,11 +258,8 @@ async function prepareCodexBalancer(config: CodexAuthBalancerConfig, model: stri
   const isolatedDir = join(runDir, "auth", "codex-balancer");
   mkdirSync(isolatedDir, { recursive: true, mode: 0o700 });
   try { if ((statSync(isolatedDir).mode & 0o777) !== 0o700) chmodSync(isolatedDir, 0o700); } catch { /* mkdir already failed if unavailable */ }
-  const bin = config.authswapPath ?? process.env.AUTHSWAP_BIN ?? "authswap";
-  validateAuthswapVersion(await runAuthswap(bin, ["--version", "--json"], config.timeoutMs));
-  const prepared = validatePrepare(await runAuthswap(bin, ["codex", "--prepare-launch", "--json", "--isolated-dir", isolatedDir], config.timeoutMs), isolatedDir);
-  prepared.authswapPath = bin;
-  return prepared;
+  const prepared = await withTimeout(prepareLaunch(isolatedDir, { stateRoot: config.stateDir }), config.timeoutMs, "codex auth balancer prepare-launch");
+  return { enabled: true, isolatedDir, selectedSlot: prepared.selected_slot, env: prepared.env, metadata: { enabled: true, provider: "bravo", mode: "process-env", selectedSlot: prepared.selected_slot, label: prepared.label, reason: prepared.reason, status: prepared.status, primaryRemainingPercent: prepared.primary_remaining_percent, secondaryRemainingPercent: prepared.secondary_remaining_percent } };
 }
 
 async function spawnDetachedSupervisor(inputPath: string): Promise<string | undefined> {
@@ -565,7 +517,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     const preflight = await preflightPiModelAvailability(command, prompt.model);
     writeFileSync(join(paths.logsDir, "model-preflight.json"), `${JSON.stringify(preflight, null, 2)}\n`, "utf8");
     if (!preflight.ok) {
-      await authswapSyncBackAndCleanup({ codexAuthBalancer: codexAuthBalancer ? { authswapPath: codexAuthBalancer.authswapPath, isolatedDir: codexAuthBalancer.isolatedDir, selectedSlot: codexAuthBalancer.selectedSlot, timeoutMs: asyncSubagentsConfig.codexAuthBalancer.timeoutMs, metadata: codexAuthBalancer.metadata } : undefined });
+      await codexBalancerSyncBackAndCleanup({ codexAuthBalancer: codexAuthBalancer ? { isolatedDir: codexAuthBalancer.isolatedDir, selectedSlot: codexAuthBalancer.selectedSlot, stateDir: asyncSubagentsConfig.codexAuthBalancer.stateDir, timeoutMs: asyncSubagentsConfig.codexAuthBalancer.timeoutMs, metadata: codexAuthBalancer.metadata } : undefined });
       return failBeforeLaunch("MODEL_PREFLIGHT_FAILED", preflight.message ?? `model preflight failed for ${prompt.model}`, preflight);
     }
   }
@@ -579,7 +531,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     command,
     maxRunMs: input.fake?.mode === "child" ? input.fake.maxRunMs ?? prompt.maxRunMs : prompt.maxRunMs,
     fake: input.fake?.mode === "immediate" ? input.fake : undefined,
-    codexAuthBalancer: codexAuthBalancer ? { authswapPath: codexAuthBalancer.authswapPath, isolatedDir: codexAuthBalancer.isolatedDir, selectedSlot: codexAuthBalancer.selectedSlot, timeoutMs: asyncSubagentsConfig.codexAuthBalancer.timeoutMs, metadata: codexAuthBalancer.metadata } : undefined,
+    codexAuthBalancer: codexAuthBalancer ? { isolatedDir: codexAuthBalancer.isolatedDir, selectedSlot: codexAuthBalancer.selectedSlot, stateDir: asyncSubagentsConfig.codexAuthBalancer.stateDir, timeoutMs: asyncSubagentsConfig.codexAuthBalancer.timeoutMs, metadata: codexAuthBalancer.metadata } : undefined,
   };
   const supervisorInputPath = writeSupervisorInput(paths.runDir, supervisorInput);
 

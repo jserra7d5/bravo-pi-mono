@@ -1,5 +1,5 @@
-import { execFile, spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createStartedEvent } from "./events.js";
 import { finalizeTerminalRun } from "./lifecycle.js";
@@ -8,6 +8,7 @@ import { updateRunStatus } from "./status.js";
 import { nowIso } from "./time.js";
 import type { PiCommand } from "./piHarness.js";
 import type { RunResult, TerminalRunState } from "./types.js";
+import { cleanupLaunch, syncBack } from "@bravo/codex-auth-balancer";
 
 export interface SupervisorFakeInput {
   mode: "immediate";
@@ -28,9 +29,9 @@ export interface SupervisorInput {
   maxRunMs?: number;
   fake?: SupervisorFakeInput;
   codexAuthBalancer?: {
-    authswapPath: string;
     isolatedDir: string;
     selectedSlot: string;
+    stateDir?: string;
     timeoutMs: number;
     metadata?: Record<string, unknown>;
   };
@@ -77,46 +78,56 @@ export function augmentChildFailureDiagnostics(command: PiCommand, stderr: strin
   };
 }
 
-function authswapExitClassification(error: unknown): { classification: string; retryable: boolean; safeCleanup: boolean; message: string } {
+function classifyBalancerError(error: unknown): { classification: string; retryable: boolean; safeCleanup: boolean; message: string } {
   if (!error) return { classification: "success", retryable: false, safeCleanup: true, message: "sync-back completed" };
-  const nodeError = error as NodeJS.ErrnoException & { code?: unknown; killed?: boolean; signal?: unknown };
-  const message = nodeError.message ?? String(error);
-  const code = String(nodeError.code ?? "");
-  if (nodeError.killed || /timed out|timeout/i.test(message) || code === "6" || code === "124") return { classification: "timeout", retryable: true, safeCleanup: false, message };
-  if (/conflict|generation|hash|changed|mismatch/i.test(message) || code === "65" || code === "409") return { classification: "conflict", retryable: false, safeCleanup: false, message };
-  return { classification: code ? `exit-${code}` : "failed", retryable: false, safeCleanup: false, message };
+  const message = error instanceof Error ? error.message : String(error);
+  if (/timed out|timeout/i.test(message)) return { classification: "timeout", retryable: true, safeCleanup: false, message };
+  if (/conflict|generation|hash|changed|mismatch/i.test(message)) return { classification: "conflict", retryable: false, safeCleanup: false, message };
+  return { classification: "failed", retryable: false, safeCleanup: false, message };
 }
 
-function writeAuthswapRetentionMarker(balancer: NonNullable<SupervisorInput["codexAuthBalancer"]>, result: { classification: string; message: string }): void {
+function writeBalancerRetentionMarker(balancer: NonNullable<SupervisorInput["codexAuthBalancer"]>, result: { classification: string; message: string }): void {
   const marker = join(balancer.isolatedDir, "ASYNC_SUBAGENTS_RETAINED.json");
   try {
     mkdirSync(dirname(marker), { recursive: true, mode: 0o700 });
-    writeFileSync(marker, `${JSON.stringify({ schemaVersion: 1, provider: "authswap", classification: result.classification, retainUntil: "manual-cleanup-after-sync-back", isolatedDir: balancer.isolatedDir, slot: balancer.selectedSlot, message: result.message.replace(/[A-Za-z0-9+/=._-]{24,}/g, "<redacted>") }, null, 2)}\n`, { mode: 0o600 });
+    writeFileSync(marker, `${JSON.stringify({ schemaVersion: 1, provider: "bravo", classification: result.classification, retainUntil: "manual-cleanup-after-sync-back", isolatedDir: balancer.isolatedDir, slot: balancer.selectedSlot, message: result.message.replace(/[A-Za-z0-9+/=._-]{24,}/g, "<redacted>") }, null, 2)}\n`, { mode: 0o600 });
   } catch { /* best-effort marker */ }
 }
 
-export function authswapSyncBackAndCleanup(input: Pick<SupervisorInput, "codexAuthBalancer">): Promise<void> {
-  const balancer = input.codexAuthBalancer;
-  if (!balancer) return Promise.resolve();
-  const args = ["codex", "--sync-back", "--json", "--isolated-dir", balancer.isolatedDir, "--slot", balancer.selectedSlot];
-  const attempt = (remaining: number): Promise<{ classification: string; retryable: boolean; safeCleanup: boolean; message: string }> => new Promise((resolve) => {
-    execFile(balancer.authswapPath, args, { timeout: balancer.timeoutMs, maxBuffer: 64 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (error) => {
-      const result = authswapExitClassification(error);
-      if (error && remaining > 0 && result.retryable) setTimeout(() => void attempt(remaining - 1).then(resolve), 250);
-      else resolve(result);
-    });
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
   });
-  return attempt(1).then((result) => {
-    if (result.safeCleanup) {
-      try { rmSync(balancer.isolatedDir, { recursive: true, force: true }); } catch { writeAuthswapRetentionMarker(balancer, { classification: "cleanup-failed", message: "sync-back succeeded but cleanup failed" }); }
-    } else {
-      writeAuthswapRetentionMarker(balancer, result);
-    }
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
   });
 }
 
+export async function codexBalancerSyncBackAndCleanup(input: Pick<SupervisorInput, "codexAuthBalancer">): Promise<void> {
+  const balancer = input.codexAuthBalancer;
+  if (!balancer) return;
+  const attempt = async (remaining: number): Promise<{ classification: string; retryable: boolean; safeCleanup: boolean; message: string }> => {
+    try {
+      const result = await withTimeout(syncBack(balancer.isolatedDir, { stateRoot: balancer.stateDir, slot: balancer.selectedSlot }), balancer.timeoutMs, "codex auth balancer sync-back");
+      if (!result.ok) return { classification: "conflict", retryable: false, safeCleanup: false, message: "sync-back conflict" };
+      return classifyBalancerError(undefined);
+    } catch (error) {
+      const result = classifyBalancerError(error);
+      if (remaining > 0 && result.retryable) { await sleep(250); return attempt(remaining - 1); }
+      return result;
+    }
+  };
+  const result = await attempt(1);
+  if (result.safeCleanup) {
+    try { await cleanupLaunch(balancer.isolatedDir); } catch { writeBalancerRetentionMarker(balancer, { classification: "cleanup-failed", message: "sync-back succeeded but cleanup failed" }); }
+  } else {
+    writeBalancerRetentionMarker(balancer, result);
+  }
+}
+
 async function finalizeRun(input: SupervisorInput, output: { state: TerminalRunState; stdout?: string; stderr?: string; error?: RunResult["error"] }): Promise<RunResult> {
-  await authswapSyncBackAndCleanup(input);
+  await codexBalancerSyncBackAndCleanup(input);
   const store = new RunStore({ cwd: input.cwd, runRoot: input.runRoot });
   const status = store.readStatus(input.runId);
   const body = output.stdout?.trim() || output.stderr?.trim() || undefined;

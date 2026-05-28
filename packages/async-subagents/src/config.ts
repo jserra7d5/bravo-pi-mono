@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, existsSync, readFileSync, realpathSync, accessSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { SubagentError } from "./errors.js";
@@ -49,8 +49,8 @@ export interface DefaultExtensionEntry {
 
 export interface CodexAuthBalancerConfig {
   enabled: boolean;
-  provider: "authswap";
-  authswapPath?: string;
+  provider: "bravo";
+  stateDir?: string;
   mode: "process-env";
   timeoutMs: number;
   failClosed: boolean;
@@ -91,24 +91,23 @@ function parseCodexAuthBalancer(value: unknown, context: string, env: NodeJS.Pro
   const envEnabled = parseBoolEnv(env.CODEX_AUTH_BALANCER_ENABLED);
   const envTimeout = env.CODEX_AUTH_BALANCER_TIMEOUT_MS ? Number(env.CODEX_AUTH_BALANCER_TIMEOUT_MS) : undefined;
   const envMode = env.CODEX_AUTH_BALANCER_MODE;
-  const defaults: CodexAuthBalancerConfig = { enabled: envEnabled ?? false, provider: "authswap", mode: "process-env", timeoutMs: envTimeout ?? 10000, failClosed: true, onlyForProviders: ["openai-codex", "openai-codex-responses"] };
+  const defaults: CodexAuthBalancerConfig = { enabled: envEnabled ?? false, provider: "bravo", stateDir: env.CODEX_AUTH_BALANCER_HOME ? resolve(env.CODEX_AUTH_BALANCER_HOME) : undefined, mode: "process-env", timeoutMs: envTimeout ?? 10000, failClosed: true, onlyForProviders: ["openai-codex", "openai-codex-responses"] };
   if (value === undefined) {
     if (!Number.isInteger(defaults.timeoutMs) || defaults.timeoutMs < 1000 || defaults.timeoutMs > 60000) throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.timeoutMs must be an integer 1000..60000: ${context}`);
     if (envMode !== undefined && envMode !== "process-env") throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.mode must be process-env: ${context}`);
     return defaults;
   }
   if (!isRecord(value)) throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer must be an object: ${context}`);
-  assertOnlyKeys(value, ["enabled", "provider", "authswapPath", "mode", "timeoutMs", "failClosed", "onlyForProviders"], context);
+  assertOnlyKeys(value, ["enabled", "provider", "stateDir", "mode", "timeoutMs", "failClosed", "onlyForProviders"], context);
   const config: CodexAuthBalancerConfig = { ...defaults };
   if (value.enabled !== undefined) {
     if (typeof value.enabled !== "boolean") throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.enabled must be boolean: ${context}`);
     config.enabled = value.enabled;
   }
-  if (value.provider !== undefined && value.provider !== "authswap") throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.provider must be authswap: ${context}`);
-  if (value.authswapPath !== undefined) {
-    if (typeof value.authswapPath !== "string" || !isAbsolute(value.authswapPath)) throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.authswapPath must be an absolute path: ${context}`);
-    try { accessSync(value.authswapPath, constants.X_OK); } catch { throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.authswapPath must be executable: ${context}`); }
-    config.authswapPath = value.authswapPath;
+  if (value.provider !== undefined && value.provider !== "bravo") throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.provider must be bravo: ${context}`);
+  if (value.stateDir !== undefined) {
+    if (typeof value.stateDir !== "string" || !isAbsolute(value.stateDir)) throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.stateDir must be an absolute path: ${context}`);
+    config.stateDir = value.stateDir;
   }
   if (value.mode !== undefined) {
     if (value.mode !== "process-env") throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.mode must be process-env: ${context}`);
