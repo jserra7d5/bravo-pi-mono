@@ -968,7 +968,7 @@ export function summarizeStartResult(result: SubagentStartResult): string {
   const action = result.waited ? "started and waited" : "started";
   const agent = result.variant ? `${result.agentName}/${result.variant}` : result.agentName;
   const label = result.displayName ? `@${result.displayName} (${agent})` : agent;
-  return `Subagent ${result.runId} ${action}: ${label} (${result.state})`;
+  return `Subagent ${result.runId} ${action}: ${label} (${result.state}); async wakeups will report attention or results`;
 }
 
 function formatResultSummary(result: RunResult, options?: { includeSummary?: boolean; useLiteralState?: boolean }): string {
@@ -993,6 +993,8 @@ export function summarizeRunResult(result: RunResult | undefined, runId: string)
 export function summarizeStatusRows(rows: Array<Pick<RunStatus, "runId" | "state" | "summary">>): string {
   if (!rows.length) return "No subagent runs found";
   const active = rows.filter((row) => !["completed", "failed", "cancelled", "expired"].includes(row.state)).length;
+  const actionable = rows.filter((row) => ["blocked", "waiting_for_input", "paused"].includes(row.state)).length;
   const results = rows.filter((row) => ["completed", "failed", "cancelled", "expired"].includes(row.state)).length;
-  return `Subagent status: ${active} active, ${results} terminal, ${rows.length} total`;
+  const suffix = active > 0 && actionable === 0 ? "; no action needed for merely active runs until an async wakeup arrives" : "";
+  return `Subagent status: ${active} active, ${results} terminal, ${rows.length} total${suffix}`;
 }

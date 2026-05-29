@@ -8,6 +8,8 @@ test("async subagents prompt module establishes neutral lifecycle rules", () => 
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /source-of-truth artifacts/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /async wakeups/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /subagent_status/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /one-shot inspection/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /go idle/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /subagent_result/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /timeout wakeups/);
   assert.doesNotMatch(ASYNC_SUBAGENTS_PROMPT_MODULE, /subagent_wait/);

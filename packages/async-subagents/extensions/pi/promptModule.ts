@@ -1,6 +1,6 @@
 export const ASYNC_SUBAGENTS_PROMPT_MODULE = `## Async Subagents
 
-When async subagent tools are available, they are the first-party interface for spawning, monitoring, messaging, continuing, interrupting, and reading results from child agents.
+When async subagent tools are available, they are the first-party interface for spawning child agents, responding to actionable wakeups, lifecycle control, and reading results.
 
 Async subagents are useful when work has a clean boundary: independent investigation, parallelizable implementation, review, verification, or a bounded handoff. Keep work local when delegation would add coordination cost without useful independence.
 
@@ -14,13 +14,15 @@ Some agent definitions expose variants. A variant keeps the same agent prompt an
 
 Read source-of-truth artifacts yourself before delegating interpretation of them. Use subagents for reconnaissance, independent checks, implementation slices, or review around that source, not as a replacement for owning the spec.
 
-After delegating broad work, do not duplicate the same broad exploration yourself. Continue with non-overlapping work or go idle; async wakeups will report questions, blockers, timeout pauses, and terminal results.
+After delegating broad work, do not duplicate the same broad exploration yourself. Continue with non-overlapping work if useful; otherwise end your turn and go idle. Async wakeups, not polling, are the normal signal for questions, blockers, timeout pauses, and terminal results.
+
+Do not poll child progress with repeated \`subagent_status\` calls. Use \`subagent_status\` as a one-shot inspection tool only when you have a concrete reason: the user asks for status, a wakeup is ambiguous, you are recovering after compaction/restart, you are about to finalize or change direction and need to account for in-flight work, or you are diagnosing a suspected stale/missing wakeup. If a status call shows only active/running children and no actionable state, go idle instead of calling status again.
 
 Treat subagent tool results as the primary result channel. Do not read raw async-subagent run files unless the native tool output is unavailable, truncated beyond usefulness, or appears corrupted.
 
 When a child fails, blocks, or returns a surprising result, inspect native status and result details first. Inspect raw run files or logs only when the tool result is insufficient.
 
-Use \`subagent_status\` to inspect live runs, \`subagent_result\` to collect terminal results, \`subagent_message\` to answer questions or unblock children, and \`subagent_continue\` only when a paused/timed-out child result is still needed. Treat timeout wakeups as runtime events, not user requests.
+Use \`subagent_result\` to collect terminal results, \`subagent_message\` to answer questions or unblock children, \`subagent_continue\` only when a paused/timed-out child result is still needed, and \`subagent_status\` only for one-shot inspection/recovery. Treat timeout wakeups as runtime events, not user requests.
 
 For implementation children, include allowed write scope and validation boundary in the task. For review children, include the exact diff, files, claim, or artifact being reviewed.
 
@@ -41,7 +43,8 @@ Subagent status events are control-plane information. Summarize them to the user
 7. Read subagent results through native tools before summarizing them.
 8. Collect every child run you still need before finalizing the parent task.
 9. Use \`@DisplayName\` for subagents in user-facing prose; use run IDs only for tool/internal references.
-10. Do not invent subagent names, variants, statuses, or results.`;
+10. Do not invent subagent names, variants, statuses, or results.
+11. Do not call \`subagent_status\` repeatedly to wait for completion; go idle and let async wakeups resume you.`;
 
 export function appendAsyncSubagentsPrompt(systemPrompt: string, catalog?: string): string {
   if (systemPrompt.includes("## Async Subagents")) return systemPrompt;

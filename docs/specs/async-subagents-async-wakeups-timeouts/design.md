@@ -76,7 +76,7 @@ No normal flow requires a foreground wait tool.
 ### Keep / emphasize
 
 - `subagent_start`: start a durable async child and return immediately.
-- `subagent_status`: inspect current and recent child state.
+- `subagent_status`: one-shot inspection of current and recent child state; not a polling/waiting path.
 - `subagent_result`: collect a terminal result and mark it handled.
 - `subagent_message`: answer or send context to a live waiting child.
 - `subagent_interrupt`: pause or cancel active child.
@@ -84,7 +84,7 @@ No normal flow requires a foreground wait tool.
 
 ### Next suggestions
 
-For a non-terminal start result, suggest `subagent_status`, not `subagent_wait`.
+For a non-terminal start result, do not suggest a follow-up polling action. The parent should continue non-overlapping work or go idle; async wakeups are the completion/attention signal. Use `subagent_status` only for explicit inspection, recovery, or pre-finalization accounting.
 
 For terminal/result-ready wakeups, suggest `subagent_result`.
 
@@ -408,7 +408,7 @@ Recommended: supervisor remains owner of child process lifecycle while paused.
 
 - Registered tools do not include `subagent_wait`.
 - Prompt module does not mention `subagent_wait` or wait tools.
-- Compaction reminder says `subagent_status` / `subagent_result`, not `subagent_wait`.
+- Compaction reminder says `subagent_result` for results, `subagent_message` for blocked/question states, and may suggest one `subagent_status` call for post-compaction orientation, but must not tell the agent to poll active runs.
 - Existing wakeup dedupe still delivers terminal/paused events once.
 
 ## Validation Commands

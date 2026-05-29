@@ -419,7 +419,7 @@ test("context fork only falls back to fresh when explicitly allowed", async () =
   assert.equal(store.readResult(started.runId)?.forkFallback?.reason, "branch unavailable");
 });
 
-test("startSubagent returns async status guidance without waiting", async () => {
+test("startSubagent returns no polling follow-up for running async children", async () => {
   const w = workspace();
   const started = await startSubagent({
     agent: "scout",
@@ -431,7 +431,7 @@ test("startSubagent returns async status guidance without waiting", async () => 
   });
 
   assert.equal(started.waited, false);
-  assert.deepEqual(started.next, [{ tool: "subagent_status", args: { runIds: [started.runId] } }]);
+  assert.deepEqual(started.next, []);
 });
 
 test("supervisor writes result before terminal status and terminal event", async () => {

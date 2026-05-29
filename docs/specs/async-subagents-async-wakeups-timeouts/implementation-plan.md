@@ -14,7 +14,7 @@ Reviewer feedback tightened the plan around process-group control, supervisor ow
 
 ## Design Decisions
 
-- **No model-facing `subagent_wait`.** Wakeups are the collection trigger; `subagent_status` and `subagent_result` are the explicit inspection tools.
+- **No model-facing `subagent_wait`.** Wakeups are the collection trigger; `subagent_result` is the result collection tool and `subagent_status` is a one-shot inspection/recovery tool, not a polling loop.
 - **No sync start/continue mode.** Parent tool calls should return promptly.
 - **Public budget unit is seconds.** Runtime converts to milliseconds internally.
 - **Every child has an explicit effective budget.** Use per-agent/per-variant `maxRunSeconds`, otherwise package config `defaultMaxRunSeconds`. Built-ins must launch without requiring users to hand-write config.
@@ -115,7 +115,7 @@ Compatibility decision:
 - Remove `waited` / `waitResult` from model-facing result details if practical; otherwise keep only as internal fields not surfaced in schemas/docs.
 - Change returned `next`:
   - terminal: `subagent_result`
-  - non-terminal: `subagent_status`
+  - non-terminal: no follow-up tool; continue non-overlapping work or go idle until async wakeup
 - If `src/wait.ts` remains, ensure start results never suggest it.
 
 #### `src/wait.ts`
@@ -137,13 +137,13 @@ Compatibility decision:
 - Add guidance:
   - start children async;
   - rely on wakeups;
-  - use `subagent_status` for inspection;
+  - use `subagent_status` only for one-shot inspection/recovery/pre-finalization accounting;
   - use `subagent_result` for terminal results;
   - use `subagent_message` for questions/blocked runs.
 
 #### `extensions/pi/compactionReminder.ts`
 
-- Change active-run next action from `track with subagent_status or subagent_wait` to `track with subagent_status`.
+- Remove active-run next actions that tell the model to track/poll with `subagent_status`; normal active runs should say no action is needed until an async wakeup arrives. Post-compaction reminders may allow one `subagent_status` call for orientation, explicitly not a loop.
 
 #### `README.md`
 
@@ -159,7 +159,7 @@ Update/remove:
   - remove direct `subagent_wait` tests;
   - add registered-tool assertion that wait is absent;
   - add schema/tool-catalog snapshot asserting no wait knobs are exposed;
-  - assert start result suggests `subagent_status` for running runs.
+  - assert start result does not suggest a status/polling follow-up for running runs.
 - `test/coreRuntime.test.ts`
   - keep `waitSubagents` tests only if `src/wait.ts` remains internal;
   - remove start wait-mode expectations.

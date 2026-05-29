@@ -778,7 +778,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     {
       name: "subagent_status",
       label: "Subagent Status",
-      description: "Read compact status for direct children or selected run ids.",
+      description: "One-shot inspection of direct children or selected run ids. Not a polling/waiting tool; if runs are merely active, go idle and wait for async wakeups.",
       parameters: subagentStatusSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const cwd = ctxCwd(ctx);

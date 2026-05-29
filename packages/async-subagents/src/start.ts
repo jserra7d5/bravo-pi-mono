@@ -570,6 +570,6 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     maxRunSeconds,
     effectiveMaxRunMs,
     maxSubagentDepth: definition.maxSubagentDepth,
-    next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [{ tool: "subagent_status", args: { runIds: [runId] } }],
+    next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [],
   };
 }
