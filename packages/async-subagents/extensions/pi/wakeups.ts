@@ -76,6 +76,16 @@ export function eventDeliveryKey(event: RunEvent): string {
   return `event:${event.runId}:${event.eventId}`;
 }
 
+function redactedResult(result: RunResult): RunResult & { bodyAvailable?: boolean } {
+  const { body, ...rest } = result;
+  return { ...rest, bodyAvailable: body !== undefined } as RunResult & { bodyAvailable?: boolean };
+}
+
+function redactedEvent(event: RunEvent): RunEvent & { bodyAvailable?: boolean } {
+  const { body, ...rest } = event;
+  return { ...rest, bodyAvailable: body !== undefined } as RunEvent & { bodyAvailable?: boolean };
+}
+
 function resultDelivery(runId: string, result: RunResult): WakeupDelivery {
   const summary = result.summary ?? result.error?.message ?? `Run ${result.state}`;
   return {
@@ -87,8 +97,8 @@ function resultDelivery(runId: string, result: RunResult): WakeupDelivery {
       runId,
       state: result.state,
       summary,
-      body: result.body,
-      result,
+      bodyAvailable: result.body !== undefined,
+      result: redactedResult(result),
       next: [{ tool: "subagent_result", args: { runId } }],
     },
   };
@@ -97,7 +107,7 @@ function resultDelivery(runId: string, result: RunResult): WakeupDelivery {
 function eventDelivery(event: RunEvent, status?: { agentName?: string; displayName?: string }): WakeupDelivery {
   // Map the event type onto a run-state-ish string so wake-card glyph/badge selection works
   // (event types like "question" → "waiting_for_input").
-  const state = event.type === "question" ? "waiting_for_input" : event.type;
+  const state = event.type === "question" ? "waiting_for_input" : event.type === "status" && event.data?.reason === "timeout" ? "paused" : event.type;
   return {
     deliveryKey: eventDeliveryKey(event),
     runId: event.runId,
@@ -107,10 +117,10 @@ function eventDelivery(event: RunEvent, status?: { agentName?: string; displayNa
       runId: event.runId,
       state,
       summary: event.summary,
-      body: event.body,
-      event,
+      bodyAvailable: event.body !== undefined,
+      event: redactedEvent(event),
       status,
-      next: event.type === "question" || event.type === "blocked" ? [{ tool: "subagent_message", args: { runId: event.runId, type: "answer" } }] : [{ tool: "subagent_result", args: { runId: event.runId } }],
+      next: event.type === "question" || event.type === "blocked" ? [{ tool: "subagent_message", args: { runId: event.runId, type: "answer" } }] : state === "paused" ? [{ tool: "subagent_continue", args: { runId: event.runId, additionalRunSeconds: 900 } }, { tool: "subagent_interrupt", args: { runId: event.runId, action: "cancel" } }] : [],
     },
   };
 }
@@ -129,7 +139,7 @@ function statusForRun(store: RunStore, runId: string): { agentName?: string; dis
 function isActionableModelWakeup(delivery: WakeupDelivery): boolean {
   if (delivery.message.result) return true;
   const eventType = delivery.message.event?.type;
-  return eventType === "question" || eventType === "blocked";
+  return eventType === "question" || eventType === "blocked" || (delivery.message.state as string | undefined) === "paused";
 }
 
 export function isResultWakeupCurrent(store: RunStore, parentRunId: string, runId: string, result: RunResult): boolean {
@@ -153,11 +163,14 @@ function pendingForRun(store: RunStore, parentRunId: string, runId: string, noti
     if (result && isResultWakeupCurrent(store, parentRunId, runId, result)) deliveries.push(resultDelivery(runId, result));
   }
   const shouldScanEvents = !allowed || [...allowed].some((type) => !["result", "completed", "failed", "cancelled", "expired"].includes(type));
+  const status = shouldScanEvents ? statusForRun(store, runId) : undefined;
+  const latestTimeoutWake = summary?.latestWakeEvent?.type === "status" && summary.latestWakeEvent.wake && summary.latestWakeEvent.data?.reason === "timeout" ? summary.latestWakeEvent : undefined;
+  if (!shouldScanEvents && latestTimeoutWake) deliveries.push(eventDelivery(latestTimeoutWake, statusForRun(store, runId)));
   if (shouldScanEvents) {
-    const status = statusForRun(store, runId);
     for (const event of store.readEvents(runId).records) {
       if (["result", "completed", "failed", "cancelled", "expired"].includes(event.type)) continue;
-      if (!isInterestingEvent(event.type, event.wake) || (allowed && !allowed.has(event.type))) continue;
+      const timeoutAttention = event.type === "status" && event.wake && event.data?.reason === "timeout";
+      if (!(isInterestingEvent(event.type, event.wake) || timeoutAttention) || (allowed && !allowed.has(event.type) && !timeoutAttention)) continue;
       deliveries.push(eventDelivery(event, status));
     }
   }

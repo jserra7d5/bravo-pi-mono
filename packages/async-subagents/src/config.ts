@@ -60,6 +60,7 @@ export interface CodexAuthBalancerConfig {
 export interface AsyncSubagentsConfig {
   version: 1;
   defaultExtensions: DefaultExtensionEntry[];
+  defaultMaxRunSeconds: number;
   codexAuthBalancer: CodexAuthBalancerConfig;
   configPath: string;
 }
@@ -134,7 +135,7 @@ export function loadAsyncSubagentsConfig(options: { cwd?: string; env?: NodeJS.P
   const env = options.env ?? process.env;
   const path = configPath(env);
   const defaultBalancer = parseCodexAuthBalancer(undefined, `${path}.codexAuthBalancer`, env);
-  if (!existsSync(path)) return { version: 1, defaultExtensions: [], codexAuthBalancer: defaultBalancer, configPath: path };
+  if (!existsSync(path)) return { version: 1, defaultExtensions: [], defaultMaxRunSeconds: 1800, codexAuthBalancer: defaultBalancer, configPath: path };
 
   let parsed: unknown;
   try {
@@ -143,7 +144,8 @@ export function loadAsyncSubagentsConfig(options: { cwd?: string; env?: NodeJS.P
     throw new SubagentError("INVALID_CONFIG", `failed to parse async-subagents config: ${path}`, { path, error: error instanceof Error ? error.message : String(error) });
   }
   if (!isRecord(parsed)) throw new SubagentError("INVALID_CONFIG", `async-subagents config must be an object: ${path}`, { path });
-  assertOnlyKeys(parsed, ["version", "defaultExtensions", "codexAuthBalancer"], path);
+  assertOnlyKeys(parsed, ["version", "defaultExtensions", "defaultMaxRunSeconds", "maxRunMs", "codexAuthBalancer"], path);
+  if (parsed.maxRunMs !== undefined) throw new SubagentError("INVALID_CONFIG", `maxRunMs has been replaced by defaultMaxRunSeconds in ${path}; use seconds, for example defaultMaxRunSeconds: 1800`);
   if (parsed.version !== 1) throw new SubagentError("INVALID_CONFIG", `async-subagents config version must be 1: ${path}`, { path, version: parsed.version });
   const rawDefaults = parsed.defaultExtensions ?? [];
   if (!Array.isArray(rawDefaults)) throw new SubagentError("INVALID_CONFIG", `defaultExtensions must be an array: ${path}`, { path });
@@ -175,5 +177,7 @@ export function loadAsyncSubagentsConfig(options: { cwd?: string; env?: NodeJS.P
     });
   });
 
-  return { version: 1, defaultExtensions, codexAuthBalancer: parseCodexAuthBalancer(parsed.codexAuthBalancer, `${path}.codexAuthBalancer`, env), configPath: path };
+  const defaultMaxRunSeconds = parsed.defaultMaxRunSeconds === undefined ? 1800 : parsed.defaultMaxRunSeconds;
+  if (typeof defaultMaxRunSeconds !== "number" || !Number.isInteger(defaultMaxRunSeconds) || !Number.isFinite(defaultMaxRunSeconds) || defaultMaxRunSeconds <= 0) throw new SubagentError("INVALID_CONFIG", `defaultMaxRunSeconds must be a positive integer JSON number: ${path}`);
+  return { version: 1, defaultExtensions, defaultMaxRunSeconds, codexAuthBalancer: parseCodexAuthBalancer(parsed.codexAuthBalancer, `${path}.codexAuthBalancer`, env), configPath: path };
 }

@@ -114,6 +114,8 @@ export interface RunStatus {
   writerRole?: WriterRole;
   pid?: number;
   processHealth?: "unknown" | "alive" | "dead";
+  effectiveMaxRunMs?: number;
+  timeout?: { softWarningAt?: string; hardTimeoutAt?: string; pausedAt?: string; additionalRunSeconds?: number; reason?: string } | null;
   cwd: string;
   createdAt: string;
   startedAt?: string;
@@ -180,6 +182,8 @@ export interface RunResult {
   success: boolean;
   createdAt: string;
   durationMs?: number;
+  effectiveMaxRunMs?: number;
+  timeout?: { softWarningAt?: string; hardTimeoutAt?: string; pausedAt?: string; additionalRunSeconds?: number; reason?: string } | null;
   summary?: string;
   body?: string;
   artifacts: ArtifactRef[];
@@ -291,7 +295,8 @@ export interface SubagentStartResult {
   // the child has, its budget, and any nested subagent depth limit.
   skills?: string[];
   tools?: string[];
-  maxRunMs?: number;
+  maxRunSeconds?: number;
+  effectiveMaxRunMs?: number;
   maxSubagentDepth?: number;
   next: Array<{ tool: string; args: Record<string, unknown> }>;
 }

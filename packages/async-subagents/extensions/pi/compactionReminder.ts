@@ -61,7 +61,7 @@ function rowLabel(row: RunSummaryRow): string {
 function nextAction(row: RunSummaryRow): string {
   if (row.state === "waiting_for_input" || row.state === "blocked") return "respond with subagent_message or inspect with subagent_status";
   if (row.resultReady || row.result || isTerminalRunState(row.state)) return "read with subagent_result";
-  return "track with subagent_status or subagent_wait";
+  return "track with subagent_status";
 }
 
 function rowLine(row: RunSummaryRow): string {

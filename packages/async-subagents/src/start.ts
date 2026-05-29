@@ -6,6 +6,7 @@ import { applyAgentVariant, resolveAgentDefinition } from "./agentDefinitions.js
 import { loadAsyncSubagentsConfig, type CodexAuthBalancerConfig } from "./config.js";
 import { buildPiCommand, childControlEventTool, childControlExtensionPath, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
 import { assemblePrompt } from "./promptAssembly.js";
+import { SubagentError } from "./errors.js";
 import { finalizeTerminalRun } from "./lifecycle.js";
 import { assignDisplayName } from "./namePacks.js";
 import { branchPiSession, type BranchPiSession, type ParentPiSessionRef } from "./piSession.js";
@@ -13,8 +14,7 @@ import { createRootSession, readRootSession } from "./rootSession.js";
 import { RunStore } from "./runStore.js";
 import { createInitialStatus } from "./status.js";
 import { codexBalancerSyncBackAndCleanup, runSupervisor, type SupervisorFakeInput, type SupervisorInput } from "./supervisor.js";
-import { waitSubagents } from "./wait.js";
-import type { ContextPolicy, SessionPolicy, SubagentStartResult, SubagentWaitResult, TerminalRunState, ThinkingLevel } from "./types.js";
+import type { ContextPolicy, SessionPolicy, SubagentStartResult, TerminalRunState, ThinkingLevel } from "./types.js";
 import { prepareLaunch } from "@bravo/codex-auth-balancer";
 
 export interface StartFakeChildInput {
@@ -23,7 +23,7 @@ export interface StartFakeChildInput {
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
-  maxRunMs?: number;
+  effectiveMaxRunMs?: number;
 }
 
 export interface StartFakeImmediateInput extends SupervisorFakeInput {
@@ -42,10 +42,6 @@ export interface StartSubagentInput {
   depth?: number;
   files?: string[];
   skills?: string[];
-  startMode?: "async" | "wait" | "sync";
-  waitUntil?: "interesting" | "terminal" | "result" | "event";
-  waitTimeoutMs?: number;
-  pollIntervalMs?: number;
   context?: ContextPolicy;
   session?: SessionPolicy;
   allowFreshFallback?: boolean;
@@ -312,6 +308,10 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   const runtimeBuiltinTools = [childControlEventTool];
   const runtimeExtensionPaths = [childControlExtensionPath];
   const launchLogPath = join(paths.logsDir, "launch.json");
+  const asyncSubagentsConfig = loadAsyncSubagentsConfig({ cwd, env: { ...process.env, ...(input.env ?? {}) } });
+  const maxRunSeconds = definition.maxRunSeconds ?? asyncSubagentsConfig.defaultMaxRunSeconds;
+  if (!Number.isFinite(maxRunSeconds) || maxRunSeconds <= 0) throw new SubagentError("INVALID_AGENT_DEFINITION", "maxRunSeconds must be a positive finite number");
+  const effectiveMaxRunMs = Math.ceil(maxRunSeconds * 1000);
 
   const initialStatus = createInitialStatus({
     runId,
@@ -341,6 +341,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     runtimeExtensionPaths,
     launchLogPath,
     inboxPath: paths.inboxPath,
+    effectiveMaxRunMs,
     cwd,
     state: "queued",
   });
@@ -379,7 +380,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       continuationOfPiSessionPath: input.continuation?.continuationOfPiSessionPath,
       skills: definition.skills,
       tools: definition.tools,
-      maxRunMs: definition.maxRunMs,
+      maxRunSeconds,
+      effectiveMaxRunMs,
       maxSubagentDepth: definition.maxSubagentDepth,
       next: [{ tool: "subagent_result", args: { runId } }],
     };
@@ -435,8 +437,6 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       updatedAt: new Date().toISOString(),
     });
   }
-
-  const asyncSubagentsConfig = loadAsyncSubagentsConfig({ cwd, env: { ...process.env, ...(input.env ?? {}) } });
 
   const prompt = assemblePrompt({
     definition,
@@ -529,7 +529,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     parentRunId: root.parentRunId,
     agentName: definition.name,
     command,
-    maxRunMs: input.fake?.mode === "child" ? input.fake.maxRunMs ?? prompt.maxRunMs : prompt.maxRunMs,
+    effectiveMaxRunMs: input.fake?.mode === "child" ? input.fake.effectiveMaxRunMs ?? effectiveMaxRunMs : effectiveMaxRunMs,
     fake: input.fake?.mode === "immediate" ? input.fake : undefined,
     codexAuthBalancer: codexAuthBalancer ? { isolatedDir: codexAuthBalancer.isolatedDir, selectedSlot: codexAuthBalancer.selectedSlot, stateDir: asyncSubagentsConfig.codexAuthBalancer.stateDir, timeoutMs: asyncSubagentsConfig.codexAuthBalancer.timeoutMs, metadata: codexAuthBalancer.metadata } : undefined,
   };
@@ -540,19 +540,6 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   } else {
     const spawnError = await spawnDetachedSupervisor(supervisorInputPath);
     if (spawnError && !store.readResult(runId)) writeLauncherFailure(store, supervisorInput, spawnError);
-  }
-
-  let waitResult: SubagentWaitResult | undefined;
-  const startMode = input.startMode ?? "async";
-  if (startMode === "wait" || startMode === "sync") {
-    waitResult = await waitSubagents(store, {
-      runIds: [runId],
-      timeoutMs: input.waitTimeoutMs ?? (startMode === "sync" || startMode === "wait" ? 300_000 : 0),
-      pollIntervalMs: input.pollIntervalMs,
-      includeResult: true,
-      includeStatus: true,
-      until: input.waitUntil ?? (startMode === "sync" ? "result" : "interesting"),
-    });
   }
 
   const status = store.readStatus(runId);
@@ -569,8 +556,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     model: status.model,
     thinkingLevel: status.thinkingLevel,
     started: status.state === "running" || terminal,
-    waited: Boolean(waitResult),
-    waitResult,
+    waited: false,
     contextPolicy: status.contextPolicy,
     sessionPolicy: status.sessionPolicy,
     piSessionPath: status.piSessionPath,
@@ -581,8 +567,9 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     continuationOfPiSessionPath: status.continuationOfPiSessionPath,
     skills: prompt.skills,
     tools: definition.tools,
-    maxRunMs: definition.maxRunMs,
+    maxRunSeconds,
+    effectiveMaxRunMs,
     maxSubagentDepth: definition.maxSubagentDepth,
-    next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [{ tool: "subagent_wait", args: { runIds: [runId] } }],
+    next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [{ tool: "subagent_status", args: { runIds: [runId] } }],
   };
 }

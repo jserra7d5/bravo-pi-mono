@@ -109,7 +109,7 @@ export default function childControlExtension(pi: ExtensionAPI) {
     name: "subagent_event",
     label: "Subagent Event",
     description: "Emit a structured child-to-parent subagent event.",
-    promptSnippet: "Emit a progress, question, blocked, status, or artifact event to the parent subagent runtime.",
+    promptSnippet: "Emit a progress, question, blocked, status, or artifact event to the parent subagent runtime. If you receive a time-budget warning, checkpoint your current findings; if you cannot finish before the deadline, emit a blocked event with the checkpoint and what parent input or continuation you need.",
     parameters: Type.Object({
       type: StringEnum(CHILD_EVENT_TYPES),
       summary: Type.String(),

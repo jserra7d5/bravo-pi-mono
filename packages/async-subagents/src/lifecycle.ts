@@ -15,6 +15,8 @@ export interface FinalizeTerminalRunInput {
   startedAt?: string;
   summary?: string;
   body?: string;
+  effectiveMaxRunMs?: number;
+  timeout?: RunResult["timeout"];
   error?: RunResult["error"];
 }
 
@@ -80,6 +82,8 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
     startedAt: input.startedAt ?? status.startedAt,
     summary: input.summary,
     body: input.body,
+    effectiveMaxRunMs: input.effectiveMaxRunMs ?? status.effectiveMaxRunMs,
+    timeout: input.timeout ?? status.timeout,
     metrics,
     error: input.error ?? null,
   });
@@ -105,6 +109,8 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
       lastActivityAt: result.createdAt,
       lastEventId: terminalEvent.eventId,
       summary: result.summary,
+      effectiveMaxRunMs: result.effectiveMaxRunMs,
+      timeout: result.timeout,
       metrics,
       error: input.error ?? null,
     }),

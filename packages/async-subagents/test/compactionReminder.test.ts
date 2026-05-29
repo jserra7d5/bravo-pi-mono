@@ -58,7 +58,8 @@ test("compaction reminder preserves active, blocked, and result-ready subagent s
   assert.equal(reminder?.display, true);
   assert.match(reminder?.content ?? "", /Async subagent status preserved after compaction/);
   assert.match(reminder?.content ?? "", new RegExp(running));
-  assert.match(reminder?.content ?? "", /@Alex \(scout\).*running.*subagent_status or subagent_wait/);
+  assert.match(reminder?.content ?? "", /@Alex \(scout\).*running.*subagent_status/);
+  assert.doesNotMatch(reminder?.content ?? "", /subagent_wait/);
   assert.match(reminder?.content ?? "", new RegExp(blocked));
   assert.match(reminder?.content ?? "", /@Rex \(scout\).*blocked.*subagent_message/);
   assert.match(reminder?.content ?? "", new RegExp(completed));

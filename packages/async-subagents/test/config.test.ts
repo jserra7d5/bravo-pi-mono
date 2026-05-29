@@ -35,6 +35,14 @@ test("loadAsyncSubagentsConfig rejects unknown codexAuthBalancer keys", () => {
   assert.throws(() => loadAsyncSubagentsConfig({ env: { ASYNC_SUBAGENTS_HOME: home, HOME: home } as NodeJS.ProcessEnv }), /unknown key unexpected/);
 });
 
+test("loadAsyncSubagentsConfig requires defaultMaxRunSeconds to be a positive integer JSON number", () => {
+  for (const value of ["1", true, 0, -1, 1.5, null]) {
+    const home = mkdtempSync(join(tmpdir(), "async-config-"));
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 1, defaultMaxRunSeconds: value }));
+    assert.throws(() => loadAsyncSubagentsConfig({ env: { ASYNC_SUBAGENTS_HOME: home, HOME: home } as NodeJS.ProcessEnv }), /defaultMaxRunSeconds must be a positive integer JSON number/);
+  }
+});
+
 function authWorkspace(mode: "success" | "conflict" | "prepare-fail", failClosed = true) {
   const root = mkdtempSync(join(tmpdir(), "async-balancer-"));
   mkdirSync(join(root, ".agents"), { recursive: true });

@@ -51,10 +51,28 @@ function refreshUi(ctx: ExtensionContext): void {
   if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
 }
 
+function wakeupEnvelope(wakeup: WakeupMessage): string {
+  const attention = wakeup.state === "paused" || wakeup.state === "blocked" || wakeup.state === "waiting_for_input" || wakeup.state === "failed";
+  const lines = [attention ? "[ASYNC SUBAGENT ATTENTION — NOT USER INPUT]" : "[ASYNC SUBAGENT RESULT READY — NOT USER INPUT]", "", `Run ID: ${wakeup.runId}`];
+  if (wakeup.status?.displayName) lines.push(`Subagent: @${wakeup.status.displayName}${wakeup.status.agentName ? ` (${wakeup.status.agentName})` : ""}`);
+  else if (wakeup.status?.agentName) lines.push(`Subagent: ${wakeup.status.agentName}`);
+  if (wakeup.state) lines.push(`State: ${wakeup.state}`);
+  if (wakeup.summary) lines.push(`Summary: ${wakeup.summary}`);
+  lines.push("", wakeup.bodyAvailable ? "The child body is ready but not included in this wakeup." : "Full child output is not included in this wakeup.");
+  if (wakeup.state === "waiting_for_input" || wakeup.event?.type === "question" || wakeup.state === "blocked" || wakeup.event?.type === "blocked") {
+    lines.push(`Reply with subagent_message({ runId: "${wakeup.runId}", type: "answer", ... }) when you have the requested input. You may call subagent_status({ runIds: ["${wakeup.runId}"] }) for current status; do not call subagent_result for this non-terminal wakeup.`);
+  } else if (wakeup.state === "paused") {
+    lines.push(`If this result is still needed, choose a bounded extension and call subagent_continue({ runId: "${wakeup.runId}", additionalRunSeconds: 900 }) to resume. Adjust additionalRunSeconds to the smallest reasonable budget for the remaining work, or call subagent_interrupt({ runId: "${wakeup.runId}", action: "cancel" }) if it is no longer needed.`);
+  } else {
+    lines.push(`Call subagent_result({ runId: "${wakeup.runId}" }) if this result is relevant before continuing.`);
+  }
+  return lines.join("\n");
+}
+
 function sendWakeup(pi: ExtensionAPI, wakeup: WakeupMessage): void {
   const message = {
     customType: "async-subagent-message",
-    content: wakeup.summary ?? wakeup.title,
+    content: wakeupEnvelope(wakeup),
     display: true,
     details: wakeup,
   };

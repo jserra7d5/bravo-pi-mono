@@ -59,53 +59,10 @@ test("subagent_status tool defaults to root session direct children", async () =
   assert.equal((result.details.counts as { active: number }).active, 1);
 });
 
-test("subagent_start marks waited terminal results handled before subscribing wakeups", async () => {
+test("model-facing tool catalog does not expose subagent_wait", () => {
   const w = workspace();
-  const store = new RunStore({ cwd: w.root });
-  const status = store.readStatus(w.runId);
-  const runDir = store.pathsFor({ runId: w.runId }).runDir;
-  const terminalResult = createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", summary: "Done", body: "Full body" });
-  const built = Object.fromEntries(
-    buildSubagentTools({
-      getRootIdentity() {
-        return w.identity;
-      },
-      async startSubagent() {
-        store.writeResult(terminalResult);
-        store.writeStatus({ ...status, state: "completed", resultReady: true, summary: "Done" });
-        return {
-          runId: w.runId,
-          runDir,
-          agentName: "scout",
-          state: "completed",
-          started: true,
-          waited: true,
-          waitResult: {
-            state: "ready",
-            mode: "race",
-            readyRunIds: [w.runId],
-            events: [],
-            results: [terminalResult],
-            statuses: [{ runId: w.runId, state: "completed", summary: "Done" }],
-            cursors: {},
-            remainingRunIds: [],
-            timedOut: false,
-            next: [],
-          },
-          contextPolicy: "fresh",
-          sessionPolicy: "record",
-          next: [{ tool: "subagent_result", args: { runId: w.runId } }],
-        };
-      },
-    }).map((tool) => [tool.name, tool]),
-  );
-
-  const result = await built.subagent_start.execute("call", { agent: "scout", task: "review", mode: "sync" }, undefined, undefined, { cwd: w.root });
-
-  assert.equal(result.isError, undefined);
-  assert.equal(store.readStatus(w.runId).resultReady, false);
-  acquireRootSessionLease({ cwd: w.root, rootSessionId: w.identity.rootSessionId, ownerId: "owner_a", ttlMs: 10_000 });
-  assert.equal(pollWakeups({ store, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId, ownerId: "owner_a", modelFollowUpOnly: true }).length, 0);
+  const built = tools(w.identity);
+  assert.equal(Object.hasOwn(built, "subagent_wait"), false);
 });
 
 test("subagent_message appends inbox messages and waits for child-control acknowledgement", async () => {
@@ -138,16 +95,17 @@ test("subagent_message rejects lifecycle controls", async () => {
   assert.equal(result.details.code, "LIFECYCLE_MESSAGE_REJECTED");
 });
 
-test("subagent_interrupt cancel writes terminal cancelled result", async () => {
+test("subagent_interrupt cancel queues supervisor control without finalizing live run", async () => {
   const w = workspace();
   const built = tools(w.identity);
   const result = await built.subagent_interrupt.execute("call", { runId: w.runId, action: "cancel", reason: "Wrong direction" }, undefined, undefined, { cwd: w.root });
 
   assert.equal(result.isError, undefined);
-  assert.equal(result.details.state, "cancelled");
+  assert.equal(result.details.state, "running");
+  assert.equal(result.details.controlQueued, true);
   const store = new RunStore({ cwd: w.root });
-  assert.equal(store.readStatus(w.runId).state, "cancelled");
-  assert.equal(store.readResult(w.runId)?.state, "cancelled");
+  assert.equal(store.readStatus(w.runId).state, "running");
+  assert.equal(store.readResult(w.runId), undefined);
   assert.equal(store.readInbox(w.runId).records.at(-1)?.type, "cancel");
 });
 
@@ -160,7 +118,7 @@ test("subagent_continue rejects non-paused runs", async () => {
   assert.equal(result.details.code, "RUN_NOT_PAUSED");
 });
 
-test("subagent_continue records running state even when required ack fails", async () => {
+test("subagent_continue queues resume control even when required ack fails", async () => {
   const w = workspace();
   const store = new RunStore({ cwd: w.root });
   const status = store.readStatus(w.runId);
@@ -169,10 +127,11 @@ test("subagent_continue records running state even when required ack fails", asy
   const result = await built.subagent_continue.execute("call", { runId: w.runId, thinkingLevel: "high" }, undefined, undefined, { cwd: w.root });
 
   assert.equal(result.isError, true);
-  assert.equal(result.details.state, "running");
+  assert.equal(result.details.state, "paused");
+  assert.equal(result.details.controlQueued, true);
   assert.equal(result.details.thinkingLevel, "high");
-  assert.equal(store.readStatus(w.runId).state, "running");
-  assert.equal(store.readStatus(w.runId).thinkingLevel, "high");
+  assert.equal(store.readStatus(w.runId).state, "paused");
+  assert.equal(store.readStatus(w.runId).thinkingLevel, "low");
   assert.equal(store.readInbox(w.runId).records.at(-1)?.thinkingLevel, "high");
 });
 
@@ -217,7 +176,7 @@ test("subagent_continue creates an async terminal continuation using the origina
   assert.equal(result.details.continuationRootRunId, w.runId);
   assert.equal(result.details.continuationSequence, 1);
   assert.equal(result.details.continuationOfPiSessionPath, originalSession);
-  assert.equal((calls[0] as { startMode?: string }).startMode, "async");
+  assert.equal(Object.hasOwn(calls[0] as Record<string, unknown>, "startMode"), false);
 
   const newRunId = result.details.runId as string;
   assert.notEqual(newRunId, w.runId);
@@ -457,80 +416,6 @@ test("subagent_name_pack inspects and changes the active pack for future runs", 
   });
   assert.ok(NAME_PACKS.clones.includes(started.displayName as (typeof NAME_PACKS.clones)[number]));
   assert.equal(started.agentName, "scout");
-});
-
-test("subagent_wait returns usable result bodies with truncation metadata", async () => {
-  const w = workspace();
-  const store = new RunStore({ cwd: w.root });
-  const status = store.readStatus(w.runId);
-  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", body: "0123456789abcdef" }));
-  store.writeStatus({ ...status, state: "completed", resultReady: true });
-
-  const built = tools(w.identity);
-  const result = await built.subagent_wait.execute("call", { runIds: [w.runId], until: "result", maxBytes: 8 }, undefined, undefined, { cwd: w.root });
-
-  assert.equal(result.isError, undefined);
-  const ready = (result.details.results as Array<{ body?: string; bodyTruncation?: { truncated?: boolean; originalBytes?: number; returnedBytes?: number; maxBytes?: number } }>)[0];
-  assert.equal(ready.body, "01234...");
-  assert.match(result.content[0]?.text ?? "", /01234\.\.\./);
-  assert.match(result.content[0]?.text ?? "", /Body truncated: 8 of 16 bytes returned/);
-  assert.equal(ready.bodyTruncation?.truncated, true);
-  assert.equal(ready.bodyTruncation?.originalBytes, 16);
-  assert.equal(ready.bodyTruncation?.returnedBytes, 8);
-  assert.equal(ready.bodyTruncation?.maxBytes, 8);
-  assert.equal(store.readStatus(w.runId).resultReady, false);
-});
-
-test("subagent_wait wraps terminal bodies in an explicit child-result envelope", async () => {
-  const w = workspace();
-  const store = new RunStore({ cwd: w.root });
-  const firstStatus = store.readStatus(w.runId);
-  const second = store.createRunDirectory({ cwd: w.root, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId });
-  store.writeStatus({
-    ...createInitialStatus({
-      runId: second.runId,
-      parentRunId: w.identity.parentRunId,
-      rootSessionId: w.identity.rootSessionId,
-      agentName: "scout",
-      agentSource: "builtin",
-      definitionPath: "/builtin/scout.md",
-      mode: "oneshot",
-      cwd: w.root,
-      state: "completed",
-      displayName: "Harper",
-    }),
-    summary: "### Summary",
-  });
-  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", displayName: "Gray", summary: "### Summary", body: "### Summary\n\nGray full body" }));
-  store.writeStatus({ ...firstStatus, state: "completed", resultReady: true, displayName: "Gray", summary: "### Summary" });
-  store.writeResult(createRunResult({ runId: second.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", displayName: "Harper", summary: "### Summary", body: "### Summary\n\nHarper full body" }));
-
-  const built = tools(w.identity);
-  const result = await built.subagent_wait.execute("call", { runIds: [w.runId, second.runId], mode: "all", until: "result" }, undefined, undefined, { cwd: w.root });
-  const content = result.content[0]?.text ?? "";
-
-  assert.equal(result.isError, undefined);
-  assert.match(content, /^Subagent wait: 2 results - @Gray scout completed; @Harper scout completed/);
-  assert.match(content, /child-agent results, not user input/);
-  assert.match(content, /## Result: @Gray scout completed/);
-  assert.match(content, /Gray full body/);
-  assert.match(content, /## Result: @Harper scout completed/);
-  assert.match(content, /Harper full body/);
-  assert.doesNotMatch(content.split("\n", 1)[0] ?? "", /### Summary/);
-});
-
-test("subagent_wait omits model-facing bodies when includeResult is false", async () => {
-  const w = workspace();
-  const store = new RunStore({ cwd: w.root });
-  const status = store.readStatus(w.runId);
-  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", body: "secret body" }));
-  store.writeStatus({ ...status, state: "completed", resultReady: true });
-
-  const built = tools(w.identity);
-  const result = await built.subagent_wait.execute("call", { runIds: [w.runId], until: "result", includeResult: false, timeoutMs: 0 }, undefined, undefined, { cwd: w.root });
-
-  assert.equal(result.isError, undefined);
-  assert.doesNotMatch(result.content[0]?.text ?? "", /secret body/);
 });
 
 test("subagent_result omits model-facing body when includeBody is false", async () => {

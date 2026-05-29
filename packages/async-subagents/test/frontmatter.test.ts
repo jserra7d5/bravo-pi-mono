@@ -7,7 +7,7 @@ test("frontmatter parser supports strings, booleans, numbers, inline arrays, blo
 name: scout
 description: Read-only scout
 enabled: true
-maxRunMs: 600000
+maxRunSeconds: 600
 tools: [read, grep, ls]
 includes:
   - safety
@@ -18,7 +18,7 @@ Body prompt.
 `);
   assert.equal(parsed.data.name, "scout");
   assert.equal(parsed.data.enabled, true);
-  assert.equal(parsed.data.maxRunMs, 600000);
+  assert.equal(parsed.data.maxRunSeconds, 600);
   assert.deepEqual(parsed.data.tools, ["read", "grep", "ls"]);
   assert.deepEqual(parsed.data.includes, ["safety", "repo"]);
   assert.equal(parsed.body, "Body prompt.");

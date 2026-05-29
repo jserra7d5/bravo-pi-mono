@@ -25,7 +25,7 @@ export interface PromptAssemblyResult {
   model?: string;
   thinkingLevel?: ResolvedAgentDefinition["thinkingLevel"];
   mode: ResolvedAgentDefinition["mode"];
-  maxRunMs?: number;
+  maxRunSeconds?: number;
 }
 
 const runtimeContract = `You are a delegated child agent.
@@ -94,6 +94,6 @@ Interactive agents should watch their inbox and acknowledge handled parent messa
     model: input.definition.model,
     thinkingLevel: input.definition.thinkingLevel,
     mode: input.definition.mode,
-    maxRunMs: input.definition.maxRunMs,
+    maxRunSeconds: input.definition.maxRunSeconds,
   };
 }

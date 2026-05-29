@@ -337,15 +337,13 @@ Provider variant body.
     runRoot: w.runRoot,
     parentRunId: "root_test",
     piBin,
-    startMode: "sync",
-    waitUntil: "result",
-    waitTimeoutMs: 5000,
   });
 
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  await waitForStatusState(store, started.runId, "completed", 5000);
   const result = store.readResult(started.runId);
   const launch = JSON.parse(readFileSync(join(started.runDir, "logs", "launch.json"), "utf8"));
-  assert.equal(started.state, "completed");
+  assert.equal(store.readStatus(started.runId).state, "completed");
   assert.match(result?.body ?? "", /Variant child completed/);
   assert.deepEqual(launch.extensions, [extensionPath]);
   assert.ok(existsSync(join(started.runDir, "logs", "model-preflight.json")));
@@ -421,23 +419,19 @@ test("context fork only falls back to fresh when explicitly allowed", async () =
   assert.equal(store.readResult(started.runId)?.forkFallback?.reason, "branch unavailable");
 });
 
-test("startSubagent wait mode uses a real default wait timeout", async () => {
+test("startSubagent returns async status guidance without waiting", async () => {
   const w = workspace();
   const started = await startSubagent({
     agent: "scout",
-    task: "Wait for fake result",
+    task: "Start async fake result",
     cwd: w.root,
     runRoot: w.runRoot,
     parentRunId: "root_test",
-    startMode: "wait",
-    waitUntil: "result",
-    fake: { mode: "child", env: { ASYNC_SUBAGENTS_FAKE_DELAY_MS: "50", ASYNC_SUBAGENTS_FAKE_BODY: "Waited child completed" } },
+    fake: { mode: "child", env: { ASYNC_SUBAGENTS_FAKE_DELAY_MS: "50", ASYNC_SUBAGENTS_FAKE_BODY: "Async child completed" } },
   });
 
-  assert.equal(started.waited, true);
-  assert.equal(started.state, "completed");
-  assert.equal(started.waitResult?.state, "ready");
-  assert.match(started.waitResult?.results[0]?.body ?? "", /Waited child completed/);
+  assert.equal(started.waited, false);
+  assert.deepEqual(started.next, [{ tool: "subagent_status", args: { runIds: [started.runId] } }]);
 });
 
 test("supervisor writes result before terminal status and terminal event", async () => {

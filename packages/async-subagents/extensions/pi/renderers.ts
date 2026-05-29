@@ -1,5 +1,5 @@
 import type { RunSummaryRow } from "../../src/watcher.js";
-import type { RunEvent, RunResult, RunStatus, SubagentMessageResult, SubagentStartResult, SubagentWaitResult } from "../../src/types.js";
+import type { RunEvent, RunResult, RunStatus, SubagentMessageResult, SubagentStartResult } from "../../src/types.js";
 
 export interface TextTheme {
   fg?: (name: string, value: string) => string;
@@ -11,7 +11,6 @@ export interface RenderOptions {
 
 export type SubagentToolName =
   | "subagent_start"
-  | "subagent_wait"
   | "subagent_message"
   | "subagent_interrupt"
   | "subagent_continue"
@@ -32,6 +31,7 @@ export interface WakeupMessage {
   state?: string;
   summary?: string;
   body?: string;
+  bodyAvailable?: boolean;
   event?: RunEvent;
   result?: RunResult;
   status?: { agentName?: string; displayName?: string };
@@ -689,7 +689,8 @@ export function renderToolCallCard(input: ToolCallCardInput): string[] {
 
 function describeBudget(args: Record<string, unknown>): string | undefined {
   const parts: string[] = [];
-  if (typeof args.timeoutMs === "number") parts.push(`${compactDuration(args.timeoutMs)} max`);
+  if (typeof args.maxRunSeconds === "number") parts.push(`${compactDuration(args.maxRunSeconds * 1000)} max`);
+  if (typeof args.additionalRunSeconds === "number") parts.push(`+${compactDuration(args.additionalRunSeconds * 1000)}`);
   if (typeof args.maxSubagentDepth === "number") parts.push(`depth ${args.maxSubagentDepth}`);
   if (!parts.length) return undefined;
   return parts.join(" · ");
@@ -705,9 +706,10 @@ function describeContext(args: Record<string, unknown>): string | undefined {
 function describeAffordances(kind: string | undefined): string[] {
   switch (kind) {
     case "waiting_for_input":
-    case "question": return ["reply", "wait", "dismiss"];
+    case "question": return ["reply", "status", "dismiss"];
     case "blocked": return ["recheck", "skip", "dismiss"];
     case "failed": return ["retry", "dismiss"];
+    case "paused": return ["continue", "cancel"];
     case "completed":
     case "result_ready": return ["view", "continue"];
     case "cancelled":
@@ -778,17 +780,6 @@ function selectedRunsLabel(args: Record<string, unknown>): string {
 
 function renderSubagentCallCard(toolName: SubagentToolName | undefined, args: Record<string, unknown>, width?: number): string[] {
   switch (toolName) {
-    case "subagent_wait": {
-      const until = typeof args.until === "string" ? args.until : "interesting";
-      const mode = typeof args.mode === "string" ? args.mode : "race";
-      const timeout = typeof args.timeoutMs === "number" ? compactDuration(args.timeoutMs) : "5m";
-      return renderToolCallCard({
-        width,
-        title: "wait for subagents",
-        badge: "◐ watching",
-        rows: [["scope", selectedRunsLabel(args)], ["until", until], ["mode", mode], ["timeout", timeout]],
-      });
-    }
     case "subagent_status":
       return renderToolCallCard({ width, title: "subagent status", badge: "○ reading", rows: [["scope", selectedRunsLabel(args)]] });
     case "subagent_result":
@@ -818,10 +809,10 @@ function renderStartResultCard(details: Record<string, unknown>, width?: number)
   const state = typeof details.state === "string" ? details.state : "queued";
   const skills = Array.isArray(details.skills) ? details.skills.filter((s): s is string => typeof s === "string") : undefined;
   const tools = Array.isArray(details.tools) ? details.tools.filter((t): t is string => typeof t === "string") : undefined;
-  const maxRunMs = typeof details.maxRunMs === "number" ? details.maxRunMs : undefined;
+  const effectiveMaxRunMs = typeof details.effectiveMaxRunMs === "number" ? details.effectiveMaxRunMs : typeof details.maxRunSeconds === "number" ? details.maxRunSeconds * 1000 : undefined;
   const maxSubagentDepth = typeof details.maxSubagentDepth === "number" ? details.maxSubagentDepth : undefined;
   const budgetParts: string[] = [];
-  if (maxRunMs) budgetParts.push(`${compactDuration(maxRunMs)} max`);
+  if (effectiveMaxRunMs) budgetParts.push(`${compactDuration(effectiveMaxRunMs)} max`);
   if (maxSubagentDepth) budgetParts.push(`depth ${maxSubagentDepth}`);
   const budget = budgetParts.length ? budgetParts.join(" · ") : undefined;
   return renderLaunchCard({
@@ -880,7 +871,7 @@ export function renderSubagentToolCall(args: Record<string, unknown>, theme?: Te
   const task = typeof args.task === "string" ? ` - ${preview(args.task, 90)}` : "";
   const accent = (v: string) => (theme?.fg ? theme.fg("accent", v) : v);
   const muted = (v: string) => (theme?.fg ? theme.fg("muted", v) : v);
-  const titleText = toolName === "subagent_wait" ? "subagent wait" : "subagent";
+  const titleText = "subagent";
   const title = theme?.fg ? theme.fg("toolTitle", titleText) : titleText;
   return `${title} ${accent(target)}${muted(task)}`;
 }
@@ -946,8 +937,7 @@ function wakeCardInputFor(message: WakeupMessage, options?: RenderOptions): Wake
   const headline = summaryText ? preview(summaryText, 96) : undefined;
   const body = (() => {
     if (options?.expanded && message.body) return message.body;
-    if (message.event?.body) return preview(message.event.body, 400);
-    if (message.result?.body) return preview(message.result.body, 400);
+    if (message.bodyAvailable) return "Full child body available via subagent_result.";
     return undefined;
   })();
   return {
@@ -988,21 +978,6 @@ function formatResultSummary(result: RunResult, options?: { includeSummary?: boo
   const state = options?.useLiteralState ? result.state : stateGlyph(result.state).label;
   const summary = options?.includeSummary === false || !result.summary ? "" : ` - ${preview(result.summary, 96)}`;
   return `${label} ${state}${duration}${summary}`;
-}
-
-export function summarizeWaitResult(result: SubagentWaitResult): string {
-  if (result.state === "timeout") return `No subagent updates before timeout (${result.remainingRunIds.length} remaining)`;
-  if (result.results.length) {
-    const shown = result.results.slice(0, 2).map((readyResult) => formatResultSummary(readyResult, { includeSummary: false, useLiteralState: true })).join("; ");
-    const more = result.results.length > 2 ? `; +${result.results.length - 2} more` : "";
-    return `Subagent wait: ${result.results.length} result${result.results.length === 1 ? "" : "s"} - ${shown}${more}`;
-  }
-  const parts = [
-    `${result.readyRunIds.length} ready`,
-    result.results.length ? `${result.results.length} result` : "",
-    result.events.length ? `${result.events.length} event` : "",
-  ].filter(Boolean);
-  return `Subagent wait: ${parts.join(", ")}`;
 }
 
 export function summarizeMessageResult(result: SubagentMessageResult): string {

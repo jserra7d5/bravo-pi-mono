@@ -79,7 +79,7 @@ test("manual retention dry-run skips active and unhandled result-ready runs", ()
   assert.equal(existsSync(join(w.store.runRoot, collectableRunId)), false);
 });
 
-test("terminal result with missing summary delivers full body once", () => {
+test("terminal result with missing summary delivers safe metadata once", () => {
   const w = workspace();
   const runId = addRun(w.store, w.root, w.parentRunId, "completed");
   w.store.writeStatus({ ...w.store.readStatus(runId), resultReady: true });
@@ -91,7 +91,9 @@ test("terminal result with missing summary delivers full body once", () => {
   acquireRootSessionLease({ cwd: w.root, rootSessionId: w.parentRunId, ownerId: "owner", nowMs, ttlMs: 10_000 });
   const first = pollWakeups({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, ownerId: "owner", limit: 5, nowMs });
   assert.equal(first.length, 1);
-  assert.equal(first[0].message.body, "full body once");
+  assert.equal(first[0].message.body, undefined);
+  assert.equal(first[0].message.bodyAvailable, true);
+  assert.equal(first[0].message.result?.body, undefined);
   const second = pollWakeups({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, ownerId: "owner", limit: 5, nowMs: nowMs + 1 });
   assert.equal(second.length, 0);
 });
@@ -187,7 +189,9 @@ test("wakeup polling reads full result only for subscribed ready runs", () => {
   acquireRootSessionLease({ cwd: w.root, rootSessionId: w.parentRunId, ownerId: "owner", nowMs, ttlMs: 10_000 });
   const deliveries = pollWakeups({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, ownerId: "owner", limit: 5, nowMs });
   assert.equal(deliveries.length, 1);
-  assert.equal(deliveries[0].message.body, "full body");
+  assert.equal(deliveries[0].message.body, undefined);
+  assert.equal(deliveries[0].message.bodyAvailable, true);
+  assert.equal(deliveries[0].message.result?.body, undefined);
   assert.equal(readEvents, 0);
   assert.equal(readResults, 1);
 });

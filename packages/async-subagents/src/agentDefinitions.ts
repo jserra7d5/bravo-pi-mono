@@ -17,7 +17,7 @@ export interface AgentDefinitionVariant {
   mode?: AgentMode;
   context?: ContextPolicy;
   session?: SessionPolicy;
-  maxRunMs?: number;
+  maxRunSeconds?: number;
   maxSubagentDepth?: number;
   cwdPolicy?: CwdPolicy;
   resultFormat?: ResultFormat;
@@ -35,7 +35,7 @@ export interface MarkdownAgentDefinition {
   mode?: AgentMode;
   context?: ContextPolicy;
   session?: SessionPolicy;
-  maxRunMs?: number;
+  maxRunSeconds?: number;
   maxSubagentDepth?: number;
   cwdPolicy?: CwdPolicy;
   resultFormat?: ResultFormat;
@@ -117,6 +117,12 @@ function optionalNumber(value: unknown, field: string, path: string): number | u
   return value;
 }
 
+function optionalPositiveNumber(value: unknown, field: string, path: string): number | undefined {
+  const parsed = optionalNumber(value, field, path);
+  if (parsed !== undefined && parsed <= 0) throw new SubagentError("INVALID_AGENT_DEFINITION", `${field} must be a positive number in ${path}`);
+  return parsed;
+}
+
 function assertEnum<T extends string>(value: unknown, field: string, allowed: readonly T[], fallback: T, path: string): T {
   if (value === undefined) return fallback;
   if (typeof value === "string" && allowed.includes(value as T)) return value as T;
@@ -139,8 +145,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parseAgentVariant(name: string, value: unknown, path: string): AgentDefinitionVariant {
   if (!isRecord(value)) throw new SubagentError("INVALID_AGENT_DEFINITION", `variant ${name} must be a map in ${path}`);
-  const allowed = new Set(["model", "thinkingLevel", "thinking_level", "tools", "skills", "extensions", "includes", "mode", "context", "session", "maxRunMs", "maxSubagentDepth", "cwdPolicy", "resultFormat"]);
+  const allowed = new Set(["model", "thinkingLevel", "thinking_level", "tools", "skills", "extensions", "includes", "mode", "context", "session", "maxRunSeconds", "maxRunMs", "maxSubagentDepth", "cwdPolicy", "resultFormat"]);
   for (const key of Object.keys(value)) {
+    if (key === "maxRunMs") throw new SubagentError("INVALID_AGENT_DEFINITION", `variants.${name}.maxRunMs has been replaced by variants.${name}.maxRunSeconds in ${path}; use seconds, for example maxRunSeconds: 1800`);
     if (!allowed.has(key)) throw new SubagentError("INVALID_AGENT_DEFINITION", `unknown variant field ${key} in ${path}`);
   }
   return {
@@ -153,7 +160,7 @@ function parseAgentVariant(name: string, value: unknown, path: string): AgentDef
     mode: optionalEnum(value.mode, `variants.${name}.mode`, ["oneshot", "interactive"] as const, path),
     context: optionalEnum(value.context, `variants.${name}.context`, ["fresh", "fork"] as const, path),
     session: optionalEnum(value.session, `variants.${name}.session`, ["record", "none"] as const, path),
-    maxRunMs: optionalNumber(value.maxRunMs, `variants.${name}.maxRunMs`, path),
+    maxRunSeconds: optionalPositiveNumber(value.maxRunSeconds, `variants.${name}.maxRunSeconds`, path),
     maxSubagentDepth: optionalNumber(value.maxSubagentDepth, `variants.${name}.maxSubagentDepth`, path),
     cwdPolicy: optionalEnum(value.cwdPolicy, `variants.${name}.cwdPolicy`, ["inherit", "explicit", "sandbox"] as const, path),
     resultFormat: optionalEnum(value.resultFormat, `variants.${name}.resultFormat`, ["text", "json", "files"] as const, path),
@@ -187,7 +194,7 @@ export function applyAgentVariant(definition: ResolvedAgentDefinition, variantNa
     mode: variant.mode ?? definition.mode,
     context: variant.context ?? definition.context,
     session: variant.session ?? definition.session,
-    maxRunMs: variant.maxRunMs ?? definition.maxRunMs,
+    maxRunSeconds: variant.maxRunSeconds ?? definition.maxRunSeconds,
     maxSubagentDepth: variant.maxSubagentDepth ?? definition.maxSubagentDepth,
     cwdPolicy: variant.cwdPolicy ?? definition.cwdPolicy,
     resultFormat: variant.resultFormat ?? definition.resultFormat,
@@ -202,6 +209,7 @@ export function parseAgentDefinitionFile(path: string, source: AgentDefinitionSo
   const skills = stringArray(parsed.data.skills, "skills", path);
   const extensions = stringArray(parsed.data.extensions, "extensions", path);
   const variants = parseAgentVariants(parsed.data.variants, path);
+  if (parsed.data.maxRunMs !== undefined) throw new SubagentError("INVALID_AGENT_DEFINITION", `maxRunMs has been replaced by maxRunSeconds in ${path}; use seconds, for example maxRunSeconds: 1800`);
   if (source === "project" && !options.allowProjectPathCapabilities) {
     const variantCapabilities = Object.values(variants).flatMap((variant) => [...(variant.skills ?? []), ...(variant.extensions ?? [])]);
     const pathCapabilities = [...skills, ...extensions, ...variantCapabilities].filter(isPathCapability);
@@ -225,7 +233,7 @@ export function parseAgentDefinitionFile(path: string, source: AgentDefinitionSo
     mode: assertEnum(parsed.data.mode, "mode", ["oneshot", "interactive"] as const, "oneshot", path),
     context: assertEnum(parsed.data.context, "context", ["fresh", "fork"] as const, "fresh", path),
     session: assertEnum(parsed.data.session, "session", ["record", "none"] as const, "record", path),
-    maxRunMs: optionalNumber(parsed.data.maxRunMs, "maxRunMs", path),
+    maxRunSeconds: optionalPositiveNumber(parsed.data.maxRunSeconds, "maxRunSeconds", path),
     maxSubagentDepth: optionalNumber(parsed.data.maxSubagentDepth, "maxSubagentDepth", path),
     cwdPolicy: assertEnum(parsed.data.cwdPolicy, "cwdPolicy", ["inherit", "explicit", "sandbox"] as const, "inherit", path),
     resultFormat: assertEnum(parsed.data.resultFormat, "resultFormat", ["text", "json", "files"] as const, "text", path),

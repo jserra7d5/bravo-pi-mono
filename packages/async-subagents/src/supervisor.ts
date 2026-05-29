@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createStartedEvent } from "./events.js";
+import { createRunEvent, createStartedEvent } from "./events.js";
 import { finalizeTerminalRun } from "./lifecycle.js";
+import { appendJsonl } from "./jsonl.js";
+import { createInboxMessage } from "./message.js";
 import { RunStore } from "./runStore.js";
 import { updateRunStatus } from "./status.js";
 import { nowIso } from "./time.js";
@@ -26,7 +28,7 @@ export interface SupervisorInput {
   parentRunId: string;
   agentName: string;
   command: PiCommand;
-  maxRunMs?: number;
+  effectiveMaxRunMs?: number;
   fake?: SupervisorFakeInput;
   codexAuthBalancer?: {
     isolatedDir: string;
@@ -140,6 +142,7 @@ async function finalizeRun(input: SupervisorInput, output: { state: TerminalRunS
     startedAt: status.startedAt,
     summary: summaryFromOutput(body ?? "", output.state === "completed" ? "Completed" : `Run ${output.state}`),
     body,
+    effectiveMaxRunMs: input.effectiveMaxRunMs,
     error: output.error ?? null,
   });
 }
@@ -177,7 +180,22 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
     const stderrChunks: Buffer[] = [];
     let settled = false;
     let timeout: NodeJS.Timeout | undefined;
+    let softTimeout: NodeJS.Timeout | undefined;
+    let activeBudgetMs = input.effectiveMaxRunMs && input.effectiveMaxRunMs > 0 ? input.effectiveMaxRunMs : undefined;
+    let activeElapsedMs = 0;
+    let activeStartedAt = Date.now();
+    let budgetPaused = false;
+    let controlOffset = 0;
+    let controlPoll: NodeJS.Timeout | undefined;
+    let cancelState: { reason: string; command: unknown; forceTimer?: NodeJS.Timeout } | undefined;
+    const killGroup = (signal: NodeJS.Signals): boolean => {
+      if (!child.pid) return false;
+      try { process.kill(-child.pid, signal); return true; } catch {
+        try { child.kill(signal); return true; } catch { return false; }
+      }
+    };
 
+    const controlPath = join(paths.runDir, "control.jsonl");
     const child = spawn(input.command.command, input.command.args, {
       cwd: input.command.cwd,
       env: {
@@ -191,6 +209,7 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
         ASYNC_SUBAGENT_PARENT_RUN_ID: input.parentRunId,
       },
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
 
     const started = store.readStatus(input.runId);
@@ -205,10 +224,58 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       appendLog(stderrPath, chunk.toString("utf8"));
     });
 
+    const clearBudgetTimers = (): void => {
+      if (timeout) clearTimeout(timeout);
+      if (softTimeout) clearTimeout(softTimeout);
+      timeout = undefined;
+      softTimeout = undefined;
+    };
+
+    const accountActiveTime = (): void => {
+      if (budgetPaused) return;
+      activeElapsedMs += Math.max(0, Date.now() - activeStartedAt);
+      budgetPaused = true;
+    };
+
+    const installBudgetTimers = (budgetMs = activeBudgetMs, elapsedMs = activeElapsedMs): void => {
+      clearBudgetTimers();
+      if (!budgetMs || budgetMs <= 0) return;
+      activeBudgetMs = budgetMs;
+      activeElapsedMs = Math.max(0, elapsedMs);
+      budgetPaused = false;
+      activeStartedAt = Date.now();
+      const remainingMs = Math.max(0, activeBudgetMs - activeElapsedMs);
+      if (remainingMs <= 0) {
+        timeout = setTimeout(pauseForBudget, 0);
+        return;
+      }
+      const warningLeadMs = Math.min(Math.floor(activeBudgetMs / 2), Math.max(5_000, Math.min(60_000, Math.floor(activeBudgetMs * 0.2))), remainingMs);
+      const warningDelayMs = remainingMs - warningLeadMs;
+      if (warningDelayMs > 0) {
+        softTimeout = setTimeout(() => {
+          const current = store.readStatus(input.runId);
+          const warningAt = nowIso();
+          const hardTimeoutAt = new Date(Date.now() + warningLeadMs).toISOString();
+          store.writeStatus(updateRunStatus(current, { timeout: { ...(current.timeout ?? {}), softWarningAt: warningAt, hardTimeoutAt } }));
+          const message = createInboxMessage({
+            toRunId: input.runId,
+            fromRunId: input.parentRunId,
+            type: "context",
+            requiresAck: false,
+            body: `Time budget warning: this run will be paused in about ${Math.ceil(warningLeadMs / 1000)} seconds. Checkpoint your current findings and, if you cannot finish before the deadline, emit a blocked event with a concise checkpoint and what parent input or continuation you need.`,
+          });
+          appendJsonl(join(paths.runDir, "inbox.jsonl"), message);
+        }, warningDelayMs);
+      }
+      timeout = setTimeout(pauseForBudget, remainingMs);
+    };
+
     const settle = (state: TerminalRunState, error?: RunResult["error"]): void => {
       if (settled) return;
       settled = true;
-      if (timeout) clearTimeout(timeout);
+      clearBudgetTimers();
+      if (controlPoll) clearInterval(controlPoll);
+      if (cancelState?.forceTimer) clearTimeout(cancelState.forceTimer);
       const stdout = Buffer.concat(stdoutChunks).toString("utf8");
       const rawStderr = Buffer.concat(stderrChunks).toString("utf8");
       const diagnostics = state === "failed" ? augmentChildFailureDiagnostics(input.command, rawStderr, error) : { stderr: rawStderr, error };
@@ -223,23 +290,74 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
 
     child.once("close", (code, signal) => {
       if (settled) return;
-      if (code === 0) {
+      if (cancelState) {
+        settle("cancelled", { code: "PARENT_CANCELLED", message: cancelState.reason, details: { ...(typeof cancelState.command === "object" && cancelState.command ? cancelState.command : {}), code, signal } });
+      } else if (code === 0) {
         settle("completed");
       } else {
         settle("failed", { code: "CHILD_EXITED", message: `child exited with code ${code ?? "null"}${signal ? ` signal ${signal}` : ""}`, details: { code, signal } });
       }
     });
 
-    if (input.maxRunMs && input.maxRunMs > 0) {
-      timeout = setTimeout(() => {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // Process may already have exited.
+    const applyControl = (command: any): void => {
+      if (!command || typeof command !== "object") return;
+      if (command.action === "cancel") {
+        if (cancelState) return;
+        const reason = String(command.reason ?? "Cancelled by parent");
+        cancelState = { reason, command };
+        if (command.signal === "SIGKILL") {
+          killGroup("SIGKILL");
+        } else {
+          killGroup("SIGTERM");
+          killGroup("SIGCONT");
+          cancelState.forceTimer = setTimeout(() => {
+            if (!settled) killGroup("SIGKILL");
+          }, 5_000);
         }
-        settle("expired", { code: "MAX_RUN_MS_EXPIRED", message: `child exceeded maxRunMs ${input.maxRunMs}` });
-      }, input.maxRunMs);
-    }
+      } else if (command.action === "pause") {
+        if (killGroup("SIGSTOP")) {
+          accountActiveTime();
+          clearBudgetTimers();
+          const current = store.readStatus(input.runId);
+          store.writeStatus(updateRunStatus(current, { state: "paused", processHealth: "alive", summary: String(command.reason ?? "Paused by parent"), timeout: { ...(current.timeout ?? {}), reason: String(command.reason ?? "Paused by parent") } }));
+        }
+      } else if (command.action === "resume" || command.action === "extend") {
+        killGroup("SIGCONT");
+        const additional = typeof command.additionalRunSeconds === "number" ? command.additionalRunSeconds : undefined;
+        const current = store.readStatus(input.runId);
+        store.writeStatus(updateRunStatus(current, { state: "running", processHealth: "alive", summary: "Continued by parent", needs: null, timeout: { ...(current.timeout ?? {}), additionalRunSeconds: additional } }));
+        if (additional && additional > 0) installBudgetTimers(Math.ceil(additional * 1000), 0);
+        else installBudgetTimers();
+      }
+    };
+    const readControls = (): void => {
+      if (!existsSync(controlPath)) return;
+      const text = readFileSync(controlPath, "utf8");
+      const chunk = text.slice(controlOffset);
+      controlOffset = text.length;
+      for (const line of chunk.split(/\r?\n/).filter(Boolean)) {
+        try { applyControl(JSON.parse(line)); } catch { /* ignore malformed control line */ }
+      }
+    };
+    controlPoll = setInterval(readControls, 250);
+
+    const pauseForBudget = (): void => {
+      if (settled) return;
+      accountActiveTime();
+      clearBudgetTimers();
+      const paused = killGroup("SIGSTOP");
+      const current = store.readStatus(input.runId);
+      if (!paused) {
+        const event = createRunEvent({ sequence: store.readEvents(input.runId).records.length + 1, runId: input.runId, parentRunId: input.parentRunId, type: "status", summary: "Time budget expired; pause failed", body: "Runtime budget expired, but the supervisor could not pause the process group. The run is being finalized as expired.", wake: true, data: { reason: "timeout", effectiveMaxRunMs: input.effectiveMaxRunMs, paused } });
+        store.appendEvent(input.runId, event);
+        settle("expired", { code: "MAX_RUN_SECONDS_EXPIRED", message: "Time budget expired and SIGSTOP failed", details: { effectiveMaxRunMs: input.effectiveMaxRunMs } });
+        return;
+      }
+      const event = createRunEvent({ sequence: store.readEvents(input.runId).records.length + 1, runId: input.runId, parentRunId: input.parentRunId, type: "status", summary: "Time budget expired; run paused", body: "Runtime budget expired. Continue this run if the result is still needed, or cancel it.", wake: true, data: { reason: "timeout", effectiveMaxRunMs: input.effectiveMaxRunMs, paused } });
+      store.appendEvent(input.runId, event);
+      store.writeStatus(updateRunStatus(current, { state: "paused", processHealth: "alive", summary: event.summary, needs: "runtime budget expired", lastActivityAt: event.createdAt, lastEventId: event.eventId, timeout: { ...(current.timeout ?? {}), pausedAt: nowIso(), hardTimeoutAt: nowIso(), reason: "time budget expired" } }));
+    };
+    installBudgetTimers();
   });
 }
 

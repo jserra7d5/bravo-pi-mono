@@ -21,11 +21,9 @@ import {
   renderWidgetRow,
   stateGlyph,
   summarizeRunResult,
-  summarizeWaitResult,
   truncAnsi,
   visWidth,
 } from "../extensions/pi/renderers.js";
-import type { SubagentWaitResult } from "../src/types.js";
 import type { RunSummaryRow } from "../src/watcher.js";
 
 function stripAnsi(value: string): string {
@@ -324,12 +322,11 @@ test("renderSubagentToolCallComponent renders a launch card when called with age
   assert.ok(rendered.includes("look around"));
 });
 
-test("renderSubagentToolCallComponent renders a wait card when no agent is supplied", () => {
-  const comp = renderSubagentToolCallComponent({}, undefined, "subagent_wait");
+test("renderSubagentToolCallComponent renders a status card when no run is supplied", () => {
+  const comp = renderSubagentToolCallComponent({}, undefined, "subagent_status");
   const rendered = comp.render(72).map(stripAnsi).join("\n");
-  assert.ok(rendered.includes("wait for subagents"));
+  assert.ok(rendered.includes("subagent status"));
   assert.ok(rendered.includes("direct children"));
-  assert.ok(rendered.includes("interesting"));
 });
 
 test("renderSubagentToolResultComponent renders a result card from terminal result details", () => {
@@ -361,7 +358,7 @@ test("renderSubagentToolResultComponent launch card surfaces agent-definition de
       thinkingLevel: "high",
       skills: ["reading-code", "debugging-helpers"],
       tools: ["read", "grep", "bash"],
-      maxRunMs: 30 * 60_000,
+      maxRunSeconds: 30 * 60,
       maxSubagentDepth: 4,
       contextPolicy: "fresh",
     },
@@ -444,41 +441,6 @@ test("run result summary preserves the child result summary", () => {
     artifacts: [],
     error: null,
   }, "run_a"), /Found 3 issues/);
-});
-
-test("wait summary collapses result details and avoids duplicating the agent name", () => {
-  const waited: SubagentWaitResult = {
-    state: "ready",
-    mode: "race",
-    readyRunIds: ["run_a"],
-    events: [],
-    results: [
-      {
-        schemaVersion: 1,
-        runId: "run_a",
-        parentRunId: "root_a",
-        agentName: "scout",
-        contextPolicy: "fresh",
-        sessionPolicy: "record",
-        state: "completed",
-        success: true,
-        createdAt: "2026-05-14T00:00:01.000Z",
-        durationMs: 1000,
-        summary: "Done",
-        body: "Done",
-        artifacts: [],
-        error: null,
-      },
-    ],
-    statuses: [],
-    cursors: {},
-    remainingRunIds: [],
-    timedOut: false,
-    next: [],
-  };
-  assert.match(summarizeWaitResult(waited), /scout completed/);
-  assert.doesNotMatch(summarizeWaitResult(waited), /Done/);
-  assert.doesNotMatch(summarizeWaitResult(waited), /scout scout/);
 });
 
 test("formatCost suppresses values under one cent and switches decimals at the dollar mark", () => {

@@ -1,6 +1,6 @@
 export const ASYNC_SUBAGENTS_PROMPT_MODULE = `## Async Subagents
 
-When async subagent tools are available, they are the first-party interface for spawning, monitoring, messaging, continuing, interrupting, waiting for, and reading results from child agents.
+When async subagent tools are available, they are the first-party interface for spawning, monitoring, messaging, continuing, interrupting, and reading results from child agents.
 
 Async subagents are useful when work has a clean boundary: independent investigation, parallelizable implementation, review, verification, or a bounded handoff. Keep work local when delegation would add coordination cost without useful independence.
 
@@ -14,13 +14,13 @@ Some agent definitions expose variants. A variant keeps the same agent prompt an
 
 Read source-of-truth artifacts yourself before delegating interpretation of them. Use subagents for reconnaissance, independent checks, implementation slices, or review around that source, not as a replacement for owning the spec.
 
-After delegating broad work, do not duplicate the same broad exploration yourself. Continue with non-overlapping work, then use the subagent tools to wait for and read results.
+After delegating broad work, do not duplicate the same broad exploration yourself. Continue with non-overlapping work or go idle; async wakeups will report questions, blockers, timeout pauses, and terminal results.
 
 Treat subagent tool results as the primary result channel. Do not read raw async-subagent run files unless the native tool output is unavailable, truncated beyond usefulness, or appears corrupted.
 
 When a child fails, blocks, or returns a surprising result, inspect native status and result details first. Inspect raw run files or logs only when the tool result is insufficient.
 
-After delegating, either do meaningful non-overlapping work or wait at a planned collection point. Do not leave child runs uncollected.
+Use \`subagent_status\` to inspect live runs, \`subagent_result\` to collect terminal results, \`subagent_message\` to answer questions or unblock children, and \`subagent_continue\` only when a paused/timed-out child result is still needed. Treat timeout wakeups as runtime events, not user requests.
 
 For implementation children, include allowed write scope and validation boundary in the task. For review children, include the exact diff, files, claim, or artifact being reviewed.
 
@@ -34,7 +34,7 @@ Subagent status events are control-plane information. Summarize them to the user
 
 1. Use the async subagent tools for subagent lifecycle and result access.
 2. Do not hard-code or assume particular subagent types; use the Async Subagent Catalog below and available tool schema.
-3. Give subagents bounded tasks with deliverables, constraints, and stop conditions.
+3. Give subagents bounded tasks with deliverables, constraints, stop conditions, and explicit time budgets for risky validation.
 4. Prefer a configured \`variant\` over ad hoc model/thinking overrides when the requested lane already exists.
 5. Override thinking level only when the task's risk or complexity justifies changing the agent definition default.
 6. Do not duplicate broad work you assigned to a subagent unless resolving a specific ambiguity or risk.

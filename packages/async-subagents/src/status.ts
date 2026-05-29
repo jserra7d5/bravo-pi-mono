@@ -34,6 +34,7 @@ export function createInitialStatus(input: {
   runtimeExtensionPaths?: string[];
   launchLogPath?: string;
   inboxPath?: string;
+  effectiveMaxRunMs?: number;
   cwd: string;
   state?: RunState;
 }): RunStatus {
@@ -72,6 +73,8 @@ export function createInitialStatus(input: {
     runtimeExtensionPaths: input.runtimeExtensionPaths ?? [],
     launchLogPath: input.launchLogPath,
     inboxPath: input.inboxPath,
+    effectiveMaxRunMs: input.effectiveMaxRunMs,
+    timeout: null,
     state: input.state ?? "created",
     writerRole: "launcher",
     cwd: input.cwd,

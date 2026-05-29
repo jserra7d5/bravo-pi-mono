@@ -27,6 +27,8 @@ export function createRunResult(input: {
   startedAt?: string;
   summary?: string;
   body?: string;
+  effectiveMaxRunMs?: number;
+  timeout?: RunResult["timeout"];
   artifacts?: ArtifactRef[];
   metrics?: RunMetrics;
   error?: RunResult["error"];
@@ -59,6 +61,8 @@ export function createRunResult(input: {
     durationMs: input.startedAt ? durationMs(input.startedAt, createdAt) : undefined,
     summary: input.summary,
     body: input.body,
+    effectiveMaxRunMs: input.effectiveMaxRunMs,
+    timeout: input.timeout ?? null,
     artifacts: input.artifacts ?? [],
     metrics: input.metrics,
     error: input.error ?? null,

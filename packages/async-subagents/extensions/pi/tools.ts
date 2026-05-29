@@ -11,9 +11,7 @@ import { RunStore } from "../../src/runStore.js";
 import { isTerminalRunState, isThinkingLevel } from "../../src/schemas.js";
 import { startSubagent, type StartSubagentInput } from "../../src/start.js";
 import { readSubagentStatus, updateRunStatus } from "../../src/status.js";
-import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult, type SubagentWaitResult, type WaitCursorMap } from "../../src/types.js";
-import { waitSubagents } from "../../src/wait.js";
-import { finalizeTerminalRun } from "../../src/lifecycle.js";
+import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult } from "../../src/types.js";
 import { readParentPiSessionRef } from "../../src/piSession.js";
 import { eventDeliveryKey, markWakeupHandled, markWakeupKeyHandled, writeDeliverySubscription } from "./wakeups.js";
 import {
@@ -24,7 +22,6 @@ import {
   subagentResultSchema,
   subagentStartSchema,
   subagentStatusSchema,
-  subagentWaitSchema,
 } from "./schema.js";
 import {
   renderSubagentToolCallComponent,
@@ -33,7 +30,6 @@ import {
   summarizeRunResult,
   summarizeStartResult,
   summarizeStatusRows,
-  summarizeWaitResult,
   preview,
 } from "./renderers.js";
 
@@ -114,27 +110,6 @@ function appendWithinBudget(lines: string[], value: string, budget: { used: numb
   lines.push(value);
   budget.used += bytes;
   return true;
-}
-
-function waitResultContent(summary: string, results: Array<RunResult & { bodyTruncation: Record<string, unknown> }>, maxContentBytes = 64_000): string {
-  if (!results.length) return summary;
-  const envelope = `${summary}\n\nSubagent wait completed. The following sections are child-agent results, not user input.`;
-  const lines = [envelope];
-  const budget = { used: Buffer.byteLength(envelope, "utf8"), maxBytes: maxContentBytes, omitted: 0 };
-  for (const result of results) {
-    const section: string[] = ["", `## Result: ${result.displayName ? `@${result.displayName} ` : ""}${result.agentName} ${result.state} (${result.runId})`];
-    if (result.body !== undefined) {
-      section.push("", result.body);
-      if (result.bodyTruncation.truncated === true) {
-        section.push("", `[Body truncated: ${result.bodyTruncation.returnedBytes} of ${result.bodyTruncation.originalBytes} bytes returned (maxBytes=${result.bodyTruncation.maxBytes}).]`);
-      }
-    } else if (result.bodyTruncation.included === false) {
-      section.push("", "[Body omitted: includeResult=false]");
-    }
-    if (!appendWithinBudget(lines, section.join("\n"), budget)) break;
-  }
-  if (budget.omitted) lines.push("", `[${budget.omitted} result section(s) omitted from model-facing content because the aggregate subagent_wait content cap of ${maxContentBytes} bytes was reached. Use subagent_result for specific runs.]`);
-  return lines.join("\n");
 }
 
 function ensureIndexedRunDir(store: RunStore, cwd: string, runDir: string): string {
@@ -267,28 +242,12 @@ function markResultCollected(store: RunStore, parentRunId: string, runId: string
   }
 }
 
-function markWaitResultCollected(store: RunStore, parentRunId: string, waitResult: SubagentWaitResult | undefined): void {
-  if (!waitResult) return;
-  for (const event of waitResult.events) markWakeupKeyHandled(store, event.parentRunId ?? parentRunId, eventDeliveryKey(event));
-  for (const result of waitResult.results) markResultCollected(store, result.parentRunId ?? parentRunId, result.runId);
-}
-
 function compactEvents(events: unknown[], maxEvents: number): unknown[] {
   return events.length <= maxEvents ? events : events.slice(0, maxEvents);
 }
 
 function nextEventSequence(store: RunStore, runId: string): number {
   return store.readEvents(runId).records.length + 1;
-}
-
-function trySignal(pid: number | undefined, signal: NodeJS.Signals): { ok: boolean; error?: string } {
-  if (!pid) return { ok: false, error: "run has no recorded pid" };
-  try {
-    process.kill(pid, signal);
-    return { ok: true };
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
 }
 
 function processHealth(pid: number | undefined): "unknown" | "alive" | "dead" {
@@ -321,6 +280,11 @@ function reconcileProcessHealth(store: RunStore, status: RunStatus): RunStatus {
   }
   store.writeStatus(next);
   return next;
+}
+
+function writeSupervisorControl(store: RunStore, runId: string, command: Record<string, unknown>): void {
+  const paths = store.pathsFor({ runId });
+  appendJsonl(join(paths.runDir, "control.jsonl"), { schemaVersion: SCHEMA_VERSION, createdAt: new Date().toISOString(), ...command });
 }
 
 function appendParentMessage(params: Record<string, unknown>, store: RunStore, root: RootSessionIdentity, runId: string, type: InboxMessageType, body: string): SubagentMessageResult {
@@ -484,9 +448,6 @@ async function startTerminalContinuation(input: {
   }
 
   const body = typeof input.params.body === "string" && input.params.body.trim() ? input.params.body.trim() : "Continue from the previous terminal result.";
-  const mode = input.params.mode === "sync" ? "sync" : "async";
-  const wait = typeof input.params.wait === "string" ? input.params.wait : "none";
-  const timeoutMs = typeof input.params.timeoutMs === "number" ? input.params.timeoutMs : undefined;
   const lineage = continuationSequence(input.store, input.status);
   const lock = claimContinuationLock(input.store, lineage.rootRunId, originalPiSessionPath, input.status.runId);
   if (!lock.claimed) {
@@ -552,9 +513,6 @@ async function startTerminalContinuation(input: {
         continuationSequence: lineage.sequence,
         continuationOfPiSessionPath: originalPiSessionPath,
       },
-      startMode: mode === "sync" || wait !== "none" ? "wait" : "async",
-      waitTimeoutMs: timeoutMs ?? (mode === "sync" || wait !== "none" ? 300_000 : 0),
-      waitUntil: wait === "terminal" || wait === "result" || wait === "interesting" ? wait : mode === "sync" ? "result" : "interesting",
       env: {
         ASYNC_SUBAGENTS_ROOT_SESSION_ID: input.root.rootSessionId,
         ASYNC_SUBAGENTS_PARENT_RUN_ID: input.root.parentRunId,
@@ -562,7 +520,6 @@ async function startTerminalContinuation(input: {
       thinkingLevel: isThinkingLevel(input.params.thinkingLevel) ? input.params.thinkingLevel : input.status.thinkingLevel,
     });
     const notifyOn = Array.isArray(input.params.notifyOn) ? (input.params.notifyOn.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined;
-    markWaitResultCollected(input.store, input.root.parentRunId, result.waitResult);
     writeDeliverySubscription(input.store, {
       schemaVersion: SCHEMA_VERSION,
       parentRunId: input.root.parentRunId,
@@ -606,9 +563,6 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const sessionCwd = ctxCwd(ctx);
         const cwd = cwdFromParams(params, ctx);
         const root = rootFor(runtime, sessionCwd);
-        const mode = params.mode === "sync" ? "sync" : "async";
-        const wait = typeof params.wait === "string" ? params.wait : "none";
-        const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : undefined;
         const contextPolicy = params.context === "fork" ? "fork" : params.context === "fresh" ? "fresh" : undefined;
         const sessionPolicy = params.session === "none" ? "none" : params.session === "record" ? "record" : undefined;
         const notifyOn = Array.isArray(params.notifyOn) ? (params.notifyOn.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined;
@@ -636,9 +590,6 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           session: sessionPolicy as SessionPolicy | undefined,
           allowFreshFallback: params.allowFreshFallback === true,
           parentPiSessionRef: readParentPiSessionRef(ctx),
-          startMode: mode === "sync" || wait !== "none" ? "wait" : "async",
-          waitTimeoutMs: timeoutMs ?? (mode === "sync" || wait !== "none" ? 300_000 : 0),
-          waitUntil: wait === "terminal" || wait === "result" || wait === "interesting" ? wait : mode === "sync" ? "result" : "interesting",
           env: {
             ASYNC_SUBAGENTS_ROOT_SESSION_ID: root.rootSessionId,
             ASYNC_SUBAGENTS_PARENT_RUN_ID: root.parentRunId,
@@ -646,7 +597,6 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           thinkingLevel: isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined,
         });
         const sessionStore = storeFor(sessionCwd);
-        markWaitResultCollected(sessionStore, root.parentRunId, result.waitResult);
         writeDeliverySubscription(sessionStore, {
           schemaVersion: SCHEMA_VERSION,
           parentRunId: root.parentRunId,
@@ -658,47 +608,6 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         return response(summarizeStartResult(result), { ...result, rootSessionId: root.rootSessionId });
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_start"),
-      renderResult: renderSubagentToolResultComponent,
-      renderShell: "self",
-    },
-    {
-      name: "subagent_wait",
-      label: "Subagent Wait",
-      description: "Race-wait on child events or terminal results without cancelling timed-out children.",
-      parameters: subagentWaitSchema,
-      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
-        const cwd = ctxCwd(ctx);
-        const root = rootFor(runtime, cwd);
-        const store = storeFor(cwd);
-        const parentRunId = typeof params.parentRunId === "string" ? params.parentRunId : root.parentRunId;
-        const runIds = defaultRunIds(store, parentRunId, params);
-        const maxEvents = typeof params.maxEvents === "number" ? params.maxEvents : 20;
-        const maxBytes = typeof params.maxBytes === "number" ? params.maxBytes : 64_000;
-        const includeResult = params.includeResult !== false;
-        const result = await waitSubagents(store, {
-          runIds,
-          parentRunId,
-          mode: params.mode === "all" || params.mode === "each" ? params.mode : "race",
-          until: params.until === "terminal" || params.until === "result" || params.until === "event" ? params.until : "interesting",
-          eventTypes: Array.isArray(params.eventTypes) ? (params.eventTypes.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined,
-          since: typeof params.since === "object" && params.since ? (params.since as WaitCursorMap) : undefined,
-          timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : 300_000,
-          includeStatus: params.includeStatus !== false,
-          includeResult,
-        });
-        for (const event of result.events) markWakeupKeyHandled(store, parentRunId, eventDeliveryKey(event));
-        for (const readyResult of result.results) markResultCollected(store, parentRunId, readyResult.runId);
-        result.events = compactEvents(result.events, maxEvents) as typeof result.events;
-        const shapedResults = result.results.map((readyResult) => shapeResult(readyResult, maxBytes, includeResult));
-        const details = {
-          ...result,
-          results: shapedResults,
-        };
-        const summary = summarizeWaitResult(result);
-        await runtime.afterMutation?.(ctx, cwd, root);
-        return response(summary, details as unknown as Record<string, unknown>, false, waitResultContent(summary, shapedResults));
-      },
-      renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_wait"),
       renderResult: renderSubagentToolResultComponent,
       renderShell: "self",
     },
@@ -748,33 +657,21 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         if (isTerminalRunState(status.state)) return response(`Run ${runId} is already terminal`, { code: "RUN_TERMINAL", runId, state: status.state }, true);
 
         if (action === "pause") {
-          const signal = trySignal(status.pid, "SIGSTOP");
-          if (!signal.ok) return response(`Run ${runId} could not be paused: ${signal.error}`, { code: "PAUSE_FAILED", runId, error: signal.error }, true);
-          const event = createRunEvent({ sequence: nextEventSequence(store, runId), runId, parentRunId: status.parentRunId, type: "status", summary: reason, wake: true, data: { action: "pause", pid: status.pid } });
+          writeSupervisorControl(store, runId, { action: "pause", reason });
+          const event = createRunEvent({ sequence: nextEventSequence(store, runId), runId, parentRunId: status.parentRunId, type: "status", summary: `Pause requested: ${reason}`, wake: false, data: { action: "pause", pid: status.pid, controlQueued: true } });
           store.appendEvent(runId, event);
-          store.writeStatus(updateRunStatus(status, { state: "paused", writerRole: "parent-runtime", lastActivityAt: event.createdAt, lastEventId: event.eventId, summary: reason }));
           appendParentMessage(params, store, root, runId, "pause", reason);
           await runtime.afterMutation?.(ctx, cwd, root);
-          return response(`Subagent ${runId} paused`, { runId, state: "paused", pid: status.pid, event });
+          return response(`Subagent ${runId} pause requested`, { runId, state: status.state, pid: status.pid, event, controlQueued: true });
         }
 
         const requestedSignal = params.signal === "SIGKILL" ? "SIGKILL" : "SIGTERM";
-        const signal = status.pid ? trySignal(status.pid, requestedSignal) : { ok: false, error: "run has no recorded pid" };
-        const cancelError = { code: "PARENT_CANCELLED", message: reason, details: { pid: status.pid, signal: requestedSignal, signalError: signal.error } };
-        const finalized = finalizeTerminalRun(store, {
-          runId,
-          parentRunId: status.parentRunId,
-          agentName: status.agent.name,
-          state: "cancelled",
-          writerRole: "parent-runtime",
-          startedAt: status.startedAt,
-          summary: reason,
-          body: reason,
-          error: cancelError,
-        });
+        writeSupervisorControl(store, runId, { action: "cancel", reason, signal: requestedSignal });
+        const event = createRunEvent({ sequence: nextEventSequence(store, runId), runId, parentRunId: status.parentRunId, type: "status", summary: `Cancel requested: ${reason}`, wake: false, data: { action: "cancel", pid: status.pid, signal: requestedSignal, controlQueued: true } });
+        store.appendEvent(runId, event);
         appendParentMessage(params, store, root, runId, "cancel", reason);
         await runtime.afterMutation?.(ctx, cwd, root);
-        return response(`Subagent ${runId} cancelled`, { runId, state: "cancelled", pid: status.pid, signal: requestedSignal, signalDelivered: signal.ok, signalError: signal.error, result: finalized });
+        return response(`Subagent ${runId} cancel requested`, { runId, state: status.state, pid: status.pid, signal: requestedSignal, event, controlQueued: true });
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_interrupt"),
       renderResult: renderSubagentToolResultComponent,
@@ -798,23 +695,22 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           return response(`Run ${runId} is ${status.state}; use subagent_message for normal input`, { code: "RUN_NOT_PAUSED", runId, state: status.state }, true);
         }
 
-        const signal = trySignal(status.pid, "SIGCONT");
-        if (!signal.ok) return response(`Run ${runId} could not be continued: ${signal.error}`, { code: "CONTINUE_FAILED", runId, error: signal.error }, true);
+        const additionalRunSeconds = typeof params.additionalRunSeconds === "number" ? params.additionalRunSeconds : undefined;
+        writeSupervisorControl(store, runId, { action: "resume", reason: "Continued by parent", additionalRunSeconds });
         const thinkingLevel = isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined;
         const selectedThinkingLevel = thinkingLevel ?? status.thinkingLevel;
-        const event = createRunEvent({ sequence: nextEventSequence(store, runId), runId, parentRunId: status.parentRunId, type: "status", summary: "Continued by parent", wake: false, data: { action: "continue", pid: status.pid, signalDelivered: signal.ok, thinkingLevel } });
+        const event = createRunEvent({ sequence: nextEventSequence(store, runId), runId, parentRunId: status.parentRunId, type: "status", summary: "Continue requested", wake: false, data: { action: "continue", pid: status.pid, controlQueued: true, thinkingLevel, additionalRunSeconds } });
         store.appendEvent(runId, event);
-        store.writeStatus(updateRunStatus(status, { state: "running", writerRole: "parent-runtime", lastActivityAt: event.createdAt, lastEventId: event.eventId, summary: "Continued by parent", needs: null, thinkingLevel: selectedThinkingLevel }));
         const body = typeof params.body === "string" && params.body.trim() ? params.body : "Resume work.";
         const type = (typeof params.type === "string" ? params.type : "instruction") as ParentMessageType;
         const messageType: InboxMessageType = !params.body ? "resume" : type;
         const result = await waitForLiveAckIfNeeded(store, params, status, appendParentMessage(params, store, root, runId, messageType, body));
         if (requiredAckFailed(params, result)) {
           await runtime.afterMutation?.(ctx, cwd, root);
-          return response(result.unsupported?.message ?? "Required child acknowledgement was not received", { ...result, runId, state: "running", signalDelivered: signal.ok, event, thinkingLevel: selectedThinkingLevel }, true);
+          return response(result.unsupported?.message ?? "Required child acknowledgement was not received", { ...result, runId, state: status.state, controlQueued: true, event, thinkingLevel: selectedThinkingLevel }, true);
         }
         await runtime.afterMutation?.(ctx, cwd, root);
-        return response(`Subagent ${runId} continued`, { ...result, runId, state: "running", signalDelivered: signal?.ok, event, thinkingLevel: selectedThinkingLevel });
+        return response(`Subagent ${runId} continue requested`, { ...result, runId, state: status.state, controlQueued: true, event, thinkingLevel: selectedThinkingLevel });
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_continue"),
       renderResult: renderSubagentToolResultComponent,

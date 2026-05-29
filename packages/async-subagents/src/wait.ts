@@ -90,7 +90,7 @@ export function waitOnce(store: RunStore, input: WaitInput): SubagentWaitResult 
     cursors,
     remainingRunIds: runIds.filter((runId) => !readyRunIds.has(runId)),
     timedOut: state === "timeout",
-    next: ready.length ? ready.map((runId) => ({ tool: "subagent_result", args: { runId } })) : [{ tool: "subagent_wait", args: { runIds, since: cursors } }],
+    next: ready.length ? ready.map((runId) => ({ tool: "subagent_result", args: { runId } })) : [{ tool: "subagent_status", args: { runIds } }],
   };
 }
 
