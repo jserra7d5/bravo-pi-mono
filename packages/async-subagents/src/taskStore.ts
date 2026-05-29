@@ -90,6 +90,31 @@ export class TaskStore {
   reopenTask(rootSessionId: string, taskId: string, input: ReopenTaskInput): TaskRecord { return this.withLock(rootSessionId, "reopen", () => { const task = this.readTaskRaw(rootSessionId, taskId); const all = this.listTasksRaw(rootSessionId); const affectedIds = new Set<string>(); const queue = [taskId]; while (queue.length) { const current = queue.shift()!; for (const candidate of all) { if (!candidate.dependsOn.includes(current) || affectedIds.has(candidate.id)) continue; affectedIds.add(candidate.id); queue.push(candidate.id); } } const affected = all.filter((candidate) => affectedIds.has(candidate.id) && ["running", "result_ready", "completed"].includes(candidate.status)); if (affected.length && !input.force) throw new SubagentError("REOPEN_HAS_AFFECTED_DEPENDENTS", "reopen would invalidate dependents", { affected: affected.map((item) => item.id) }); const now = nowIso(); if (input.force) { for (const dep of affected) { const depUpdated = { ...dep, status: "pending" as const, owner: undefined, result: dep.result ? { ...dep.result, state: "superseded" as const, rejectedAt: now } : undefined, attempts: dep.attempts.map((attempt) => !attempt.endedAt ? { ...attempt, endedAt: now, status: "cancelled" as const } : attempt), updatedAt: now }; this.writeTask(rootSessionId, depUpdated); this.appendTaskEvent(rootSessionId, dep.parentRunId, dep.id, "task.reopened", `Reopened because dependency ${taskId} was reopened`, { actor: input.actor, data: { invalidatedBy: taskId } }); } } const updated = { ...task, status: "pending" as const, owner: undefined, activeForm: input.activeForm ?? task.activeForm, result: task.result ? { ...task.result, state: "rejected" as const, rejectedAt: now } : undefined, updatedAt: now }; this.writeTask(rootSessionId, updated); this.appendTaskEvent(rootSessionId, task.parentRunId, taskId, "task.reopened", input.reason, { actor: input.actor, data: { affected: affected.map((item) => item.id) } }); return updated; }); }
   failTask(rootSessionId: string, taskId: string, input: FailTaskInput): TaskRecord { return this.withLock(rootSessionId, "fail", () => { const task = this.readTaskRaw(rootSessionId, taskId); const updated = { ...task, status: "failed" as const, updatedAt: nowIso() }; this.writeTask(rootSessionId, updated); this.appendTaskEvent(rootSessionId, task.parentRunId, taskId, "task.failed", input.reason, { actor: input.actor, runId: input.runId, wake: true }); return updated; }); }
   cancelTask(rootSessionId: string, taskId: string, input: CancelTaskInput): TaskRecord { return this.withLock(rootSessionId, "cancel", () => { const task = this.readTaskRaw(rootSessionId, taskId); const updated = { ...task, status: "cancelled" as const, updatedAt: nowIso() }; this.writeTask(rootSessionId, updated); this.appendTaskEvent(rootSessionId, task.parentRunId, taskId, "task.cancelled", input.reason, { actor: input.actor }); return updated; }); }
+  clearTasks(rootSessionId: string, input: { reason: string; actor?: string }): { count: number; affectedIds: string[] } {
+    return this.withLock(rootSessionId, "clear", () => {
+      const all = this.listTasksRaw(rootSessionId);
+      const affected: TaskRecord[] = [];
+      const now = nowIso();
+      for (const task of all) {
+        if (task.status !== "completed" && task.status !== "cancelled") {
+          const updated = {
+            ...task,
+            status: "cancelled" as const,
+            attempts: task.attempts.map((attempt) => !attempt.endedAt ? { ...attempt, endedAt: now, status: "cancelled" as const } : attempt),
+            updatedAt: now,
+          };
+          this.writeTask(rootSessionId, updated);
+          this.appendTaskEvent(rootSessionId, task.parentRunId, task.id, "task.cancelled", input.reason, { actor: input.actor });
+          affected.push(updated);
+        }
+      }
+      return {
+        count: affected.length,
+        affectedIds: affected.map((t) => t.id),
+      };
+    });
+  }
+  updateOwnerDisplayName(rootSessionId: string, taskId: string, displayName: string): TaskRecord { return this.withLock(rootSessionId, "updateDisplayName", () => { const task = this.readTaskRaw(rootSessionId, taskId); if (task.owner) { task.owner.displayName = displayName; } task.attempts = task.attempts.map((attempt) => attempt.runId === task.owner?.runId ? { ...attempt, displayName } : attempt); task.updatedAt = nowIso(); this.writeTask(rootSessionId, task); return task; }); }
   appendEvent(rootSessionId: string, event: TaskEvent): void { appendJsonl(this.pathsFor(rootSessionId).eventsPath, event); }
   readEvents(rootSessionId: string): TaskEvent[] { return readJsonl<TaskEvent>(this.pathsFor(rootSessionId).eventsPath).records; }
 

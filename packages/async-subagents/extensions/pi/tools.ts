@@ -7,7 +7,7 @@ import { appendJsonl, readJsonl } from "../../src/jsonl.js";
 import { createInboxMessage, sendSubagentMessage, waitForMessageAck } from "../../src/message.js";
 import { NAME_PACKS, readNamePackSelection, writeNamePackSelection, type NamePackId } from "../../src/namePacks.js";
 import { readSubagentResult } from "../../src/result.js";
-import { createRootSession } from "../../src/rootSession.js";
+import { createRootSession, readRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import { TaskStore, hashTaskToken, newTaskToken } from "../../src/taskStore.js";
 import { deriveTaskState, unresolvedDependencies } from "../../src/taskState.js";
@@ -16,7 +16,7 @@ import { startSubagent, type StartSubagentInput } from "../../src/start.js";
 import { readSubagentStatus, updateRunStatus } from "../../src/status.js";
 import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult } from "../../src/types.js";
 import { readParentPiSessionRef } from "../../src/piSession.js";
-import { eventDeliveryKey, markTaskWakeupHandled, markWakeupHandled, markWakeupKeyHandled, writeDeliverySubscription } from "./wakeups.js";
+import { markTaskWakeupHandled, markWakeupHandled, markWakeupKeyHandled, taskEventDeliveryKey, writeDeliverySubscription } from "./wakeups.js";
 import {
   subagentContinueSchema,
   subagentInterruptSchema,
@@ -31,6 +31,7 @@ import {
   taskGetSchema,
   taskListSchema,
   taskReopenSchema,
+  taskClearSchema,
 } from "./schema.js";
 import {
   renderSubagentToolCallComponent,
@@ -74,7 +75,8 @@ function storeFor(cwd: string): RunStore {
 function rootFor(runtime: ToolRuntime, cwd: string): RootSessionIdentity {
   const existing = runtime.getRootIdentity?.(cwd);
   if (existing && resolve(existing.cwd) === resolve(cwd)) return existing;
-  const identity = createRootSession({ cwd, rootSessionId: process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID });
+  const rootSessionId = process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID;
+  const identity = readRootSession({ cwd, rootSessionId }) ?? createRootSession({ cwd, rootSessionId });
   runtime.setRootIdentity?.(identity);
   return identity;
 }
@@ -651,6 +653,44 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "task_cancel"), renderResult: renderSubagentToolResultComponent, renderShell: "self",
     },
     {
+      name: "task_clear",
+      label: "Task Clear",
+      description: "Parent/scheduler-only bulk cancellation of all non-completed tasks in the current session.",
+      parameters: taskClearSchema,
+      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
+        const denied = parentOnly(); if (denied) return denied;
+        const cwd = ctxCwd(ctx);
+        const root = rootFor(runtime, cwd);
+        try {
+          const store = taskStoreFor(cwd);
+          const runStore = storeFor(cwd);
+          const before = store.listTasks(root.rootSessionId);
+          const affectedBefore = before.filter((task) => task.status !== "completed" && task.status !== "cancelled");
+          const affectedIds = new Set(affectedBefore.map((task) => task.id));
+          const ownedRunning = affectedBefore.filter((task) => task.status === "running" && task.owner);
+          const reason = String(params.reason);
+          const result = store.clearTasks(root.rootSessionId, { actor: root.parentRunId, reason });
+          for (const task of affectedBefore) markTaskWakeupHandled(runStore, root.parentRunId, task.id);
+          for (const event of store.readEvents(root.rootSessionId)) {
+            if (event.parentRunId === root.parentRunId && event.wake === true && affectedIds.has(event.taskId)) markWakeupKeyHandled(runStore, root.parentRunId, taskEventDeliveryKey(event));
+          }
+          await runtime.afterMutation?.(ctx, cwd, root);
+          return response(
+            `Cancelled ${result.count} task(s). Cancelled tasks are preserved in session history; new tasks will continue numbering.`,
+            {
+              ...result,
+              next: ownedRunning.map((task) => ({ tool: "subagent_interrupt", args: { runId: task.owner!.runId, action: "cancel", reason } })),
+            }
+          );
+        } catch (error) {
+          return response(error instanceof Error ? error.message : String(error), { code: (error as any).code ?? "TASK_CLEAR_FAILED" }, true);
+        }
+      },
+      renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "task_clear"),
+      renderResult: renderSubagentToolResultComponent,
+      renderShell: "self",
+    },
+    {
       name: "subagent_start",
       label: "Subagent Start",
       description: "Start a durable async Pi child agent and return immediately by default.",
@@ -682,7 +722,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           if (deriveTaskState(task, all) !== "ready") return response(`Task ${taskId} is not ready`, { code: "TASK_NOT_READY", taskId, state: deriveTaskState(task, all) }, true);
           taskRunId = newRunId();
           const token = newTaskToken();
-          const displayName = `@${String(params.agent)}`;
+          const displayName = String(params.agent);
           tasks.claimTask(root.rootSessionId, taskId, { runId: taskRunId, agent: String(params.agent), displayName, assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
           taskAssignment = { task, token, dependencies: all.filter((candidate) => task.dependsOn.includes(candidate.id)) };
         }
@@ -720,6 +760,9 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         }
         if (taskId && taskRunId && result.started === false) {
           try { taskStoreFor(sessionCwd).releaseClaim(root.rootSessionId, taskId, { runId: taskRunId, reason: "subagent launch did not start" }); } catch { /* best effort */ }
+        }
+        if (taskId && result.displayName) {
+          try { taskStoreFor(sessionCwd).updateOwnerDisplayName(root.rootSessionId, taskId, result.displayName); } catch { /* best effort */ }
         }
         writeDeliverySubscription(sessionStore, {
           schemaVersion: SCHEMA_VERSION,

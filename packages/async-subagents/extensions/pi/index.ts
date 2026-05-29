@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { Text, type Component } from "@earendil-works/pi-tui";
 import { acquireRootSessionLease } from "../../src/leases.js";
 import { NAME_PACKS, readNamePackSelection, writeNamePackSelection, type NamePackId } from "../../src/namePacks.js";
-import { createRootSession } from "../../src/rootSession.js";
+import { createRootSession, readRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import type { RootSessionIdentity, RunIndexRecord } from "../../src/types.js";
 import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from "./compactionReminder.js";
@@ -28,7 +28,8 @@ function cwdOf(ctx: unknown): string {
 function ensureRoot(cwd: string): RootSessionIdentity {
   const existing = roots.get(cwd);
   if (existing) return existing;
-  const identity = createRootSession({ cwd, rootSessionId: process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID });
+  const rootSessionId = process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID;
+  const identity = readRootSession({ cwd, rootSessionId }) ?? createRootSession({ cwd, rootSessionId });
   roots.set(cwd, identity);
   return identity;
 }

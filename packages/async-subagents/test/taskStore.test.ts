@@ -68,3 +68,51 @@ test("TaskStore force reopen invalidates transitive completed dependents", () =>
   assert.equal(reopened[1].result?.state, "superseded");
   assert.equal(reopened[2].result?.state, "superseded");
 });
+
+test("TaskStore updateOwnerDisplayName updates owner and attempts displayName", () => {
+  const s = store();
+  const [task] = s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const token = newTaskToken();
+  s.tasks.claimTask(s.rootSessionId, task.id, { runId: "run_1", agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+
+  const updated = s.tasks.updateOwnerDisplayName(s.rootSessionId, task.id, "Rex");
+  assert.equal(updated.owner?.displayName, "Rex");
+  assert.equal(updated.attempts[0]?.displayName, "Rex");
+
+  const read = s.tasks.readTask(s.rootSessionId, task.id);
+  assert.equal(read.owner?.displayName, "Rex");
+  assert.equal(read.attempts[0]?.displayName, "Rex");
+});
+
+test("TaskStore clearTasks cancels all non-completed tasks", () => {
+  const s = store();
+  s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [
+    { alias: "a", title: "A", description: "A" },
+    { alias: "b", title: "B", description: "B" },
+    { alias: "c", title: "C", description: "C" },
+  ] }).tasks;
+
+  // Complete the first task
+  const allBefore = s.tasks.listTasks(s.rootSessionId);
+  const token = newTaskToken();
+  s.tasks.claimTask(s.rootSessionId, allBefore[0].id, { runId: "run_1", agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  s.tasks.submitResult(s.rootSessionId, allBefore[0].id, { runId: "run_1", taskToken: token, summary: "done A" });
+  s.tasks.acceptResult(s.rootSessionId, allBefore[0].id, {});
+
+  // Leave the second task actively owned when clearing.
+  const token2 = newTaskToken();
+  s.tasks.claimTask(s.rootSessionId, allBefore[1].id, { runId: "run_2", agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token2) });
+
+  // Clear the tasks
+  const result = s.tasks.clearTasks(s.rootSessionId, { reason: "cleanup" });
+  assert.equal(result.count, 2);
+  assert.deepEqual(result.affectedIds, ["T-0002", "T-0003"]);
+
+  const allAfter = s.tasks.listTasks(s.rootSessionId);
+  assert.equal(allAfter[0].status, "completed");
+  assert.equal(allAfter[1].status, "cancelled");
+  assert.equal(allAfter[1].owner?.runId, "run_2");
+  assert.equal(allAfter[1].attempts[0]?.status, "cancelled");
+  assert.ok(allAfter[1].attempts[0]?.endedAt);
+  assert.equal(allAfter[2].status, "cancelled");
+});

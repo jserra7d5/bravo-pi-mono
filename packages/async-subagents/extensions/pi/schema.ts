@@ -83,6 +83,7 @@ export const taskGetSchema = Type.Object({ taskId: Type.String(), view: Type.Opt
 export const taskAcceptResultSchema = Type.Object({ taskId: Type.String(), summary: Type.Optional(Type.String()) });
 export const taskReopenSchema = Type.Object({ taskId: Type.String(), reason: Type.String(), activeForm: Type.Optional(Type.String()), force: Type.Optional(Type.Boolean()) });
 export const taskCancelSchema = Type.Object({ taskId: Type.String(), reason: Type.String() });
+export const taskClearSchema = Type.Object({ reason: Type.String({ description: "Reason for bulk cancelling/clearing all non-completed tasks." }) });
 export const taskSubmitResultSchema = Type.Object({ summary: Type.String(), receipt: Type.Optional(Type.Any()), artifactPaths: Type.Optional(Type.Array(Type.String())), evidence: Type.Optional(Type.Array(Type.String())), commandsRun: Type.Optional(Type.Array(Type.String())), notes: Type.Optional(Type.String()) });
 export const taskUpdateProgressSchema = Type.Object({ summary: Type.Optional(Type.String()), activeForm: Type.Optional(Type.String()) });
 export const taskReportBlockedSchema = Type.Object({ summary: Type.String(), notes: Type.Optional(Type.String()) });

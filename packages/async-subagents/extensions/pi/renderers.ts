@@ -23,7 +23,8 @@ export type SubagentToolName =
   | "task_get"
   | "task_accept_result"
   | "task_reopen"
-  | "task_cancel";
+  | "task_cancel"
+  | "task_clear";
 
 export interface TextRenderable {
   invalidate(): void;
@@ -286,7 +287,7 @@ export function stateGlyph(state: string | undefined, resultReady = false): Stat
     case "idle": return { g: "○", color: ANSI.gray, label: "idle" };
     case "waiting_for_input":
     case "question": return { g: "?", color: ANSI.amber, label: "needs you" };
-    case "blocked": return { g: "⚠", color: ANSI.red, label: "blocked" };
+    case "blocked": return { g: "◌", color: ANSI.gray, label: "blocked" };
     case "paused": return { g: "⏸", color: ANSI.gray, label: "paused" };
     case "stalled": return { g: "◌", color: ANSI.amber, label: "stalled" };
     case "completed": return { g: "✓", color: ANSI.green, label: "done" };
@@ -1002,6 +1003,71 @@ function renderSubagentCallCard(toolName: SubagentToolName | undefined, args: Re
       return renderToolCallCard({ width, title: "continue subagent", badge: "→ resume", rows: [["target", selectedRunsLabel(args)], ["body", typeof args.body === "string" ? preview(args.body, 120) : "resume work"]] });
     case "subagent_name_pack":
       return renderToolCallCard({ width, title: "subagent name pack", badge: "○ config", rows: [["pack", typeof args.pack === "string" ? args.pack : "current"]] });
+    case "task_create": {
+      const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+      const rows: [string, string][] = [["count", String(tasks.length)]];
+      if (tasks.length === 1 && tasks[0] && typeof tasks[0] === "object") {
+        const t = tasks[0] as Record<string, unknown>;
+        if (typeof t.title === "string") rows.push(["title", preview(t.title, 80)]);
+      } else if (tasks.length > 1) {
+        const list = tasks.map((t: any) => (t && typeof t === "object" && typeof t.title === "string") ? t.title : "untitled").join(", ");
+        rows.push(["tasks", preview(list, 100)]);
+      }
+      return renderToolCallCard({ width, title: "create task", badge: "○ task", rows });
+    }
+    case "task_list": {
+      const rows: [string, string][] = [];
+      if (args.states !== undefined) {
+        rows.push(["states", Array.isArray(args.states) ? args.states.join(", ") : String(args.states)]);
+      }
+      if (args.includeCompleted !== undefined) {
+        rows.push(["include completed", args.includeCompleted ? "yes" : "no"]);
+      }
+      if (args.limit !== undefined) {
+        rows.push(["limit", String(args.limit)]);
+      }
+      return renderToolCallCard({ width, title: "task list", badge: "○ reading", rows: rows.length ? rows : [["scope", "all tasks"]] });
+    }
+    case "task_get": {
+      const rows: [string, string][] = [["taskId", typeof args.taskId === "string" ? args.taskId : ""]];
+      if (args.view !== undefined) {
+        rows.push(["view", String(args.view)]);
+      }
+      return renderToolCallCard({ width, title: "task status", badge: "○ reading", rows });
+    }
+    case "task_accept_result": {
+      const rows: [string, string][] = [["taskId", typeof args.taskId === "string" ? args.taskId : ""]];
+      if (args.summary !== undefined) {
+        rows.push(["summary", preview(String(args.summary), 100)]);
+      }
+      return renderToolCallCard({ width, title: "accept task", badge: "✓ accept", rows });
+    }
+    case "task_reopen": {
+      const rows: [string, string][] = [
+        ["taskId", typeof args.taskId === "string" ? args.taskId : ""],
+        ["reason", typeof args.reason === "string" ? preview(args.reason, 80) : ""]
+      ];
+      if (args.activeForm !== undefined) {
+        rows.push(["activeForm", String(args.activeForm)]);
+      }
+      if (args.force !== undefined) {
+        rows.push(["force", args.force ? "true" : "false"]);
+      }
+      return renderToolCallCard({ width, title: "reopen task", badge: "⚠ reopen", rows });
+    }
+    case "task_cancel": {
+      const rows: [string, string][] = [
+        ["taskId", typeof args.taskId === "string" ? args.taskId : ""],
+        ["reason", typeof args.reason === "string" ? preview(args.reason, 80) : ""]
+      ];
+      return renderToolCallCard({ width, title: "cancel task", badge: "⊘ cancel", rows });
+    }
+    case "task_clear": {
+      const rows: [string, string][] = [
+        ["reason", typeof args.reason === "string" ? preview(args.reason, 80) : ""]
+      ];
+      return renderToolCallCard({ width, title: "clear tasks", badge: "⊘ clear", rows });
+    }
     default:
       return renderToolCallCard({ width, title: "subagent tool", badge: "○ running", rows: [["scope", selectedRunsLabel(args)]] });
   }

@@ -67,7 +67,7 @@ test("stateGlyph maps each runtime state to its decision-2 glyph", () => {
   assert.equal(stateGlyph("running").g, "◐");
   assert.equal(stateGlyph("queued").g, "○");
   assert.equal(stateGlyph("waiting_for_input").g, "?");
-  assert.equal(stateGlyph("blocked").g, "⚠");
+  assert.equal(stateGlyph("blocked").g, "◌");
   assert.equal(stateGlyph("paused").g, "⏸");
   assert.equal(stateGlyph("stalled").g, "◌");
   assert.equal(stateGlyph("completed").g, "✓");
@@ -83,11 +83,13 @@ test("stateGlyph colors are semantic", () => {
   const green = "\x1b[38;2;106;191;115m";
   const red = "\x1b[38;2;220;88;88m";
   const gold = "\x1b[38;2;229;181;72m";
+  const gray = "\x1b[38;2;110;110;110m";
   assert.equal(stateGlyph("running").color, cyan);
   assert.equal(stateGlyph("waiting_for_input").color, amber);
   assert.equal(stateGlyph("completed").color, green);
   assert.equal(stateGlyph("failed").color, red);
   assert.equal(stateGlyph("result_ready").color, gold);
+  assert.equal(stateGlyph("blocked").color, gray);
 });
 
 test("visWidth treats CJK and emoji as 2 cells and ignores ANSI escapes", () => {
@@ -327,6 +329,27 @@ test("renderSubagentToolCallComponent renders a status card when no run is suppl
   const rendered = comp.render(72).map(stripAnsi).join("\n");
   assert.ok(rendered.includes("subagent status"));
   assert.ok(rendered.includes("direct children"));
+});
+
+test("renderSubagentToolCallComponent renders task tool cards", () => {
+  const compCreate = renderSubagentToolCallComponent({ tasks: [{ title: "My Task", description: "Desc" }] }, undefined, "task_create");
+  const renderedCreate = compCreate.render(72).map(stripAnsi).join("\n");
+  assert.ok(renderedCreate.includes("create task"));
+  assert.ok(renderedCreate.includes("My Task"));
+
+  const compList = renderSubagentToolCallComponent({ includeCompleted: true }, undefined, "task_list");
+  const renderedList = compList.render(72).map(stripAnsi).join("\n");
+  assert.ok(renderedList.includes("task list"));
+
+  const compGet = renderSubagentToolCallComponent({ taskId: "T-0001", view: "full" }, undefined, "task_get");
+  const renderedGet = compGet.render(72).map(stripAnsi).join("\n");
+  assert.ok(renderedGet.includes("task status"));
+  assert.ok(renderedGet.includes("T-0001"));
+
+  const compClear = renderSubagentToolCallComponent({ reason: "finished work" }, undefined, "task_clear");
+  const renderedClear = compClear.render(72).map(stripAnsi).join("\n");
+  assert.ok(renderedClear.includes("clear tasks"));
+  assert.ok(renderedClear.includes("finished work"));
 });
 
 test("renderSubagentToolResultComponent renders a result card from terminal result details", () => {
