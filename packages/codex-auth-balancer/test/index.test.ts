@@ -5,25 +5,21 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { cleanupLaunch, getUsage, importAuthswap, prepareLaunch, resolveStateRoot, syncBack } from '../src/index.js';
+import { cleanupLaunch, getDbStatus, getUsage, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, syncBack } from '../src/index.js';
 
 const exec = promisify(execFile);
 async function tmp() { return fs.mkdtemp(path.join(os.tmpdir(), 'cab-')); }
 async function writeJson(p: string, v: unknown) { await fs.mkdir(path.dirname(p), { recursive: true }); await fs.writeFile(p, JSON.stringify(v)); }
 
+async function writeFakeCodexBin(dir: string) {
+  const bin = path.join(dir, 'codex');
+  await fs.writeFile(bin, `#!/usr/bin/env node\nconst fs=require('fs'), path=require('path');\nconst home=process.env.CODEX_HOME;\nconst session=path.join(home,'sessions','2026','05','28','probe.jsonl');\nfs.mkdirSync(path.dirname(session), {recursive:true});\nfs.appendFileSync(session, JSON.stringify({timestamp:new Date().toISOString(), type:'event_msg', payload:{type:'token_count', rate_limits:{primary:{used_percent:23, window_minutes:300, resets_at:2000}, secondary:{used_percent:84, window_minutes:10080, resets_at:3000}, plan_type:'pro', rate_limit_reached_type:null}}})+'\\n');\nconsole.log('OK');\n`, { mode: 0o755 });
+  return bin;
+}
+
 test('resolveStateRoot uses env override and default suffix', () => {
   assert.equal(resolveStateRoot({ CODEX_AUTH_BALANCER_HOME: '/tmp/x' } as NodeJS.ProcessEnv), '/tmp/x');
   assert.match(resolveStateRoot({} as NodeJS.ProcessEnv), /\.bravo\/codex-auth-balancer$/);
-});
-
-test('importAuthswap copies accounts and tolerates missing primary remaining percent', async () => {
-  const root = await tmp(); const legacy = await tmp();
-  await writeJson(path.join(legacy, 'accounts', 'a', 'auth.json'), { access_token: 'tok' });
-  await writeJson(path.join(legacy, 'accounts', 'a', 'pi-openai-codex.json'), { refresh_token: 'pi' });
-  await writeJson(path.join(legacy, 'cache', 'usage.json'), { a: { slot: 'a', windows: { primary: {}, secondary: { remainingPercent: 50 } } } });
-  const r = await importAuthswap(legacy, { stateRoot: root });
-  assert.deepEqual(r.imported, ['a']);
-  assert.equal(JSON.parse(await fs.readFile(path.join(root, 'cache', 'usage.json'), 'utf8')).a.windows.secondary.remainingPercent, 50);
 });
 
 test('prepareLaunch creates isolated auth and syncBack success cleans via caller', async () => {
@@ -45,7 +41,44 @@ test('syncBack conflict retains isolated dir', async () => {
   await writeJson(path.join(iso, 'codex', 'auth.json'), { access_token: 'new' });
   const r = await syncBack(iso, { stateRoot: root, slot: 's1' });
   assert.equal(r.conflict, true);
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'old' });
+  const retry = await syncBack(iso, { stateRoot: root, slot: 's1' });
+  assert.equal(retry.conflict, true);
+  const inactive = await listReservations({ stateRoot: root, includeInactive: true });
+  assert.equal(inactive[0]?.state, 'conflict');
   assert.ok(await fs.stat(iso));
+});
+
+test('concurrent syncBack for same generation is serialized by compare-and-swap', async () => {
+  const root = await tmp(); const iso1 = await tmp(); const iso2 = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'old' });
+  await prepareLaunch(iso1, { stateRoot: root, slot: 's1' });
+  await prepareLaunch(iso2, { stateRoot: root, slot: 's1' });
+  await writeJson(path.join(iso1, 'codex', 'auth.json'), { access_token: 'new-1' });
+  await writeJson(path.join(iso2, 'codex', 'auth.json'), { access_token: 'new-2' });
+  const results = await Promise.all([syncBack(iso1, { stateRoot: root, slot: 's1' }), syncBack(iso2, { stateRoot: root, slot: 's1' })]);
+  assert.equal(results.filter(r => r.ok).length, 1);
+  assert.equal(results.filter(r => r.conflict).length, 1);
+  assert.match(JSON.parse(await fs.readFile(path.join(root, 'accounts', 's1', 'auth.json'), 'utf8')).access_token, /^new-[12]$/);
+});
+
+test('CLI concurrent sync-back for same generation allows only one writer', async () => {
+  const root = await tmp(); const iso1 = await tmp(); const iso2 = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'old' });
+  await prepareLaunch(iso1, { stateRoot: root, slot: 's1' });
+  await prepareLaunch(iso2, { stateRoot: root, slot: 's1' });
+  await writeJson(path.join(iso1, 'codex', 'auth.json'), { access_token: 'cli-1' });
+  await writeJson(path.join(iso2, 'codex', 'auth.json'), { access_token: 'cli-2' });
+  const cli = new URL('../src/cli.js', import.meta.url).pathname;
+  const env = { ...process.env, CODEX_AUTH_BALANCER_HOME: root };
+  const [one, two] = await Promise.all([
+    exec(process.execPath, [cli, 'sync-back', '--json', '--isolated-dir', iso1, '--slot', 's1'], { env, timeout: 5000 }),
+    exec(process.execPath, [cli, 'sync-back', '--json', '--isolated-dir', iso2, '--slot', 's1'], { env, timeout: 5000 }),
+  ]);
+  const results = [JSON.parse(one.stdout), JSON.parse(two.stdout)];
+  assert.equal(results.filter(r => r.ok).length, 1);
+  assert.equal(results.filter(r => r.conflict).length, 1);
+  assert.match(JSON.parse(await fs.readFile(path.join(root, 'accounts', 's1', 'auth.json'), 'utf8')).access_token, /^cli-[12]$/);
 });
 
 test('CLI JSON redacts token material', async () => {
@@ -63,13 +96,110 @@ test('cleanupLaunch refuses unprepared directories', async () => {
   await assert.rejects(prepareLaunch(path.join(root, 'nested'), { stateRoot: root }), /inside stateRoot/);
 });
 
-test('getUsage marks old cache stale by mtime', async () => {
+test('prepareLaunch removes isolated dir after partial secret copy failure', async () => {
+  const root = await tmp(); const iso = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
+  await fs.mkdir(path.join(iso, 'pi-agent', 'auth.json'), { recursive: true });
+  await assert.rejects(prepareLaunch(iso, { stateRoot: root, slot: 's1' }));
+  await assert.rejects(fs.stat(iso), /ENOENT/);
+});
+
+test('getUsage marks old v2 cache stale by generated_at', async () => {
   const root = await tmp();
   await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
-  const cache = path.join(root, 'cache', 'usage.json');
-  await writeJson(cache, { s1: { primary: { remainingPercent: 42 } } });
-  const old = new Date(Date.now() - 60_000);
-  await fs.utimes(cache, old, old);
+  await writeJson(path.join(root, 'cache', 'usage.json'), { schema_version: 2, generated_at: Date.now() - 60_000, accounts: { s1: { slot: 's1', primary: { label: 'primary', remainingPercent: 42 } } } });
   const usage = await getUsage({ stateRoot: root, staleAfterMs: 1 });
   assert.equal(usage.error, 'stale');
+  assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 42);
+});
+
+test('usage cache migration preserves legacy windows shape', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    schema_version: 2,
+    generated_at: Date.now(),
+    accounts: { s1: { slot: 's1', windows: { primary: { label: 'primary', remainingPercent: 55 }, secondary: { label: 'secondary', remaining_percent: 66 } } } },
+  });
+  const usage = await getUsage({ stateRoot: root });
+  assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 55);
+  assert.equal(usage.accounts[0].usage?.secondary?.remainingPercent, 66);
+});
+
+test('usage cache migration accepts raw legacy slot map', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    s1: { windows: { primary: { label: 'primary', remainingPercent: 12 }, secondary: { label: 'secondary', remaining_percent: 34 } } },
+  });
+  const usage = await getUsage({ stateRoot: root });
+  assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 12);
+  assert.equal(usage.accounts[0].usage?.secondary?.remainingPercent, 34);
+  assert.ok(usage.generatedAt > 0);
+});
+
+test('refreshUsage probes Codex CLI for both slots and stores remaining percent', async () => {
+  const root = await tmp(); const binDir = await tmp();
+  await writeFakeCodexBin(binDir);
+  await writeJson(path.join(root, 'accounts', 'a', 'auth.json'), { OPENAI_API_KEY: 'tok-a' });
+  await writeJson(path.join(root, 'accounts', 'b', 'auth.json'), { OPENAI_API_KEY: 'tok-b' });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${binDir}${path.delimiter}${oldPath}`;
+  try {
+    const usage = await refreshUsage({ stateRoot: root });
+    assert.equal(usage.accounts.length, 2);
+    for (const account of usage.accounts) {
+      assert.equal(account.status, 'ok');
+      assert.equal(account.usage?.primary?.remainingPercent, 77);
+      assert.equal(account.usage?.primary?.resetAt, 2_000_000);
+      assert.equal(account.usage?.secondary?.remainingPercent, 16);
+      assert.equal(account.usage?.secondary?.resetAt, 3_000_000);
+    }
+    const status = await getDbStatus({ stateRoot: root });
+    assert.equal(status.accountCount, 2);
+    assert.ok(status.generatedAt);
+    await assert.rejects(fs.readFile(path.join(root, 'cache', 'usage.json'), 'utf8'), /ENOENT/);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+
+test('prepareLaunch reserves active slots atomically and distributes concurrent launches', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 'a', 'auth.json'), { access_token: 'tok-a' });
+  await writeJson(path.join(root, 'accounts', 'b', 'auth.json'), { access_token: 'tok-b' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    schema_version: 2,
+    generated_at: Date.now(),
+    accounts: {
+      a: { slot: 'a', status: 'ok', updatedAt: Date.now(), primary: { label: 'primary', remainingPercent: 100 }, secondary: { label: 'secondary', remainingPercent: 100, resetAt: Date.now() + 7 * 24 * 60 * 60_000 } },
+      b: { slot: 'b', status: 'ok', updatedAt: Date.now(), primary: { label: 'primary', remainingPercent: 100 }, secondary: { label: 'secondary', remainingPercent: 100, resetAt: Date.now() + 7 * 24 * 60 * 60_000 } },
+    },
+  });
+  const [one, two] = await Promise.all([prepareLaunch(await tmp(), { stateRoot: root }), prepareLaunch(await tmp(), { stateRoot: root })]);
+  assert.deepEqual([one.slot, two.slot].sort(), ['a', 'b']);
+  const reservations = await listReservations({ stateRoot: root });
+  assert.equal(reservations.length, 2);
+  assert.ok(one.metadata.reservation_id);
+  assert.ok(two.metadata.launch_id);
+});
+
+test('syncBack and cleanup preserve terminal reservation state', async () => {
+  const root = await tmp(); const iso = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'old' });
+  const p = await prepareLaunch(iso, { stateRoot: root, slot: 's1', runId: 'run1', rootRunId: 'root1' });
+  assert.equal((await listReservations({ stateRoot: root })).length, 1);
+  await writeJson(path.join(iso, 'codex', 'auth.json'), { access_token: 'new' });
+  const r = await syncBack(iso, { stateRoot: root, slot: 's1' });
+  assert.equal(r.ok, true);
+  const retry = await syncBack(iso, { stateRoot: root, slot: 's1' });
+  assert.equal(retry.ok, true);
+  assert.equal(retry.conflict, false);
+  assert.equal((await listReservations({ stateRoot: root })).length, 0);
+  const inactive = await listReservations({ stateRoot: root, includeInactive: true });
+  assert.equal(inactive.find(x => x.id === p.metadata.reservation_id)?.state, 'completed');
+  await cleanupLaunch(iso);
+  const released = await listReservations({ stateRoot: root, includeInactive: true });
+  assert.equal(released.find(x => x.id === p.metadata.reservation_id)?.state, 'completed');
 });

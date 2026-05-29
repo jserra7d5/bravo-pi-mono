@@ -249,13 +249,13 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
   });
 }
 
-async function prepareCodexBalancer(config: CodexAuthBalancerConfig, model: string | undefined, runDir: string): Promise<CodexBalancerLaunch | undefined> {
+async function prepareCodexBalancer(config: CodexAuthBalancerConfig, model: string | undefined, runDir: string, runId: string, rootRunId: string, ttlMs: number): Promise<CodexBalancerLaunch | undefined> {
   if (!config.enabled || !isCodexModel(model, config.onlyForProviders)) return undefined;
   const isolatedDir = join(runDir, "auth", "codex-balancer");
   mkdirSync(isolatedDir, { recursive: true, mode: 0o700 });
   try { if ((statSync(isolatedDir).mode & 0o777) !== 0o700) chmodSync(isolatedDir, 0o700); } catch { /* mkdir already failed if unavailable */ }
-  const prepared = await withTimeout(prepareLaunch(isolatedDir, { stateRoot: config.stateDir }), config.timeoutMs, "codex auth balancer prepare-launch");
-  return { enabled: true, isolatedDir, selectedSlot: prepared.selected_slot, env: prepared.env, metadata: { enabled: true, provider: "bravo", mode: "process-env", selectedSlot: prepared.selected_slot, label: prepared.label, reason: prepared.reason, status: prepared.status, primaryRemainingPercent: prepared.primary_remaining_percent, secondaryRemainingPercent: prepared.secondary_remaining_percent } };
+  const prepared = await withTimeout(prepareLaunch(isolatedDir, { stateRoot: config.stateDir, runId, rootRunId, reservationTtlMs: ttlMs }), config.timeoutMs, "codex auth balancer prepare-launch");
+  return { enabled: true, isolatedDir, selectedSlot: prepared.selected_slot, env: prepared.env, metadata: { enabled: true, provider: "bravo", mode: "process-env", selectedSlot: prepared.selected_slot, reservationId: prepared.metadata.reservation_id, launchId: prepared.metadata.launch_id, policyVersion: prepared.selection?.policy_version, label: prepared.label, reason: prepared.reason, status: prepared.status, primaryRemainingPercent: prepared.primary_remaining_percent, secondaryRemainingPercent: prepared.secondary_remaining_percent } };
 }
 
 async function spawnDetachedSupervisor(inputPath: string): Promise<string | undefined> {
@@ -453,7 +453,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
 
   let codexAuthBalancer: CodexBalancerLaunch | undefined;
   try {
-    codexAuthBalancer = await prepareCodexBalancer(asyncSubagentsConfig.codexAuthBalancer, prompt.model, paths.runDir);
+    codexAuthBalancer = await prepareCodexBalancer(asyncSubagentsConfig.codexAuthBalancer, prompt.model, paths.runDir, runId, root.rootRunId, effectiveMaxRunMs);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (asyncSubagentsConfig.codexAuthBalancer.failClosed) return failBeforeLaunch("CODEX_AUTH_BALANCER_FAILED", message);
