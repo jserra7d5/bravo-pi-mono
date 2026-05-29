@@ -16,6 +16,10 @@ Read source-of-truth artifacts yourself before delegating interpretation of them
 
 After delegating broad work, do not duplicate the same broad exploration yourself. Continue with non-overlapping work if useful; otherwise end your turn and go idle. Async wakeups, not polling, are the normal signal for questions, blockers, timeout pauses, and terminal results.
 
+Prefer pipelined orchestration over batch barriers, keeping dependency sequencing in the parent session. Independent child runs can run concurrently; start a downstream child once all prerequisite results are collected and the parent has enough concrete context to define its bounded task. Do not wait for unrelated child runs.
+
+Async subagents are independent child processes and cannot wait on siblings. Do not pre-launch a dependent follow-up child with instructions like "do this after the other child finishes"; it will run immediately against whatever state exists. Start a child only when its required inputs, files, diffs, artifacts, or prior results already exist.
+
 Do not poll child progress with repeated \`subagent_status\` calls. Use \`subagent_status\` as a one-shot inspection tool only when you have a concrete reason: the user asks for status, a wakeup is ambiguous, you are recovering after compaction/restart, you are about to finalize or change direction and need to account for in-flight work, or you are diagnosing a suspected stale/missing wakeup. If a status call shows only active/running children and no actionable state, go idle instead of calling status again.
 
 Treat subagent tool results as the primary result channel. Do not read raw async-subagent run files unless the native tool output is unavailable, truncated beyond usefulness, or appears corrupted.
@@ -24,7 +28,7 @@ When a child fails, blocks, or returns a surprising result, inspect native statu
 
 Use \`subagent_result\` to collect terminal results, \`subagent_message\` to answer questions or unblock children, \`subagent_continue\` only when a paused/timed-out child result is still needed, and \`subagent_status\` only for one-shot inspection/recovery. Treat timeout wakeups as runtime events, not user requests.
 
-For implementation children, include allowed write scope and validation boundary in the task. For review children, include the exact diff, files, claim, or artifact being reviewed.
+For implementation children, include allowed write scope and validation boundary in the task. When an implementation child changes code, prompts, config, migrations, public contracts, or other meaningful artifacts, normally run an independent review unless the change is trivial, the user waived review, or no suitable review lane is available. Start review only after collecting the implementation result, and include the exact diff, files, claim, or artifact being reviewed. If review finds issues, remediate and re-review until the lane is clean, blocked, or needs a decision.
 
 When asking children to run tests, builds, git remote operations, package installs, or network/API calls, require explicit fail-fast timeouts and noninteractive git/SSH behavior where practical; if a check cannot be safely bounded, have the child skip it and report why.
 
@@ -40,11 +44,12 @@ Subagent status events are control-plane information. Summarize them to the user
 4. Prefer a configured \`variant\` over ad hoc model/thinking overrides when the requested lane already exists.
 5. Override thinking level only when the task's risk or complexity justifies changing the agent definition default.
 6. Do not duplicate broad work you assigned to a subagent unless resolving a specific ambiguity or risk.
-7. Read subagent results through native tools before summarizing them.
-8. Collect every child run you still need before finalizing the parent task.
-9. Use \`@DisplayName\` for subagents in user-facing prose; use run IDs only for tool/internal references.
-10. Do not invent subagent names, variants, statuses, or results.
-11. Do not call \`subagent_status\` repeatedly to wait for completion; go idle and let async wakeups resume you.`;
+7. Do not pre-launch dependent follow-up children; collect prerequisite results first, then start the child with concrete inputs.
+8. Read subagent results through native tools before summarizing them.
+9. Collect every child run you still need before finalizing the parent task.
+10. Use \`@DisplayName\` for subagents in user-facing prose; use run IDs only for tool/internal references.
+11. Do not invent subagent names, variants, statuses, or results.
+12. Do not call \`subagent_status\` repeatedly to wait for completion; go idle and let async wakeups resume you.`;
 
 export function appendAsyncSubagentsPrompt(systemPrompt: string, catalog?: string): string {
   if (systemPrompt.includes("## Async Subagents")) return systemPrompt;

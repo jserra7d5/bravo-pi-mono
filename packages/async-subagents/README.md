@@ -174,6 +174,16 @@ Choose the smallest reasonable `additionalRunSeconds` for the remaining work. If
 
 Lifecycle controls are intentionally not accepted by `subagent_message`.
 
+## Parent orchestration model
+
+Async subagents are sibling child processes, not a task graph. A child cannot wait on another child, so the parent session owns dependency sequencing:
+
+- Start independent child lanes concurrently when their inputs already exist.
+- Do not pre-launch a dependent follow-up child with instructions to wait for another child to finish; it will run immediately.
+- Collect prerequisite results first with `subagent_result`, then start the follow-up child with concrete files, diffs, artifacts, or claims to inspect.
+- Prefer lane-level pipelining over batch barriers: when one lane becomes reviewable or otherwise ready for a downstream step, start that step without waiting for unrelated lanes.
+- For delegated implementation that changes meaningful artifacts, normally run an independent review/remediation loop unless the change is trivial, review was explicitly waived, or no suitable review lane is available.
+
 ## Verification Status
 
 Validated in this repo:
