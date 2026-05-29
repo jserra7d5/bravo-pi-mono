@@ -78,7 +78,7 @@ const TaskSpec = Type.Object({
 });
 
 export const taskCreateSchema = Type.Object({ tasks: Type.Array(TaskSpec) });
-export const taskListSchema = Type.Object({ states: Type.Optional(Type.Array(Type.String())), includeCompleted: Type.Optional(Type.Boolean({ default: false })), limit: Type.Optional(Type.Number({ default: 50 })) });
+export const taskListSchema = Type.Object({ states: Type.Optional(Type.Array(Type.String({ description: "Optional status/derived-state filters. Default visibility still hides completed and cancelled history unless includeCompleted is true." }))), includeCompleted: Type.Optional(Type.Boolean({ default: false, description: "Include completed and cancelled history rows. Defaults to false so task_list shows the active queue." })), limit: Type.Optional(Type.Number({ default: 50 })) });
 export const taskGetSchema = Type.Object({ taskId: Type.String(), view: Type.Optional(StringEnum(["status", "receipt", "full"] as const, { default: "status" })) });
 export const taskAcceptResultSchema = Type.Object({ taskId: Type.String(), summary: Type.Optional(Type.String()) });
 export const taskReopenSchema = Type.Object({ taskId: Type.String(), reason: Type.String(), activeForm: Type.Optional(Type.String()), force: Type.Optional(Type.Boolean()) });

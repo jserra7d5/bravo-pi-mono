@@ -59,6 +59,39 @@ test("subagent_status tool defaults to root session direct children", async () =
   assert.equal((result.details.counts as { active: number }).active, 1);
 });
 
+test("task_list defaults to active queue after task_clear while includeCompleted shows cancelled history", async () => {
+  const w = workspace();
+  const built = tools(w.identity);
+  const previousRunId = process.env.ASYNC_SUBAGENTS_RUN_ID;
+  const previousSingularRunId = process.env.ASYNC_SUBAGENT_RUN_ID;
+  delete process.env.ASYNC_SUBAGENTS_RUN_ID;
+  delete process.env.ASYNC_SUBAGENT_RUN_ID;
+  try {
+    await built.task_create.execute("create", { tasks: [
+      { title: "A", description: "A" },
+      { title: "B", description: "B" },
+    ] }, undefined, undefined, { cwd: w.root });
+    const clear = await built.task_clear.execute("clear", { reason: "reset queue" }, undefined, undefined, { cwd: w.root });
+    assert.equal(clear.isError, undefined);
+
+    const defaultList = await built.task_list.execute("list", {}, undefined, undefined, { cwd: w.root });
+    assert.equal(defaultList.isError, undefined);
+    assert.deepEqual(defaultList.details.rows, []);
+    assert.equal(defaultList.content[0]?.text, "0 task(s)");
+    assert.equal((defaultList.details.counts as { total: number; cancelled: number }).total, 2);
+    assert.equal((defaultList.details.counts as { total: number; cancelled: number }).cancelled, 2);
+
+    const historyList = await built.task_list.execute("list-history", { includeCompleted: true }, undefined, undefined, { cwd: w.root });
+    assert.equal(historyList.isError, undefined);
+    assert.deepEqual((historyList.details.rows as Array<{ status: string }>).map((row) => row.status), ["cancelled", "cancelled"]);
+  } finally {
+    if (previousRunId === undefined) delete process.env.ASYNC_SUBAGENTS_RUN_ID;
+    else process.env.ASYNC_SUBAGENTS_RUN_ID = previousRunId;
+    if (previousSingularRunId === undefined) delete process.env.ASYNC_SUBAGENT_RUN_ID;
+    else process.env.ASYNC_SUBAGENT_RUN_ID = previousSingularRunId;
+  }
+});
+
 test("model-facing tool catalog does not expose subagent_wait", () => {
   const w = workspace();
   const built = tools(w.identity);

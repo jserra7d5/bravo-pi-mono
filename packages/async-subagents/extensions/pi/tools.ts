@@ -603,14 +603,14 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     {
       name: "task_list",
       label: "Task List",
-      description: "List compact durable task rows with derived readiness states. Completed tasks are hidden unless requested.",
+      description: "List compact durable task rows with derived readiness states. Completed and cancelled history are hidden unless requested.",
       parameters: taskListSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd); const store = taskStoreFor(cwd); const all = store.listTasks(root.rootSessionId);
         const states = Array.isArray(params.states) ? new Set(params.states.filter((s): s is string => typeof s === "string")) : undefined;
         const includeCompleted = params.includeCompleted === true; const limit = typeof params.limit === "number" ? params.limit : 50;
-        const rows = compactTaskRows(all).filter((row) => (includeCompleted || row.status !== "completed") && (!states || states.has(row.status) || states.has(String(row.state)))).slice(0, limit);
-        return response(`${rows.length} task(s)`, { rows, counts: { total: all.length, result_ready: all.filter((t) => t.status === "result_ready").length, running: all.filter((t) => t.status === "running").length, ready: all.filter((t) => deriveTaskState(t, all) === "ready").length, blocked: all.filter((t) => deriveTaskState(t, all) === "blocked").length, completed: all.filter((t) => t.status === "completed").length } });
+        const rows = compactTaskRows(all).filter((row) => (includeCompleted || (row.status !== "completed" && row.status !== "cancelled")) && (!states || states.has(row.status) || states.has(String(row.state)))).slice(0, limit);
+        return response(`${rows.length} task(s)`, { rows, counts: { total: all.length, result_ready: all.filter((t) => t.status === "result_ready").length, running: all.filter((t) => t.status === "running").length, ready: all.filter((t) => deriveTaskState(t, all) === "ready").length, blocked: all.filter((t) => deriveTaskState(t, all) === "blocked").length, completed: all.filter((t) => t.status === "completed").length, cancelled: all.filter((t) => t.status === "cancelled").length } });
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "task_list"),
       renderResult: renderSubagentToolResultComponent,
