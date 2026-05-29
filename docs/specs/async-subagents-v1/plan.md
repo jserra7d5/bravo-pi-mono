@@ -1,7 +1,9 @@
 # Async Subagents v1 Implementation Plan
 
 Date: 2026-05-14
-Status: Draft implementation plan
+Status: Superseded historical implementation plan
+
+> Superseded: this plan describes the original wait-capable v1 implementation. The current async-subagents contract is wakeup-first: `subagent_wait`, sync start/continue modes, and public `maxRunMs` budgets were removed by `docs/specs/async-subagents-async-wakeups-timeouts/design.md`. Use that spec and `packages/async-subagents/README.md` for current tool and timeout semantics.
 
 ## Objective
 

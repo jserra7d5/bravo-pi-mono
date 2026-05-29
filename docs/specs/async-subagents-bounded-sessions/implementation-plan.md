@@ -1,7 +1,9 @@
 # Async Subagents Bounded Sessions Implementation Plan
 
 Date: 2026-05-17
-Status: Draft implementation plan
+Status: Historical implementation plan, amended by async wakeups/timeouts
+
+> Amendment: this bounded-session plan predates the wakeup-first tool cleanup. Current async-subagents no longer exposes model-facing `subagent_wait` or sync start/continue modes, and public runtime budgets are `maxRunSeconds` / `defaultMaxRunSeconds`. Timeout expiry is a resumable pause with bounded `subagent_continue({ additionalRunSeconds })`; see `docs/specs/async-subagents-async-wakeups-timeouts/design.md` and `packages/async-subagents/README.md`.
 
 ## Objective
 

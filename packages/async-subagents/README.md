@@ -131,6 +131,38 @@ The canonical files remain `run-index.jsonl`, `status.json`, `events.jsonl`, `in
 
 Model-facing wakeups are runtime envelopes marked `NOT USER INPUT`; they include metadata and short summaries only. Full child result bodies are stored in `result.json` and are collected with `subagent_result`.
 
+## Runtime budgets and timeout continuation
+
+Agent definitions use second-based runtime budgets:
+
+```md
+---
+maxRunSeconds: 1800
+variants:
+  quick:
+    maxRunSeconds: 300
+---
+```
+
+User config may provide a fallback:
+
+```json
+{
+  "version": 1,
+  "defaultMaxRunSeconds": 1800
+}
+```
+
+Authored `maxRunMs` is rejected with a migration error. Internally the runtime records `effectiveMaxRunMs` for timers and diagnostics.
+
+When a child approaches its budget, the supervisor appends an inbox warning asking the child to finish or emit a checkpoint. If the hard budget expires and the process group can be preserved, the run moves to `paused` instead of terminal `expired`; parent wakeups suggest either cancelling or resuming with a bounded extension, for example:
+
+```ts
+subagent_continue({ runId, additionalRunSeconds: 900 })
+```
+
+Choose the smallest reasonable `additionalRunSeconds` for the remaining work. If the result is no longer needed, cancel the paused run with `subagent_interrupt({ runId, action: "cancel" })`.
+
 ## Parent Tools
 
 - `subagent_start`: start a durable async child run and return immediately.

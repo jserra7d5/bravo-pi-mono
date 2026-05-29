@@ -1,7 +1,9 @@
 # Async Subagents v1 Design
 
 Date: 2026-05-14
-Status: Draft
+Status: Superseded historical draft
+
+> Superseded: this v1 draft describes the original wait-capable model. The current async-subagents contract is wakeup-first: `subagent_wait`, sync start/continue modes, and public `maxRunMs` budgets were removed by `docs/specs/async-subagents-async-wakeups-timeouts/design.md`. Use that spec and `packages/async-subagents/README.md` for current tool and timeout semantics.
 
 ## Problem
 
