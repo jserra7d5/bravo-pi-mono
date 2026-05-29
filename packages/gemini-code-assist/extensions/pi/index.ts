@@ -36,6 +36,7 @@ const PROVIDER = "antigravity-code-assist";
 const API = "google-generative-ai" as Api;
 const PUBLIC_HIGH_MODEL_ID = "gemini-3.5-flash";
 const PUBLIC_MEDIUM_MODEL_ID = "gemini-3.5-flash-medium";
+const FILE_BACKED_AUTH_SENTINEL = "antigravity-code-assist-file";
 
 function upstreamModelId(modelId: string): string {
   if (modelId === PUBLIC_HIGH_MODEL_ID) return ANTIGRAVITY_DEFAULT_MODEL;
@@ -135,7 +136,7 @@ function thinkingConfig(options?: SimpleStreamOptions): Record<string, unknown> 
 }
 
 async function accessToken(options?: SimpleStreamOptions): Promise<string> {
-  if (options?.apiKey && options.apiKey !== "ANTIGRAVITY_CODE_ASSIST_FILE") return options.apiKey;
+  if (options?.apiKey && options.apiKey !== FILE_BACKED_AUTH_SENTINEL) return options.apiKey;
   return getAntigravityAccessToken(defaultAntigravityCredentialsPath(), fetch);
 }
 
@@ -305,7 +306,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerProvider(PROVIDER, {
     name: "Antigravity Code Assist",
     baseUrl: ANTIGRAVITY_ENDPOINT,
-    apiKey: "ANTIGRAVITY_CODE_ASSIST_FILE",
+    apiKey: FILE_BACKED_AUTH_SENTINEL,
     api: API,
     streamSimple: streamAntigravity,
     oauth: { name: "Antigravity Code Assist", login, refreshToken, getApiKey: (credentials) => credentials.access },
