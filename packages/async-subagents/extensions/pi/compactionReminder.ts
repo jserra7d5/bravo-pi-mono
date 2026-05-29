@@ -2,6 +2,8 @@ import { isTerminalRunState } from "../../src/schemas.js";
 import { RunStore } from "../../src/runStore.js";
 import { readWatcherSnapshot, type RunSummaryRow } from "../../src/watcher.js";
 import { isWakeupKeyHandled, resultDeliveryKey } from "./wakeups.js";
+import { TaskStore } from "../../src/taskStore.js";
+import { deriveTaskState } from "../../src/taskState.js";
 
 export const ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE = "async-subagent-compaction-status";
 
@@ -19,6 +21,13 @@ export interface CompactionReminderDetails {
   waiting: number;
   resultReady: number;
   omitted: number;
+  taskCounts?: {
+    resultReady: number;
+    running: number;
+    ready: number;
+    blocked: number;
+    failed: number;
+  };
   rows: Array<{
     runId: string;
     displayName?: string;
@@ -85,6 +94,52 @@ export function buildCompactionReminder(input: CompactionReminderInput): Compact
   const waiting = rows.filter((row) => row.state === "blocked" || row.state === "waiting_for_input").length;
   const resultReady = rows.filter((row) => unreadResult(input, row)).length;
 
+  let taskCountsLine = "";
+  let taskCounts = { resultReady: 0, running: 0, ready: 0, blocked: 0, failed: 0 };
+  if (input.rootSessionId) {
+    try {
+      const taskStore = new TaskStore(input.store);
+      const tasks = taskStore.listTasks(input.rootSessionId);
+      const resultReadyTasks = tasks.filter(t => deriveTaskState(t, tasks) === "result_ready");
+      const runningTasks = tasks.filter(t => deriveTaskState(t, tasks) === "running");
+      const readyTasks = tasks.filter(t => deriveTaskState(t, tasks) === "ready");
+      const blockedTasks = tasks.filter(t => deriveTaskState(t, tasks) === "blocked");
+      const failedTasks = tasks.filter(t => deriveTaskState(t, tasks) === "failed");
+
+      taskCounts = {
+        resultReady: resultReadyTasks.length,
+        running: runningTasks.length,
+        ready: readyTasks.length,
+        blocked: blockedTasks.length,
+        failed: failedTasks.length,
+      };
+
+      const taskParts: string[] = [];
+      if (resultReadyTasks.length > 0) {
+        const ids = resultReadyTasks.map(t => t.id).join(", ");
+        taskParts.push(`${resultReadyTasks.length} result_ready (${ids})`);
+      }
+      if (runningTasks.length > 0) {
+        taskParts.push(`${runningTasks.length} running`);
+      }
+      if (readyTasks.length > 0) {
+        taskParts.push(`${readyTasks.length} ready`);
+      }
+      if (blockedTasks.length > 0) {
+        taskParts.push(`${blockedTasks.length} blocked`);
+      }
+      if (failedTasks.length > 0) {
+        taskParts.push(`${failedTasks.length} failed`);
+      }
+
+      if (taskParts.length > 0) {
+        taskCountsLine = `Tasks: ${taskParts.join(", ")}.`;
+      }
+    } catch {
+      // safe fallback
+    }
+  }
+
   const counts = [
     active ? `${active} active` : "",
     waiting ? `${waiting} waiting/blocked` : "",
@@ -95,6 +150,7 @@ export function buildCompactionReminder(input: CompactionReminderInput): Compact
     `Async subagent status preserved after compaction${counts ? ` (${counts})` : ""}:`,
     ...shown.map(rowLine),
     omitted ? `- ${omitted} more subagent run${omitted === 1 ? "" : "s"} not shown.` : "",
+    taskCountsLine,
     "After compaction, one subagent_status call is appropriate if you need to re-orient; do not loop on status for active runs. Before finalizing or changing direction, account for these in-flight or unread subagent results.",
   ].filter(Boolean).join("\n");
 
@@ -109,6 +165,7 @@ export function buildCompactionReminder(input: CompactionReminderInput): Compact
       waiting,
       resultReady,
       omitted,
+      taskCounts,
       rows: shown.map((row) => ({
         runId: row.runId,
         displayName: row.displayName,

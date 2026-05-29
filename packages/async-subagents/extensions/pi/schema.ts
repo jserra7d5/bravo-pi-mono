@@ -15,6 +15,7 @@ export const subagentStartSchema = Type.Object({
   agent: Type.String({ description: "Agent definition name, such as scout, reviewer, or worker." }),
   variant: Type.Optional(Type.String({ description: "Optional agent variant name that overlays model/config while keeping the same agent prompt." })),
   task: Type.String({ description: "Bounded task for the child agent." }),
+  taskId: Type.Optional(Type.String({ description: "Optional durable task id to claim and execute. subagent_start is the canonical launch surface for task-owned child runs." })),
   cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current Pi session cwd." })),
   files: Type.Optional(Type.Array(Type.String(), { description: "Relevant files to mention in the child task prompt." })),
   skills: Type.Optional(Type.Array(Type.String(), { description: "Additional skill names to enable for this child run, merged with the agent definition skills. Children do not inherit parent-session skills automatically. Pass skill names only; path-like values are rejected." })),
@@ -67,6 +68,24 @@ export const subagentResultSchema = Type.Object({
 export const subagentNamePackSchema = Type.Object({
   pack: Type.Optional(StringEnum(["default", "clones", "ct"] as const, { description: "Set the active display-name pack for future runs." })),
 });
+
+const TaskSpec = Type.Object({
+  alias: Type.Optional(Type.String()),
+  title: Type.String(),
+  description: Type.String(),
+  dependsOn: Type.Optional(Type.Array(Type.String())),
+  activeForm: Type.Optional(Type.String()),
+});
+
+export const taskCreateSchema = Type.Object({ tasks: Type.Array(TaskSpec) });
+export const taskListSchema = Type.Object({ states: Type.Optional(Type.Array(Type.String())), includeCompleted: Type.Optional(Type.Boolean({ default: false })), limit: Type.Optional(Type.Number({ default: 50 })) });
+export const taskGetSchema = Type.Object({ taskId: Type.String(), view: Type.Optional(StringEnum(["status", "receipt", "full"] as const, { default: "status" })) });
+export const taskAcceptResultSchema = Type.Object({ taskId: Type.String(), summary: Type.Optional(Type.String()) });
+export const taskReopenSchema = Type.Object({ taskId: Type.String(), reason: Type.String(), activeForm: Type.Optional(Type.String()), force: Type.Optional(Type.Boolean()) });
+export const taskCancelSchema = Type.Object({ taskId: Type.String(), reason: Type.String() });
+export const taskSubmitResultSchema = Type.Object({ summary: Type.String(), receipt: Type.Optional(Type.Any()), artifactPaths: Type.Optional(Type.Array(Type.String())), evidence: Type.Optional(Type.Array(Type.String())), commandsRun: Type.Optional(Type.Array(Type.String())), notes: Type.Optional(Type.String()) });
+export const taskUpdateProgressSchema = Type.Object({ summary: Type.Optional(Type.String()), activeForm: Type.Optional(Type.String()) });
+export const taskReportBlockedSchema = Type.Object({ summary: Type.String(), notes: Type.Optional(Type.String()) });
 
 export const subagentStatusSchema = Type.Object({
   runIds: Type.Optional(Type.Array(Type.String())),

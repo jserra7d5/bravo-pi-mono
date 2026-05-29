@@ -7,6 +7,7 @@ import { renderLiveWidget, updateLiveWidget } from "../extensions/pi/liveWidget.
 import { markWakeupHandled } from "../extensions/pi/wakeups.js";
 import { visWidth } from "../extensions/pi/renderers.js";
 import { RunStore } from "../src/runStore.js";
+import { TaskStore } from "../src/taskStore.js";
 import { createRunResult } from "../src/result.js";
 import { createInitialStatus } from "../src/status.js";
 import type { RunMetrics, RunState } from "../src/types.js";
@@ -261,4 +262,45 @@ test("updateLiveWidget clears the widget when there are no visible rows", () => 
   updateLiveWidget(ctx, { store: w.store, parentRunId: w.parentRunId });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].value, undefined);
+});
+
+test("live widget renders task summary and maps task to run rows", () => {
+  const w = workspace();
+  const taskStore = new TaskStore(w.store);
+  const result = taskStore.createTasks(w.parentRunId, {
+    parentRunId: w.parentRunId,
+    tasks: [
+      { alias: "t1", title: "Task 1", description: "First" },
+      { alias: "t2", title: "Task 2", description: "Second", dependsOn: ["t1"] }
+    ]
+  });
+
+  const t1Id = result.aliasToId["t1"];
+
+  const runId = addRun({
+    ...w,
+    displayName: "Rex",
+    state: "running",
+    summary: "working on task 1"
+  });
+
+  taskStore.claimTask(w.parentRunId, t1Id, {
+    runId,
+    agent: "worker",
+    displayName: "Rex",
+    assignedAt: new Date().toISOString(),
+    tokenHash: "somehash"
+  });
+
+  const lines = renderLiveWidget({
+    store: w.store,
+    parentRunId: w.parentRunId,
+    rootSessionId: w.parentRunId,
+    width: 72
+  });
+
+  const body = lines.map(stripAnsi).join("\n");
+  assert.ok(body.includes("T-0001 Task 1"), "run row shows mapped task info");
+  assert.ok(body.includes("Tasks"), "bottom section shows Tasks");
+  assert.ok(body.includes("T-0002 Task 2"), "bottom section shows pending/blocked task");
 });

@@ -36,6 +36,8 @@ Use subagent display names in user-facing prose. Write names as \`@DisplayName\`
 
 Subagent status events are control-plane information. Summarize them to the user only when they affect the answer, mark a meaningful checkpoint, need input, or explain a blocker.
 
+Tasks are durable coordination state; subagent runs are execution attempts. Use task tools to plan and inspect dependency state, and use the canonical \`subagent_start({ taskId })\` path to launch a child only for a ready task. A child-submitted task result is not accepted completion until the parent accepts it. Downstream children should consume task receipts/artifacts and \`task_get\` context, not sibling chat. Use \`subagent_result\` for raw run diagnostics and \`task_list\`/\`task_get\` for durable task state.
+
 ## Async Subagents Hard Rules
 
 1. Use the async subagent tools for subagent lifecycle and result access.
@@ -49,7 +51,8 @@ Subagent status events are control-plane information. Summarize them to the user
 9. Collect every child run you still need before finalizing the parent task.
 10. Use \`@DisplayName\` for subagents in user-facing prose; use run IDs only for tool/internal references.
 11. Do not invent subagent names, variants, statuses, or results.
-12. Do not call \`subagent_status\` repeatedly to wait for completion; go idle and let async wakeups resume you.`;
+12. Do not call \`subagent_status\` repeatedly to wait for completion; go idle and let async wakeups resume you.
+13. Do not use task tools to bypass ownership/dependency constraints; start task-owned children only with \`subagent_start({ taskId })\`.`;
 
 export function appendAsyncSubagentsPrompt(systemPrompt: string, catalog?: string): string {
   if (systemPrompt.includes("## Async Subagents")) return systemPrompt;

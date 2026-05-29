@@ -1,5 +1,6 @@
 import type { RunSummaryRow } from "../../src/watcher.js";
-import type { RunEvent, RunResult, RunStatus, SubagentMessageResult, SubagentStartResult } from "../../src/types.js";
+import type { RunEvent, RunResult, RunStatus, SubagentMessageResult, SubagentStartResult, TaskEvent, TaskRecord } from "../../src/types.js";
+import { deriveTaskState, unresolvedDependencies } from "../../src/taskState.js";
 
 export interface TextTheme {
   fg?: (name: string, value: string) => string;
@@ -16,7 +17,13 @@ export type SubagentToolName =
   | "subagent_continue"
   | "subagent_result"
   | "subagent_name_pack"
-  | "subagent_status";
+  | "subagent_status"
+  | "task_create"
+  | "task_list"
+  | "task_get"
+  | "task_accept_result"
+  | "task_reopen"
+  | "task_cancel";
 
 export interface TextRenderable {
   invalidate(): void;
@@ -24,7 +31,7 @@ export interface TextRenderable {
 }
 
 export interface WakeupMessage {
-  kind: "subagent_wakeup";
+  kind: "subagent_wakeup" | "task_wakeup";
   title: string;
   runId: string;
   runDir?: string;
@@ -33,6 +40,8 @@ export interface WakeupMessage {
   body?: string;
   bodyAvailable?: boolean;
   event?: RunEvent;
+  taskEvent?: TaskEvent;
+  task?: { taskId: string; title?: string; status?: string; owner?: { runId?: string; displayName?: string; agent?: string }; receiptPath?: string };
   result?: RunResult;
   status?: { agentName?: string; displayName?: string };
   next?: Array<{ tool: string; args: Record<string, unknown> }>;
@@ -270,6 +279,7 @@ export function stateGlyph(state: string | undefined, resultReady = false): Stat
     return { g: "★", color: ANSI.gold, label: "result ready" };
   }
   switch (state) {
+    case "ready": return { g: "▫", color: ANSI.gray, label: "ready" };
     case "running": return { g: "◐", color: ANSI.cyan, label: "working" };
     case "queued":
     case "created": return { g: "○", color: ANSI.gray, label: "starting" };
@@ -376,6 +386,12 @@ export interface WidgetRowInput {
   urgent?: boolean;
   done?: boolean;
   resultReady?: boolean;
+  task?: {
+    id: string;
+    title: string;
+    status: string;
+    activeForm?: string;
+  };
 }
 
 export function renderWidgetRow(width: number, ch: Chrome, r: WidgetRowInput): string {
@@ -399,6 +415,54 @@ export function renderWidgetRow(width: number, ch: Chrome, r: WidgetRowInput): s
 
   const role = done ? ANSI.dim + r.role + ANSI.reset : ANSI.white + r.role + ANSI.reset;
   const glyph = gl.color + (urgent ? ANSI.bold : "") + gl.g + ANSI.reset;
+
+  if (r.task) {
+    const statusText = (r.state === "result_ready" || r.resultReady)
+      ? "result ready"
+      : (r.state === "waiting_for_input" || r.state === "question")
+        ? "needs input"
+        : r.state === "blocked"
+          ? "blocked"
+          : r.age ?? "";
+
+    const statusPart = statusText ? (done ? ANSI.dim + statusText + ANSI.reset : ANSI.white + statusText + ANSI.reset) : "";
+    const taskText = `${r.task.id} ${r.task.title}`;
+
+    if (layout === "full") {
+      const namePart = name + "  " + role;
+      const COL = 22;
+      const padCol = " ".repeat(Math.max(1, COL - visWidth(namePart)));
+
+      const leftWidth = 22 + 2; // namePart aligned + glyph
+      const rightWidth = statusPart ? visWidth(statusPart) + 2 : 0;
+      const maxTitleWidth = width - 4 - leftWidth - rightWidth;
+
+      const truncatedTask = truncAnsi(taskText, maxTitleWidth);
+      const centerPart = glyph + " " + truncatedTask;
+      const padRight = " ".repeat(Math.max(0, width - 4 - leftWidth - visWidth(centerPart) - visWidth(statusPart)));
+
+      return ch.rowBar(bar, namePart + padCol + centerPart + padRight + statusPart);
+    }
+    if (layout === "no-role") {
+      const COL = 12;
+      const padCol = " ".repeat(Math.max(1, COL - visWidth(name)));
+
+      const leftWidth = 12 + 2; // name + glyph
+      const rightWidth = statusPart ? visWidth(statusPart) + 2 : 0;
+      const maxTitleWidth = width - 4 - leftWidth - rightWidth;
+
+      const truncatedTask = truncAnsi(taskText, maxTitleWidth);
+      const centerPart = glyph + " " + truncatedTask;
+      const padRight = " ".repeat(Math.max(0, width - 4 - leftWidth - visWidth(centerPart) - visWidth(statusPart)));
+
+      return ch.rowBar(bar, name + padCol + centerPart + padRight + statusPart);
+    }
+    // minimal
+    const maxTitleWidth = width - 4 - 2;
+    const truncatedTask = truncAnsi(taskText, maxTitleWidth);
+    return ch.rowBar(bar, glyph + " " + truncatedTask);
+  }
+
   const summary = urgent
     ? ANSI.white + r.summary + ANSI.reset
     : done
@@ -428,6 +492,9 @@ export interface WidgetCardInput {
   // terminal). When set and >= the display threshold, surfaces as the
   // right-most header segment; dropped first on width overflow.
   totalCost?: number;
+  tasks?: TaskRecord[];
+  allTasks?: TaskRecord[];
+  now?: number;
 }
 
 // True when topTitled can fit the badge at this width. Mirrors the slack math
@@ -437,6 +504,77 @@ function headerBadgeFits(width: number, title: string, badge: string): boolean {
   const left = "╭─ " + title + " ";
   const right = " " + badge + " ─╮";
   return visWidth(left) + visWidth(right) <= width;
+}
+
+function taskPriority(state: string): number {
+  switch (state) {
+    case "result_ready": return 1;
+    case "running": return 2;
+    case "ready": return 3;
+    case "blocked": return 4;
+    case "failed": return 5;
+    case "completed": return 6;
+    case "cancelled": return 7;
+    default: return 8;
+  }
+}
+
+export function renderTaskSectionRow(width: number, task: TaskRecord, allTasks: TaskRecord[]): string {
+  const state = deriveTaskState(task, allTasks);
+  const gl = stateGlyph(state);
+  const glyph = gl.color + gl.g + ANSI.reset;
+
+  const taskId = ANSI.white + task.id + ANSI.reset;
+  const title = task.title;
+
+  const ownerName = task.owner?.displayName ?? task.owner?.agent;
+  const owner = ownerName ? idMention(capName(ownerName)) : "";
+
+  let statusText: string = state;
+  if (state === "blocked") {
+    const deps = unresolvedDependencies(task, allTasks);
+    if (deps.length > 0) {
+      statusText = `blocked by ${deps.map(d => d.id).join(", ")}`;
+    }
+  } else if (state === "result_ready") {
+    statusText = "result ready";
+  } else if (state === "running" && task.activeForm) {
+    statusText = task.activeForm;
+  }
+
+  const status = statusText ? ANSI.dim + statusText + ANSI.reset : "";
+
+  if (width >= 72) {
+    const leftPart = "  " + glyph + " " + taskId + " ";
+    const rightPart = (owner ? owner + "  " : "") + status;
+    const leftWidth = 11;
+    const rightWidth = visWidth(rightPart);
+    const maxTitleWidth = width - 4 - leftWidth - (rightWidth ? rightWidth + 2 : 0);
+
+    const truncatedTitle = truncAnsi(title, maxTitleWidth);
+    const centerPart = leftPart + truncatedTitle;
+
+    const padRight = " ".repeat(Math.max(0, width - 4 - visWidth(centerPart) - rightWidth));
+    return centerPart + padRight + rightPart;
+  } else if (width >= 54) {
+    const leftPart = "  " + glyph + " " + taskId + " ";
+    const rightPart = owner ? owner : status;
+    const leftWidth = 11;
+    const rightWidth = visWidth(rightPart);
+    const maxTitleWidth = width - 4 - leftWidth - (rightWidth ? rightWidth + 2 : 0);
+
+    const truncatedTitle = truncAnsi(title, maxTitleWidth);
+    const centerPart = leftPart + truncatedTitle;
+
+    const padRight = " ".repeat(Math.max(0, width - 4 - visWidth(centerPart) - rightWidth));
+    return centerPart + padRight + rightPart;
+  } else {
+    const leftPart = "  " + glyph + " " + taskId + " ";
+    const leftWidth = 11;
+    const maxTitleWidth = width - 4 - leftWidth;
+    const truncatedTitle = truncAnsi(title, maxTitleWidth);
+    return leftPart + truncatedTitle;
+  }
 }
 
 export function renderWidgetCard(input: WidgetCardInput): string[] {
@@ -455,8 +593,6 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
   const title = `${ANSI.bold}subagents${ANSI.reset}`;
   const headerRightWithCost = [...baseSegments, ...(costSegment ? [costSegment] : [])].join(sep);
   const headerRightBase = baseSegments.join(sep);
-  // Cost is lowest priority — drop it first if the header can't fit the full
-  // badge. Anything else (the active/needs/ready counts) stays.
   const headerRight = costSegment && !headerBadgeFits(width, title, headerRightWithCost)
     ? headerRightBase
     : headerRightWithCost;
@@ -471,6 +607,80 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
       : `${ANSI.gray}+${hidden} more${ANSI.reset}`;
     out.push(ch.row(tail));
   }
+
+  // Task section
+  const allTasks = input.allTasks ?? [];
+  const now = input.now ?? Date.now();
+  const graceMs = 5_000;
+  const visibleTasks = (input.tasks ?? []).filter(t => {
+    const state = deriveTaskState(t, allTasks);
+    if (state === "completed" || state === "failed" || state === "cancelled") {
+      const updatedAtMs = Date.parse(t.updatedAt);
+      if (Number.isFinite(updatedAtMs)) {
+        return now - updatedAtMs <= graceMs;
+      }
+    }
+    return true;
+  });
+
+  if (visibleTasks.length > 0) {
+    const tReadyCount = allTasks.filter(t => deriveTaskState(t, allTasks) === "ready").length;
+    const tRunningCount = allTasks.filter(t => deriveTaskState(t, allTasks) === "running").length;
+    const tResultReadyCount = allTasks.filter(t => deriveTaskState(t, allTasks) === "result_ready").length;
+    const tBlockedCount = allTasks.filter(t => deriveTaskState(t, allTasks) === "blocked").length;
+    const tFailedCount = allTasks.filter(t => deriveTaskState(t, allTasks) === "failed").length;
+
+    const taskSegments = [
+      tReadyCount ? `${tReadyCount} ready` : "",
+      tRunningCount ? `${tRunningCount} running` : "",
+      tResultReadyCount ? `${tResultReadyCount} result ready` : "",
+      tBlockedCount ? `${tBlockedCount} blocked` : "",
+      tFailedCount ? `${tFailedCount} failed` : "",
+    ].filter(Boolean);
+
+    // Separator line
+    out.push(ch.row(ANSI.gray + "─".repeat(width - 4) + ANSI.reset));
+
+    const headerText = `${ANSI.bold}Tasks${ANSI.reset}  ` + taskSegments.join(` ${ANSI.gray}·${ANSI.reset} `);
+    out.push(ch.row(headerText));
+
+    if (width >= 36) {
+      const sortedTasks = [...visibleTasks].sort((a, b) => {
+        const pA = taskPriority(deriveTaskState(a, allTasks));
+        const pB = taskPriority(deriveTaskState(b, allTasks));
+        if (pA !== pB) return pA - pB;
+        return a.id.localeCompare(b.id);
+      });
+
+      const maxTaskRows = 4;
+      const visibleTaskRows = sortedTasks.slice(0, maxTaskRows);
+      for (const task of visibleTaskRows) {
+        const line = renderTaskSectionRow(width, task, allTasks);
+        out.push(ch.row(line));
+      }
+
+      const hiddenTasksCount = sortedTasks.length - visibleTaskRows.length;
+      if (hiddenTasksCount > 0) {
+        const omittedTasks = sortedTasks.slice(maxTaskRows);
+        const omittedCounts: Record<string, number> = {};
+        for (const task of omittedTasks) {
+          const state = deriveTaskState(task, allTasks);
+          omittedCounts[state] = (omittedCounts[state] || 0) + 1;
+        }
+        const omittedParts: string[] = [];
+        const statesOrder = ["result_ready", "running", "ready", "blocked", "failed", "completed", "cancelled"];
+        for (const st of statesOrder) {
+          if (omittedCounts[st]) {
+            const label = st === "result_ready" ? "result ready" : st;
+            omittedParts.push(`${omittedCounts[st]} ${label}`);
+          }
+        }
+        const overflowText = `${ANSI.gray}… +${omittedParts.join(", ")}${ANSI.reset}`;
+        out.push(ch.row(overflowText));
+      }
+    }
+  }
+
   out.push(ch.bot());
   return out;
 }

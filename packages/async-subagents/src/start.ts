@@ -14,7 +14,7 @@ import { createRootSession, readRootSession } from "./rootSession.js";
 import { RunStore } from "./runStore.js";
 import { createInitialStatus } from "./status.js";
 import { codexBalancerSyncBackAndCleanup, runSupervisor, type SupervisorFakeInput, type SupervisorInput } from "./supervisor.js";
-import type { ContextPolicy, SessionPolicy, SubagentStartResult, TerminalRunState, ThinkingLevel } from "./types.js";
+import type { ContextPolicy, SessionPolicy, SubagentStartResult, TerminalRunState, ThinkingLevel, TaskRecord } from "./types.js";
 import { prepareLaunch } from "@bravo/codex-auth-balancer";
 
 export interface StartFakeChildInput {
@@ -31,6 +31,7 @@ export interface StartFakeImmediateInput extends SupervisorFakeInput {
 }
 
 export interface StartSubagentInput {
+  runId?: string;
   agent: string;
   variant?: string;
   task: string;
@@ -59,6 +60,7 @@ export interface StartSubagentInput {
   piBin?: string;
   env?: Record<string, string>;
   fake?: StartFakeImmediateInput | StartFakeChildInput;
+  taskAssignment?: { task: TaskRecord; token: string; dependencies?: TaskRecord[] };
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -283,6 +285,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   const requestedContextPolicy = input.context ?? definition.context ?? "fresh";
   const requestedSessionPolicy = input.session ?? definition.session ?? "record";
   const { runId, paths } = store.createRunDirectory({
+    runId: input.runId,
     cwd,
     parentRunId: root.parentRunId,
     rootRunId: root.rootRunId,
@@ -383,6 +386,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       maxRunSeconds,
       effectiveMaxRunMs,
       maxSubagentDepth: definition.maxSubagentDepth,
+      task: input.taskAssignment ? { taskId: input.taskAssignment.task.id, title: input.taskAssignment.task.title } : undefined,
       next: [{ tool: "subagent_result", args: { runId } }],
     };
   };
@@ -449,6 +453,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     depth: input.depth ?? 0,
     files: input.files,
     skills: input.skills,
+    taskAssignment: input.taskAssignment ? { task: input.taskAssignment.task, dependencies: input.taskAssignment.dependencies } : undefined,
   });
 
   let codexAuthBalancer: CodexBalancerLaunch | undefined;
@@ -458,7 +463,14 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     const message = error instanceof Error ? error.message : String(error);
     if (asyncSubagentsConfig.codexAuthBalancer.failClosed) return failBeforeLaunch("CODEX_AUTH_BALANCER_FAILED", message);
   }
-  const effectiveExtraEnv = codexAuthBalancer ? { ...(input.env ?? {}), ...codexAuthBalancer.env } : input.env;
+  const taskEnv: Record<string, string> = input.taskAssignment
+    ? {
+        ASYNC_SUBAGENTS_RUN_ID: runId,
+        ASYNC_SUBAGENTS_TASK_ID: input.taskAssignment.task.id,
+        ASYNC_SUBAGENTS_TASK_TOKEN: input.taskAssignment.token,
+      }
+    : {};
+  const effectiveExtraEnv = codexAuthBalancer ? { ...(input.env ?? {}), ...taskEnv, ...codexAuthBalancer.env } : { ...(input.env ?? {}), ...taskEnv };
 
   const piCommand = buildPiCommand({
     piBin: input.piBin,
@@ -570,6 +582,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     maxRunSeconds,
     effectiveMaxRunMs,
     maxSubagentDepth: definition.maxSubagentDepth,
+    task: input.taskAssignment ? { taskId: input.taskAssignment.task.id, title: input.taskAssignment.task.title } : undefined,
     next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [],
   };
 }

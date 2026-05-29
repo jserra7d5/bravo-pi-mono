@@ -131,6 +131,12 @@ The canonical files remain `run-index.jsonl`, `status.json`, `events.jsonl`, `in
 
 Model-facing wakeups are runtime envelopes marked `NOT USER INPUT`; they include metadata and short summaries only. Full child result bodies are stored in `result.json` and are collected with `subagent_result`.
 
+## Task orchestration
+
+Async subagents also provide a lightweight durable task layer scoped by root session. Parent tools create/query/accept task state (`task_create`, `task_list`, `task_get`, `task_accept_result`, `task_reopen`, `task_cancel`). `subagent_start({ taskId })` is the only spawn path for task-owned child runs; it validates readiness, claims the task, injects task identity/token env, and adds a task-owned result contract to the child prompt. Children submit durable receipts with `task_submit_result` and may use `task_update_progress` or `task_report_blocked`; parent acceptance is still required before dependencies are satisfied.
+
+Task storage lives next to run delivery state under `session-tasks/<rootSessionId>/`. Tool returns are compact by default: `task_get` starts with status/pointers and only returns receipt/full details when requested. Task result, failure, and input-needed events produce once-only parent wakeups with `task_get` as the suggested next action.
+
 ## Runtime budgets and timeout continuation
 
 Agent definitions use second-based runtime budgets:

@@ -270,6 +270,75 @@ export interface RootSessionLease {
   expiresAt: string;
 }
 
+export type TaskStatus = "pending" | "running" | "result_ready" | "completed" | "failed" | "cancelled";
+export type TaskResultState = "submitted" | "accepted" | "rejected" | "superseded";
+export type DerivedTaskState = "ready" | "blocked" | TaskStatus;
+export type TaskEventType = "task.created" | "task.claimed" | "task.released" | "task.progress" | "task.needs_input" | "task.result_submitted" | "task.result_accepted" | "task.reopened" | "task.failed" | "task.cancelled" | "task.ready";
+
+export interface TaskOwner {
+  runId: string;
+  agent: string;
+  displayName: string;
+  assignedAt: string;
+  tokenHash: string;
+}
+
+export interface TaskResultReceipt {
+  state: TaskResultState;
+  summary: string;
+  receiptPath?: string;
+  artifactPaths?: string[];
+  evidence?: string[];
+  commandsRun?: string[];
+  notes?: string;
+  submittedAt?: string;
+  acceptedAt?: string;
+  rejectedAt?: string;
+}
+
+export interface TaskAttempt {
+  runId: string;
+  agent: string;
+  displayName: string;
+  startedAt: string;
+  endedAt?: string;
+  status: "running" | "result_ready" | "failed" | "cancelled";
+}
+
+export interface TaskRecord {
+  schemaVersion: SchemaVersion;
+  id: string;
+  title: string;
+  description: string;
+  status: TaskStatus;
+  dependsOn: string[];
+  blocks?: string[];
+  owner?: TaskOwner;
+  activeForm?: string;
+  result?: TaskResultReceipt;
+  attempts: TaskAttempt[];
+  createdBy: string;
+  parentRunId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskEvent {
+  schemaVersion: SchemaVersion;
+  eventId: string;
+  sequence: number;
+  rootSessionId: string;
+  parentRunId: string;
+  taskId: string;
+  type: TaskEventType;
+  summary: string;
+  actor?: string;
+  runId?: string;
+  wake?: boolean;
+  data?: Record<string, unknown>;
+  createdAt: string;
+}
+
 export interface SubagentStartResult {
   runId: string;
   runDir: string;
@@ -298,6 +367,7 @@ export interface SubagentStartResult {
   maxRunSeconds?: number;
   effectiveMaxRunMs?: number;
   maxSubagentDepth?: number;
+  task?: { taskId: string; title: string };
   next: Array<{ tool: string; args: Record<string, unknown> }>;
 }
 

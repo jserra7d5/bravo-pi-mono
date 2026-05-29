@@ -7,6 +7,7 @@ import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from 
 import { markWakeupHandled } from "../extensions/pi/wakeups.js";
 import { createRunResult } from "../src/result.js";
 import { RunStore } from "../src/runStore.js";
+import { TaskStore } from "../src/taskStore.js";
 import { createInitialStatus } from "../src/status.js";
 import type { RunState } from "../src/types.js";
 
@@ -80,4 +81,33 @@ test("compaction reminder omits terminal results after they are collected", () =
   markWakeupHandled(w.store, w.parentRunId, completed);
 
   assert.equal(buildCompactionReminder({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId }), undefined);
+});
+
+test("compaction reminder includes task counts in text and details", () => {
+  const w = workspace();
+  const taskStore = new TaskStore(w.store);
+
+  // Create tasks: one ready, one blocked
+  taskStore.createTasks(w.parentRunId, {
+    parentRunId: w.parentRunId,
+    tasks: [
+      { alias: "t1", title: "Task One", description: "Desc 1" },
+      { alias: "t2", title: "Task Two", description: "Desc 2", dependsOn: ["t1"] }
+    ]
+  });
+
+  // Add one active subagent run to force compaction reminder to display (needsReminder must be true)
+  addRun({ ...w, displayName: "Worker", state: "running", summary: "working" });
+
+  const reminder = buildCompactionReminder({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+  assert.ok(reminder);
+  assert.match(reminder.content, /Tasks: 1 ready/);
+  assert.match(reminder.content, /1 blocked/);
+
+  const tc = reminder.details.taskCounts;
+  assert.ok(tc);
+  assert.equal(tc.ready, 1);
+  assert.equal(tc.blocked, 1);
+  assert.equal(tc.resultReady, 0);
+  assert.equal(tc.running, 0);
 });

@@ -1,8 +1,10 @@
 import { RunStore } from "../../src/runStore.js";
-import type { RunIndexRecord } from "../../src/types.js";
+import type { RunIndexRecord, TaskRecord } from "../../src/types.js";
 import { readWatcherSnapshot, type RunSummaryRow } from "../../src/watcher.js";
 import { renderWidgetCard, widgetRowFromSummary, type WidgetRowInput } from "./renderers.js";
 import { isResultWakeupCurrent } from "./wakeups.js";
+import { TaskStore } from "../../src/taskStore.js";
+import { deriveTaskState } from "../../src/taskState.js";
 
 export interface LiveWidgetInput {
   store: RunStore;
@@ -92,9 +94,65 @@ function renderAt(input: LiveWidgetInput, width: number, now: number): string[] 
   const maxRows = input.maxRows ?? 5;
   const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
   const { rows, totalCost } = buildSnapshot(input, now, terminalCompletedVisibleMs);
-  if (!rows.length) return [];
-  const widgetRows: WidgetRowInput[] = rows.map((row) => widgetRowFromSummary(row, now));
-  return renderWidgetCard({ width: clampWidth(width), rows: widgetRows, maxRows, totalCost });
+
+  let tasks: TaskRecord[] = [];
+  if (input.rootSessionId) {
+    try {
+      tasks = new TaskStore(input.store).listTasks(input.rootSessionId);
+    } catch {
+      // safe fallback
+    }
+  }
+
+  const graceMs = 5_000;
+  const visibleTasks = tasks.filter(t => {
+    const state = deriveTaskState(t, tasks);
+    if (state === "completed" || state === "failed" || state === "cancelled") {
+      const updatedAtMs = Date.parse(t.updatedAt);
+      if (Number.isFinite(updatedAtMs)) {
+        return now - updatedAtMs <= graceMs;
+      }
+    }
+    return true;
+  });
+
+  if (!rows.length && !visibleTasks.length) return [];
+
+  const runIdToTask = new Map<string, TaskRecord>();
+  for (const task of tasks) {
+    if (task.owner?.runId) {
+      runIdToTask.set(task.owner.runId, task);
+    }
+    for (const attempt of task.attempts) {
+      if (attempt.runId) {
+        runIdToTask.set(attempt.runId, task);
+      }
+    }
+  }
+
+  const widgetRows: WidgetRowInput[] = rows.map((row) => {
+    const task = runIdToTask.get(row.runId);
+    const baseRow = widgetRowFromSummary(row, now);
+    if (task) {
+      baseRow.task = {
+        id: task.id,
+        title: task.title,
+        status: deriveTaskState(task, tasks),
+        activeForm: task.activeForm
+      };
+    }
+    return baseRow;
+  });
+
+  return renderWidgetCard({
+    width: clampWidth(width),
+    rows: widgetRows,
+    maxRows,
+    totalCost,
+    tasks: visibleTasks,
+    allTasks: tasks,
+    now
+  });
 }
 
 function hasVisibleRows(input: LiveWidgetInput, now: number): boolean {
@@ -104,6 +162,26 @@ function hasVisibleRows(input: LiveWidgetInput, now: number): boolean {
     : input.store.readRunSummaries({ parentRunId: input.parentRunId, rootSessionId: input.rootSessionId });
   for (const summary of summaries) {
     if (visibleState(summary.state, summary.updatedAt, now, terminalCompletedVisibleMs)) return true;
+  }
+  if (input.rootSessionId) {
+    try {
+      const taskStore = new TaskStore(input.store);
+      const tasks = taskStore.listTasks(input.rootSessionId);
+      const graceMs = 5_000;
+      const visibleTasks = tasks.filter(t => {
+        const state = deriveTaskState(t, tasks);
+        if (state === "completed" || state === "failed" || state === "cancelled") {
+          const updatedAtMs = Date.parse(t.updatedAt);
+          if (Number.isFinite(updatedAtMs)) {
+            return now - updatedAtMs <= graceMs;
+          }
+        }
+        return true;
+      });
+      if (visibleTasks.length > 0) return true;
+    } catch {
+      // safe fallback
+    }
   }
   return false;
 }

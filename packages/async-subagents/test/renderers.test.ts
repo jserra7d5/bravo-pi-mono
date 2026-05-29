@@ -518,3 +518,98 @@ test("widget chrome holds its declared width when the card includes a cost segme
     }
   }
 });
+
+test("stateGlyph maps ready state to ▫", () => {
+  assert.equal(stateGlyph("ready").g, "▫");
+  assert.equal(stateGlyph("ready").label, "ready");
+});
+
+test("renderWidgetRow formats row with task at different layouts", () => {
+  const ch72 = chrome(72);
+  const ch56 = chrome(56);
+  const ch44 = chrome(44);
+  const row = {
+    displayName: "Rex",
+    role: "worker",
+    state: "running",
+    summary: "original summary",
+    age: "2m",
+    task: {
+      id: "T-004",
+      title: "Implement task lifecycle",
+      status: "running"
+    }
+  };
+  const full = stripAnsi(renderWidgetRow(72, ch72, row));
+  const noRole = stripAnsi(renderWidgetRow(56, ch56, row));
+  const minimal = stripAnsi(renderWidgetRow(44, ch44, row));
+
+  assert.ok(full.includes("T-004"), "full includes task ID");
+  assert.ok(full.includes("Implement task"), "full includes task title");
+  assert.ok(full.includes("2m"), "full includes status/age");
+  assert.ok(full.includes("Rex"), "full includes display name");
+
+  assert.ok(noRole.includes("T-004"), "no-role includes task ID");
+  assert.ok(noRole.includes("Implement task"), "no-role includes task title");
+  assert.ok(noRole.includes("Rex"), "no-role includes display name");
+
+  assert.ok(minimal.includes("T-004"), "minimal includes task ID");
+  assert.ok(minimal.includes("Implement"), "minimal includes truncated task title");
+  assert.ok(!minimal.includes("Rex"), "minimal drops display name");
+});
+
+test("renderWidgetCard renders task section with priority and overflow", () => {
+  const task1 = {
+    schemaVersion: 1 as const,
+    id: "T-001",
+    title: "First Task",
+    description: "First",
+    status: "completed" as const,
+    dependsOn: [],
+    attempts: [],
+    createdBy: "root",
+    parentRunId: "root",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const task2 = {
+    schemaVersion: 1 as const,
+    id: "T-002",
+    title: "Second Task",
+    description: "Second",
+    status: "result_ready" as const,
+    dependsOn: [],
+    attempts: [],
+    createdBy: "root",
+    parentRunId: "root",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const task3 = {
+    schemaVersion: 1 as const,
+    id: "T-003",
+    title: "Third Task",
+    description: "Third",
+    status: "pending" as const,
+    dependsOn: [],
+    attempts: [],
+    createdBy: "root",
+    parentRunId: "root",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const card = renderWidgetCard({
+    width: 72,
+    rows: [],
+    tasks: [task1, task2, task3],
+    allTasks: [task1, task2, task3],
+    now: Date.now()
+  });
+
+  const text = card.map(stripAnsi).join("\n");
+  assert.ok(text.includes("Tasks"));
+  assert.ok(text.includes("T-002 Second Task"), "prioritizes result_ready");
+  assert.ok(text.includes("T-003 Third Task"), "includes ready task");
+  assert.ok(text.includes("T-001 First Task"));
+});

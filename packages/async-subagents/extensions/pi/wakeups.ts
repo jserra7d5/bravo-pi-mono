@@ -1,10 +1,11 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { atomicWriteJson } from "../../src/jsonl.js";
 import { ownsRootSessionLease } from "../../src/leases.js";
 import { isInterestingEvent } from "../../src/schemas.js";
 import { RunStore } from "../../src/runStore.js";
-import type { DeliverySubscription, EventType, RunEvent, RunIndexRecord, RunResult } from "../../src/types.js";
+import { TaskStore } from "../../src/taskStore.js";
+import type { DeliverySubscription, EventType, RunEvent, RunIndexRecord, RunResult, TaskEvent } from "../../src/types.js";
 import { SCHEMA_VERSION } from "../../src/types.js";
 import type { WakeupMessage } from "./renderers.js";
 
@@ -76,6 +77,10 @@ export function eventDeliveryKey(event: RunEvent): string {
   return `event:${event.runId}:${event.eventId}`;
 }
 
+export function taskEventDeliveryKey(event: TaskEvent): string {
+  return `task:${event.rootSessionId}:${event.taskId}:${event.eventId}`;
+}
+
 function redactedResult(result: RunResult): RunResult & { bodyAvailable?: boolean } {
   const { body, ...rest } = result;
   return { ...rest, bodyAvailable: body !== undefined } as RunResult & { bodyAvailable?: boolean };
@@ -136,7 +141,25 @@ function statusForRun(store: RunStore, runId: string): { agentName?: string; dis
   }
 }
 
+function taskDelivery(event: TaskEvent, task?: ReturnType<TaskStore["readTask"]>): WakeupDelivery {
+  return {
+    deliveryKey: taskEventDeliveryKey(event),
+    runId: event.runId ?? task?.owner?.runId ?? event.taskId,
+    message: {
+      kind: "task_wakeup",
+      title: event.type === "task.result_submitted" ? "Task result ready" : "Task attention",
+      runId: event.runId ?? task?.owner?.runId ?? "",
+      state: event.type,
+      summary: event.summary,
+      taskEvent: event,
+      task: { taskId: event.taskId, title: task?.title, status: task?.status, owner: task?.owner ? { runId: task.owner.runId, displayName: task.owner.displayName, agent: task.owner.agent } : undefined, receiptPath: task?.result?.receiptPath },
+      next: [{ tool: "task_get", args: { taskId: event.taskId } }],
+    },
+  };
+}
+
 function isActionableModelWakeup(delivery: WakeupDelivery): boolean {
+  if (delivery.message.kind === "task_wakeup") return true;
   if (delivery.message.result) return true;
   const eventType = delivery.message.event?.type;
   return eventType === "question" || eventType === "blocked" || (delivery.message.state as string | undefined) === "paused";
@@ -177,10 +200,18 @@ function pendingForRun(store: RunStore, parentRunId: string, runId: string, noti
   return deliveries;
 }
 
+const DELIVERY_CLAIM_TTL_MS = 60_000;
+
 function claimDelivery(store: RunStore, deliveryKey: string, ownerId: string, nowMs?: number): boolean {
   const path = claimPath(store, deliveryKey);
   try {
     mkdirSync(dirname(path), { recursive: true });
+    if (existsSync(path)) {
+      try {
+        const stat = statSync(path);
+        if ((nowMs ?? Date.now()) - stat.mtimeMs > DELIVERY_CLAIM_TTL_MS) rmSync(path, { force: true });
+      } catch { rmSync(path, { force: true }); }
+    }
     const fd = openSync(path, "wx");
     try {
       writeFileSync(fd, `${JSON.stringify({ schemaVersion: SCHEMA_VERSION, deliveryKey, ownerId, claimedAt: new Date(nowMs ?? Date.now()).toISOString() })}\n`, "utf8");
@@ -216,6 +247,12 @@ export function markWakeupKeyHandled(store: RunStore, parentRunId: string, deliv
   writeDeliveryState(store, state);
 }
 
+export function markTaskWakeupHandled(store: RunStore, parentRunId: string, taskId: string, eventId?: string): void {
+  const state = readDeliveryState(store, parentRunId);
+  for (const key of Object.keys(state.delivered)) if (key.includes(`:${taskId}:`) && (!eventId || key.endsWith(`:${eventId}`))) state.handled[key] = new Date().toISOString();
+  writeDeliveryState(store, state);
+}
+
 export function markWakeupHandled(store: RunStore, parentRunId: string, runId: string): void {
   const state = readDeliveryState(store, parentRunId);
   const result = store.readResult(runId);
@@ -241,7 +278,19 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
   const state = readDeliveryState(input.store, input.parentRunId);
   const deliveries: WakeupDelivery[] = [];
   const subscriptions = new Map(readDeliverySubscriptions(input.store, input.parentRunId).map((item) => [item.runId, item]));
-  const records = subscriptions.size
+  const taskStore = new TaskStore(input.store);
+  for (const event of taskStore.readEvents(input.rootSessionId).filter((event) => event.parentRunId === input.parentRunId && event.wake === true && ["task.result_submitted", "task.failed", "task.needs_input", "task.ready"].includes(event.type))) {
+    if (state.delivered[taskEventDeliveryKey(event)] || state.handled[taskEventDeliveryKey(event)]) continue;
+    let task; try { task = taskStore.readTask(input.rootSessionId, event.taskId); } catch { /* event remains deliverable without task details */ }
+    const delivery = taskDelivery(event, task);
+    if (input.modelFollowUpOnly && !isActionableModelWakeup(delivery)) continue;
+    if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) continue;
+    if (isWakeupKeyHandled(input.store, input.parentRunId, delivery.deliveryKey)) continue;
+    deliveries.push(delivery);
+    state.delivered[delivery.deliveryKey] = new Date(input.nowMs ?? Date.now()).toISOString();
+    if (deliveries.length >= (input.limit ?? 5)) break;
+  }
+  const records = deliveries.length >= (input.limit ?? 5) ? [] : subscriptions.size
     ? (input.records ?? input.store.listDirectChildren(input.parentRunId)).filter((record) => subscriptions.has(record.runId))
     : [];
   for (const record of records) {

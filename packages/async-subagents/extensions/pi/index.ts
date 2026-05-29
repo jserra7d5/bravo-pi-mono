@@ -28,7 +28,7 @@ function cwdOf(ctx: unknown): string {
 function ensureRoot(cwd: string): RootSessionIdentity {
   const existing = roots.get(cwd);
   if (existing) return existing;
-  const identity = createRootSession({ cwd });
+  const identity = createRootSession({ cwd, rootSessionId: process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID });
   roots.set(cwd, identity);
   return identity;
 }
@@ -52,6 +52,16 @@ function refreshUi(ctx: ExtensionContext): void {
 }
 
 function wakeupEnvelope(wakeup: WakeupMessage): string {
+  if (wakeup.kind === "task_wakeup") {
+    const task = wakeup.task;
+    const lines = [wakeup.state === "task.result_submitted" ? "[TASK RESULT READY — NOT USER INPUT]" : "[TASK ATTENTION — NOT USER INPUT]", ""];
+    if (task) lines.push(`Task: ${task.taskId}${task.title ? ` ${task.title}` : ""}`);
+    if (task?.owner) lines.push(`Owner: ${task.owner.displayName ? `@${task.owner.displayName}` : task.owner.agent ?? "unknown"}${task.owner.runId ? ` / ${task.owner.runId}` : ""}`);
+    if (wakeup.summary) lines.push(`Summary: ${wakeup.summary}`);
+    if (task?.receiptPath) lines.push(`Receipt: ${task.receiptPath}`);
+    lines.push("", `Next: task_get({ taskId: "${task?.taskId ?? wakeup.taskEvent?.taskId}" })`);
+    return lines.join("\n");
+  }
   const attention = wakeup.state === "paused" || wakeup.state === "blocked" || wakeup.state === "waiting_for_input" || wakeup.state === "failed";
   const lines = [attention ? "[ASYNC SUBAGENT ATTENTION — NOT USER INPUT]" : "[ASYNC SUBAGENT RESULT READY — NOT USER INPUT]", "", `Run ID: ${wakeup.runId}`];
   if (wakeup.status?.displayName) lines.push(`Subagent: @${wakeup.status.displayName}${wakeup.status.agentName ? ` (${wakeup.status.agentName})` : ""}`);
