@@ -60,7 +60,7 @@ function wakeupEnvelope(wakeup: WakeupMessage): string {
   if (wakeup.summary) lines.push(`Summary: ${wakeup.summary}`);
   lines.push("", wakeup.bodyAvailable ? "The child body is ready but not included in this wakeup." : "Full child output is not included in this wakeup.");
   if (wakeup.state === "waiting_for_input" || wakeup.event?.type === "question" || wakeup.state === "blocked" || wakeup.event?.type === "blocked") {
-    lines.push(`Reply with subagent_message({ runId: "${wakeup.runId}", type: "answer", ... }) when you have the requested input. You may call subagent_status({ runIds: ["${wakeup.runId}"] }) for current status; do not call subagent_result for this non-terminal wakeup.`);
+    lines.push(`Reply with subagent_message({ runId: "${wakeup.runId}", type: "answer", ... }) when you have the requested input. Do not call subagent_result for this non-terminal wakeup.`);
   } else if (wakeup.state === "paused") {
     lines.push(`If this result is still needed, choose a bounded extension and call subagent_continue({ runId: "${wakeup.runId}", additionalRunSeconds: 900 }) to resume. Adjust additionalRunSeconds to the smallest reasonable budget for the remaining work, or call subagent_interrupt({ runId: "${wakeup.runId}", action: "cancel" }) if it is no longer needed.`);
   } else {

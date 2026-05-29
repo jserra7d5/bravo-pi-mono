@@ -61,7 +61,7 @@ function rowLabel(row: RunSummaryRow): string {
 function nextAction(row: RunSummaryRow): string {
   if (row.state === "waiting_for_input" || row.state === "blocked") return "respond with subagent_message; inspect once with subagent_status only if needed";
   if (row.resultReady || row.result || isTerminalRunState(row.state)) return "read with subagent_result";
-  return "inspect once with subagent_status if you need orientation; do not poll";
+  return "active; no per-row action needed until an async wakeup";
 }
 
 function rowLine(row: RunSummaryRow): string {
@@ -94,7 +94,7 @@ export function buildCompactionReminder(input: CompactionReminderInput): Compact
   const content = [
     `Async subagent status preserved after compaction${counts ? ` (${counts})` : ""}:`,
     ...shown.map(rowLine),
-    omitted ? `- ${omitted} more subagent run${omitted === 1 ? "" : "s"} not shown; use subagent_status once if you need the full list.` : "",
+    omitted ? `- ${omitted} more subagent run${omitted === 1 ? "" : "s"} not shown.` : "",
     "After compaction, one subagent_status call is appropriate if you need to re-orient; do not loop on status for active runs. Before finalizing or changing direction, account for these in-flight or unread subagent results.",
   ].filter(Boolean).join("\n");
 

@@ -210,8 +210,8 @@ for (const eventType of ["question", "blocked"] as const) {
       assert.ok(wakeup);
       assert.equal(wakeup.message.details?.event?.type, eventType);
       assert.match(wakeup.message.content, /subagent_message/);
-      assert.match(wakeup.message.content, /subagent_status/);
-      assert.match(wakeup.message.content, /do not call subagent_result/);
+      assert.doesNotMatch(wakeup.message.content, /subagent_status/);
+      assert.match(wakeup.message.content, /Do not call subagent_result/);
       assert.doesNotMatch(wakeup.message.content, /Call subagent_result\(\{ runId:/);
       assert.deepEqual(wakeup.options, { triggerTurn: true, deliverAs: "steer" });
     } finally {
