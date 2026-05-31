@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyAgentVariant, resolveAgentDefinition } from "./agentDefinitions.js";
@@ -241,6 +242,36 @@ interface CodexBalancerLaunch {
   metadata: Record<string, unknown>;
 }
 
+const BALANCED_PI_CONFIG_ENTRIES = [
+  "AGENTS.md",
+  "APPEND_SYSTEM.md",
+  "SYSTEM.md",
+  "keybindings.json",
+  "models.json",
+  "npm",
+  "git",
+  "prompts",
+  "settings.json",
+  "skills",
+  "themes",
+  "tools",
+  "extensions",
+];
+
+function sourcePiAgentDir(): string {
+  return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+}
+
+function linkIfPresent(source: string, dest: string): void {
+  if (!existsSync(source) || existsSync(dest)) return;
+  symlinkSync(source, dest, lstatSync(source).isDirectory() ? "dir" : "file");
+}
+
+function mirrorPiAgentConfig(piAgentDir: string): void {
+  const sourceAgentDir = sourcePiAgentDir();
+  for (const entry of BALANCED_PI_CONFIG_ENTRIES) linkIfPresent(join(sourceAgentDir, entry), join(piAgentDir, entry));
+}
+
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -257,6 +288,7 @@ async function prepareCodexBalancer(config: CodexAuthBalancerConfig, model: stri
   mkdirSync(isolatedDir, { recursive: true, mode: 0o700 });
   try { if ((statSync(isolatedDir).mode & 0o777) !== 0o700) chmodSync(isolatedDir, 0o700); } catch { /* mkdir already failed if unavailable */ }
   const prepared = await withTimeout(prepareLaunch(isolatedDir, { stateRoot: config.stateDir, runId, rootRunId, reservationTtlMs: ttlMs }), config.timeoutMs, "codex auth balancer prepare-launch");
+  mirrorPiAgentConfig(prepared.pi_agent_dir);
   return { enabled: true, isolatedDir, selectedSlot: prepared.selected_slot, env: prepared.env, metadata: { enabled: true, provider: "bravo", mode: "process-env", selectedSlot: prepared.selected_slot, reservationId: prepared.metadata.reservation_id, launchId: prepared.metadata.launch_id, policyVersion: prepared.selection?.policy_version, label: prepared.label, reason: prepared.reason, status: prepared.status, primaryRemainingPercent: prepared.primary_remaining_percent, secondaryRemainingPercent: prepared.secondary_remaining_percent } };
 }
 
@@ -463,13 +495,17 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     const message = error instanceof Error ? error.message : String(error);
     if (asyncSubagentsConfig.codexAuthBalancer.failClosed) return failBeforeLaunch("CODEX_AUTH_BALANCER_FAILED", message);
   }
-  const taskEnv: Record<string, string> = input.taskAssignment
-    ? {
-        ASYNC_SUBAGENTS_RUN_ID: runId,
-        ASYNC_SUBAGENTS_TASK_ID: input.taskAssignment.task.id,
-        ASYNC_SUBAGENTS_TASK_TOKEN: input.taskAssignment.token,
-      }
-    : {};
+  const taskEnv: Record<string, string> = {
+    ASYNC_SUBAGENTS_RUN_ID: runId,
+    ASYNC_SUBAGENTS_PARENT_RUN_ID: root.parentRunId,
+    ASYNC_SUBAGENTS_ROOT_SESSION_ID: root.rootSessionId,
+    ...(input.taskAssignment
+      ? {
+          ASYNC_SUBAGENTS_TASK_ID: input.taskAssignment.task.id,
+          ASYNC_SUBAGENTS_TASK_TOKEN: input.taskAssignment.token,
+        }
+      : {}),
+  };
   const effectiveExtraEnv = codexAuthBalancer ? { ...(input.env ?? {}), ...taskEnv, ...codexAuthBalancer.env } : { ...(input.env ?? {}), ...taskEnv };
 
   const piCommand = buildPiCommand({

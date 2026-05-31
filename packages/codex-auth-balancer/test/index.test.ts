@@ -33,6 +33,30 @@ test('prepareLaunch creates isolated auth and syncBack success cleans via caller
   assert.equal(JSON.parse(await fs.readFile(path.join(root, 'accounts', 's1', 'auth.json'), 'utf8')).access_token, 'new');
 });
 
+test('syncBack copies Pi auth updates back to the selected slot', async () => {
+  const root = await tmp(); const iso = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'codex-old' });
+  await writeJson(path.join(root, 'accounts', 's1', 'pi-openai-codex.json'), { type: 'oauth', refresh: 'pi-old' });
+  await prepareLaunch(iso, { stateRoot: root, slot: 's1' });
+  await writeJson(path.join(iso, 'codex', 'auth.json'), { access_token: 'codex-new' });
+  await writeJson(path.join(iso, 'pi-agent', 'auth.json'), { type: 'oauth', refresh: 'pi-new' });
+  const r = await syncBack(iso, { stateRoot: root, slot: 's1' });
+  assert.equal(r.ok, true);
+  assert.equal(JSON.parse(await fs.readFile(path.join(root, 'accounts', 's1', 'auth.json'), 'utf8')).access_token, 'codex-new');
+  assert.equal(JSON.parse(await fs.readFile(path.join(root, 'accounts', 's1', 'pi-openai-codex.json'), 'utf8')).refresh, 'pi-new');
+});
+
+test('syncBack detects Pi auth conflicts', async () => {
+  const root = await tmp(); const iso = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'codex-old' });
+  await writeJson(path.join(root, 'accounts', 's1', 'pi-openai-codex.json'), { type: 'oauth', refresh: 'pi-old' });
+  await prepareLaunch(iso, { stateRoot: root, slot: 's1' });
+  await writeJson(path.join(root, 'accounts', 's1', 'pi-openai-codex.json'), { type: 'oauth', refresh: 'other' });
+  const r = await syncBack(iso, { stateRoot: root, slot: 's1' });
+  assert.equal(r.conflict, true);
+  assert.equal(JSON.parse(await fs.readFile(path.join(root, 'accounts', 's1', 'pi-openai-codex.json'), 'utf8')).refresh, 'other');
+});
+
 test('syncBack conflict retains isolated dir', async () => {
   const root = await tmp(); const iso = await tmp();
   await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'old' });
@@ -200,6 +224,27 @@ test('prepareLaunch reserves active slots atomically and distributes concurrent 
   assert.equal(reservations.length, 2);
   assert.ok(one.metadata.reservation_id);
   assert.ok(two.metadata.launch_id);
+});
+
+test('pi-balanced launches Pi with isolated auth and preserved config/session dirs', async () => {
+  const root = await tmp(); const sourceAgent = await tmp(); const binDir = await tmp(); const runRoot = path.join(await tmp(), 'run-');
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'codex-old' });
+  await writeJson(path.join(root, 'accounts', 's1', 'pi-openai-codex.json'), { type: 'oauth', refresh: 'pi-old' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), { schema_version: 2, generated_at: Date.now(), accounts: { s1: { slot: 's1', status: 'ok', updatedAt: Date.now(), primary: { label: 'primary', remainingPercent: 100 } } } });
+  await writeJson(path.join(sourceAgent, 'settings.json'), { theme: 'test' });
+  await fs.mkdir(path.join(sourceAgent, 'sessions'), { recursive: true });
+  const capture = path.join(await tmp(), 'env.json');
+  await fs.writeFile(path.join(binDir, 'pi'), `#!/usr/bin/env node\nconst fs=require('fs'), path=require('path');\nconst agent=process.env.PI_CODING_AGENT_DIR;\nconst auth=JSON.parse(fs.readFileSync(path.join(agent,'auth.json'),'utf8'));\nfs.writeFileSync('${capture}', JSON.stringify({agent, sessions:process.env.PI_CODING_AGENT_SESSION_DIR, hasSettings:fs.existsSync(path.join(agent,'settings.json')), auth}, null, 2));\nfs.writeFileSync(path.join(agent,'auth.json'), JSON.stringify({type:'oauth', refresh:'pi-new'}));\n`, { mode: 0o755 });
+  const cli = new URL('../src/pi-balanced.js', import.meta.url).pathname;
+  const env = { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH}`, CODEX_AUTH_BALANCER_HOME: root, PI_CODING_AGENT_DIR: sourceAgent, PI_BALANCED_RUN_ROOT: runRoot };
+  const result = await exec(process.execPath, [cli, '--version'], { env, timeout: 5000 });
+  assert.equal(result.stderr.includes('Codex account slot s1'), true);
+  const captured = JSON.parse(await fs.readFile(capture, 'utf8'));
+  assert.equal(captured.sessions, path.join(sourceAgent, 'sessions'));
+  assert.equal(captured.hasSettings, true);
+  assert.equal(captured.auth['openai-codex'].refresh, 'pi-old');
+  assert.equal(JSON.parse(await fs.readFile(path.join(root, 'accounts', 's1', 'pi-openai-codex.json'), 'utf8')).refresh, 'pi-new');
+  assert.equal((await listReservations({ stateRoot: root })).length, 0);
 });
 
 test('syncBack and cleanup preserve terminal reservation state', async () => {

@@ -10,6 +10,8 @@ When the selected model is Codex-backed, the footer reads normalized account/usa
 
 Use `/codex-accounts status` to show the cached account state. Use `/codex-accounts refresh` to explicitly refresh through the Codex auth balancer package and then reread the cache.
 
+For interactive account balancing, pilot sessions with `pi-balanced [pi args...]` instead of bare `pi`. The wrapper reserves a Codex slot, launches Pi with isolated Pi/Codex auth homes, preserves normal session history, and syncs refreshed auth back to the selected slot on exit. Bare `pi` still uses `~/.pi/agent/auth.json` directly.
+
 ### `/fast`
 
 Use `/fast on|off|status` in an interactive Pi session.

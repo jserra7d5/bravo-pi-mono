@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
@@ -64,6 +64,7 @@ type LaunchMetadata = {
   run_id?: string;
   root_run_id?: string;
   reservation_expires_at?: number;
+  pi_auth_hash?: string;
 };
 export type PrepareLaunchResult = {
   schema_version: 1;
@@ -199,6 +200,19 @@ function readUsageCacheSync(stateRoot: string): UsageCache | undefined {
     try { generatedAt = statSync(cachePath).mtimeMs; } catch { /* use current time fallback */ }
     return parseUsageCache(parsed, generatedAt);
   } catch { return undefined; }
+}
+
+function readJsonFileSync<T>(p: string): T {
+  return JSON.parse(readFileSync(p, 'utf8')) as T;
+}
+
+function piAuthStorageForCredential(credentialPath: string): Record<string, unknown> {
+  return { 'openai-codex': readJsonFileSync<unknown>(credentialPath) };
+}
+
+function piCredentialFromAuthStorage(authStoragePath: string): unknown | undefined {
+  const parsed = readJsonFileSync<unknown>(authStoragePath);
+  return isRecord(parsed) && Object.hasOwn(parsed, 'openai-codex') ? parsed['openai-codex'] : parsed;
 }
 
 function openDb(stateRoot: string): DatabaseSync {
@@ -759,9 +773,10 @@ export async function prepareLaunch(isolatedDir: string, opts: { stateRoot?: str
     await fs.mkdir(piDir, { recursive: true, mode: 0o700 });
     await fs.mkdir(codexDir, { recursive: true, mode: 0o700 });
     await fs.copyFile(acct.authPath, path.join(codexDir, 'auth.json'));
-    await fs.copyFile(acct.piAuthPath || acct.authPath, path.join(piDir, 'auth.json'));
+    const piSourcePath = acct.piAuthPath || acct.authPath;
+    await writeJson(path.join(piDir, 'auth.json'), piAuthStorageForCredential(piSourcePath));
     const metaPath = path.join(isolatedDir, 'balancer-metadata.json');
-    const meta: LaunchMetadata = { slot: acct.slot, generation: acct.authHash, expected_generation: acct.authHash, authHash: acct.authHash, stateRoot, metadata_path: metaPath, reservation_id: acct.reservationId, launch_id: acct.launchId, policy_version: acct.selection.policy_version, run_id: opts.runId, root_run_id: opts.rootRunId, reservation_expires_at: acct.selection.reservation_expires_at };
+    const meta: LaunchMetadata = { slot: acct.slot, generation: acct.authHash, expected_generation: acct.authHash, authHash: acct.authHash, stateRoot, metadata_path: metaPath, reservation_id: acct.reservationId, launch_id: acct.launchId, policy_version: acct.selection.policy_version, run_id: opts.runId, root_run_id: opts.rootRunId, reservation_expires_at: acct.selection.reservation_expires_at, pi_auth_hash: sha(readFileSync(piSourcePath)) };
     await writeJson(metaPath, meta);
     markReservation(stateRoot, acct.reservationId, acct.launchId, 'prepared', { isolated_dir: isolatedDir, metadata_path: metaPath });
     const primary = normalizeWindow('primary', acct.usage?.primary);
@@ -778,13 +793,16 @@ export async function syncBack(isolatedDir: string, opts: { stateRoot?: string; 
   if (!meta) throw new Error('missing balancer metadata');
   const stateRoot = opts.stateRoot || meta.stateRoot || resolveStateRoot();
   let tmpAuthPath: string | undefined;
+  let tmpPiAuthPath: string | undefined;
   try {
     isolatedDir = assertSafeIsolatedDir(isolatedDir, stateRoot);
     if (path.resolve(isolatedDir) !== path.resolve(path.dirname(meta.metadata_path || path.join(isolatedDir, 'balancer-metadata.json')))) throw new Error('isolatedDir does not match metadata');
     const slot = opts.slot || meta.slot;
     if (slot !== meta.slot) throw new Error('slot does not match metadata');
     const authPath = path.join(stateRoot, 'accounts', slot, 'auth.json');
+    const piAuthPath = path.join(stateRoot, 'accounts', slot, 'pi-openai-codex.json');
     const src = path.join(isolatedDir, 'codex', 'auth.json');
+    const piSrc = path.join(isolatedDir, 'pi-agent', 'auth.json');
     const db = openDb(stateRoot);
     try {
       db.exec('BEGIN IMMEDIATE');
@@ -798,22 +816,36 @@ export async function syncBack(isolatedDir: string, opts: { stateRoot?: string; 
         }
         const currentHash = sha(readFileSync(authPath));
         if (currentHash !== meta.generation) {
-          markReservationInDb(db, meta.reservation_id, meta.launch_id, 'conflict', { isolated_dir: isolatedDir });
+          markReservationInDb(db, meta.reservation_id, meta.launch_id, 'conflict', { isolated_dir: isolatedDir, reason: 'codex_auth_changed' });
+          db.exec('COMMIT');
+          return { ok: false, conflict: true, retainedDir: isolatedDir };
+        }
+        if (existsSync(piAuthPath) && meta.pi_auth_hash && sha(readFileSync(piAuthPath)) !== meta.pi_auth_hash) {
+          markReservationInDb(db, meta.reservation_id, meta.launch_id, 'conflict', { isolated_dir: isolatedDir, reason: 'pi_auth_changed' });
           db.exec('COMMIT');
           return { ok: false, conflict: true, retainedDir: isolatedDir };
         }
         tmpAuthPath = path.join(path.dirname(authPath), `.auth.json.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
         copyFileSync(src, tmpAuthPath);
         chmodSync(tmpAuthPath, 0o600);
+        if (existsSync(piSrc)) {
+          tmpPiAuthPath = path.join(path.dirname(piAuthPath), `.pi-openai-codex.json.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
+          writeFileSync(tmpPiAuthPath, JSON.stringify(piCredentialFromAuthStorage(piSrc), null, 2) + '\n', { mode: 0o600 });
+          chmodSync(tmpPiAuthPath, 0o600);
+        }
         const nextHash = sha(readFileSync(tmpAuthPath));
         db.prepare(`
-          INSERT INTO accounts(slot, auth_hash, auth_path, first_seen_at, last_seen_at)
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(slot) DO UPDATE SET auth_hash = excluded.auth_hash, auth_path = excluded.auth_path, last_seen_at = excluded.last_seen_at
-        `).run(slot, nextHash, authPath, Date.now(), Date.now());
+          INSERT INTO accounts(slot, auth_hash, auth_path, pi_auth_path, first_seen_at, last_seen_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(slot) DO UPDATE SET auth_hash = excluded.auth_hash, auth_path = excluded.auth_path, pi_auth_path = excluded.pi_auth_path, last_seen_at = excluded.last_seen_at
+        `).run(slot, nextHash, authPath, tmpPiAuthPath ? piAuthPath : null, Date.now(), Date.now());
         markReservationInDb(db, meta.reservation_id, meta.launch_id, 'completed', { isolated_dir: isolatedDir });
         renameSync(tmpAuthPath, authPath);
         tmpAuthPath = undefined;
+        if (tmpPiAuthPath) {
+          renameSync(tmpPiAuthPath, piAuthPath);
+          tmpPiAuthPath = undefined;
+        }
         db.exec('COMMIT');
         return { ok: true, conflict: false, retainedDir: null };
       } catch (error) {
@@ -824,6 +856,9 @@ export async function syncBack(isolatedDir: string, opts: { stateRoot?: string; 
       closeDb(db);
       if (tmpAuthPath) {
         try { rmSync(tmpAuthPath, { force: true }); } catch { /* ignore temp cleanup errors */ }
+      }
+      if (tmpPiAuthPath) {
+        try { rmSync(tmpPiAuthPath, { force: true }); } catch { /* ignore temp cleanup errors */ }
       }
     }
   } catch (error) {

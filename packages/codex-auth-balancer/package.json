@@ -14,11 +14,12 @@
     }
   },
   "bin": {
-    "codex-auth-balancer": "./dist/src/cli.js"
+    "codex-auth-balancer": "./dist/src/cli.js",
+    "pi-balanced": "./dist/src/pi-balanced.js"
   },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit",
-    "build": "tsc -p tsconfig.json && chmod +x dist/src/cli.js",
+    "build": "tsc -p tsconfig.json && chmod +x dist/src/cli.js dist/src/pi-balanced.js",
     "test": "npm run build && node --test dist/test/*.test.js"
   },
   "devDependencies": {
