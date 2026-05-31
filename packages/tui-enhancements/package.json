@@ -1,9 +1,9 @@
 {
-  "name": "@bravo/inline-slash-completion",
+  "name": "@bravo/tui-enhancements",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Pi extension for inline slash completion and multi-skill expansion.",
+  "description": "Pi extension for inline slash completion, multi-skill expansion, and terminal link UX helpers.",
   "keywords": [
     "pi-package"
   ],
@@ -16,7 +16,8 @@
     "typescript": "latest"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "pi": {
     "extensions": [

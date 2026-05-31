@@ -9,7 +9,7 @@ Personal pi/agent tooling monorepo.
 - `packages/async-subagents` — Pi-only async subagent primitive with durable run files and parent/child tools.
 - `packages/bravo-goals` — Pi-first durable goal workspaces with task receipts, phase boundaries, HUD status, and Judge contracts.
 - `packages/caveman` — Pi extension for session-scoped terse response mode.
-- `packages/inline-slash-completion` — Pi extension for Tab-triggered inline slash completion and multi-skill inline `/skill:name` expansion.
+- `packages/tui-enhancements` — Pi extension for Tab-triggered inline slash completion, multi-skill inline `/skill:name` expansion, and terminal link helpers (`/links`, `/copy-link`).
 
 ## Tango quick start
 
@@ -25,7 +25,7 @@ npm link
 # Optional: install the pi package integrations by local path.
 pi install /home/joe/Documents/projects/bravo-pi-mono/packages/async-subagents
 pi install /home/joe/Documents/projects/bravo-pi-mono/packages/caveman
-pi install /home/joe/Documents/projects/bravo-pi-mono/packages/inline-slash-completion
+pi install /home/joe/Documents/projects/bravo-pi-mono/packages/tui-enhancements
 ```
 
 ## Bravo Goals quick start
