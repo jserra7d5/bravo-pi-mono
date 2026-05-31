@@ -254,6 +254,12 @@ export interface RootSessionIdentity {
   rootSessionId: string;
   parentRunId: string;
   cwd: string;
+  /**
+   * Pi's durable session id for the lead session that owns this async root.
+   * Older roots and non-Pi callers may not have one; Pi extension startup must
+   * pass it so concurrent/resumed sessions in the same workspace stay isolated.
+   */
+  piSessionId?: string;
   createdAt: string;
   updatedAt: string;
 }

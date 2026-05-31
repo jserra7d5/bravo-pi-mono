@@ -20,10 +20,21 @@ test("root sessions in the same repo keep direct-child defaults separate", () =>
   assert.equal(store.listDirectChildren(b.parentRunId).length, 1);
 });
 
-test("readRootSession returns the latest session for a cwd", () => {
+test("readRootSession returns the latest session for a cwd when no Pi session id is available", () => {
   const root = mkdtempSync(join(tmpdir(), "async-subagents-root-"));
   const sessionsDir = join(root, ".subagents", "sessions");
   createRootSession({ cwd: root, rootSessionId: "root_a", sessionsDir });
   const latest = createRootSession({ cwd: root, rootSessionId: "root_b", sessionsDir });
   assert.equal(readRootSession({ cwd: root, sessionsDir })?.rootSessionId, latest.rootSessionId);
+});
+
+test("readRootSession isolates roots by Pi session id within the same cwd", () => {
+  const root = mkdtempSync(join(tmpdir(), "async-subagents-root-"));
+  const sessionsDir = join(root, ".subagents", "sessions");
+  const a = createRootSession({ cwd: root, rootSessionId: "root_a", piSessionId: "pi_a", sessionsDir });
+  const b = createRootSession({ cwd: root, rootSessionId: "root_b", piSessionId: "pi_b", sessionsDir });
+
+  assert.equal(readRootSession({ cwd: root, piSessionId: "pi_a", sessionsDir })?.rootSessionId, a.rootSessionId);
+  assert.equal(readRootSession({ cwd: root, piSessionId: "pi_b", sessionsDir })?.rootSessionId, b.rootSessionId);
+  assert.equal(readRootSession({ cwd: root, piSessionId: "pi_c", sessionsDir }), undefined);
 });

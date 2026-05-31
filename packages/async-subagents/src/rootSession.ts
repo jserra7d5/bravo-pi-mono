@@ -10,6 +10,8 @@ import { SCHEMA_VERSION } from "./types.js";
 export interface RootSessionOptions {
   cwd: string;
   rootSessionId?: string;
+  /** Pi lead-session id. When provided, roots are isolated per cwd + Pi session. */
+  piSessionId?: string;
   sessionsDir?: string;
   env?: NodeJS.ProcessEnv;
 }
@@ -25,12 +27,13 @@ export function createRootSession(options: RootSessionOptions): RootSessionIdent
   const now = nowIso();
   const existing = existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as RootSessionIdentity) : undefined;
   const identity: RootSessionIdentity = existing
-    ? { ...existing, updatedAt: now }
+    ? { ...existing, piSessionId: existing.piSessionId ?? options.piSessionId, updatedAt: now }
     : {
         schemaVersion: SCHEMA_VERSION,
         rootSessionId,
         parentRunId: rootSessionId,
         cwd,
+        piSessionId: options.piSessionId,
         createdAt: now,
         updatedAt: now,
       };
@@ -50,6 +53,7 @@ export function readRootSession(options: RootSessionOptions): RootSessionIdentit
     .filter((file) => file.endsWith(".json"))
     .map((file) => JSON.parse(readFileSync(join(dir, file), "utf8")) as RootSessionIdentity)
     .filter((session) => resolve(session.cwd) === resolve(options.cwd))
+    .filter((session) => !options.piSessionId || session.piSessionId === options.piSessionId)
     .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
   return sessions.at(-1);
 }

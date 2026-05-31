@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type Component } from "@earendil-works/pi-tui";
 import { acquireRootSessionLease } from "../../src/leases.js";
@@ -25,12 +26,36 @@ function cwdOf(ctx: unknown): string {
   return typeof cwd === "string" ? cwd : process.cwd();
 }
 
-function ensureRoot(cwd: string): RootSessionIdentity {
-  const existing = roots.get(cwd);
+function piSessionIdOf(ctx: unknown): string | undefined {
+  const sessionManager = (ctx as { sessionManager?: { getSessionId?: () => unknown } } | undefined)?.sessionManager;
+  const sessionId = sessionManager?.getSessionId?.();
+  return typeof sessionId === "string" && sessionId ? sessionId : undefined;
+}
+
+function isChildContext(): boolean {
+  return Boolean(process.env.ASYNC_SUBAGENTS_RUN_ID || process.env.ASYNC_SUBAGENT_RUN_ID);
+}
+
+function inheritedRootSessionId(): string | undefined {
+  // Only child Pi sessions should honor the inherited async root. A lead Pi
+  // session may inherit this environment accidentally (tests, tmux shells,
+  // nested launches), and using it there collapses distinct Pi sessions in the
+  // same workspace back onto one root.
+  return isChildContext() ? process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID : undefined;
+}
+
+function rootCacheKey(cwd: string, piSessionId?: string): string {
+  return `${resolve(cwd)}\0${inheritedRootSessionId() ?? piSessionId ?? ""}`;
+}
+
+function ensureRoot(cwd: string, piSessionId?: string): RootSessionIdentity {
+  const rootSessionId = inheritedRootSessionId();
+  const effectivePiSessionId = rootSessionId ? undefined : piSessionId;
+  const key = rootCacheKey(cwd, effectivePiSessionId);
+  const existing = roots.get(key);
   if (existing) return existing;
-  const rootSessionId = process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID;
-  const identity = readRootSession({ cwd, rootSessionId }) ?? createRootSession({ cwd, rootSessionId });
-  roots.set(cwd, identity);
+  const identity = readRootSession({ cwd, rootSessionId, piSessionId: effectivePiSessionId }) ?? createRootSession({ cwd, rootSessionId, piSessionId: effectivePiSessionId });
+  roots.set(key, identity);
   return identity;
 }
 
@@ -45,7 +70,7 @@ function acquireLease(cwd: string, identity: RootSessionIdentity): void {
 
 function refreshUi(ctx: ExtensionContext): void {
   const cwd = cwdOf(ctx);
-  const identity = ensureRoot(cwd);
+  const identity = ensureRoot(cwd, piSessionIdOf(ctx));
   const store = new RunStore({ cwd });
   // The widget is the canonical async-subagents surface; the old setStatus
   // segment was redundant alongside the codex footer and has been removed.
@@ -102,7 +127,7 @@ function pollAndSendWakeups(pi: ExtensionAPI, store: RunStore, identity: RootSes
 
 function tickPi(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const cwd = cwdOf(ctx);
-  const identity = ensureRoot(cwd);
+  const identity = ensureRoot(cwd, piSessionIdOf(ctx));
   const store = new RunStore({ cwd });
   const records = store.listRecentRuns({ parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
   pollAndSendWakeups(pi, store, identity, records);
@@ -145,7 +170,7 @@ function registerNamePackCommand(pi: ExtensionAPI): void {
 function startTimers(pi: ExtensionAPI, ctx: ExtensionContext): void {
   currentCtx = ctx;
   const cwd = cwdOf(ctx);
-  const identity = ensureRoot(cwd);
+  const identity = ensureRoot(cwd, piSessionIdOf(ctx));
   acquireLease(cwd, identity);
   tickPi(pi, ctx);
 
@@ -153,7 +178,7 @@ function startTimers(pi: ExtensionAPI, ctx: ExtensionContext): void {
     const active = currentCtx;
     if (!active) return;
     const activeCwd = cwdOf(active);
-    acquireLease(activeCwd, ensureRoot(activeCwd));
+    acquireLease(activeCwd, ensureRoot(activeCwd, piSessionIdOf(active)));
   }, 5_000);
   piTimer = setInterval(() => {
     if (currentCtx) tickPi(pi, currentCtx);
@@ -175,11 +200,11 @@ function stopTimers(ctx?: ExtensionContext): void {
 
 export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   const runtime: ToolRuntime = {
-    getRootIdentity(cwd) {
-      return roots.get(cwd);
+    getRootIdentity(cwd, piSessionId) {
+      return roots.get(rootCacheKey(cwd, piSessionId));
     },
     setRootIdentity(identity) {
-      roots.set(identity.cwd, identity);
+      roots.set(rootCacheKey(identity.cwd, identity.piSessionId), identity);
     },
     afterMutation(ctx) {
       if (ctx) refreshUi(ctx as ExtensionContext);
@@ -204,7 +229,7 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     stopTimers();
-    ensureRoot(cwdOf(ctx));
+    ensureRoot(cwdOf(ctx), piSessionIdOf(ctx));
     startTimers(pi, ctx);
   });
 
@@ -214,7 +239,7 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
 
   pi.on("session_compact", async (_event, ctx) => {
     const cwd = cwdOf(ctx);
-    const identity = ensureRoot(cwd);
+    const identity = ensureRoot(cwd, piSessionIdOf(ctx));
     const message = buildCompactionReminder({
       store: new RunStore({ cwd }),
       parentRunId: identity.parentRunId,
