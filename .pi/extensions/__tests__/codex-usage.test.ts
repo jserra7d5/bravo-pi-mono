@@ -565,7 +565,8 @@ test("renderStatsLine renders compact multi-account Codex usage with active mark
 	] } } as any)));
 	assert.ok(line.includes("cx*"));
 	assert.ok(line.includes("work"));
-	assert.ok(line.includes("72%"));
+	assert.ok(line.includes("28.0%"));
+	assert.ok(line.includes("41%"));
 	assert.ok(line.includes("stale"));
 });
 

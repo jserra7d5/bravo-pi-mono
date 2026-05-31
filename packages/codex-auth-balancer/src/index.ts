@@ -622,12 +622,15 @@ function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageE
     const active = activeCounts[account.slot] || 0;
     const primary = normalizeWindow('primary', entry?.primary);
     const secondary = normalizeWindow('secondary', entry?.secondary);
+    const generatedAt = entry?.updatedAt;
+    const stale = generatedAt != null ? now - generatedAt > POLICY.selectionStaleAfterMs : true;
+    const usageStale = stale || primary?.stale === true || secondary?.stale === true;
     const effPrimary = effectiveRemaining(primary, active);
     const effSecondary = effectiveRemaining(secondary, active);
     const penalties: string[] = [];
     if (status === 'broken') { penalties.push('rejected:broken'); continue; }
-    if (effPrimary != null && effPrimary < POLICY.hardFloorPrimaryPercent) { penalties.push('rejected:primary_hard_floor'); continue; }
-    if (effSecondary != null && effSecondary < POLICY.hardFloorSecondaryPercent) { penalties.push('rejected:secondary_hard_floor'); continue; }
+    if (!usageStale && effPrimary != null && effPrimary < POLICY.hardFloorPrimaryPercent) { penalties.push('rejected:primary_hard_floor'); continue; }
+    if (!usageStale && effSecondary != null && effSecondary < POLICY.hardFloorSecondaryPercent) { penalties.push('rejected:secondary_hard_floor'); continue; }
     let score = 50;
     if (effPrimary != null) score += effPrimary * 0.6;
     if (effSecondary != null) score += effSecondary * 0.4;
@@ -639,9 +642,7 @@ function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageE
       score -= POLICY.limitedPenalty;
       penalties.push('limited');
     }
-    const generatedAt = entry?.updatedAt;
-    const stale = generatedAt != null ? now - generatedAt > POLICY.selectionStaleAfterMs : true;
-    if (stale || primary?.stale || secondary?.stale) {
+    if (usageStale) {
       score -= POLICY.stalePenalty;
       penalties.push('stale_usage');
     }

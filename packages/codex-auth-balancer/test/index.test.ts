@@ -165,6 +165,23 @@ test('refreshUsage probes Codex CLI for both slots and stores remaining percent'
 });
 
 
+test('prepareLaunch does not hard-reject stale zero windows', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 'low', 'auth.json'), { access_token: 'tok-low' });
+  await writeJson(path.join(root, 'accounts', 'stale-zero', 'auth.json'), { access_token: 'tok-stale' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    schema_version: 2,
+    generated_at: Date.now() - 60 * 60_000,
+    accounts: {
+      low: { slot: 'low', status: 'ok', updatedAt: Date.now() - 60 * 60_000, primary: { label: 'primary', remainingPercent: 75 }, secondary: { label: 'secondary', remainingPercent: 16 } },
+      'stale-zero': { slot: 'stale-zero', status: 'ok', updatedAt: Date.now() - 60 * 60_000, primary: { label: 'primary', remainingPercent: 100 }, secondary: { label: 'secondary', remainingPercent: 0 } },
+    },
+  });
+  const prepared = await prepareLaunch(await tmp(), { stateRoot: root });
+  assert.equal(prepared.slot, 'stale-zero');
+  assert.deepEqual(prepared.selection?.penalties, ['stale_usage']);
+});
+
 test('prepareLaunch reserves active slots atomically and distributes concurrent launches', async () => {
   const root = await tmp();
   await writeJson(path.join(root, 'accounts', 'a', 'auth.json'), { access_token: 'tok-a' });

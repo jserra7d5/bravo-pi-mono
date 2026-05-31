@@ -25,6 +25,7 @@ import type { Component, TUI } from "@earendil-works/pi-tui";
 
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 const MIN_REFRESH_MS = 30 * 1000;
+const FOOTER_USAGE_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 const MODEL_SPEED_CONFIG_PATH = join(process.cwd(), ".pi", "model-speed.json");
 const FAST_SERVICE_TIER = "priority";
 
@@ -153,7 +154,7 @@ export function parseCodexUsage(payload: unknown, now = Date.now()): CodexUsage 
 }
 
 async function readCodexUsageCache(): Promise<CodexUsage> {
-	return getUsage();
+	return getUsage({ staleAfterMs: FOOTER_USAGE_STALE_AFTER_MS });
 }
 
 async function refreshCodexUsageCache(): Promise<CodexUsage> {
@@ -441,6 +442,17 @@ export function codexWindowSegment(
 	return `${c.dim}${label}${R} ${bar(100 - remainingPct, barW, col)} ${col}${Math.round(remainingPct)}%${R}${resetStr}`;
 }
 
+function codexAccountPrimarySegment(
+	remainingPct: number | null,
+	resetIn: string | null,
+	barW: number,
+): string {
+	if (remainingPct == null) return ` ${c.dim}5h${R} ?`;
+	const usedPct = 100 - remainingPct;
+	const col = codexThreshold(remainingPct);
+	return ` ${c.dim}5h${R} ${bar(usedPct, barW, col)} ${col}${usedPct.toFixed(1)}%${R}${resetIn ? `${c.dim}/${resetIn}${R}` : ""}`;
+}
+
 export function renderStatsLine(width: number, s: FooterRenderState): string {
 	const { ctxBar, codexBar } = pickLayoutWidths(width);
 
@@ -470,7 +482,9 @@ export function renderStatsLine(width: number, s: FooterRenderState): string {
 						const head = `${c.dim}cx${mark}${R}${status}${c.text}${account.label}${R}`;
 						if (mode === "identity") return `${head}${stale}`;
 						const p = account.primary == null ? "?" : `${Math.round(account.primary)}%`;
-						const primary = ` ${c.dim}5h${R} ${p}${account.primaryReset ? `${c.dim}/${account.primaryReset}${R}` : ""}`;
+						const primary = mode === "full" && account.active
+							? codexAccountPrimarySegment(account.primary, account.primaryReset, codexBar)
+							: ` ${c.dim}5h${R} ${p}${account.primaryReset ? `${c.dim}/${account.primaryReset}${R}` : ""}`;
 						if (mode === "noSecondary") return `${head}${primary}${stale}`;
 						const sec = account.secondary == null ? "?" : `${Math.round(account.secondary)}%`;
 						return `${head}${primary} ${c.dim}wk${R} ${sec}${account.secondaryReset ? `${c.dim}/${account.secondaryReset}${R}` : ""}${stale}`;
