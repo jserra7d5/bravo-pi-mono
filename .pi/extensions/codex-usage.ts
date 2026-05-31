@@ -439,7 +439,7 @@ export function codexWindowSegment(
 	if (remainingPct == null) return null;
 	const col = codexThreshold(remainingPct);
 	const resetStr = resetIn ? `${c.dim} in ${resetIn}${R}` : "";
-	return `${c.dim}${label}${R} ${bar(100 - remainingPct, barW, col)} ${col}${Math.round(remainingPct)}%${R}${resetStr}`;
+	return `${c.dim}${label}${R} ${bar(remainingPct, barW, col)} ${col}${Math.round(remainingPct)}%${R}${resetStr}`;
 }
 
 function codexAccountPrimarySegment(
@@ -448,9 +448,8 @@ function codexAccountPrimarySegment(
 	barW: number,
 ): string {
 	if (remainingPct == null) return ` ${c.dim}5h${R} ?`;
-	const usedPct = 100 - remainingPct;
 	const col = codexThreshold(remainingPct);
-	return ` ${c.dim}5h${R} ${bar(usedPct, barW, col)} ${col}${usedPct.toFixed(1)}%${R}${resetIn ? `${c.dim}/${resetIn}${R}` : ""}`;
+	return ` ${c.dim}5h${R} ${bar(remainingPct, barW, col)} ${col}${Math.round(remainingPct)}%${R}${resetIn ? `${c.dim}/${resetIn}${R}` : ""}`;
 }
 
 export function renderStatsLine(width: number, s: FooterRenderState): string {
