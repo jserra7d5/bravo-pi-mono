@@ -10,6 +10,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `packages/async-subagents/` contains the Pi-only async subagent primitive: markdown agent definitions, durable run files, parent Pi tools, child-control extension, and terminal status/wake-up UI.
 - `packages/bravo-goals/` contains the Bravo Goals CLI and Pi extension for workspace-level `.bravo/` goal workspaces, task receipts, phase boundaries, terminal HUD status, and Judge run contracts.
 - `packages/caveman/` contains the Pi extension for session-scoped terse response mode (`/caveman`, `/normal`).
+- `packages/inline-slash-completion/` contains the Pi extension for Tab-triggered inline slash completion and multi-skill inline `/skill:name` expansion.
 - `packages/showcase/` contains the Pi extension package that registers the `showcase` tool for inline TUI rendering of requested file slices.
 - `packages/web-evidence-cache/` contains the Pi extension package for Brave-backed web discovery, temporary local web evidence artifacts, and SQLite FTS5 lookup; read `packages/web-evidence-cache/README.md` before changing web search, fetch safety, extraction, artifact, or lookup behavior.
 - `packages/source-search/` contains the Pi extension package for Tantivy-backed `ranked_search`, the `source-search` CLI/sidecar, and the source-search skill; read `packages/source-search/README.md` and `docs/specs/source-search-v1/design.md` before changing indexing, corpus selection, workspace registry, or ranked-search behavior.
@@ -41,6 +42,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `npm run check --workspace @bravo/async-subagents` — type-check the async subagents package.
 - `npm test --workspace @bravo/async-subagents` — build and run async subagents tests.
 - `npm run check --workspace @bravo/caveman` — type-check the Caveman Pi extension.
+- `npm run check --workspace @bravo/inline-slash-completion` — type-check the Inline Slash Completion Pi extension.
 - `npm run check --workspace @bravo/gemini-code-assist` — type-check the Gemini/Antigravity Code Assist provider.
 - `npm test --workspace @bravo/gemini-code-assist` — build and run Gemini/Antigravity Code Assist tests.
 - `npm run check --workspace @bravo/web-evidence-cache` — type-check the Web Evidence Cache Pi extension.

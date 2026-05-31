@@ -1,0 +1,26 @@
+{
+  "name": "@bravo/inline-slash-completion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi extension for inline slash completion and multi-skill expansion.",
+  "keywords": [
+    "pi-package"
+  ],
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/pi"
+    ]
+  }
+}
