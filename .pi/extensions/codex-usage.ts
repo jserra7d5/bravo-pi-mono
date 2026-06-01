@@ -8,8 +8,9 @@
 // Codex account usage is cache-only through @bravo/codex-auth-balancer;
 // /codex-accounts refresh explicitly refreshes the owned cache state.
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { getUsage, refreshUsage } from "../../packages/codex-auth-balancer/src/index.ts";
+import { getUsage, refreshUsage, resolveStateRoot } from "../../packages/codex-auth-balancer/src/index.ts";
 import type { CodexUsage, CodexAccountSlot, UsageWindow } from "../../packages/codex-auth-balancer/src/index.ts";
 import { dirname, join } from "node:path";
 import type {
@@ -30,7 +31,11 @@ const MODEL_SPEED_CONFIG_PATH = join(process.cwd(), ".pi", "model-speed.json");
 const FAST_SERVICE_TIER = "priority";
 
 function isCodexModel(model: Model<any> | undefined): boolean {
-	return model?.provider === "openai-codex" || model?.api === "openai-codex-responses";
+	return model?.provider === "openai-codex" || model?.provider === "bravo-codex-balanced" || model?.api === "openai-codex-responses";
+}
+
+function isBalancedCodexModel(model: Model<any> | undefined): boolean {
+	return model?.provider === "bravo-codex-balanced" || model?.id?.startsWith("bravo-codex-balanced/") === true;
 }
 
 function readFastModeSetting(): boolean {
@@ -359,7 +364,7 @@ export interface FooterRenderState {
 		primaryReset?: string | null;
 		secondary?: number | null;
 		secondaryReset?: string | null;
-		accounts?: Array<{ label: string; active: boolean; status: CodexAccountStatus; primary: number | null; primaryReset: string | null; secondary: number | null; secondaryReset: string | null; stale: boolean }>;
+		accounts?: Array<{ slot: string; label: string; active: boolean; status: CodexAccountStatus; primary: number | null; primaryReset: string | null; secondary: number | null; secondaryReset: string | null; stale: boolean }>;
 		unavailable?: boolean;
 		stale?: boolean;
 	} | null;
@@ -540,15 +545,33 @@ function resetFor(w: UsageWindow | undefined, now: number): string | null {
 	return null;
 }
 
+function balancedAffinityPath(sessionId: string): string {
+	const key = createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
+	return join(resolveStateRoot(), "leases", "affinity", `${key}.json`);
+}
+
+function readBalancedAffinitySlot(sessionId: string | undefined): string | undefined {
+	if (!sessionId) return undefined;
+	try {
+		const parsed = JSON.parse(readFileSync(balancedAffinityPath(sessionId), "utf8")) as { slot?: unknown; expires_at?: unknown };
+		if (typeof parsed.expires_at === "number" && parsed.expires_at <= Date.now()) return undefined;
+		return typeof parsed.slot === "string" ? parsed.slot : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function buildCodexState(
 	usage: CodexUsage | undefined,
 	now = Date.now(),
+	balancedAffinitySlot?: string,
 ): FooterRenderState["codex"] {
 	if (!usage) return null;
 	if (usage.unavailable) return { accounts: [], unavailable: true };
 	const accounts = usage.accounts.map((a) => ({
+		slot: a.slot,
 		label: redactCodexAccountLabel(a),
-		active: a.activeCodex || a.activePi,
+		active: a.slot === balancedAffinitySlot || a.activeCodex || a.activePi,
 		status: a.status,
 		primary: a.usage?.primary?.remainingPercent ?? null,
 		primaryReset: resetFor(a.usage?.primary, now),
@@ -608,7 +631,7 @@ function collectState(
 		ctxKnown,
 		cost: totalCost > 0 || sub ? totalCost : null,
 		sub,
-		codex: buildCodexState(codexUsage),
+		codex: buildCodexState(codexUsage, Date.now(), isBalancedCodexModel(ctx.model) ? readBalancedAffinitySlot(ctx.sessionManager.getSessionId()) : undefined),
 	};
 }
 
