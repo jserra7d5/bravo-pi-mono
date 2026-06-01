@@ -1,11 +1,9 @@
-import { chmod, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { createBashTool, defineTool, type AgentToolResult, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { resolve } from "node:path";
+import { defineTool, type AgentToolResult, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { discoverSourceSearch, appendSourceSearchPrompt } from "../../src/discovery.js";
 import { renderQueryResult } from "../../src/render.js";
-import { findSidecar, queryRepo, sourceSearchCliPath } from "../../src/sidecar.js";
+import { queryRepo } from "../../src/live.js";
 import { resolveRepoPath, resolveWorkspaceSearch } from "../../src/workspace.js";
 import type { QueryResponse } from "../../src/types.js";
 
@@ -26,39 +24,41 @@ function response(content: string, details: QueryResponse): AgentToolResult<Quer
   return { content: [{ type: "text", text: content }], details };
 }
 
+type CwdProvider = (ctx: unknown) => string;
+
 function failureSummary(warnings: string[]): string | undefined {
   const failures = warnings.filter((warning) => /: /.test(warning));
   if (!failures.length) return undefined;
   return `Workspace ranked_search failed for all configured repos: ${failures.join("; ")}`;
 }
 
-export function buildSourceSearchTools() {
+export function buildSourceSearchTools(getCwd: CwdProvider = (ctx) => cwdOf(ctx)) {
   return [defineTool({
     name: "ranked_search",
     label: "Ranked Search",
-    description: "Ranked lexical/BM25 discovery across the current git checkout. Returns evidence packets with paths, matched fields, structured snippet windows, and optional enclosing context; use grep/read for exact evidence after selecting promising paths.",
-    promptSnippet: "ranked_search: broad ranked lexical repo discovery; not semantic. Returns compact evidence packets (path/score, fields, selected snippet windows, optional context). Use first when Source Search is available, optionally with boosts/excludeTerms for ranking noise control, then confirm exact evidence with grep/read.",
+    description: "Live ranked lexical discovery across the current git checkout. Returns evidence packets with paths, matched fields, structured snippet windows, and optional enclosing context; use grep/read for exact evidence after selecting promising paths.",
+    promptSnippet: "ranked_search: live broad ranked lexical repo discovery; not semantic. Returns compact evidence packets (path/score, fields, selected snippet windows, optional context). Use first when available, optionally with boosts/excludeTerms for ranking noise control, then confirm exact evidence with grep/read.",
     promptGuidelines: [
-      "Use ranked_search for broad lexical source discovery; it is BM25 lexical search, not semantic search.",
+      "Use ranked_search for broad lexical source discovery; it is live git-aware lexical ranking, not semantic search.",
       "Read result evidence packets as ranked paths with matchedFields (filename/path/content), selected snippet line windows, and optional enclosing context; inspect with read/grep before citing.",
       "Use boosts when some query terms matter more or less: weight >1 ranks matching files higher, weight <1 ranks them lower, and boosts never filter results. If a phrase/down-weight warning says reranking used a bounded candidate set, broaden/adjust the query when recall matters.",
       "Use excludeTerms only for clearly unwanted noise topics; it filters results and is not proof of absence.",
       "Do not put boost, boolean, or field syntax in query. Pass plain query terms plus typed boosts/excludeTerms instead.",
       "Use grep for exact strings/regex confirmation and read for inspecting known files.",
       "If terminology may differ, try synonyms or related identifiers.",
-      "Do not use Source Search CLI/index commands unless setting up or debugging Source Search failures.",
     ],
     parameters: rankedSearchSchema,
     renderShell: "self",
     async execute(_toolCallId: string, params: RankedSearchArgs, _signal, _onUpdate, ctx): Promise<AgentToolResult<QueryResponse>> {
       const limit = Math.min(50, Math.max(1, Math.floor(params.limit ?? 10)));
-      const scope = await resolveRepoPath(ctx.cwd, params.path);
+      const cwd = getCwd(ctx);
+      const scope = await resolveRepoPath(cwd, params.path);
       if (scope) {
         const result = await queryRepo(scope.repoRoot, params.query, limit, scope.pathPrefix, params.boosts, params.excludeTerms);
         return response(renderQueryResult(result), result);
       }
 
-      const workspace = await resolveWorkspaceSearch(ctx.cwd, params.path);
+      const workspace = await resolveWorkspaceSearch(cwd, params.path);
       if (workspace) {
         if (!workspace.repos.length) {
           const result: QueryResponse = { protocolVersion: 1, ok: false, hits: [], count: 0, error: "No configured workspace repo matched the requested ranked_search path." };
@@ -82,14 +82,6 @@ export function buildSourceSearchTools() {
           ]),
         ];
         const allReposFailed = hits.length === 0 && responses.every(({ result }) => !result.ok);
-        const childFreshness = new Set(responses.map(({ result }) => result.indexFreshness).filter(Boolean));
-        const indexFreshness = responses.some(({ result }) => !result.ok)
-          ? "partial"
-          : childFreshness.size === 1
-            ? [...childFreshness][0]
-            : childFreshness.has("live")
-              ? "mixed-live"
-              : "fresh";
         const result: QueryResponse = {
           protocolVersion: 1,
           ok: !allReposFailed,
@@ -99,71 +91,35 @@ export function buildSourceSearchTools() {
           excludeTerms: params.excludeTerms,
           hits,
           count: hits.length,
-          indexFreshness,
+          indexFreshness: responses.some(({ result }) => !result.ok) ? "partial" : "live",
           warnings,
           error: allReposFailed ? failureSummary(warnings) ?? "Workspace ranked_search failed for all configured repos." : undefined,
         };
         return response(renderQueryResult(result), result);
       }
 
-      const result: QueryResponse = { protocolVersion: 1, ok: false, hits: [], count: 0, error: "No git checkout or configured workspace found for ranked_search. Use the source-search skill to configure a workspace or run from inside a git checkout." };
+      const fallbackResult = await queryRepo(params.path ? resolve(cwd, params.path) : cwd, params.query, limit, undefined, params.boosts, params.excludeTerms).catch((error: unknown) => ({ protocolVersion: 1, ok: false, hits: [], count: 0, error: error instanceof Error ? error.message : String(error) }) satisfies QueryResponse);
+      const result: QueryResponse = fallbackResult.ok || fallbackResult.error ? fallbackResult : { protocolVersion: 1, ok: false, hits: [], count: 0, error: "No searchable directory found for ranked_search." };
       return response(renderQueryResult(result), result);
     },
   })];
 }
 
-function cwdOf(ctx: unknown): string {
-  const cwd = (ctx as { cwd?: unknown } | undefined)?.cwd;
-  return typeof cwd === "string" ? cwd : process.cwd();
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
-async function ensureCliShim(cliPath: string): Promise<string> {
-  const dir = join(homedir(), ".cache", "pi-coding-agent", "source-search", "bin");
-  const shim = join(dir, "source-search");
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  await writeFile(shim, `#!/usr/bin/env bash\nexec node ${shellQuote(cliPath)} "$@"\n`, { mode: 0o700 });
-  await chmod(shim, 0o700);
-  return dir;
-}
-
-function prependPath(pathValue: string | undefined, dir: string): string {
-  const parts = (pathValue ?? "").split(":").filter(Boolean);
-  return [dir, ...parts.filter((part) => part !== dir)].join(":");
+function cwdOf(ctx: unknown, fallback = process.cwd()): string {
+  const direct = (ctx as { cwd?: unknown } | undefined)?.cwd;
+  if (typeof direct === "string") return direct;
+  const optionsCwd = (ctx as { systemPromptOptions?: { cwd?: unknown } } | undefined)?.systemPromptOptions?.cwd;
+  if (typeof optionsCwd === "string") return optionsCwd;
+  return fallback;
 }
 
 export default async function sourceSearchExtension(pi: ExtensionAPI): Promise<void> {
-  for (const tool of buildSourceSearchTools()) pi.registerTool(tool as never);
-
-  const cliPath = await sourceSearchCliPath();
-  const sidecarPath = await findSidecar();
-  const shimDir = await ensureCliShim(cliPath);
-  process.env.SOURCE_SEARCH_CLI = cliPath;
-  process.env.SOURCE_SEARCH_SIDECAR = sidecarPath;
-  process.env.PATH = prependPath(process.env.PATH, shimDir);
-
-  const bashTool = createBashTool(process.cwd(), {
-    spawnHook: ({ command, cwd, env }) => ({
-      command,
-      cwd,
-      env: {
-        ...env,
-        SOURCE_SEARCH_CLI: cliPath,
-        SOURCE_SEARCH_SIDECAR: sidecarPath,
-        PATH: prependPath(env.PATH, shimDir),
-      },
-    }),
-  });
-  pi.registerTool({
-    ...bashTool,
-    execute: async (id, params, signal, onUpdate, _ctx) => bashTool.execute(id, params, signal, onUpdate),
-  });
+  let activeCwd = process.cwd();
+  for (const tool of buildSourceSearchTools((ctx) => cwdOf(ctx, activeCwd))) pi.registerTool(tool as never);
 
   pi.on("before_agent_start", async (event, ctx) => {
-    const discovery = await discoverSourceSearch(cwdOf(ctx));
+    activeCwd = cwdOf(event, cwdOf(ctx, activeCwd));
+    const discovery = await discoverSourceSearch(activeCwd);
     return { systemPrompt: appendSourceSearchPrompt(event.systemPrompt, discovery) };
   });
 }

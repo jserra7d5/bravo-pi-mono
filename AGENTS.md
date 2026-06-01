@@ -13,7 +13,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `packages/tui-enhancements/` contains the Pi extension for Tab-triggered inline slash completion, multi-skill inline `/skill:name` expansion, and terminal link helpers (`/links`, `/copy-link`).
 - `packages/showcase/` contains the Pi extension package that registers the `showcase` tool for inline TUI rendering of requested file slices.
 - `packages/web-evidence-cache/` contains the Pi extension package for Brave-backed web discovery, temporary local web evidence artifacts, and SQLite FTS5 lookup; read `packages/web-evidence-cache/README.md` before changing web search, fetch safety, extraction, artifact, or lookup behavior.
-- `packages/source-search/` contains the Pi extension package for Tantivy-backed `ranked_search`, the `source-search` CLI/sidecar, and the source-search skill; read `packages/source-search/README.md` and `docs/specs/source-search-v1/design.md` before changing indexing, corpus selection, workspace registry, or ranked-search behavior.
+- `packages/source-search/` contains the Pi extension package for live TypeScript `ranked_search` tool-call discovery across arbitrary directories, using git-visible files when inside a checkout and filesystem walking otherwise. It has no index/cache/CLI/sidecar lifecycle and no source-search skill; read `packages/source-search/README.md` and `docs/specs/source-search-v1/design.md` before changing live corpus selection, workspace registry, prompt guidance, or ranked-search behavior.
 - `packages/gemini-code-assist/` contains the direct Antigravity Code Assist Pi provider for `antigravity-code-assist/gemini-3.5-flash`; read `packages/gemini-code-assist/README.md` before changing OAuth, model ids, reasoning controls, or provider behavior.
 - `packages/pi-extension-background-bash/` contains the opt-in Pi `bash` override with Claude-like `run_in_background`, managed background task controls, `/tasks`, and the `pi-background-bash` async-subagent migration CLI; read `packages/pi-extension-background-bash/README.md` and `docs/specs/pi-background-bash/design.md` before changing activation, tool override behavior, timeout semantics, task lifecycle, TUI rendering, or migration behavior.
 - `docs/specs/` contains design specs. Each spec should live under a slug directory, e.g. `docs/specs/tango-v1/design.md`.
@@ -22,7 +22,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 ## Development Guidelines
 
 - Keep reusable design decisions in specs before implementing larger changes.
-- Prefer CLI-first tools that can be used by humans and agents.
+- Prefer CLI-first tools that can be used by humans and agents, except for packages whose design explicitly says tool-call-only.
 - Pi integrations should be thin adapters over reusable CLIs, not the only implementation surface.
 - For Pi integration/extension API reference, consult `/home/joe/Documents/misc/pi-mono` and `/home/joe/Documents/misc/pi-mono/AGENTS.md`.
 - Do not modify upstream pi source for package/extension work; use pi runtime extension/package mechanisms.

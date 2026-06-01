@@ -23,15 +23,15 @@ export async function discoverSourceSearch(cwd: string): Promise<Discovery> {
 
 export function renderDiscoveryPrompt(discovery: Discovery): string {
   if (discovery.kind === "repo") {
-    return "## Source Search\n\nranked_search is available for this git checkout. Use it as the default first-pass discovery tool for broad lexical repo search, then use read or grep to inspect exact evidence. Use typed boosts/excludeTerms for ranking noise control; do not put boost or boolean syntax in the query string. A Source Search index/cache is optional; if unavailable, ranked_search falls back to live git-aware scanning.";
+    return "## Source Search\n\nranked_search is available for this git checkout. Use it as the default first-pass discovery tool for live broad lexical repo search, then use read or grep to inspect exact evidence. Use typed boosts/excludeTerms for ranking noise control; do not put boost, boolean, or field syntax in the query string.";
   }
   if (discovery.kind === "workspace") {
-    return `## Source Search\n\nranked_search is available for this workspace. Configured child checkouts: ${discovery.workspaceRepos?.join(", ")}. Use ranked_search as the default first-pass discovery tool across configured child checkouts, then use read or grep for exact evidence. Use typed boosts/excludeTerms for ranking noise control; do not put boost or boolean syntax in the query string. Configure dev/prod/worktree variants as separate checkout paths.`;
+    return `## Source Search\n\nranked_search is available for this workspace. Configured child checkouts: ${discovery.workspaceRepos?.join(", ")}. Use ranked_search as the default first-pass discovery tool across configured child checkouts, then use read or grep for exact evidence. Use typed boosts/excludeTerms for ranking noise control; do not put boost, boolean, or field syntax in the query string.`;
   }
   if (discovery.kind === "workspace-candidates") {
-    return `## Source Search\n\nranked_search can opportunistically search detected immediate child git checkouts from this directory (conservative scope): ${discovery.childCandidates?.join(", ")}. For stable names/default repos, curated excludes, and performance, configure workspace.repos in .bravo/source-search.json.`;
+    return `## Source Search\n\nranked_search can opportunistically search detected immediate child git checkouts from this directory (conservative scope): ${discovery.childCandidates?.join(", ")}. Use it for live broad lexical discovery, then confirm exact evidence with read or grep.`;
   }
-  return "## Source Search\n\nSource Search is installed, but this directory is not a git checkout and no searchable scope was detected. Run from a git checkout or a parent containing immediate child git checkouts; use config for curated workspace scope/performance.";
+  return "## Source Search\n\nranked_search is available for this directory. It searches git-visible files when inside a checkout, otherwise it searches live filesystem files under the current directory with conservative noise/secret excludes.";
 }
 
 export function appendSourceSearchPrompt(systemPrompt: string, discovery: Discovery): string {

@@ -1,6 +1,6 @@
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import { queryRepo } from "./sidecar.js";
+import { queryRepo } from "./live.js";
 import { resolveRepoPath, resolveWorkspaceSearch } from "./workspace.js";
 import type { QueryResponse, TermBoost } from "./types.js";
 
@@ -38,7 +38,7 @@ async function readIgnorePatterns(root: string): Promise<string[]> {
     const parsed = JSON.parse(raw) as { exclude?: unknown };
     if (Array.isArray(parsed.exclude)) patterns.push(...parsed.exclude.filter((item): item is string => typeof item === "string"));
   } catch {
-    // Missing or invalid Source Search config is handled by the sidecar for queries.
+    // Missing or invalid Source Search config is handled by live query execution.
   }
   return patterns;
 }
@@ -86,7 +86,10 @@ export async function rankedSearch(options: SourceSearchQueryOptions): Promise<Q
 
   const workspace = await resolveWorkspaceSearch(options.cwd, options.path);
   if (!workspace) {
-    return { protocolVersion: 1, ok: false, hits: [], count: 0, error: "No git checkout or configured workspace found for ranked_search." };
+    const root = resolve(options.cwd, options.path ?? ".");
+    const exists = await stat(root).catch(() => null);
+    if (exists?.isDirectory()) return queryRepo(root, options.query, limit, undefined, options.boosts, options.excludeTerms);
+    return { protocolVersion: 1, ok: false, hits: [], count: 0, error: "No searchable directory found for ranked_search." };
   }
   if (!workspace.repos.length) {
     return { protocolVersion: 1, ok: false, hits: [], count: 0, error: "No configured workspace repo matched the requested ranked_search path." };
@@ -103,10 +106,10 @@ export async function rankedSearch(options: SourceSearchQueryOptions): Promise<Q
     ...(result.ok ? [] : [`${repo.name}: ${result.error ?? "search failed"}`]),
   ]);
   const allReposFailed = hits.length === 0 && responses.every(({ result }) => !result.ok);
-  return { protocolVersion: 1, ok: !allReposFailed, repoRoot: workspace.workspaceRoot, query: options.query, hits, count: hits.length, indexFreshness: responses.some(({ result }) => result.indexFreshness === "live") ? "mixed-live" : "fresh", warnings, error: allReposFailed ? "Workspace ranked_search failed for all configured repos." : undefined };
+  return { protocolVersion: 1, ok: !allReposFailed, repoRoot: workspace.workspaceRoot, query: options.query, boosts: options.boosts, excludeTerms: options.excludeTerms, hits, count: hits.length, indexFreshness: responses.some(({ result }) => !result.ok) ? "partial" : "live", warnings, error: allReposFailed ? "Workspace ranked_search failed for all configured repos." : undefined };
 }
 
-/** Conservative TypeScript-side guard for paths read outside the sidecar. */
+/** Conservative TypeScript-side guard for paths read outside live search. */
 export async function sourceSearchPolicy(cwd: string, candidatePath: string): Promise<SourceSearchPolicyDecision> {
   const normalized = candidatePath.replace(/\\/g, "/").replace(/^\.\//, "");
   const lower = normalized.toLowerCase();

@@ -48,12 +48,3 @@ export interface QueryResponse {
   error?: string;
 }
 
-export interface StatusResponse {
-  protocolVersion: number;
-  ok: boolean;
-  repoRoot?: string;
-  cacheDir?: string;
-  indexedFiles?: number;
-  warnings?: string[];
-  error?: string;
-}

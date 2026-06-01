@@ -89,16 +89,16 @@ test("renders disjoint snippet ranges in the hit location", () => {
 });
 
 test("renders failed search warnings instead of hiding details behind unknown error", () => {
-  const text = renderQueryResult({ protocolVersion: 1, ok: false, hits: [], count: 0, warnings: ["lib: sidecar missing", "switchyard: sidecar missing"] });
+  const text = renderQueryResult({ protocolVersion: 1, ok: false, hits: [], count: 0, warnings: ["lib: git unavailable", "switchyard: git unavailable"] });
   assert.match(text, /ranked_search failed: unknown error/);
-  assert.match(text, /lib: sidecar missing/);
-  assert.match(text, /switchyard: sidecar missing/);
+  assert.match(text, /lib: git unavailable/);
+  assert.match(text, /switchyard: git unavailable/);
 });
 
 test("renders no-match warnings for partial workspace failures", () => {
-  const text = renderQueryResult({ protocolVersion: 1, ok: true, query: "missing", hits: [], count: 0, warnings: ["lib: sidecar missing"] });
+  const text = renderQueryResult({ protocolVersion: 1, ok: true, query: "missing", hits: [], count: 0, warnings: ["lib: git unavailable"] });
   assert.match(text, /No ranked_search matches/);
-  assert.match(text, /lib: sidecar missing/);
+  assert.match(text, /lib: git unavailable/);
 });
 
 test("renders repo discovery prompt", () => {
