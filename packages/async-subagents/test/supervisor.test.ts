@@ -11,7 +11,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test("manual pause suspends runtime budget and resume reinstalls timeout", async () => {
+function createQueuedRun() {
   const cwd = mkdtempSync(join(tmpdir(), "async-supervisor-cwd-"));
   const runRoot = join(cwd, ".runs");
   const parentRunId = "root_supervisor";
@@ -28,6 +28,11 @@ test("manual pause suspends runtime budget and resume reinstalls timeout", async
     cwd,
     state: "queued",
   }));
+  return { cwd, runRoot, parentRunId, store, runId, paths };
+}
+
+test("manual pause suspends runtime budget and resume reinstalls timeout", async () => {
+  const { cwd, runRoot, parentRunId, store, runId, paths } = createQueuedRun();
 
   const supervisor = runSupervisor({
     runId,
@@ -61,4 +66,29 @@ test("manual pause suspends runtime budget and resume reinstalls timeout", async
   appendFileSync(join(paths.runDir, "control.jsonl"), `${JSON.stringify({ action: "cancel", reason: "test cleanup" })}\n`, "utf8");
   const result = await supervisor;
   assert.equal(result.state, "cancelled");
+});
+
+test("supervisor removes lifecycle listeners after child settles", async () => {
+  const { cwd, runRoot, parentRunId, runId } = createQueuedRun();
+  const signals = ["SIGINT", "SIGTERM", "SIGHUP", "uncaughtException", "unhandledRejection"] as const;
+  const before = new Map(signals.map((signal) => [signal, process.listenerCount(signal)]));
+
+  const result = await runSupervisor({
+    runId,
+    runRoot,
+    cwd,
+    parentRunId,
+    agentName: "scout",
+    command: {
+      command: process.execPath,
+      args: ["-e", "process.exit(0);"],
+      cwd,
+      env: {},
+    },
+  });
+
+  assert.equal(result.state, "completed");
+  for (const signal of signals) {
+    assert.equal(process.listenerCount(signal), before.get(signal));
+  }
 });

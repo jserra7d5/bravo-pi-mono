@@ -10,7 +10,7 @@ import type { RunStore } from "./runStore.js";
 import { isTerminalRunState } from "./schemas.js";
 import { deriveTaskState } from "./taskState.js";
 import { nowIso } from "./time.js";
-import { SCHEMA_VERSION, type RunState, type TaskEvent, type TaskEventType, type TaskOwner, type TaskRecord, type TaskResultReceipt, type TerminalRunState } from "./types.js";
+import { SCHEMA_VERSION, type RunState, type TaskEvent, type TaskEventType, type TaskOwner, type TaskRecord, type TaskResultReceipt, type TerminalRunState, type WaitCursor } from "./types.js";
 
 export interface TaskPaths { taskRoot: string; highwatermarkPath: string; eventsPath: string; lockDir: string; tasksDir: string; receiptsDir: string; artifactsDir: string }
 export interface CreateTaskSpec { alias?: string; title: string; description: string; dependsOn?: string[]; activeForm?: string }
@@ -53,14 +53,15 @@ export class TaskStore {
     return { taskRoot, highwatermarkPath: join(taskRoot, "highwatermark"), eventsPath: join(taskRoot, "events.jsonl"), lockDir: join(taskRoot, "lock"), tasksDir: join(taskRoot, "tasks"), receiptsDir: join(taskRoot, "receipts"), artifactsDir: join(taskRoot, "artifacts") };
   }
 
-  listTasks(rootSessionId: string): TaskRecord[] {
-    const paths = this.pathsFor(rootSessionId); mkdirSync(paths.tasksDir, { recursive: true });
-    const tasks = readdirSync(paths.tasksDir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(paths.tasksDir, name), "utf8")) as TaskRecord).sort((a, b) => a.id.localeCompare(b.id));
-    for (const task of tasks) this.lazyReconcile(rootSessionId, task);
-    return readdirSync(paths.tasksDir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(paths.tasksDir, name), "utf8")) as TaskRecord).sort((a, b) => a.id.localeCompare(b.id));
+  listTasks(rootSessionId: string, options: { reconcile?: boolean } = {}): TaskRecord[] {
+    const tasks = this.listTasksRaw(rootSessionId);
+    if (options.reconcile === false) return tasks;
+    let changed = false;
+    for (const task of tasks) changed = this.lazyReconcile(rootSessionId, task) || changed;
+    return changed ? this.listTasksRaw(rootSessionId) : tasks;
   }
 
-  readTask(rootSessionId: string, taskId: string): TaskRecord { this.lazyReconcile(rootSessionId, this.readTaskRaw(rootSessionId, taskId)); return this.readTaskRaw(rootSessionId, taskId); }
+  readTask(rootSessionId: string, taskId: string): TaskRecord { const task = this.readTaskRaw(rootSessionId, taskId); return this.lazyReconcile(rootSessionId, task) ? this.readTaskRaw(rootSessionId, taskId) : task; }
 
   createTasks(rootSessionId: string, input: CreateTasksInput): CreateTasksResult { return this.withLock(rootSessionId, "create", () => {
     if (!input.tasks.length) throw new SubagentError("NO_TASKS", "tasks must not be empty");
@@ -116,7 +117,13 @@ export class TaskStore {
   }
   updateOwnerDisplayName(rootSessionId: string, taskId: string, displayName: string): TaskRecord { return this.withLock(rootSessionId, "updateDisplayName", () => { const task = this.readTaskRaw(rootSessionId, taskId); if (task.owner) { task.owner.displayName = displayName; } task.attempts = task.attempts.map((attempt) => attempt.runId === task.owner?.runId ? { ...attempt, displayName } : attempt); task.updatedAt = nowIso(); this.writeTask(rootSessionId, task); return task; }); }
   appendEvent(rootSessionId: string, event: TaskEvent): void { appendJsonl(this.pathsFor(rootSessionId).eventsPath, event); }
-  readEvents(rootSessionId: string): TaskEvent[] { return readJsonl<TaskEvent>(this.pathsFor(rootSessionId).eventsPath).records; }
+  readEvents(rootSessionId: string): TaskEvent[];
+  readEvents(rootSessionId: string, cursor: WaitCursor): { records: TaskEvent[]; cursor: WaitCursor };
+  readEvents(rootSessionId: string, cursor?: WaitCursor): TaskEvent[] | { records: TaskEvent[]; cursor: WaitCursor } {
+    const result = readJsonl<TaskEvent>(this.pathsFor(rootSessionId).eventsPath, { offset: cursor?.eventOffset ?? 0 });
+    if (!cursor) return result.records;
+    return { records: result.records, cursor: { eventOffset: result.nextOffset, lastEventId: result.lastId ?? cursor.lastEventId } };
+  }
 
   private readTaskRaw(rootSessionId: string, taskId: string): TaskRecord { const path = join(this.pathsFor(rootSessionId).tasksDir, `${safeSegment(taskId)}.json`); if (!existsSync(path)) throw new SubagentError("TASK_NOT_FOUND", `task not found: ${taskId}`); return JSON.parse(readFileSync(path, "utf8")) as TaskRecord; }
   private listTasksRaw(rootSessionId: string): TaskRecord[] { const paths = this.pathsFor(rootSessionId); mkdirSync(paths.tasksDir, { recursive: true }); return readdirSync(paths.tasksDir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(paths.tasksDir, name), "utf8")) as TaskRecord).sort((a, b) => a.id.localeCompare(b.id)); }
@@ -126,7 +133,7 @@ export class TaskStore {
   private assertAcyclic(tasks: TaskRecord[]): void { const visiting = new Set<string>(); const visited = new Set<string>(); const byId = new Map(tasks.map((task) => [task.id, task])); const visit = (id: string) => { if (visiting.has(id)) throw new SubagentError("CIRCULAR_DEPENDENCY_DETECTED", "task dependencies contain a cycle"); if (visited.has(id)) return; visiting.add(id); for (const dep of byId.get(id)?.dependsOn ?? []) if (byId.has(dep)) visit(dep); visiting.delete(id); visited.add(id); }; for (const task of tasks) visit(task.id); }
   private assertOwned(task: TaskRecord, runId: string, token: string): void { if (task.status !== "running" || !task.owner) throw new SubagentError("TASK_NOT_RUNNING", `task ${task.id} is not running`); if (task.owner.runId !== runId || !taskTokenMatches(token, task.owner.tokenHash)) throw new SubagentError("TASK_OWNER_MISMATCH", "task owner identity did not match"); }
   private appendTaskEvent(rootSessionId: string, parentRunId: string, taskId: string, type: TaskEventType, summary: string, options: { actor?: string; runId?: string; wake?: boolean; data?: Record<string, unknown> } = {}): void { const sequence = this.readEvents(rootSessionId).length + 1; this.appendEvent(rootSessionId, { schemaVersion: SCHEMA_VERSION, eventId: eventIdForSequence(sequence), sequence, rootSessionId, parentRunId, taskId, type, summary, actor: options.actor, runId: options.runId, wake: options.wake, data: options.data, createdAt: nowIso() }); }
-  private lazyReconcile(rootSessionId: string, task: TaskRecord): void { if (!task.owner || task.status !== "running") return; const attempt = task.attempts.find((item) => item.runId === task.owner?.runId); if (attempt?.endedAt) return; try { const statusPath = join(this.runRoot, task.owner.runId, "status.json"); if (!existsSync(statusPath)) return; const status = JSON.parse(readFileSync(statusPath, "utf8")) as { state?: string; summary?: string }; if (status.state && isTerminalRunState(status.state as RunState)) this.reconcileOwnedRun(rootSessionId, task.owner.runId, { runId: task.owner.runId, state: status.state as TerminalRunState, summary: status.summary }); } catch { /* best effort */ } }
+  private lazyReconcile(rootSessionId: string, task: TaskRecord): boolean { if (!task.owner || task.status !== "running") return false; const attempt = task.attempts.find((item) => item.runId === task.owner?.runId); if (attempt?.endedAt) return false; try { const statusPath = join(this.runRoot, task.owner.runId, "status.json"); if (!existsSync(statusPath)) return false; const status = JSON.parse(readFileSync(statusPath, "utf8")) as { state?: string; summary?: string }; if (status.state && isTerminalRunState(status.state as RunState)) return Boolean(this.reconcileOwnedRun(rootSessionId, task.owner.runId, { runId: task.owner.runId, state: status.state as TerminalRunState, summary: status.summary })); } catch { /* best effort */ } return false; }
   private withLock<T>(rootSessionId: string, command: string, fn: () => T): T { const paths = this.pathsFor(rootSessionId); mkdirSync(paths.taskRoot, { recursive: true }); const started = Date.now(); while (true) { try { mkdirSync(paths.lockDir); writeFileSync(join(paths.lockDir, "held.json"), JSON.stringify({ pid: process.pid, host: hostname(), ownerId: process.pid, command, createdAt: nowIso() })); break; } catch { if (this.breakStaleLock(paths.lockDir)) continue; if (Date.now() - started > 5_000) throw new SubagentError("TASK_LOCK_CONTENTION", "timed out acquiring task list lock"); sleep(75); } } try { return fn(); } finally { this.releaseLock(paths.lockDir); } }
   private releaseLock(lockDir: string): void { const path = join(lockDir, "held.json"); try { const held = JSON.parse(readFileSync(path, "utf8")) as { pid?: number; host?: string }; if (held.host === hostname() && held.pid === process.pid) rmSync(lockDir, { recursive: true, force: true }); } catch { /* do not delete a lock we cannot prove we own */ } }
   private breakStaleLock(lockDir: string): boolean { const path = join(lockDir, "held.json"); try { const dirStat = statSync(lockDir); if (!existsSync(path)) { if (Date.now() - dirStat.mtimeMs > LOCK_TTL_MS) { rmSync(lockDir, { recursive: true, force: true }); return true; } return false; } const stat = statSync(path); if (Date.now() - stat.mtimeMs > LOCK_TTL_MS) { rmSync(lockDir, { recursive: true, force: true }); return true; } const held = JSON.parse(readFileSync(path, "utf8")) as { pid?: number; host?: string }; if (held.host === hostname() && held.pid) { try { process.kill(held.pid, 0); } catch { rmSync(lockDir, { recursive: true, force: true }); return true; } } } catch { try { const dirStat = statSync(lockDir); if (Date.now() - dirStat.mtimeMs <= LOCK_TTL_MS) return false; } catch { /* no usable lock dir */ } if (existsSync(lockDir)) rmSync(lockDir, { recursive: true, force: true }); return true; } return false; }

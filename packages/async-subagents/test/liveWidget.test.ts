@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { renderLiveWidget, updateLiveWidget } from "../extensions/pi/liveWidget.js";
@@ -213,6 +213,40 @@ test("updateLiveWidget passes a component factory that renders at the width pi p
       assert.equal(visWidth(line), width, `width ${width} mismatch at "${stripAnsi(line)}"`);
     }
   }
+});
+
+test("live widget component render uses the precomputed task snapshot", () => {
+  const empty = workspace();
+  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
+
+  const w = workspace();
+  const taskStore = new TaskStore(w.store);
+  taskStore.createTasks(w.parentRunId, {
+    parentRunId: w.parentRunId,
+    tasks: [{ alias: "t1", title: "Task 1", description: "First" }]
+  });
+  addRun({ ...w, displayName: "Rex", state: "running", summary: "working" });
+
+  type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void };
+  let captured: WidgetFactory | undefined;
+  const ctx = {
+    ui: {
+      setWidget(_key: string, value: unknown) {
+        if (typeof value === "function") captured = value as WidgetFactory;
+      },
+    },
+  };
+
+  updateLiveWidget(ctx, { store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+  assert.ok(captured, "expected setWidget to receive a factory function");
+  const component = captured!(undefined, undefined);
+  rmSync(taskStore.pathsFor(w.parentRunId).tasksDir, { recursive: true, force: true });
+  w.store.readRunSummaries = (() => { throw new Error("render must not read run summaries"); }) as RunStore["readRunSummaries"];
+  w.store.readRunSummary = (() => { throw new Error("render must not read run summary"); }) as RunStore["readRunSummary"];
+  w.store.readResult = (() => { throw new Error("render must not read run result"); }) as RunStore["readResult"];
+
+  const body = component.render(72).map(stripAnsi).join("\n");
+  assert.ok(body.includes("Task 1"), "render should use the task data captured during update");
 });
 
 test("updateLiveWidget keeps pi TUI as this when requesting render after an update", () => {

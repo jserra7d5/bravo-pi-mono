@@ -69,6 +69,22 @@ test("TaskStore force reopen invalidates transitive completed dependents", () =>
   assert.equal(reopened[2].result?.state, "superseded");
 });
 
+test("TaskStore readEvents supports incremental cursors", () => {
+  const s = store();
+  const [task] = s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const first = s.tasks.readEvents(s.rootSessionId, { eventOffset: 0 });
+  assert.equal(first.records.length, 1);
+  assert.equal(first.records[0]?.type, "task.created");
+
+  const token = newTaskToken();
+  s.tasks.claimTask(s.rootSessionId, task.id, { runId: "run_1", agent: "worker", displayName: "Rex", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+
+  const second = s.tasks.readEvents(s.rootSessionId, first.cursor);
+  assert.equal(second.records.length, 1);
+  assert.equal(second.records[0]?.type, "task.claimed");
+  assert.ok(second.cursor.eventOffset > first.cursor.eventOffset);
+});
+
 test("TaskStore updateOwnerDisplayName updates owner and attempts displayName", () => {
   const s = store();
   const [task] = s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;

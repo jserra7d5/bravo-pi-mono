@@ -11,7 +11,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { getUsage, refreshUsage, resolveStateRoot } from "../../packages/codex-auth-balancer/src/index.ts";
-import type { CodexUsage, CodexAccountSlot, UsageWindow } from "../../packages/codex-auth-balancer/src/index.ts";
+import type { CodexUsage, CodexAccountSlot, CodexAccountStatus, UsageWindow } from "../../packages/codex-auth-balancer/src/index.ts";
 import { dirname, join } from "node:path";
 import type {
 	ExtensionAPI,
@@ -525,13 +525,6 @@ export function renderFooter(state: FooterRenderState, width: number): string[] 
 
 // ── state collection from ExtensionContext ─────────────────────────────────
 
-const TERMINAL_WIDTH_FALLBACK = 80;
-
-function safeColumns(): number {
-	const cols = typeof process !== "undefined" ? process.stdout?.columns : undefined;
-	return typeof cols === "number" && cols > 0 ? cols : TERMINAL_WIDTH_FALLBACK;
-}
-
 function withTilde(p: string): string {
 	const home = process.env.HOME || process.env.USERPROFILE;
 	if (home && p.startsWith(home)) return `~${p.slice(home.length)}`;
@@ -561,6 +554,23 @@ function readBalancedAffinitySlot(sessionId: string | undefined): string | undef
 	}
 }
 
+interface FooterCostState {
+	totalCost: number;
+	entryCount: number;
+}
+
+function collectFooterCostState(ctx: ExtensionContext): FooterCostState {
+	let totalCost = 0;
+	let entryCount = 0;
+	for (const entry of ctx.sessionManager.getEntries()) {
+		entryCount += 1;
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			totalCost += entry.message.usage.cost.total;
+		}
+	}
+	return { totalCost, entryCount };
+}
+
 function buildCodexState(
 	usage: CodexUsage | undefined,
 	now = Date.now(),
@@ -588,14 +598,9 @@ function collectState(
 	thinkingLevel: string,
 	fastEnabled: boolean,
 	codexUsage: CodexUsage | undefined,
+	footerCost: FooterCostState,
+	balancedAffinitySlot: string | undefined,
 ): FooterRenderState {
-	let totalCost = 0;
-	for (const entry of ctx.sessionManager.getEntries()) {
-		if (entry.type === "message" && entry.message.role === "assistant") {
-			totalCost += entry.message.usage.cost.total;
-		}
-	}
-
 	const usage = ctx.getContextUsage();
 	const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 	const ctxKnown = usage?.percent != null && usage?.tokens != null;
@@ -629,9 +634,9 @@ function collectState(
 		ctxUsed,
 		ctxWindow: contextWindow,
 		ctxKnown,
-		cost: totalCost > 0 || sub ? totalCost : null,
+		cost: footerCost.totalCost > 0 || sub ? footerCost.totalCost : null,
 		sub,
-		codex: buildCodexState(codexUsage, Date.now(), isBalancedCodexModel(ctx.model) ? readBalancedAffinitySlot(ctx.sessionManager.getSessionId()) : undefined),
+		codex: buildCodexState(codexUsage, Date.now(), isBalancedCodexModel(ctx.model) ? balancedAffinitySlot : undefined),
 	};
 }
 
@@ -642,6 +647,8 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 	let lastRefresh = 0;
 	let inFlight = false;
 	let codexUsage: CodexUsage | undefined;
+	let footerCost: FooterCostState = { totalCost: 0, entryCount: 0 };
+	let balancedAffinitySlot: string | undefined;
 	let thinkingLevel = "off";
 	let fastEnabled = false;
 	let tuiRef: TUI | undefined;
@@ -650,6 +657,14 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 
 	const requestRender = (): void => {
 		tuiRef?.requestRender();
+	};
+
+	const refreshBalancedAffinity = (ctx: ExtensionContext): void => {
+		balancedAffinitySlot = isBalancedCodexModel(ctx.model) ? readBalancedAffinitySlot(ctx.sessionManager.getSessionId()) : undefined;
+	};
+
+	const recomputeFooterCost = (ctx: ExtensionContext): void => {
+		footerCost = collectFooterCostState(ctx);
 	};
 
 	const refresh = (ctx: ExtensionContext, force = false): void => {
@@ -665,6 +680,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 				} else {
 					codexUsage = undefined;
 				}
+				refreshBalancedAffinity(ctx);
 				requestRender();
 			})
 			.catch(() => {
@@ -686,11 +702,11 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 
 			const component: Component & { dispose?(): void } = {
 				render(width: number): string[] {
-					const state = collectState(ctx, footerData, thinkingLevel, fastEnabled, codexUsage);
+					const state = collectState(ctx, footerData, thinkingLevel, fastEnabled, codexUsage, footerCost, balancedAffinitySlot);
 					return renderFooter(state, Math.max(20, width));
 				},
 				invalidate(): void {
-					// No cached state — render rebuilds from ctx each tick.
+					// Cached event-driven state is refreshed by session/model/turn events.
 				},
 				dispose(): void {
 					if (unsubBranch) {
@@ -732,6 +748,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 			if (action === "refresh") {
 				ctx.ui.notify("Refreshing Codex account usage…", "info");
 				codexUsage = await refreshCodexUsageCache();
+				refreshBalancedAffinity(ctx);
 				requestRender();
 				ctx.ui.notify(codexUsage.unavailable ? "Codex account usage refresh failed." : "Codex account usage refreshed.", codexUsage.unavailable ? "error" : "info");
 				return;
@@ -741,6 +758,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 				return;
 			}
 			codexUsage = await readCodexUsageCache();
+			refreshBalancedAffinity(ctx);
 			requestRender();
 			ctx.ui.notify(codexUsage.unavailable ? "Codex account usage cache unavailable." : `Codex accounts: ${codexUsage.accounts.length}`, codexUsage.unavailable ? "error" : "info");
 		},
@@ -750,6 +768,8 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 		if (timer) clearInterval(timer);
 		thinkingLevel = pi.getThinkingLevel?.() ?? "off";
 		fastEnabled = ctx.hasUI ? readFastModeSetting() : false;
+		recomputeFooterCost(ctx);
+		refreshBalancedAffinity(ctx);
 		installFooter(ctx);
 		refresh(ctx, true);
 		timer = setInterval(() => refresh(ctx), POLL_INTERVAL_MS);
@@ -757,6 +777,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 
 	pi.on("model_select", async (_event, ctx) => {
 		if (!isCodexModel(ctx.model)) codexUsage = undefined;
+		refreshBalancedAffinity(ctx);
 		requestRender();
 		refresh(ctx, true);
 	});
@@ -771,14 +792,28 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 		return payload;
 	});
 
+	pi.on("after_provider_response", async (_event, ctx) => {
+		refreshBalancedAffinity(ctx);
+		requestRender();
+	});
+
 	pi.on("turn_end", async (_event, ctx) => {
+		recomputeFooterCost(ctx);
+		refreshBalancedAffinity(ctx);
 		requestRender();
 		refresh(ctx);
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
+		recomputeFooterCost(ctx);
+		refreshBalancedAffinity(ctx);
 		requestRender();
 		refresh(ctx, true);
+	});
+
+	pi.on("session_compact", async (_event, ctx) => {
+		recomputeFooterCost(ctx);
+		requestRender();
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {

@@ -56,6 +56,13 @@ function appendLog(path: string, text: string): void {
   appendFileSync(path, text, "utf8");
 }
 
+function signalExitCode(signal: NodeJS.Signals): number {
+  if (signal === "SIGHUP") return 129;
+  if (signal === "SIGINT") return 130;
+  if (signal === "SIGTERM") return 143;
+  return 128;
+}
+
 function childLaunchUsesNoExtensions(command: PiCommand): boolean {
   return command.args.includes("--no-extensions");
 }
@@ -188,12 +195,8 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
     let controlOffset = 0;
     let controlPoll: NodeJS.Timeout | undefined;
     let cancelState: { reason: string; command: unknown; forceTimer?: NodeJS.Timeout } | undefined;
-    const killGroup = (signal: NodeJS.Signals): boolean => {
-      if (!child.pid) return false;
-      try { process.kill(-child.pid, signal); return true; } catch {
-        try { child.kill(signal); return true; } catch { return false; }
-      }
-    };
+    let supervisorCleanupState: { reason: string; signal?: NodeJS.Signals; forceTimer?: NodeJS.Timeout; exitTimer?: NodeJS.Timeout } | undefined;
+    const supervisorErrorPath = join(paths.logsDir, "supervisor-error.log");
 
     const controlPath = join(paths.runDir, "control.jsonl");
     const child = spawn(input.command.command, input.command.args, {
@@ -224,12 +227,92 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       appendLog(stderrPath, chunk.toString("utf8"));
     });
 
+    const killGroup = (signal: NodeJS.Signals): boolean => {
+      if (!child.pid) return false;
+      try { process.kill(-child.pid, signal); return true; } catch {
+        try { child.kill(signal); return true; } catch { return false; }
+      }
+    };
+
+    const logSupervisorCleanup = (message: string): void => {
+      const line = `${new Date().toISOString()} ${message}\n`;
+      process.stderr.write(line);
+      appendLog(supervisorErrorPath, line);
+    };
+
+    const clearSupervisorCleanupTimers = (): void => {
+      if (supervisorCleanupState?.forceTimer) clearTimeout(supervisorCleanupState.forceTimer);
+      if (supervisorCleanupState?.exitTimer) clearTimeout(supervisorCleanupState.exitTimer);
+      if (supervisorCleanupState) {
+        supervisorCleanupState.forceTimer = undefined;
+        supervisorCleanupState.exitTimer = undefined;
+      }
+    };
+
+    const clearRuntimeResources = (): void => {
+      clearBudgetTimers();
+      if (controlPoll) clearInterval(controlPoll);
+      controlPoll = undefined;
+      if (cancelState?.forceTimer) clearTimeout(cancelState.forceTimer);
+      if (cancelState) cancelState.forceTimer = undefined;
+      clearSupervisorCleanupTimers();
+      process.off("SIGINT", onSupervisorSignal);
+      process.off("SIGTERM", onSupervisorSignal);
+      process.off("SIGHUP", onSupervisorSignal);
+      process.off("uncaughtException", onSupervisorUncaughtException);
+      process.off("unhandledRejection", onSupervisorUnhandledRejection);
+    };
+
+    const startSupervisorChildCleanup = (reason: string, signal?: NodeJS.Signals): void => {
+      if (settled || supervisorCleanupState) return;
+      supervisorCleanupState = { reason, signal };
+      logSupervisorCleanup(`[async-subagents] supervisor cleanup: ${reason}; sending SIGTERM/SIGCONT to child process group ${child.pid ?? "unknown"}`);
+      try {
+        const current = store.readStatus(input.runId);
+        store.writeStatus(updateRunStatus(current, { processHealth: "alive", summary: `Supervisor cleanup: ${reason}` }));
+      } catch { /* best-effort status update during fatal cleanup */ }
+      killGroup("SIGTERM");
+      killGroup("SIGCONT");
+      supervisorCleanupState.forceTimer = setTimeout(() => {
+        if (settled) return;
+        logSupervisorCleanup(`[async-subagents] supervisor cleanup: ${reason}; sending SIGKILL to child process group ${child.pid ?? "unknown"}`);
+        killGroup("SIGKILL");
+      }, 5_000);
+    };
+
+    function onSupervisorSignal(signal: NodeJS.Signals): void {
+      startSupervisorChildCleanup(`received ${signal}`, signal);
+      if (!supervisorCleanupState) process.exit(128);
+      supervisorCleanupState.exitTimer ??= setTimeout(() => process.exit(signalExitCode(signal)), 15_000);
+    }
+
+    function onSupervisorUncaughtException(error: Error): void {
+      startSupervisorChildCleanup(`uncaughtException: ${error.message}`);
+      logSupervisorCleanup(`[async-subagents] supervisor crash detail: ${error.stack ?? error.message}`);
+      if (!supervisorCleanupState) process.exit(1);
+      supervisorCleanupState.exitTimer ??= setTimeout(() => process.exit(1), 15_000);
+    }
+
+    function onSupervisorUnhandledRejection(reason: unknown): void {
+      const error = reason instanceof Error ? reason : new Error(String(reason));
+      startSupervisorChildCleanup(`unhandledRejection: ${error.message}`);
+      logSupervisorCleanup(`[async-subagents] supervisor crash detail: ${error.stack ?? error.message}`);
+      if (!supervisorCleanupState) process.exit(1);
+      supervisorCleanupState.exitTimer ??= setTimeout(() => process.exit(1), 15_000);
+    }
+
     const clearBudgetTimers = (): void => {
       if (timeout) clearTimeout(timeout);
       if (softTimeout) clearTimeout(softTimeout);
       timeout = undefined;
       softTimeout = undefined;
     };
+
+    process.on("SIGINT", onSupervisorSignal);
+    process.on("SIGTERM", onSupervisorSignal);
+    process.on("SIGHUP", onSupervisorSignal);
+    process.on("uncaughtException", onSupervisorUncaughtException);
+    process.on("unhandledRejection", onSupervisorUnhandledRejection);
 
     const accountActiveTime = (): void => {
       if (budgetPaused) return;
@@ -273,9 +356,7 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
     const settle = (state: TerminalRunState, error?: RunResult["error"]): void => {
       if (settled) return;
       settled = true;
-      clearBudgetTimers();
-      if (controlPoll) clearInterval(controlPoll);
-      if (cancelState?.forceTimer) clearTimeout(cancelState.forceTimer);
+      clearRuntimeResources();
       const stdout = Buffer.concat(stdoutChunks).toString("utf8");
       const rawStderr = Buffer.concat(stderrChunks).toString("utf8");
       const diagnostics = state === "failed" ? augmentChildFailureDiagnostics(input.command, rawStderr, error) : { stderr: rawStderr, error };
@@ -284,11 +365,31 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
     };
 
     child.once("error", (error) => {
+      if (supervisorCleanupState) return;
       appendLog(stderrPath, `${error.message}\n`);
       settle("failed", { code: "SPAWN_FAILED", message: error.message });
     });
 
     child.once("close", (code, signal) => {
+      if (supervisorCleanupState) {
+        const cleanupState = supervisorCleanupState;
+        logSupervisorCleanup(`[async-subagents] supervisor cleanup: child process group ${child.pid ?? "unknown"} closed after ${cleanupState.reason}; code ${code ?? "null"}${signal ? ` signal ${signal}` : ""}`);
+        const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+        const stderr = Buffer.concat(stderrChunks).toString("utf8");
+        const state: TerminalRunState = cleanupState.signal ? "cancelled" : "failed";
+        const error: RunResult["error"] = cleanupState.signal
+          ? { code: "SUPERVISOR_SIGNAL", message: cleanupState.reason, details: { code, signal: cleanupState.signal } }
+          : { code: "SUPERVISOR_CRASH", message: cleanupState.reason, details: { code, signal } };
+        void finalizeRun(input, { state, stdout, stderr, error })
+          .catch((error) => {
+            logSupervisorCleanup(`[async-subagents] supervisor cleanup finalization failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+          })
+          .finally(() => {
+            clearRuntimeResources();
+            process.exit(cleanupState.signal ? signalExitCode(cleanupState.signal) : 1);
+          });
+        return;
+      }
       if (settled) return;
       if (cancelState) {
         settle("cancelled", { code: "PARENT_CANCELLED", message: cancelState.reason, details: { ...(typeof cancelState.command === "object" && cancelState.command ? cancelState.command : {}), code, signal } });

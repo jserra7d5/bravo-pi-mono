@@ -6,6 +6,13 @@ import { isResultWakeupCurrent } from "./wakeups.js";
 import { TaskStore } from "../../src/taskStore.js";
 import { deriveTaskState } from "../../src/taskState.js";
 
+export interface LiveWidgetSnapshot {
+  rows: RunSummaryRow[];
+  totalCost: number | undefined;
+  tasks: TaskRecord[];
+  visibleTasks: TaskRecord[];
+}
+
 export interface LiveWidgetInput {
   store: RunStore;
   parentRunId?: string;
@@ -13,6 +20,7 @@ export interface LiveWidgetInput {
   maxRows?: number;
   terminalCompletedVisibleMs?: number;
   records?: RunIndexRecord[];
+  snapshot?: LiveWidgetSnapshot;
   // Optional explicit width — when omitted (the production path), pi tells the
   // widget its real container width via the Component.render(width) callback.
   // This is required: pi's widget container is narrower than the full terminal,
@@ -89,22 +97,9 @@ function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVis
   return { rows, totalCost: any ? total : undefined };
 }
 
-function renderAt(input: LiveWidgetInput, width: number, now: number): string[] {
-  const maxRows = input.maxRows ?? 5;
-  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
-  const { rows, totalCost } = buildSnapshot(input, now, terminalCompletedVisibleMs);
-
-  let tasks: TaskRecord[] = [];
-  if (input.rootSessionId) {
-    try {
-      tasks = new TaskStore(input.store).listTasks(input.rootSessionId);
-    } catch {
-      // safe fallback
-    }
-  }
-
+function visibleTasksFor(tasks: TaskRecord[], now: number): TaskRecord[] {
   const graceMs = 5_000;
-  const visibleTasks = tasks.filter(t => {
+  return tasks.filter(t => {
     const state = deriveTaskState(t, tasks);
     if (state === "completed" || state === "failed" || state === "cancelled") {
       const updatedAtMs = Date.parse(t.updatedAt);
@@ -114,6 +109,28 @@ function renderAt(input: LiveWidgetInput, width: number, now: number): string[] 
     }
     return true;
   });
+}
+
+function readTasksForSnapshot(input: LiveWidgetInput): TaskRecord[] {
+  if (!input.rootSessionId) return [];
+  try {
+    return new TaskStore(input.store).listTasks(input.rootSessionId);
+  } catch {
+    return [];
+  }
+}
+
+function prepareLiveWidgetSnapshot(input: LiveWidgetInput, now: number): LiveWidgetSnapshot {
+  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
+  const { rows, totalCost } = buildSnapshot(input, now, terminalCompletedVisibleMs);
+  const tasks = readTasksForSnapshot(input);
+  return { rows, totalCost, tasks, visibleTasks: visibleTasksFor(tasks, now) };
+}
+
+function renderAt(input: LiveWidgetInput, width: number, now: number): string[] {
+  const maxRows = input.maxRows ?? 5;
+  const snapshot = input.snapshot ?? prepareLiveWidgetSnapshot(input, now);
+  const { rows, totalCost, tasks, visibleTasks } = snapshot;
 
   if (!rows.length && !visibleTasks.length) return [];
 
@@ -154,35 +171,8 @@ function renderAt(input: LiveWidgetInput, width: number, now: number): string[] 
   });
 }
 
-function hasVisibleRows(input: LiveWidgetInput, now: number): boolean {
-  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
-  const summaries = input.records
-    ? input.records.flatMap((record) => input.store.readRunSummary(record.runId) ?? [])
-    : input.store.readRunSummaries({ parentRunId: input.parentRunId, rootSessionId: input.rootSessionId });
-  for (const summary of summaries) {
-    if (visibleState(summary.state, summary.updatedAt, now, terminalCompletedVisibleMs)) return true;
-  }
-  if (input.rootSessionId) {
-    try {
-      const taskStore = new TaskStore(input.store);
-      const tasks = taskStore.listTasks(input.rootSessionId);
-      const graceMs = 5_000;
-      const visibleTasks = tasks.filter(t => {
-        const state = deriveTaskState(t, tasks);
-        if (state === "completed" || state === "failed" || state === "cancelled") {
-          const updatedAtMs = Date.parse(t.updatedAt);
-          if (Number.isFinite(updatedAtMs)) {
-            return now - updatedAtMs <= graceMs;
-          }
-        }
-        return true;
-      });
-      if (visibleTasks.length > 0) return true;
-    } catch {
-      // safe fallback
-    }
-  }
-  return false;
+function hasVisibleRows(snapshot: LiveWidgetSnapshot): boolean {
+  return snapshot.rows.length > 0 || snapshot.visibleTasks.length > 0;
 }
 
 // Exposed for tests and the few callers that want a one-shot static render
@@ -249,21 +239,22 @@ export function clearLiveWidget(ctx: unknown): void {
 export function updateLiveWidget(ctx: unknown, input: LiveWidgetInput): void {
   const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
   if (!ui?.setWidget) return;
-  // Cheap status-only probe so we can drop the widget entirely when there's
-  // nothing to show — pi keeps showing the previous content otherwise. Avoid a
-  // full render probe here because render reads per-run result/events files.
-  if (!hasVisibleRows(input, Date.now())) {
+  const snapshot = input.snapshot ?? prepareLiveWidgetSnapshot(input, Date.now());
+  const snapshotInput = { ...input, snapshot };
+  // Use the precomputed snapshot so the visibility probe stays on the tick/update
+  // path and the pi Component.render(width) callback performs no filesystem I/O.
+  if (!hasVisibleRows(snapshot)) {
     clearLiveWidget(ctx);
     return;
   }
   if (mountedWidget) {
-    mountedWidget.update?.(input);
+    mountedWidget.update?.(snapshotInput);
     return;
   }
   ui.setWidget(
     "async-subagents-live",
     (tui) => {
-      mountedWidget = createLiveWidgetComponent(input, tui);
+      mountedWidget = createLiveWidgetComponent(snapshotInput, tui);
       return mountedWidget;
     },
     { placement: "belowEditor" },
