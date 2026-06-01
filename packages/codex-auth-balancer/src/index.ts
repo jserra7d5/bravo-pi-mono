@@ -292,13 +292,28 @@ function accountIdFromPiAuth(value: unknown): string | undefined {
   if (!isRecord(value)) return undefined;
   return typeof value.accountId === 'string' ? value.accountId : typeof value.account_id === 'string' ? value.account_id : undefined;
 }
+function jwtExpiryMs(token: string | undefined): number | undefined {
+  if (!token) return undefined;
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1] || '', 'base64url').toString('utf8')) as unknown;
+    if (!isRecord(payload)) return undefined;
+    const exp = asNumber(payload.exp);
+    return exp == null ? undefined : exp * 1000;
+  } catch {
+    return undefined;
+  }
+}
 function tokenFromAuth(value: unknown): { accessToken?: string; refreshToken?: string; expiresAt?: number; accountId?: string; nestedProvider?: boolean; codexCliShape?: boolean } {
   if (!isRecord(value)) return {};
   const nested = value['openai-codex'];
   if (isRecord(nested)) return { ...tokenFromAuth(nested), nestedProvider: true };
+  if (isRecord(value.tokens)) {
+    const parsed = tokenFromAuth(value.tokens);
+    return { ...parsed, accountId: parsed.accountId ?? accountIdFromPiAuth(value.tokens), codexCliShape: true };
+  }
   const accessToken = typeof value.access_token === 'string' ? value.access_token : typeof value.access === 'string' ? value.access : undefined;
   const refreshToken = typeof value.refresh_token === 'string' ? value.refresh_token : typeof value.refresh === 'string' ? value.refresh : undefined;
-  const expiresAt = asNumber(value.expiry_date) ?? asNumber(value.expires_at) ?? asNumber(value.expires);
+  const expiresAt = asNumber(value.expiry_date) ?? asNumber(value.expires_at) ?? asNumber(value.expires) ?? jwtExpiryMs(accessToken);
   const accountId = accountIdFromPiAuth(value);
   return { accessToken, refreshToken, expiresAt, accountId, codexCliShape: typeof value.access_token === 'string' || typeof value.refresh_token === 'string' || Object.hasOwn(value, 'expiry_date') };
 }
@@ -306,6 +321,9 @@ function tokenFromAuth(value: unknown): { accessToken?: string; refreshToken?: s
 function withRefreshedTokenShape(original: unknown, refreshed: OAuthCredentials): unknown {
   if (isRecord(original) && isRecord(original['openai-codex'])) {
     return { ...original, 'openai-codex': withRefreshedTokenShape(original['openai-codex'], refreshed) };
+  }
+  if (isRecord(original) && isRecord(original.tokens)) {
+    return { ...original, tokens: withRefreshedTokenShape(original.tokens, refreshed) };
   }
   const base = isRecord(original) ? { ...original } : {};
   const parsed = tokenFromAuth(original);

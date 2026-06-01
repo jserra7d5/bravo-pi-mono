@@ -12,9 +12,9 @@ import { openaiCodexOAuthProvider } from '@earendil-works/pi-ai/oauth';
 const exec = promisify(execFile);
 async function tmp() { return fs.mkdtemp(path.join(os.tmpdir(), 'cab-')); }
 async function writeJson(p: string, v: unknown) { await fs.mkdir(path.dirname(p), { recursive: true }); await fs.writeFile(p, JSON.stringify(v)); }
-function fakeCodexJwt(accountId = 'acct-test'): string {
+function fakeCodexJwt(accountId = 'acct-test', expSeconds?: number): string {
   const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
-  return `${b64({ alg: 'none', typ: 'JWT' })}.${b64({ 'https://api.openai.com/auth': { chatgpt_account_id: accountId } })}.sig`;
+  return `${b64({ alg: 'none', typ: 'JWT' })}.${b64({ 'https://api.openai.com/auth': { chatgpt_account_id: accountId }, ...(expSeconds ? { exp: expSeconds } : {}) })}.sig`;
 }
 async function eventually<T>(fn: () => Promise<T | undefined>, timeoutMs = 1000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
@@ -462,6 +462,19 @@ test('startTokenLease extracts token from slot Pi auth, honors affinity, and fin
   assert.equal(retry.already_final, true);
   const second = await startTokenLease({ stateRoot: root, provider: 'bravo-codex-balanced', model: 'bravo-codex-balanced/fake', purpose: 'pi-provider-request', expected_runtime_ms: 1000, ttl_safety_buffer_ms: 1000, session_affinity_key: 'sess-1' });
   assert.equal(second.slot, 'a');
+});
+
+test('startTokenLease accepts Codex CLI tokens auth shape in slot Pi auth', async () => {
+  const root = await tmp();
+  const access = fakeCodexJwt('acct-tokens', Math.floor((Date.now() + 60_000) / 1000));
+  await writeJson(path.join(root, 'accounts', 'tokens', 'auth.json'), { access_token: 'codex-token', expiry_date: Date.now() + 60_000 });
+  await writeJson(path.join(root, 'accounts', 'tokens', 'pi-openai-codex.json'), {
+    auth_mode: 'chatgpt',
+    tokens: { access_token: access, refresh_token: 'refresh-token', account_id: 'acct-tokens' },
+  });
+  const lease = await startTokenLease({ stateRoot: root, provider: 'bravo-codex-balanced', model: 'bravo-codex-balanced/fake', purpose: 'pi-provider-request', expected_runtime_ms: 1000, ttl_safety_buffer_ms: 1000, preferred_slot: 'tokens' });
+  assert.equal(lease.access_token, access);
+  await finishTokenLease({ stateRoot: root, lease_id: lease.lease_id, reservation_id: lease.reservation_id, launch_id: lease.launch_id, status: 'completed' });
 });
 
 test('startTokenLease refreshes near-expired OAuth credentials before leasing', async () => {
