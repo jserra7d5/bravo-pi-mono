@@ -15,6 +15,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `packages/web-evidence-cache/` contains the Pi extension package for Brave-backed web discovery, temporary local web evidence artifacts, and SQLite FTS5 lookup; read `packages/web-evidence-cache/README.md` before changing web search, fetch safety, extraction, artifact, or lookup behavior.
 - `packages/source-search/` contains the Pi extension package for Tantivy-backed `ranked_search`, the `source-search` CLI/sidecar, and the source-search skill; read `packages/source-search/README.md` and `docs/specs/source-search-v1/design.md` before changing indexing, corpus selection, workspace registry, or ranked-search behavior.
 - `packages/gemini-code-assist/` contains the direct Antigravity Code Assist Pi provider for `antigravity-code-assist/gemini-3.5-flash`; read `packages/gemini-code-assist/README.md` before changing OAuth, model ids, reasoning controls, or provider behavior.
+- `packages/pi-extension-background-bash/` contains the opt-in Pi `bash` override with Claude-like `run_in_background`, managed background task controls, `/tasks`, and the `pi-background-bash` async-subagent migration CLI; read `packages/pi-extension-background-bash/README.md` and `docs/specs/pi-background-bash/design.md` before changing activation, tool override behavior, timeout semantics, task lifecycle, TUI rendering, or migration behavior.
 - `docs/specs/` contains design specs. Each spec should live under a slug directory, e.g. `docs/specs/tango-v1/design.md`.
 - Package-specific source, docs, roles, includes, and extensions should live inside the relevant package directory.
 
@@ -45,6 +46,8 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `npm run check --workspace @bravo/tui-enhancements` — type-check the TUI Enhancements Pi extension.
 - `npm run check --workspace @bravo/gemini-code-assist` — type-check the Gemini/Antigravity Code Assist provider.
 - `npm test --workspace @bravo/gemini-code-assist` — build and run Gemini/Antigravity Code Assist tests.
+- `npm run check --workspace @bravo/pi-extension-background-bash` — type-check the Background Bash Pi extension.
+- `npm test --workspace @bravo/pi-extension-background-bash` — build and run Background Bash tests.
 - `npm run check --workspace @bravo/web-evidence-cache` — type-check the Web Evidence Cache Pi extension.
 - `npm test --workspace @bravo/web-evidence-cache` — build and run Web Evidence Cache tests.
 - `npm run check --workspace @bravo/source-search` — type-check the Source Search Pi extension.
