@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
@@ -106,6 +106,15 @@ Project scout body.
   assert.equal(scout?.source, "project");
   assert.equal(scout?.description, "Project scout");
   assert.deepEqual(scout?.tools, ["read"]);
+});
+
+test("packaged scout prompt teaches context-map handoff boundaries", () => {
+  const body = readFileSync(join(process.cwd(), "agents", "scout.md"), "utf8");
+  assert.match(body, /context_map_create/);
+  assert.match(body, /context_map_read/);
+  assert.match(body, /broad, ambiguous, cross-surface, or handoff-oriented/);
+  assert.match(body, /For named files, narrow lexical lookups, or small known scopes, use direct/);
+  assert.match(body, /context_map:<map_id>/);
 });
 
 test("missing description fails clearly", () => {

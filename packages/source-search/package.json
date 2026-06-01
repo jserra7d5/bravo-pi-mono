@@ -11,6 +11,9 @@
     "build:sidecar:release": "cargo build --manifest-path sidecar/Cargo.toml --release",
     "test": "npm run build && cargo test --manifest-path sidecar/Cargo.toml && node --test dist/test/*.test.js"
   },
+  "exports": {
+    ".": "./dist/src/api.js"
+  },
   "bin": {
     "source-search": "./dist/src/cli.js"
   },

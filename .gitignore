@@ -12,6 +12,7 @@ dist/
 
 # Runtime state and transient reports
 .pi/model-speed.json
+.pi/state/
 .subagents/
 _audits/
 bug_reports/
