@@ -72,6 +72,27 @@ test("codex auth balancer merges prepare env and cleans up after sync-back succe
   assert.equal(existsSync(join(started.runDir, "auth", "codex-balancer")), false);
 });
 
+test("codex auth balancer skips bravo-codex-balanced provider and propagates state dir", async () => {
+  const root = mkdtempSync(join(tmpdir(), "async-balanced-provider-"));
+  mkdirSync(join(root, ".agents"), { recursive: true });
+  writeFileSync(join(root, ".agents", "balanced.md"), `---
+description: Balanced.
+tools: []
+mode: oneshot
+model: bravo-codex-balanced/gpt-5-codex
+---
+Balanced agent.
+`, "utf8");
+  const stateDir = join(root, "balancer-state");
+  writeFileSync(join(root, "config.json"), JSON.stringify({ version: 1, codexAuthBalancer: { enabled: true, provider: "bravo", stateDir, timeoutMs: 1000, failClosed: true, onlyForProviders: ["openai-codex", "bravo-codex-balanced"] } }));
+  const started = await startSubagent({ agent: "balanced", task: "ok", cwd: root, runRoot: join(root, ".runs"), parentRunId: "root_balanced", env: { ASYNC_SUBAGENTS_HOME: root }, fake: { mode: "immediate" } });
+  assert.equal(started.state, "completed");
+  const supervisorInput = JSON.parse(readFileSync(join(started.runDir, "logs", "supervisor-input.json"), "utf8"));
+  assert.equal(supervisorInput.command.env.CODEX_AUTH_BALANCER_HOME, stateDir);
+  assert.equal(supervisorInput.codexAuthBalancer, undefined);
+  assert.equal(existsSync(join(started.runDir, "auth", "codex-balancer")), false);
+});
+
 test("codex auth balancer fail-closed fails and warn fallback continues", async () => {
   const closed = authWorkspace("prepare-fail", true);
   const failed = await startSubagent({ agent: "codex", task: "fail", cwd: closed.root, runRoot: closed.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: closed.root }, fake: { mode: "immediate" } });
@@ -83,10 +104,15 @@ test("codex auth balancer fail-closed fails and warn fallback continues", async 
 
 test("codex auth balancer retains isolated dir with marker on sync-back conflict", async () => {
   const w = authWorkspace("conflict");
-  setTimeout(() => {
-    writeFileSync(join(w.stateDir, "accounts", "slot-a", "auth.json"), JSON.stringify({ access_token: "changed-concurrently" }) + "\n");
-  }, 25);
-  const started = await startSubagent({ agent: "codex", task: "conflict", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate", delayMs: 200 } });
+  let conflictWriter: ReturnType<typeof setInterval> | undefined;
+  const startConflictWriter = setTimeout(() => {
+    conflictWriter = setInterval(() => {
+      writeFileSync(join(w.stateDir, "accounts", "slot-a", "auth.json"), JSON.stringify({ access_token: "changed-concurrently" }) + "\n");
+    }, 10);
+  }, 150);
+  const started = await startSubagent({ agent: "codex", task: "conflict", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate", delayMs: 500 } });
+  clearTimeout(startConflictWriter);
+  if (conflictWriter) clearInterval(conflictWriter);
   const dir = join(started.runDir, "auth", "codex-balancer");
   assert.equal(existsSync(dir), true);
   const marker = JSON.parse(readFileSync(join(dir, "ASYNC_SUBAGENTS_RETAINED.json"), "utf8"));

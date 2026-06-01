@@ -151,7 +151,15 @@ function isCodexModel(model?: string, onlyForProviders: string[] = ["openai-code
   if (!model) return false;
   const lower = model.toLowerCase();
   const provider = lower.includes("/") ? lower.split("/")[0] : "";
-  return onlyForProviders.includes(provider) || lower.includes("codex");
+  if (provider) return onlyForProviders.includes(provider);
+  return onlyForProviders.includes(lower) || lower.includes("codex");
+}
+
+function isCodexBalancedProviderModel(model?: string): boolean {
+  if (!model) return false;
+  const lower = model.toLowerCase();
+  const provider = lower.includes("/") ? lower.split("/")[0] : lower;
+  return provider === "bravo-codex-balanced";
 }
 
 function modelListed(output: string, model: string): boolean {
@@ -283,7 +291,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 }
 
 async function prepareCodexBalancer(config: CodexAuthBalancerConfig, model: string | undefined, runDir: string, runId: string, rootRunId: string, ttlMs: number): Promise<CodexBalancerLaunch | undefined> {
-  if (!config.enabled || !isCodexModel(model, config.onlyForProviders)) return undefined;
+  if (!config.enabled || isCodexBalancedProviderModel(model) || !isCodexModel(model, config.onlyForProviders)) return undefined;
   const isolatedDir = join(runDir, "auth", "codex-balancer");
   mkdirSync(isolatedDir, { recursive: true, mode: 0o700 });
   try { if ((statSync(isolatedDir).mode & 0o777) !== 0o700) chmodSync(isolatedDir, 0o700); } catch { /* mkdir already failed if unavailable */ }
@@ -506,7 +514,10 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
         }
       : {}),
   };
-  const effectiveExtraEnv = codexAuthBalancer ? { ...(input.env ?? {}), ...taskEnv, ...codexAuthBalancer.env } : { ...(input.env ?? {}), ...taskEnv };
+  const balancedProviderEnv: Record<string, string> = !codexAuthBalancer && isCodexBalancedProviderModel(prompt.model) && asyncSubagentsConfig.codexAuthBalancer.stateDir
+    ? { CODEX_AUTH_BALANCER_HOME: asyncSubagentsConfig.codexAuthBalancer.stateDir }
+    : {};
+  const effectiveExtraEnv = codexAuthBalancer ? { ...(input.env ?? {}), ...taskEnv, ...codexAuthBalancer.env } : { ...(input.env ?? {}), ...taskEnv, ...balancedProviderEnv };
 
   const piCommand = buildPiCommand({
     piBin: input.piBin,

@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
+import { openaiCodexOAuthProvider, type OAuthCredentials } from '@earendil-works/pi-ai/oauth';
 
 export type UsageWindow = {
   label: 'primary' | 'secondary' | string;
@@ -83,6 +84,45 @@ export type PrepareLaunchResult = {
   secondary_remaining_percent?: number;
 };
 
+export type TokenLeasePurpose = 'pi-provider-request' | 'async-child-preflight' | 'manual' | 'command-backed-token';
+export type TokenLeaseFinishStatus = 'completed' | 'failed' | 'aborted' | 'preflight_failed' | 'expired';
+export type StartTokenLeaseInput = {
+  provider: 'bravo-codex-balanced';
+  model: string;
+  purpose: TokenLeasePurpose;
+  expected_runtime_ms: number;
+  ttl_safety_buffer_ms: number;
+  stateRoot?: string;
+  lease_key?: string;
+  preferred_slot?: string;
+  session_affinity_key?: string;
+  abort_signal?: AbortSignal;
+};
+export type TokenLease = {
+  schema_version: 1;
+  provider: 'bravo-codex-balanced';
+  model: string;
+  purpose: TokenLeasePurpose;
+  lease_id: string;
+  access_token: string;
+  slot: string;
+  label?: string;
+  expires_at: number;
+  account_id_hash?: string;
+  reservation_id: string;
+  launch_id: string;
+  session_affinity_key?: string;
+};
+export type FinishTokenLeaseInput = {
+  lease_id: string;
+  reservation_id: string;
+  launch_id: string;
+  status: TokenLeaseFinishStatus;
+  stateRoot?: string;
+  error_kind?: string;
+};
+export type FinishTokenLeaseResult = { schema_version: 1; ok: true; lease_id: string; reservation_id: string; status: TokenLeaseFinishStatus; already_final: boolean; previous_status?: string };
+
 type LegacyUsageEntry = UsageEntry & { windows?: { primary?: UsageWindow; secondary?: UsageWindow } };
 type UsageCache = { schema_version: 2; generated_at: number; accounts: Record<string, LegacyUsageEntry> };
 type ProbeRateLimits = {
@@ -152,6 +192,28 @@ function windowFromRateLimit(label: string, value: ProbeRateLimits['primary']): 
 function accountIdFromPiAuth(value: unknown): string | undefined {
   if (!isRecord(value)) return undefined;
   return typeof value.accountId === 'string' ? value.accountId : typeof value.account_id === 'string' ? value.account_id : undefined;
+}
+function tokenFromAuth(value: unknown): { accessToken?: string; refreshToken?: string; expiresAt?: number; accountId?: string; nestedProvider?: boolean; codexCliShape?: boolean } {
+  if (!isRecord(value)) return {};
+  const nested = value['openai-codex'];
+  if (isRecord(nested)) return { ...tokenFromAuth(nested), nestedProvider: true };
+  const accessToken = typeof value.access_token === 'string' ? value.access_token : typeof value.access === 'string' ? value.access : undefined;
+  const refreshToken = typeof value.refresh_token === 'string' ? value.refresh_token : typeof value.refresh === 'string' ? value.refresh : undefined;
+  const expiresAt = asNumber(value.expiry_date) ?? asNumber(value.expires_at) ?? asNumber(value.expires);
+  const accountId = accountIdFromPiAuth(value);
+  return { accessToken, refreshToken, expiresAt, accountId, codexCliShape: typeof value.access_token === 'string' || typeof value.refresh_token === 'string' || Object.hasOwn(value, 'expiry_date') };
+}
+
+function withRefreshedTokenShape(original: unknown, refreshed: OAuthCredentials): unknown {
+  if (isRecord(original) && isRecord(original['openai-codex'])) {
+    return { ...original, 'openai-codex': withRefreshedTokenShape(original['openai-codex'], refreshed) };
+  }
+  const base = isRecord(original) ? { ...original } : {};
+  const parsed = tokenFromAuth(original);
+  if (parsed.codexCliShape) {
+    return { ...base, access_token: refreshed.access, refresh_token: refreshed.refresh, expiry_date: refreshed.expires, accountId: refreshed.accountId };
+  }
+  return { ...base, access: refreshed.access, refresh: refreshed.refresh, expires: refreshed.expires, accountId: refreshed.accountId };
 }
 async function readAccountIdHash(piAuthPath: string | undefined): Promise<string | undefined> {
   if (!piAuthPath) return undefined;
@@ -892,6 +954,164 @@ export async function cleanupLaunch(isolatedDir: string) {
   }
   await fs.rm(isolatedDir, { recursive: true, force: true });
   return { ok: true };
+}
+
+function assertTokenLeaseInput(input: StartTokenLeaseInput) {
+  if (input.provider !== 'bravo-codex-balanced') throw new Error('unsupported token lease provider');
+  if (!input.model) throw new Error('model is required');
+  if (!input.purpose) throw new Error('purpose is required');
+  if (!Number.isFinite(input.expected_runtime_ms) || input.expected_runtime_ms <= 0) throw new Error('expected_runtime_ms must be positive');
+  if (!Number.isFinite(input.ttl_safety_buffer_ms) || input.ttl_safety_buffer_ms < 0) throw new Error('ttl_safety_buffer_ms must be non-negative');
+  if (input.abort_signal?.aborted) throw new Error('token lease aborted');
+}
+function affinityPath(stateRoot: string, key: string) { return path.join(stateRoot, 'leases', 'affinity', sha(key).slice(0, 32) + '.json'); }
+async function readAffinitySlot(stateRoot: string, key: string | undefined): Promise<string | undefined> {
+  if (!key) return undefined;
+  const entry = await readJson<{ slot?: string; expires_at?: number } | null>(affinityPath(stateRoot, key), null);
+  return entry?.slot && (!entry.expires_at || entry.expires_at > Date.now()) ? entry.slot : undefined;
+}
+async function writeAffinitySlot(stateRoot: string, key: string | undefined, slot: string, expiresAt: number) {
+  if (!key) return;
+  await writeJson(affinityPath(stateRoot, key), { schema_version: 1, slot, expires_at: expiresAt });
+}
+function refreshLockDir(stateRoot: string, slot: string) { return path.join(stateRoot, 'leases', 'refresh-locks', sha(slot).slice(0, 32)); }
+async function wait(ms: number) { await new Promise((resolve) => setTimeout(resolve, ms)); }
+async function withRefreshLock<T>(stateRoot: string, slot: string, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
+  const lockDir = refreshLockDir(stateRoot, slot);
+  await fs.mkdir(path.dirname(lockDir), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + 30_000;
+  while (true) {
+    if (signal?.aborted) throw new Error('token lease aborted');
+    try {
+      await fs.mkdir(lockDir, { recursive: false, mode: 0o700 });
+      await writeJson(path.join(lockDir, 'owner.json'), { schema_version: 1, pid: process.pid, created_at: Date.now(), expires_at: Date.now() + 30_000 });
+      break;
+    } catch (error: any) {
+      if (error?.code !== 'EEXIST') throw error;
+      const stat = await fs.stat(lockDir).catch(() => undefined);
+      if (stat && Date.now() - stat.mtimeMs > 30_000) await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for token refresh lock for slot ${slot}`);
+      await wait(100 + Math.floor(Math.random() * 150));
+    }
+  }
+  try {
+    if (signal?.aborted) throw new Error('token lease aborted');
+    return await fn();
+  } finally {
+    await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+export async function startTokenLease(input: StartTokenLeaseInput): Promise<TokenLease> {
+  assertTokenLeaseInput(input);
+  const stateRoot = input.stateRoot || resolveStateRoot();
+  const ttlMs = input.expected_runtime_ms + input.ttl_safety_buffer_ms;
+  const preferred = input.preferred_slot || await readAffinitySlot(stateRoot, input.session_affinity_key);
+  const account = await chooseSlot(stateRoot, preferred, { reservationTtlMs: ttlMs });
+  if (input.abort_signal?.aborted) {
+    markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'aborted_after_reservation' });
+    throw new Error('token lease aborted');
+  }
+  const authPath = account.piAuthPath || account.authPath;
+  let auth = await readJson<unknown>(authPath, undefined);
+  let parsed = tokenFromAuth(auth);
+  const requiredUntil = Date.now() + ttlMs;
+  if ((!parsed.accessToken || parsed.accessToken.trim().length < 8) && !parsed.refreshToken) {
+    markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'empty_access_token' });
+    throw new Error('selected slot has no usable access token');
+  }
+  if (!parsed.expiresAt || parsed.expiresAt <= requiredUntil) {
+    try {
+      await withRefreshLock(stateRoot, account.slot, input.abort_signal, async () => {
+        auth = await readJson<unknown>(authPath, undefined);
+        parsed = tokenFromAuth(auth);
+        if (parsed.expiresAt && parsed.expiresAt > requiredUntil) return;
+        if (!parsed.refreshToken) {
+          markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: parsed.expiresAt ? 'access_token_ttl_insufficient' : 'access_token_expiry_unknown' });
+          throw new Error(parsed.expiresAt ? 'selected slot access token expires before requested lease ttl and cannot refresh' : 'selected slot access token expiry is unknown and cannot refresh');
+        }
+        let refreshed: OAuthCredentials;
+        try {
+          refreshed = await openaiCodexOAuthProvider.refreshToken({
+            type: 'oauth',
+            access: parsed.accessToken || '',
+            refresh: parsed.refreshToken,
+            expires: parsed.expiresAt || 0,
+            accountId: parsed.accountId || account.accountIdHash || account.idHash,
+          } as OAuthCredentials);
+        } catch {
+          throw new Error('selected slot access token refresh failed');
+        }
+        if (input.abort_signal?.aborted) {
+          markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'aborted_after_refresh' });
+          throw new Error('token lease aborted');
+        }
+        auth = withRefreshedTokenShape(auth, refreshed);
+        await writeJson(authPath, auth);
+        parsed = tokenFromAuth(auth);
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (input.abort_signal?.aborted || message.includes('cannot refresh')) throw error;
+      markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'access_token_refresh_failed', message });
+      throw new Error('selected slot access token refresh failed');
+    }
+  }
+  const { accessToken, expiresAt } = parsed;
+  if (!accessToken || accessToken.trim().length < 8) {
+    markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'empty_access_token' });
+    throw new Error('selected slot has no usable access token');
+  }
+  if (!expiresAt || expiresAt <= requiredUntil) {
+    markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'access_token_ttl_insufficient_after_refresh' });
+    throw new Error('selected slot access token expires before requested lease ttl');
+  }
+  const lease: TokenLease = {
+    schema_version: 1,
+    provider: 'bravo-codex-balanced',
+    model: input.model,
+    purpose: input.purpose,
+    lease_id: account.reservationId,
+    access_token: accessToken,
+    slot: account.slot,
+    label: account.slot,
+    expires_at: account.selection.reservation_expires_at,
+    account_id_hash: account.accountIdHash || account.idHash,
+    reservation_id: account.reservationId,
+    launch_id: account.launchId,
+    session_affinity_key: input.session_affinity_key,
+  };
+  await writeAffinitySlot(stateRoot, input.session_affinity_key, account.slot, lease.expires_at + DEFAULT_RESERVATION_TTL_MS);
+  return lease;
+}
+
+function reservationStateForFinish(status: TokenLeaseFinishStatus): ReservationState {
+  if (status === 'completed') return 'completed';
+  if (status === 'expired') return 'expired';
+  return 'failed';
+}
+export async function finishTokenLease(input: FinishTokenLeaseInput): Promise<FinishTokenLeaseResult> {
+  const stateRoot = input.stateRoot || resolveStateRoot();
+  if (!input.lease_id || !input.reservation_id || !input.launch_id) throw new Error('lease_id, reservation_id, and launch_id are required');
+  const db = openDb(stateRoot);
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const now = Date.now();
+      const row = db.prepare('SELECT state FROM reservations WHERE id = ?').get(input.reservation_id) as SqlRow | undefined;
+      const previous = rowString(row?.state);
+      const alreadyFinal = isTerminalReservationState(previous);
+      if (!alreadyFinal) db.prepare('UPDATE reservations SET state = ?, updated_at = ? WHERE id = ?').run(reservationStateForFinish(input.status), now, input.reservation_id);
+      insertReservationEvent(db, input.reservation_id, input.launch_id, alreadyFinal ? 'token_lease_finish_ignored' : 'token_lease_finished', now, { status: input.status, error_kind: input.error_kind, previous_state: previous, state_updated: !alreadyFinal });
+      db.exec('COMMIT');
+      return { schema_version: 1, ok: true, lease_id: input.lease_id, reservation_id: input.reservation_id, status: input.status, already_final: alreadyFinal, previous_status: previous };
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } finally {
+    closeDb(db);
+  }
 }
 
 export async function getDbStatus(options: { stateRoot?: string } | string = {}) {

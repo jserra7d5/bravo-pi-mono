@@ -5,7 +5,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { cleanupLaunch, getDbStatus, getUsage, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, syncBack } from '../src/index.js';
+import { cleanupLaunch, finishTokenLease, getDbStatus, getUsage, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, startTokenLease, syncBack } from '../src/index.js';
+import { getBalancedCodexModels } from '../extensions/pi/index.js';
+import { openaiCodexOAuthProvider } from '@earendil-works/pi-ai/oauth';
 
 const exec = promisify(execFile);
 async function tmp() { return fs.mkdtemp(path.join(os.tmpdir(), 'cab-')); }
@@ -245,6 +247,78 @@ test('pi-balanced launches Pi with isolated auth and preserved config/session di
   assert.equal(captured.auth['openai-codex'].refresh, 'pi-old');
   assert.equal(JSON.parse(await fs.readFile(path.join(root, 'accounts', 's1', 'pi-openai-codex.json'), 'utf8')).refresh, 'pi-new');
   assert.equal((await listReservations({ stateRoot: root })).length, 0);
+});
+
+test('balanced provider mirrors installed openai-codex models with public provider id', () => {
+  const models = getBalancedCodexModels();
+  assert.ok(models.length > 0);
+  assert.ok(models.every(model => model.provider === 'bravo-codex-balanced'));
+  assert.ok(models.every(model => model.id.startsWith('bravo-codex-balanced/')));
+  assert.ok(models.every(model => model.api === 'openai-codex-responses'));
+});
+
+test('startTokenLease extracts token from slot Pi auth, honors affinity, and finish is idempotent', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 'a', 'auth.json'), { access_token: 'codex-a-token', expiry_date: Date.now() + 60_000 });
+  await writeJson(path.join(root, 'accounts', 'a', 'pi-openai-codex.json'), { access: 'pi-a-token-123', expires: Date.now() + 60_000 });
+  await writeJson(path.join(root, 'accounts', 'b', 'auth.json'), { access_token: 'codex-b-token', expiry_date: Date.now() + 60_000 });
+  const first = await startTokenLease({ stateRoot: root, provider: 'bravo-codex-balanced', model: 'bravo-codex-balanced/fake', purpose: 'pi-provider-request', expected_runtime_ms: 1000, ttl_safety_buffer_ms: 1000, preferred_slot: 'a', session_affinity_key: 'sess-1' });
+  assert.equal(first.access_token, 'pi-a-token-123');
+  assert.equal(first.slot, 'a');
+  const done = await finishTokenLease({ stateRoot: root, lease_id: first.lease_id, reservation_id: first.reservation_id, launch_id: first.launch_id, status: 'completed' });
+  assert.equal(done.already_final, false);
+  const retry = await finishTokenLease({ stateRoot: root, lease_id: first.lease_id, reservation_id: first.reservation_id, launch_id: first.launch_id, status: 'failed' });
+  assert.equal(retry.already_final, true);
+  const second = await startTokenLease({ stateRoot: root, provider: 'bravo-codex-balanced', model: 'bravo-codex-balanced/fake', purpose: 'pi-provider-request', expected_runtime_ms: 1000, ttl_safety_buffer_ms: 1000, session_affinity_key: 'sess-1' });
+  assert.equal(second.slot, 'a');
+});
+
+test('startTokenLease refreshes near-expired OAuth credentials before leasing', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 'refresh', 'pi-openai-codex.json'), { access: 'old-access-token', refresh: 'refresh-token', expires: Date.now() + 10 });
+  await writeJson(path.join(root, 'accounts', 'refresh', 'auth.json'), { access_token: 'codex-token', expiry_date: Date.now() + 60_000 });
+  const original = openaiCodexOAuthProvider.refreshToken;
+  (openaiCodexOAuthProvider as any).refreshToken = async () => ({ type: 'oauth', access: 'new-access-token', refresh: 'new-refresh-token', expires: Date.now() + 60_000, accountId: 'acct-1' });
+  try {
+    const lease = await startTokenLease({ stateRoot: root, provider: 'bravo-codex-balanced', model: 'bravo-codex-balanced/fake', purpose: 'pi-provider-request', expected_runtime_ms: 1000, ttl_safety_buffer_ms: 1000, preferred_slot: 'refresh' });
+    assert.equal(lease.access_token, 'new-access-token');
+    const stored = JSON.parse(await fs.readFile(path.join(root, 'accounts', 'refresh', 'pi-openai-codex.json'), 'utf8'));
+    assert.equal(stored.access, 'new-access-token');
+    assert.equal(stored.refresh, 'new-refresh-token');
+  } finally {
+    (openaiCodexOAuthProvider as any).refreshToken = original;
+  }
+});
+
+test('startTokenLease fails closed on empty token and expires stale leases', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 'empty', 'auth.json'), { access_token: '' });
+  await assert.rejects(startTokenLease({ stateRoot: root, provider: 'bravo-codex-balanced', model: 'm', purpose: 'manual', expected_runtime_ms: 1000, ttl_safety_buffer_ms: 0, preferred_slot: 'empty' }), /no usable access token/);
+  const inactive = await listReservations({ stateRoot: root, includeInactive: true });
+  assert.equal(inactive[0]?.state, 'failed');
+
+  await writeJson(path.join(root, 'accounts', 'ok', 'auth.json'), { access_token: 'valid-token-123', expiry_date: Date.now() + 60_000 });
+  const lease = await startTokenLease({ stateRoot: root, provider: 'bravo-codex-balanced', model: 'm', purpose: 'manual', expected_runtime_ms: 1, ttl_safety_buffer_ms: 0, preferred_slot: 'ok' });
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await startTokenLease({ stateRoot: root, provider: 'bravo-codex-balanced', model: 'm', purpose: 'manual', expected_runtime_ms: 1000, ttl_safety_buffer_ms: 0, preferred_slot: 'ok' });
+  const states = await listReservations({ stateRoot: root, includeInactive: true });
+  assert.equal(states.find(r => r.id === lease.reservation_id)?.state, 'expired');
+});
+
+test('CLI token prints only access token and stores redacted lease metadata', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'cli-token-12345', refresh_token: 'refresh-secret', expiry_date: Date.now() + 10 * 60_000 });
+  const cli = new URL('../src/cli.js', import.meta.url).pathname;
+  const env = { ...process.env, CODEX_AUTH_BALANCER_HOME: root };
+  const { stdout, stderr } = await exec(process.execPath, [cli, 'token', '--provider', 'bravo-codex-balanced', '--lease-key', '00000000-0000-4000-8000-000000000001', '--model', 'bravo-codex-balanced/fake'], { env, timeout: 5000 });
+  assert.equal(stdout, 'cli-token-12345\n');
+  assert.doesNotMatch(stderr, /cli-token|refresh-secret/);
+  const files = await fs.readdir(path.join(root, 'leases', 'keys'));
+  assert.equal(files.length, 1);
+  const leaseFile = await fs.readFile(path.join(root, 'leases', 'keys', files[0]), 'utf8');
+  assert.doesNotMatch(leaseFile, /cli-token|refresh-secret/);
+  await exec(process.execPath, [cli, 'token-finish', '--lease-key', '00000000-0000-4000-8000-000000000001', '--status', 'completed'], { env, timeout: 5000 });
+  await assert.rejects(fs.stat(path.join(root, 'leases', 'keys', files[0])), /ENOENT/);
 });
 
 test('syncBack and cleanup preserve terminal reservation state', async () => {

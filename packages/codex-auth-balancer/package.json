@@ -11,6 +11,10 @@
     ".": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js"
+    },
+    "./extensions/pi": {
+      "types": "./dist/extensions/pi/index.d.ts",
+      "import": "./dist/extensions/pi/index.js"
     }
   },
   "bin": {
@@ -22,7 +26,13 @@
     "build": "tsc -p tsconfig.json && chmod +x dist/src/cli.js dist/src/pi-balanced.js",
     "test": "npm run build && node --test dist/test/*.test.js"
   },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "latest",
+    "@earendil-works/pi-coding-agent": "latest"
+  },
   "devDependencies": {
+    "@earendil-works/pi-ai": "latest",
+    "@earendil-works/pi-coding-agent": "latest",
     "@types/node": "latest",
     "typescript": "latest"
   },
