@@ -21,6 +21,7 @@ import {
   renderWidgetRow,
   stateGlyph,
   summarizeRunResult,
+  textBlock,
   truncAnsi,
   visWidth,
 } from "../extensions/pi/renderers.js";
@@ -284,6 +285,17 @@ test("result card normalizes child body tabs before rendering fixed-width rows",
     assert.equal(visWidth(line), 93, `expected width 93 at line "${stripAnsi(line)}"`);
     assert.equal(line.includes("\t"), false, "rendered card must not contain raw tabs");
   }
+});
+
+test("text block fallback normalizes tabs before returning render lines", () => {
+  const lines = textBlock("ok\tvalue").render(20);
+  assert.deepEqual(lines, ["ok  value"]);
+});
+
+test("generic tool result fallback normalizes tabs before returning render lines", () => {
+  const comp = renderSubagentToolResultComponent({ content: [{ text: "plain\tfallback" }], details: {} });
+  const lines = comp.render(40);
+  assert.deepEqual(lines, ["plain  fallback"]);
 });
 
 test("wake card kind picks the correct badge and affordances", () => {

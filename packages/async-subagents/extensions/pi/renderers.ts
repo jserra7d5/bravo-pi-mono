@@ -321,7 +321,10 @@ export function textBlock(value: string | string[]): TextRenderable {
     invalidate() {},
     render(width: number) {
       const max = safeWidth(width);
-      return lines.map((line) => (visWidth(line) <= max ? line : truncAnsi(line, max)));
+      return lines.map((line) => {
+        const normalized = normalizeTabs(line);
+        return visWidth(normalized) <= max ? normalized : truncAnsi(normalized, max);
+      });
     },
   };
 }
@@ -335,7 +338,10 @@ export function chromeRenderable(build: (width: number) => string[]): TextRender
     render(width: number) {
       const w = Math.max(32, Math.min(96, safeWidth(width)));
       const lines = build(w);
-      return lines.map((line) => (visWidth(line) <= w ? line : truncAnsi(line, w)));
+      return lines.map((line) => {
+        const normalized = normalizeTabs(line);
+        return visWidth(normalized) <= w ? normalized : truncAnsi(normalized, w);
+      });
     },
   };
 }
