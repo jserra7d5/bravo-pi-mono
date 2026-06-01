@@ -270,6 +270,22 @@ test("result card holds width when body lines contain default-wide emoji", () =>
   }
 });
 
+test("result card normalizes child body tabs before rendering fixed-width rows", () => {
+  const card = renderResultCard({
+    width: 93,
+    displayName: "Emery",
+    role: "scout/gemini",
+    state: "completed",
+    duration: "38s",
+    summary: "### Summary",
+    body: '  const bashSchema = Type.Object({\n  \tcommand: Type.String({ description: "Bash command to execute" }),\n  \ttimeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),\n  });',
+  });
+  for (const line of card) {
+    assert.equal(visWidth(line), 93, `expected width 93 at line "${stripAnsi(line)}"`);
+    assert.equal(line.includes("\t"), false, "rendered card must not contain raw tabs");
+  }
+});
+
 test("wake card kind picks the correct badge and affordances", () => {
   const needs = renderWakeCard({
     width: 72,

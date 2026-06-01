@@ -159,8 +159,15 @@ function canTakeEmojiPresentation(cp: number): boolean {
 }
 
 // Width calculation that handles ANSI escapes and wide unicode (CJK, emoji).
+function normalizeTabs(str: string): string {
+  // Raw tabs expand at terminal tab stops, but our card math is cell-exact.
+  // Normalize them before measuring/rendering so child markdown/code cannot
+  // push a supposedly exact-width row past Pi's terminal-width guard.
+  return str.replace(/\t/g, "  ");
+}
+
 export function visWidth(str: string): number {
-  const chars = [...str.replace(/\x1b\[[0-9;]*m/g, "")];
+  const chars = [...normalizeTabs(str).replace(/\x1b\[[0-9;]*m/g, "")];
   let w = 0;
   for (let i = 0; i < chars.length; i++) {
     const cp = chars[i].codePointAt(0) ?? 0;
@@ -188,6 +195,7 @@ export function visWidth(str: string): number {
 
 // Truncate with ellipsis honoring ANSI escapes and cell widths. Always closes with reset.
 export function truncAnsi(str: string, maxCells: number): string {
+  str = normalizeTabs(str);
   if (visWidth(str) <= maxCells) return str;
   if (maxCells <= 1) return "…" + ANSI.reset;
   let out = "";
@@ -242,18 +250,22 @@ export function chrome(width: number): Chrome {
     return ANSI.gray + left + "─".repeat(dashes) + right + ANSI.reset;
   };
   const row = (content: string) => {
+    content = normalizeTabs(content);
     const final = truncAnsi(content, width - 4);
     const inner = " " + final + " ";
     const pad = Math.max(0, width - 2 - visWidth(inner));
     return ANSI.gray + "│" + ANSI.reset + inner + " ".repeat(pad) + ANSI.gray + "│" + ANSI.reset;
   };
   const rowBar = (bar: string, content: string) => {
+    content = normalizeTabs(content);
     const final = truncAnsi(content, width - 4);
     const inner = " " + final + " ";
     const pad = Math.max(0, width - 2 - visWidth(inner));
     return bar + inner + " ".repeat(pad) + ANSI.gray + "│" + ANSI.reset;
   };
   const rowRight = (left: string, right: string) => {
+    left = normalizeTabs(left);
+    right = normalizeTabs(right);
     const innerR = right + " ";
     const wR = visWidth(innerR);
     const maxLeft = Math.max(1, width - 2 - 1 - wR - 1);
