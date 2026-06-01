@@ -28,7 +28,6 @@ function isTerminal(row: RunSummaryRow): boolean {
 
 function visibleState(state: string, updatedAt: string, now: number, terminalCompletedVisibleMs: number): boolean {
   if (!TERMINAL_STATES.has(state)) return ["created", "queued", "running", "idle", "waiting_for_input", "blocked", "stalled", "paused"].includes(state);
-  if (state !== "completed") return true;
   const updatedAtMs = Date.parse(updatedAt);
   if (!Number.isFinite(updatedAtMs)) return true;
   return now - updatedAtMs <= terminalCompletedVisibleMs;

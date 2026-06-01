@@ -50,7 +50,7 @@ export function readWatcherSnapshot(store: RunStore, input: ReadWatcherSnapshotI
   const nowMs = input.nowMs ?? Date.now();
   const rows: RunSummaryRow[] = summaries
     .flatMap((summary) => {
-      if (summary.state === "completed" && typeof input.completedVisibleMs === "number") {
+      if (isTerminalRunState(summary.state) && typeof input.completedVisibleMs === "number") {
         const updatedAtMs = Date.parse(summary.updatedAt);
         if (Number.isFinite(updatedAtMs) && nowMs - updatedAtMs > input.completedVisibleMs) return [];
       }

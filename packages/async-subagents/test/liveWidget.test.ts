@@ -127,12 +127,14 @@ test("live widget returns no lines when no rows are visible", () => {
   assert.deepEqual(lines, []);
 });
 
-test("live widget hides completed runs older than the default one minute horizon", () => {
-  const w = workspace();
-  addRun({ ...w, displayName: "OldDone", state: "completed", summary: "old completed", updatedAt: isoAgo(61_000) });
+test("live widget hides terminal runs older than the default one minute horizon", () => {
+  for (const state of ["completed", "failed", "cancelled", "expired"] as const) {
+    const w = workspace();
+    addRun({ ...w, displayName: `Old-${state}`, state, summary: `old ${state}`, updatedAt: isoAgo(61_000) });
 
-  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
-  assert.deepEqual(lines, []);
+    const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
+    assert.deepEqual(lines, [], `expected old ${state} run to be hidden`);
+  }
 });
 
 test("live widget honors an explicit longer completed visibility horizon", () => {
