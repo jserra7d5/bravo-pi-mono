@@ -83,9 +83,13 @@ function canTakeEmojiPresentation(cp: number): boolean {
   );
 }
 
+function normalizeInline(str: string): string {
+  return str.replace(/\t/g, "  ").replace(/\r?\n|\r/g, " ");
+}
+
 // Width calculation that honors ANSI escapes and wide unicode (CJK, emoji).
 export function visWidth(str: string): number {
-  const chars = [...str.replace(/\x1b\[[0-9;]*m/g, "")];
+  const chars = [...normalizeInline(str).replace(/\x1b\[[0-9;]*m/g, "")];
   let w = 0;
   for (let i = 0; i < chars.length; i++) {
     const cp = chars[i].codePointAt(0) ?? 0;
@@ -114,6 +118,7 @@ export function visWidth(str: string): number {
 // End-truncate honoring ANSI escapes; always closes with a reset so following
 // rows do not inherit color state mid-cell.
 export function truncAnsi(str: string, maxCells: number): string {
+  str = normalizeInline(str);
   if (visWidth(str) <= maxCells) return str;
   if (maxCells <= 1) return "…" + ANSI.reset;
   let out = "";
@@ -146,6 +151,7 @@ export function truncAnsi(str: string, maxCells: number): string {
 // Mid-truncate a path — preserves head + tail so the directory and filename
 // are both visible. Used for receipt paths and judge run paths.
 function truncPath(p: string, maxCells: number): string {
+  p = normalizeInline(p);
   if (visWidth(p) <= maxCells) return p;
   if (maxCells <= 3) return truncAnsi(p, maxCells);
   const head = Math.ceil((maxCells - 1) / 2);
@@ -155,12 +161,14 @@ function truncPath(p: string, maxCells: number): string {
 
 // End-truncate title text (head is salient).
 function shortTitle(title: string, maxCells: number): string {
+  title = normalizeInline(title);
   if (title.length <= maxCells) return title;
   return title.slice(0, Math.max(0, maxCells - 1)) + "…";
 }
 
 // Mid-truncate slug (head + tail both meaningful).
 function shortSlug(id: string, maxCells: number): string {
+  id = normalizeInline(id);
   if (id.length <= maxCells) return id;
   const head = Math.ceil((maxCells - 1) / 2);
   const tail = Math.floor((maxCells - 1) / 2);

@@ -160,10 +160,10 @@ function canTakeEmojiPresentation(cp: number): boolean {
 
 // Width calculation that handles ANSI escapes and wide unicode (CJK, emoji).
 function normalizeTabs(str: string): string {
-  // Raw tabs expand at terminal tab stops, but our card math is cell-exact.
-  // Normalize them before measuring/rendering so child markdown/code cannot
-  // push a supposedly exact-width row past Pi's terminal-width guard.
-  return str.replace(/\t/g, "  ");
+  // Raw tabs expand at terminal tab stops, and embedded newlines split a single
+  // TUI row into multiple physical terminal rows. Normalize both before
+  // measuring/rendering so exact-width chrome stays aligned.
+  return str.replace(/\t/g, "  ").replace(/\r?\n|\r/g, " ");
 }
 
 export function visWidth(str: string): number {

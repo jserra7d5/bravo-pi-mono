@@ -177,12 +177,16 @@ function normalizeActiveEntry(value: unknown): ActiveGoalEntry | undefined {
 	};
 }
 
+function normalizeInline(s: string): string {
+	return s.replace(/\t/g, "  ").replace(/\r?\n|\r/g, " ");
+}
+
 /**
  * Compute the visible terminal cell width of a string, stripping ANSI escape
  * sequences and accounting for variation selectors and wide (CJK/emoji) glyphs.
  */
 export function visWidth(s: string): number {
-	const stripped = s.replace(/\x1b\[[0-9;]*m/g, "");
+	const stripped = normalizeInline(s).replace(/\x1b\[[0-9;]*m/g, "");
 	let w = 0;
 	for (const ch of stripped) {
 		const cp = ch.codePointAt(0) ?? 0;
@@ -217,6 +221,7 @@ export function visWidth(s: string): number {
  * `maxCells` terminal cells, appending `…` if truncation occurs.
  */
 export function truncAnsi(str: string, maxCells: number): string {
+	str = normalizeInline(str);
 	if (visWidth(str) <= maxCells) return str;
 	if (maxCells <= 1) return "…" + C.reset;
 	let out = "";

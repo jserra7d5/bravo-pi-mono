@@ -64,6 +64,12 @@ test("truncAnsi: string already within limit is returned unchanged", () => {
 	assert.equal(truncAnsi(s, 10), "hello");
 });
 
+test("truncAnsi: embedded newlines are normalized for single-line HUD rows", () => {
+	const result = truncAnsi("hello\nworld", 20);
+	assert.equal(result, "hello world");
+	assert.ok(!/[\r\n]/.test(result));
+});
+
 test("truncAnsi: string exactly at limit is returned unchanged", () => {
 	const s = "hello";
 	assert.equal(truncAnsi(s, 5), "hello");

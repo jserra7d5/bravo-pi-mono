@@ -26,8 +26,12 @@ const IDENTITY_PALETTE = [
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
+function normalizeInline(value: string): string {
+  return value.replace(/\t/g, "  ").replace(/\r?\n|\r/g, " ");
+}
+
 export function stripAnsi(value: string): string {
-  return value.replace(ANSI_RE, "");
+  return normalizeInline(value).replace(ANSI_RE, "");
 }
 
 export function visWidth(value: string): number {
@@ -83,26 +87,38 @@ export function identityColor(seed: string): string {
 }
 
 function truncateEnd(value: string, width: number): string {
+  value = normalizeInline(value);
   if (width <= 0) return "";
   if (visWidth(value) <= width) return value;
-  if (width <= 1) return "…";
+  if (width <= 1) return "…" + ANSI.reset;
   let out = "";
   let used = 0;
-  const chars = Array.from(value);
-  for (let i = 0; i < chars.length; i++) {
-    const cp = chars[i].codePointAt(0) ?? 0;
-    const nextCp = chars[i + 1]?.codePointAt(0);
-    const cluster = nextCp === 0xfe0f && canTakeEmojiPresentation(cp) ? chars[i] + chars[i + 1] : chars[i];
+  const limit = width - 1;
+  for (let i = 0; i < value.length;) {
+    if (value.charCodeAt(i) === 0x1b && value[i + 1] === "[") {
+      const end = value.indexOf("m", i);
+      if (end === -1) break;
+      out += value.slice(i, end + 1);
+      i = end + 1;
+      continue;
+    }
+    const cp = value.codePointAt(i);
+    if (cp === undefined) break;
+    const ch = String.fromCodePoint(cp);
+    const nextIndex = i + ch.length;
+    const nextCp = value.codePointAt(nextIndex);
+    const cluster = nextCp === 0xfe0f && canTakeEmojiPresentation(cp) ? ch + String.fromCodePoint(nextCp) : ch;
     const w = visWidth(cluster);
-    if (used + w > width - 1) break;
+    if (used + w > limit) break;
     out += cluster;
     used += w;
-    if (cluster.length > chars[i].length) i++;
+    i += cluster.length;
   }
-  return `${out}…`;
+  return `${out}…${ANSI.reset}`;
 }
 
 export function truncateMiddle(value: string, width: number): string {
+  value = normalizeInline(value);
   if (width <= 0) return "";
   if (visWidth(value) <= width) return value;
   if (width <= 5) return truncateEnd(value, width);

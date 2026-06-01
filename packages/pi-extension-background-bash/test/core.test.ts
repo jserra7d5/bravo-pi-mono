@@ -7,6 +7,7 @@ import test from "node:test";
 import pkg from "../package.json" with { type: "json" };
 import extension, { BackgroundRunner, buildBackgroundBashTools, TaskRegistry } from "../src/index.js";
 import { readConfig } from "../src/config.js";
+import { visWidth } from "../src/ui.js";
 import type { BackgroundTaskRecord } from "../src/task-types.js";
 
 async function tmp() { return mkdtemp(path.join(os.tmpdir(), "bb-core-")); }
@@ -161,9 +162,22 @@ test("registered renderers produce bounded background task cards", () => {
   assert.equal(bash.renderResult, undefined);
   const now = new Date().toISOString();
   const task: BackgroundTaskRecord = { schemaVersion: 1, taskId: "bg_20260531_abcdef", command: "npm run dev -- --host 0.0.0.0", cwd: "/tmp", status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: ".pi/background-bash/bg_20260531_abcdef/output.log", metadataPath: "/tmp/meta.json", outputBytes: 12_288, maxOutputBytes: 10_000_000, maxRuntimeMs: 300_000, wakeOnCompletion: false };
-  const list = (tools[1] as { renderResult?: Function }).renderResult?.({ content: [], details: { tasks: [task] } })?.render(56).join("\n") ?? "";
+  const lines = (tools[1] as { renderResult?: Function }).renderResult?.({ content: [], details: { tasks: [task] } })?.render(56) ?? [];
+  const list = lines.join("\n");
   assert.match(list, /tasks/);
   assert.match(list, /running/);
+  for (const line of lines) assert.equal(visWidth(line), 56);
+});
+
+test("registered renderers normalize embedded newlines before chrome rendering", () => {
+  const tools = buildBackgroundBashTools();
+  const now = new Date().toISOString();
+  const task: BackgroundTaskRecord = { schemaVersion: 1, taskId: "bg_20260531_abcdef", command: "npm run dev\n-- --host 0.0.0.0", cwd: "/tmp", status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: ".pi/background-bash/bg_20260531_abcdef/output.log", metadataPath: "/tmp/meta.json", outputBytes: 12_288, maxOutputBytes: 10_000_000, maxRuntimeMs: 300_000, wakeOnCompletion: false };
+  const lines = (tools[1] as { renderResult?: Function }).renderResult?.({ content: [], details: { tasks: [task] } })?.render(56) ?? [];
+  for (const line of lines) {
+    assert.ok(!/[\r\n]/.test(line), `line contains embedded newline: ${JSON.stringify(line.replace(/\x1b\[[0-9;]*m/g, ""))}`);
+    assert.equal(visWidth(line), 56);
+  }
 });
 
 test("bash timeout is seconds and background converts to milliseconds", async () => {

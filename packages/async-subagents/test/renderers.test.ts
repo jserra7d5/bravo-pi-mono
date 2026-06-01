@@ -352,6 +352,21 @@ test("renderSubagentToolCallComponent renders a launch card when called with age
   assert.ok(rendered.includes("look around"));
 });
 
+test("renderSubagentToolCallComponent keeps multiline args inside single physical rows", () => {
+  const comp = renderSubagentToolCallComponent({
+    agent: "worker",
+    task: "Repair T-019 review BLOCK findings in the dedicated Switchyard worktree.\nWorktree: /tmp/very-long-path",
+    thinkingLevel: "medium",
+  }, undefined, "subagent_start");
+  for (const width of [56, 72, 96]) {
+    const lines = comp.render(width);
+    for (const line of lines) {
+      assert.ok(!/[\r\n]/.test(line), `line contains embedded newline at width ${width}: ${JSON.stringify(stripAnsi(line))}`);
+      assert.equal(visWidth(line), width, `line width mismatch at ${width}: ${stripAnsi(line)}`);
+    }
+  }
+});
+
 test("renderSubagentToolCallComponent renders a status card when no run is supplied", () => {
   const comp = renderSubagentToolCallComponent({}, undefined, "subagent_status");
   const rendered = comp.render(72).map(stripAnsi).join("\n");

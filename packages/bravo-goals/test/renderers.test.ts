@@ -421,6 +421,21 @@ test("chrome holds declared width across 56/72/96/120", () => {
 	}
 });
 
+test("tool cards normalize embedded newlines before rendering chrome rows", () => {
+	const lines = renderTaskReceiptReadyResult({
+		...FIXTURES.cardGrammar,
+		goal_title: "Multiline\ngoal title",
+		task_id: "task_004",
+		receipt_path: "receipts/task_004-worker.md\nextra",
+		judge_run_id: "jr_x",
+		next_action: "judge_pending_launch",
+	}, 72);
+	for (const line of lines) {
+		assert.ok(!/[\r\n]/.test(line), `line contains embedded newline: ${JSON.stringify(stripAnsi(line))}`);
+		assert.equal(visWidth(line), 72);
+	}
+});
+
 test("low-priority rows drop at narrow widths", () => {
 	// At 56 the next-action row drops (mockup contract).
 	const narrow = renderJudgeFinishResult({
