@@ -5,13 +5,27 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { cleanupLaunch, finishTokenLease, getDbStatus, getUsage, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, startTokenLease, syncBack } from '../src/index.js';
-import { getBalancedCodexModels } from '../extensions/pi/index.js';
+import { cleanupLaunch, finishTokenLease, getDbStatus, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, startTokenLease, syncBack } from '../src/index.js';
+import codexBalancedProvider, { getBalancedCodexModels } from '../extensions/pi/index.js';
 import { openaiCodexOAuthProvider } from '@earendil-works/pi-ai/oauth';
 
 const exec = promisify(execFile);
 async function tmp() { return fs.mkdtemp(path.join(os.tmpdir(), 'cab-')); }
 async function writeJson(p: string, v: unknown) { await fs.mkdir(path.dirname(p), { recursive: true }); await fs.writeFile(p, JSON.stringify(v)); }
+function fakeCodexJwt(accountId = 'acct-test'): string {
+  const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${b64({ alg: 'none', typ: 'JWT' })}.${b64({ 'https://api.openai.com/auth': { chatgpt_account_id: accountId } })}.sig`;
+}
+async function eventually<T>(fn: () => Promise<T | undefined>, timeoutMs = 1000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let last: T | undefined;
+  while (Date.now() < deadline) {
+    last = await fn();
+    if (last !== undefined) return last;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.fail(`condition not met within ${timeoutMs}ms${last === undefined ? '' : `; last=${String(last)}`}`);
+}
 
 async function writeFakeCodexBin(dir: string) {
   const bin = path.join(dir, 'codex');
@@ -130,6 +144,67 @@ test('prepareLaunch removes isolated dir after partial secret copy failure', asy
   await assert.rejects(fs.stat(iso), /ENOENT/);
 });
 
+test('getUsage distinguishes active Pi from active Codex account attribution', async () => {
+  const root = await tmp(); const home = await tmp();
+  const oldHome = process.env.HOME;
+  const oldUserProfile = process.env.USERPROFILE;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    await writeJson(path.join(root, 'accounts', 'pi-slot', 'auth.json'), { access_token: 'tok-pi' });
+    await writeJson(path.join(root, 'accounts', 'pi-slot', 'pi-openai-codex.json'), { accountId: 'acct-pi' });
+    await writeJson(path.join(root, 'accounts', 'codex-slot', 'auth.json'), { access_token: 'tok-codex' });
+    await writeJson(path.join(root, 'accounts', 'codex-slot', 'pi-openai-codex.json'), { accountId: 'acct-codex' });
+    await writeJson(path.join(home, '.pi', 'agent', 'auth.json'), { 'openai-codex': { accountId: 'acct-pi' } });
+    await writeJson(path.join(home, '.codex', 'auth.json'), { accountId: 'acct-codex' });
+    const usage = await getUsage({ stateRoot: root });
+    const bySlot = Object.fromEntries(usage.accounts.map(account => [account.slot, account]));
+    assert.equal(bySlot['pi-slot'].activePi, true);
+    assert.equal(bySlot['pi-slot'].activeCodex, false);
+    assert.equal(bySlot['codex-slot'].activePi, false);
+    assert.equal(bySlot['codex-slot'].activeCodex, true);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = oldUserProfile;
+  }
+});
+
+test('direct Pi live ingestion writes to activePi slot and skips activeCodex-only', async () => {
+  assert.equal(selectSingleActivePiSlot({ generatedAt: 1, staleAfterMs: 1, accounts: [
+    { slot: 'pi-slot', label: 'pi-slot', activePi: true, activeCodex: false, status: 'ok' },
+    { slot: 'codex-slot', label: 'codex-slot', activePi: false, activeCodex: true, status: 'ok' },
+  ] }), 'pi-slot');
+
+  const root = await tmp(); const home = await tmp();
+  const oldHome = process.env.HOME;
+  const oldUserProfile = process.env.USERPROFILE;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    await writeJson(path.join(root, 'accounts', 'pi-slot', 'auth.json'), { access_token: 'tok-pi' });
+    await writeJson(path.join(root, 'accounts', 'pi-slot', 'pi-openai-codex.json'), { accountId: 'acct-pi' });
+    await writeJson(path.join(root, 'accounts', 'codex-slot', 'auth.json'), { access_token: 'tok-codex' });
+    await writeJson(path.join(root, 'accounts', 'codex-slot', 'pi-openai-codex.json'), { accountId: 'acct-codex' });
+    await writeJson(path.join(home, '.pi', 'agent', 'auth.json'), { 'openai-codex': { accountId: 'acct-pi' } });
+    await writeJson(path.join(home, '.codex', 'auth.json'), { accountId: 'acct-codex' });
+
+    const result = await ingestDirectPiLiveUsage({
+      stateRoot: root,
+      headers: { 'x-codex-rate-limits': JSON.stringify({ rate_limits: { primary: { remaining_percent: 42, reset_at: 1_780_000_000 } } }) },
+    });
+    assert.deepEqual(result, { ok: true, ingested: true, slot: 'pi-slot' });
+    const usage = await getUsage({ stateRoot: root });
+    const bySlot = Object.fromEntries(usage.accounts.map(account => [account.slot, account]));
+    assert.equal(bySlot['pi-slot'].usage?.source, 'live');
+    assert.equal(bySlot['pi-slot'].usage?.primary?.remainingPercent, 42);
+    assert.equal(bySlot['pi-slot'].usage?.primary?.resetAt, 1_780_000_000_000);
+    assert.equal(bySlot['codex-slot'].usage?.source, 'unknown');
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = oldUserProfile;
+  }
+});
+
 test('getUsage marks old v2 cache stale by generated_at', async () => {
   const root = await tmp();
   await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
@@ -163,6 +238,66 @@ test('usage cache migration accepts raw legacy slot map', async () => {
   assert.equal(usage.accounts[0].usage?.secondary?.remainingPercent, 34);
   assert.ok(usage.generatedAt > 0);
 });
+
+test('ingestLiveUsage normalizes live metadata for an explicit slot', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
+  const result = await ingestLiveUsage({ stateRoot: root, slot: 's1', rateLimits: { rate_limits: { primary: { remaining_percent: 64, reset_at: 1_780_000_000_000 }, secondary: { remaining_percent: 25, reset_in_seconds: 99 } } } });
+  assert.deepEqual(result, { ok: true, ingested: true, slot: 's1' });
+  const usage = await getUsage({ stateRoot: root });
+  assert.equal(usage.accounts[0].usage?.source, 'live');
+  assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 64);
+  assert.equal(usage.accounts[0].usage?.primary?.resetAt, 1_780_000_000_000);
+  assert.equal(usage.accounts[0].usage?.secondary?.remainingPercent, 25);
+  assert.equal(usage.accounts[0].usage?.secondary?.resetInSeconds, 99);
+});
+
+test('ingestLiveUsage normalizes camelCase live reset timestamps at write boundary', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
+  await ingestLiveUsage({ stateRoot: root, slot: 's1', rateLimits: { primary: { remainingPercent: 93, resetAt: 1_780_000_000 }, secondary: { remainingPercent: 76, resetAt: 1_780_864_078 } } });
+  const usage = await getUsage({ stateRoot: root });
+  assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 93);
+  assert.equal(usage.accounts[0].usage?.primary?.resetAt, 1_780_000_000_000);
+  assert.equal(usage.accounts[0].usage?.secondary?.remainingPercent, 76);
+  assert.equal(usage.accounts[0].usage?.secondary?.resetAt, 1_780_864_078_000);
+});
+
+test('ingestLiveUsage converts used_percent and accepts JSON rate-limit headers', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
+  await ingestLiveUsage({
+    stateRoot: root,
+    slot: 's1',
+    headers: {
+      authorization: 'Bearer live-secret-token',
+      'x-codex-rate-limits': JSON.stringify({ rate_limits: { primary: { used_percent: 12.5, resets_at: 2000 }, secondary: { used_percent: 100, resets_at: 2_000_000_000_000 } } }),
+    },
+  });
+  const usage = await getUsage({ stateRoot: root });
+  assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 87.5);
+  assert.equal(usage.accounts[0].usage?.primary?.resetAt, 2_000_000);
+  assert.equal(usage.accounts[0].usage?.secondary?.remainingPercent, 0);
+  assert.equal(usage.accounts[0].usage?.secondary?.resetAt, 2_000_000_000_000);
+  const dbBytes = await fs.readFile(path.join(root, 'balancer.sqlite3'));
+  assert.equal(dbBytes.includes(Buffer.from('live-secret-token')), false);
+  assert.equal(dbBytes.includes(Buffer.from('authorization')), false);
+});
+
+test('ingestLiveUsage attributes by reservation/launch and skips ambiguous unattributed live data', async () => {
+  const root = await tmp(); const iso = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
+  const prepared = await prepareLaunch(iso, { stateRoot: root, slot: 's1' });
+  const skipped = await ingestLiveUsage({ stateRoot: root, rateLimits: { rate_limits: { primary: { remaining_percent: 1 } } } });
+  assert.equal(skipped.ingested, false);
+  assert.equal(skipped.skipped, 'ambiguous_attribution');
+  const attributed = await ingestLiveUsage({ stateRoot: root, reservation_id: prepared.metadata.reservation_id, launch_id: prepared.metadata.launch_id, rateLimits: { rate_limits: { primary: { used_percent: 33 } } } });
+  assert.deepEqual(attributed, { ok: true, ingested: true, slot: 's1' });
+  const usage = await getUsage({ stateRoot: root });
+  assert.equal(usage.accounts[0].usage?.source, 'live');
+  assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 67);
+});
+
 
 test('refreshUsage probes Codex CLI for both slots and stores remaining percent', async () => {
   const root = await tmp(); const binDir = await tmp();
@@ -255,6 +390,62 @@ test('balanced provider mirrors installed openai-codex models with public provid
   assert.ok(models.every(model => model.provider === 'bravo-codex-balanced'));
   assert.ok(models.every(model => model.id.startsWith('bravo-codex-balanced/')));
   assert.ok(models.every(model => model.api === 'openai-codex-responses'));
+});
+
+test('balanced provider defaults to SSE so response headers ingest live usage', async () => {
+  const root = await tmp();
+  const oldHome = process.env.CODEX_AUTH_BALANCER_HOME;
+  const oldFetch = globalThis.fetch;
+  const oldWebSocket = globalThis.WebSocket;
+  process.env.CODEX_AUTH_BALANCER_HOME = root;
+  const token = fakeCodexJwt('acct-s1');
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: token, expiry_date: Date.now() + 30 * 60_000 });
+  await writeJson(path.join(root, 'cache', 'usage.json'), { schema_version: 2, generated_at: Date.now(), accounts: { s1: { slot: 's1', status: 'ok', updatedAt: Date.now(), primary: { label: 'primary', remainingPercent: 100 } } } });
+
+  let registered: any;
+  codexBalancedProvider({ registerProvider: (_id: string, provider: any) => { registered = provider; } } as any);
+  let fetchCount = 0;
+  let webSocketConstructed = false;
+  try {
+    (globalThis as any).WebSocket = class {
+      constructor() {
+        webSocketConstructed = true;
+        throw new Error('WebSocket should not be used by default balanced provider transport');
+      }
+    };
+    globalThis.fetch = async (_url: string | URL | Request, init?: RequestInit) => {
+      fetchCount += 1;
+      assert.equal(init?.method, 'POST');
+      assert.equal(new Headers(init?.headers).get('authorization'), `Bearer ${token}`);
+      const sse = 'data: {"type":"response.done","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0}}}}\n\n';
+      return new Response(sse, {
+        status: 200,
+        headers: {
+          'content-type': 'text/event-stream',
+          'x-codex-rate-limits': JSON.stringify({ rate_limits: { primary: { remaining_percent: 61, reset_at: 1234 }, secondary: { used_percent: 80 } } }),
+        },
+      });
+    };
+
+    const model = registered.models[0];
+    const stream = registered.streamSimple(model, { messages: [{ role: 'user', content: 'hi', timestamp: Date.now() }] }, { sessionId: 'balanced-sse-test' });
+    const events: any[] = [];
+    for await (const event of stream) events.push(event);
+    assert.equal(events.at(-1)?.type, 'done');
+    assert.equal(fetchCount, 1);
+    assert.equal(webSocketConstructed, false);
+
+    const live = await eventually(async () => {
+      const usage = await getUsage({ stateRoot: root });
+      return usage.accounts[0]?.usage?.source === 'live' ? usage.accounts[0] : undefined;
+    });
+    assert.equal(live.usage?.primary?.remainingPercent, 61);
+    assert.equal(live.usage?.secondary?.remainingPercent, 20);
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldWebSocket === undefined) delete (globalThis as any).WebSocket; else globalThis.WebSocket = oldWebSocket;
+    if (oldHome === undefined) delete process.env.CODEX_AUTH_BALANCER_HOME; else process.env.CODEX_AUTH_BALANCER_HOME = oldHome;
+  }
 });
 
 test('startTokenLease extracts token from slot Pi auth, honors affinity, and finish is idempotent', async () => {

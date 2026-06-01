@@ -23,7 +23,7 @@ export type CodexAccountSlot = {
   activePi: boolean;
   activeCodex: boolean;
   status: CodexAccountStatus;
-  usage?: { primary?: UsageWindow; secondary?: UsageWindow; updatedAt?: number; source?: 'cache' | 'probe' | 'unknown' };
+  usage?: { primary?: UsageWindow; secondary?: UsageWindow; updatedAt?: number; source?: 'cache' | 'probe' | 'live' | 'unknown' };
   problem?: { code: string; message: string };
 };
 export type CodexUsage = { accounts: CodexAccountSlot[]; generatedAt: number; staleAfterMs: number; unavailable?: boolean; error?: string };
@@ -32,7 +32,7 @@ export type UsageEntry = {
   primary?: UsageWindow;
   secondary?: UsageWindow;
   updatedAt?: number;
-  source?: 'cache' | 'probe' | 'unknown';
+  source?: 'cache' | 'probe' | 'live' | 'unknown';
   status?: CodexAccountStatus;
   problem?: { code: string; message: string };
 };
@@ -126,11 +126,28 @@ export type FinishTokenLeaseResult = { schema_version: 1; ok: true; lease_id: st
 type LegacyUsageEntry = UsageEntry & { windows?: { primary?: UsageWindow; secondary?: UsageWindow } };
 type UsageCache = { schema_version: 2; generated_at: number; accounts: Record<string, LegacyUsageEntry> };
 type ProbeRateLimits = {
-  primary?: { used_percent?: number; window_minutes?: number; resets_at?: number };
-  secondary?: { used_percent?: number; window_minutes?: number; resets_at?: number };
+  primary?: { used_percent?: number; remaining_percent?: number; remainingPercent?: number; window_minutes?: number; resets_at?: number; resetsAt?: number; reset_at?: number; resetAt?: number; reset_in_seconds?: number; resetInSeconds?: number };
+  secondary?: { used_percent?: number; remaining_percent?: number; remainingPercent?: number; window_minutes?: number; resets_at?: number; resetsAt?: number; reset_at?: number; resetAt?: number; reset_in_seconds?: number; resetInSeconds?: number };
   plan_type?: string | null;
   rate_limit_reached_type?: string | null;
 };
+export type LiveUsageIngestInput = {
+  stateRoot?: string;
+  slot?: string;
+  reservation_id?: string;
+  launch_id?: string;
+  headers?: Record<string, unknown>;
+  rateLimits?: unknown;
+  rate_limits?: unknown;
+  generated_at?: number;
+  updated_at?: number;
+};
+export type LiveUsageIngestResult = { ok: boolean; ingested: boolean; slot?: string; skipped?: string; error?: string };
+
+export function selectSingleActivePiSlot(usage: CodexUsage): string | undefined {
+  const slots = usage.accounts.filter(account => account.activePi).map(account => account.slot);
+  return slots.length === 1 ? slots[0] : undefined;
+}
 
 type SqlRow = Record<string, string | number | bigint | Buffer | null>;
 type ReservationState = 'pending' | 'prepared' | 'completed' | 'released' | 'failed' | 'conflict' | 'expired';
@@ -167,6 +184,16 @@ function asNumber(value: unknown): number | undefined { return typeof value === 
 function rowNumber(value: unknown): number | undefined { return typeof value === 'number' ? value : typeof value === 'bigint' ? Number(value) : undefined; }
 function rowString(value: unknown): string | undefined { return typeof value === 'string' ? value : undefined; }
 function clampPct(value: number): number { return Math.max(0, Math.min(100, value)); }
+function epochSecondsOrMs(value: number): number {
+  // Codex/OpenAI-style reset fields may arrive as epoch seconds or millis.
+  return value < 10_000_000_000 ? value * 1000 : value;
+}
+function persistedResetAtMs(value: number): number {
+  // DB writes may receive already-normalized UsageWindow objects. Only repair
+  // plausible epoch-second values to avoid double-normalizing small synthetic
+  // timestamps or old test fixtures that already passed through reset parsing.
+  return value >= 1_000_000_000 && value < 10_000_000_000 ? value * 1000 : value;
+}
 function normalizeWindow(label: string, value: unknown): UsageWindow | undefined {
   if (!isRecord(value)) return undefined;
   const remaining = asNumber(value.remainingPercent) ?? asNumber(value.remaining_percent);
@@ -175,19 +202,91 @@ function normalizeWindow(label: string, value: unknown): UsageWindow | undefined
   return {
     label: typeof value.label === 'string' ? value.label : label,
     remainingPercent: remaining == null ? undefined : clampPct(remaining),
-    resetAt,
+    resetAt: resetAt == null ? undefined : persistedResetAtMs(resetAt),
     resetInSeconds,
     stale: value.stale === true,
   };
 }
+function asNumberish(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
 function windowFromRateLimit(label: string, value: ProbeRateLimits['primary']): UsageWindow | undefined {
   if (!value) return undefined;
-  const used = asNumber(value.used_percent);
+  const remaining = asNumberish(value.remaining_percent) ?? asNumberish(value.remainingPercent);
+  const used = asNumberish(value.used_percent);
+  const resetAt = asNumberish(value.reset_at) ?? asNumberish(value.resetAt);
+  const resetsAt = asNumberish(value.resets_at) ?? asNumberish(value.resetsAt);
+  const resetInSeconds = asNumberish(value.reset_in_seconds) ?? asNumberish(value.resetInSeconds);
   return {
     label,
-    remainingPercent: used == null ? undefined : clampPct(100 - used),
-    resetAt: asNumber(value.resets_at) ? Number(value.resets_at) * 1000 : undefined,
+    remainingPercent: remaining != null ? clampPct(remaining) : used == null ? undefined : clampPct(100 - used),
+    resetAt: resetAt != null ? epochSecondsOrMs(resetAt) : resetsAt != null ? epochSecondsOrMs(resetsAt) : undefined,
+    resetInSeconds,
   };
+}
+function hasWindowSignal(window: UsageWindow | undefined): boolean {
+  return window?.remainingPercent != null || window?.resetAt != null || window?.resetInSeconds != null;
+}
+function normalizeLiveRateLimits(metadata: unknown): { primary?: UsageWindow; secondary?: UsageWindow; status: CodexAccountStatus } | undefined {
+  const rateLimits = findRateLimits(metadata);
+  if (!rateLimits) return undefined;
+  const primary = windowFromRateLimit('primary', rateLimits.primary);
+  const secondary = windowFromRateLimit('secondary', rateLimits.secondary);
+  if (!hasWindowSignal(primary) && !hasWindowSignal(secondary)) return undefined;
+  return { primary, secondary, status: rateLimits.rate_limit_reached_type ? 'limited' : 'ok' };
+}
+function parseHeaderValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value[0];
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+    try { return JSON.parse(trimmed) as unknown; } catch { return value; }
+  }
+  return value;
+}
+function liveRateLimitsFromHeaders(headers: Record<string, unknown> | undefined): ProbeRateLimits | undefined {
+  if (!headers) return undefined;
+  const byName: Record<string, unknown> = {};
+  for (const [rawKey, rawValue] of Object.entries(headers)) {
+    const key = rawKey.toLowerCase();
+    const value = parseHeaderValue(rawValue);
+    if ((key.includes('rate') || key.includes('limit')) && isRecord(value)) {
+      const found = findRateLimits(value);
+      if (found) return found;
+    }
+    byName[key.replace(/^x-/, '').replace(/-/g, '_')] = value;
+  }
+  const windowFor = (prefix: 'primary' | 'secondary') => {
+    const window: NonNullable<ProbeRateLimits['primary']> = {};
+    const copy = (target: keyof NonNullable<ProbeRateLimits['primary']>, ...names: string[]) => {
+      for (const name of names) {
+        const value = asNumberish(byName[name]);
+        if (value != null) { (window as Record<string, number>)[target] = value; return; }
+      }
+    };
+    copy('used_percent', `${prefix}_used_percent`, `codex_${prefix}_used_percent`, `ratelimit_${prefix}_used_percent`, `rate_limit_${prefix}_used_percent`);
+    copy('remaining_percent', `${prefix}_remaining_percent`, `codex_${prefix}_remaining_percent`, `ratelimit_${prefix}_remaining_percent`, `rate_limit_${prefix}_remaining_percent`);
+    copy('resets_at', `${prefix}_resets_at`, `codex_${prefix}_resets_at`, `ratelimit_${prefix}_resets_at`, `rate_limit_${prefix}_resets_at`);
+    copy('reset_at', `${prefix}_reset_at`, `codex_${prefix}_reset_at`, `ratelimit_${prefix}_reset_at`, `rate_limit_${prefix}_reset_at`);
+    copy('reset_in_seconds', `${prefix}_reset_in_seconds`, `codex_${prefix}_reset_in_seconds`, `ratelimit_${prefix}_reset_in_seconds`, `rate_limit_${prefix}_reset_in_seconds`);
+    return Object.keys(window).length > 0 ? window : undefined;
+  };
+  const out: ProbeRateLimits = { primary: windowFor('primary'), secondary: windowFor('secondary') };
+  return out.primary || out.secondary ? out : undefined;
+}
+function liveRateLimitCandidates(input: LiveUsageIngestInput): unknown[] {
+  const candidates: unknown[] = [];
+  if (input.rateLimits != null) candidates.push(input.rateLimits);
+  if (input.rate_limits != null) candidates.push(input.rate_limits);
+  const fromHeaders = liveRateLimitsFromHeaders(input.headers);
+  if (fromHeaders) candidates.push(fromHeaders);
+  return candidates;
 }
 function accountIdFromPiAuth(value: unknown): string | undefined {
   if (!isRecord(value)) return undefined;
@@ -461,7 +560,7 @@ function latestUsageEntries(db: DatabaseSync): Record<string, UsageEntry> {
       const window: UsageWindow = {
         label,
         remainingPercent: rowNumber(w.remaining_percent),
-        resetAt: rowNumber(w.reset_at),
+        resetAt: (() => { const resetAt = rowNumber(w.reset_at); return resetAt == null ? undefined : persistedResetAtMs(resetAt); })(),
         resetInSeconds: rowNumber(w.reset_in_seconds),
         stale: Number(w.stale) === 1,
       };
@@ -566,6 +665,7 @@ async function findLatestJsonl(dir: string): Promise<string | undefined> {
 }
 function findRateLimits(value: unknown): ProbeRateLimits | undefined {
   if (!isRecord(value)) return undefined;
+  if (isRecord(value) && (value.primary || value.secondary)) return value as ProbeRateLimits;
   const direct = value.rate_limits;
   if (isRecord(direct) && (direct.primary || direct.secondary)) return direct as ProbeRateLimits;
   for (const child of Object.values(value)) {
@@ -671,6 +771,59 @@ export async function refreshUsage(options: { stateRoot?: string; all?: boolean;
     closeDb(db);
   }
   return getUsage({ stateRoot });
+}
+
+function attributableSlot(db: DatabaseSync, input: LiveUsageIngestInput): string | undefined {
+  if (input.slot) return input.slot;
+  if (input.reservation_id) {
+    const row = db.prepare('SELECT slot FROM reservations WHERE id = ? AND (? IS NULL OR launch_id = ?)').get(input.reservation_id, input.launch_id ?? null, input.launch_id ?? null) as SqlRow | undefined;
+    return rowString(row?.slot);
+  }
+  if (input.launch_id) {
+    const rows = db.prepare('SELECT DISTINCT slot FROM reservations WHERE launch_id = ?').all(input.launch_id) as SqlRow[];
+    return rows.length === 1 ? rowString(rows[0].slot) : undefined;
+  }
+  return undefined;
+}
+
+export async function ingestLiveUsage(input: LiveUsageIngestInput): Promise<LiveUsageIngestResult> {
+  try {
+    const stateRoot = input.stateRoot || resolveStateRoot();
+    const db = openDb(stateRoot);
+    try {
+      const slot = attributableSlot(db, input);
+      if (!slot) return { ok: true, ingested: false, skipped: 'ambiguous_attribution' };
+      let normalized: ReturnType<typeof normalizeLiveRateLimits>;
+      for (const candidate of liveRateLimitCandidates(input)) {
+        normalized = normalizeLiveRateLimits(candidate);
+        if (normalized) break;
+      }
+      if (!normalized) return { ok: true, ingested: false, slot, skipped: 'no_rate_limits' };
+      const generatedAt = input.generated_at && Number.isFinite(input.generated_at) ? input.generated_at : Date.now();
+      const updatedAt = input.updated_at && Number.isFinite(input.updated_at) ? input.updated_at : generatedAt;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        writeUsageSnapshot(db, { slot, primary: normalized.primary, secondary: normalized.secondary, updatedAt, source: 'live', status: normalized.status }, generatedAt);
+        db.prepare('INSERT INTO launch_events(reservation_id, launch_id, slot, event_type, created_at, details_json) VALUES (?, ?, ?, ?, ?, ?)').run(input.reservation_id ?? null, input.launch_id ?? null, slot, 'live_usage_ingested', Date.now(), JSON.stringify({ source: 'live', has_primary: !!normalized.primary, has_secondary: !!normalized.secondary }));
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+      return { ok: true, ingested: true, slot };
+    } finally {
+      closeDb(db);
+    }
+  } catch (error) {
+    return { ok: false, ingested: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function ingestDirectPiLiveUsage(input: Omit<LiveUsageIngestInput, 'slot'>): Promise<LiveUsageIngestResult> {
+  const usage = await getUsage({ stateRoot: input.stateRoot });
+  const slot = selectSingleActivePiSlot(usage);
+  if (!slot) return { ok: true, ingested: false, skipped: 'ambiguous_attribution' };
+  return ingestLiveUsage({ ...input, slot });
 }
 
 function releaseExpiredReservations(db: DatabaseSync, now = Date.now()) {

@@ -10,7 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { getUsage, refreshUsage, resolveStateRoot } from "../../packages/codex-auth-balancer/src/index.ts";
+import { getUsage, ingestDirectPiLiveUsage, refreshUsage, resolveStateRoot } from "../../packages/codex-auth-balancer/src/index.ts";
 import type { CodexUsage, CodexAccountSlot, CodexAccountStatus, UsageWindow } from "../../packages/codex-auth-balancer/src/index.ts";
 import { dirname, join } from "node:path";
 import type {
@@ -140,8 +140,8 @@ export function parseCodexUsage(payload: unknown, now = Date.now()): CodexUsage 
 			const secondary = u.secondary == null ? undefined : parseUsageWindow(u.secondary);
 			const updatedAt = "updated_at" in u ? asNumber(u.updated_at) : undefined;
 			if ((u.primary != null && !primary) || (u.secondary != null && !secondary) || ("updated_at" in u && updatedAt == null)) return undefined;
-			if ("source" in u && u.source !== "cache" && u.source !== "probe" && u.source !== "unknown") return undefined;
-			usage = { primary, secondary, updatedAt, source: u.source as "cache" | "probe" | "unknown" | undefined };
+			if ("source" in u && u.source !== "cache" && u.source !== "probe" && u.source !== "live" && u.source !== "unknown") return undefined;
+			usage = { primary, secondary, updatedAt, source: u.source as "cache" | "probe" | "live" | "unknown" | undefined };
 		}
 		accounts.push({
 			slot: a.slot,
@@ -792,7 +792,10 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 		return payload;
 	});
 
-	pi.on("after_provider_response", async (_event, ctx) => {
+	pi.on("after_provider_response", async (event, ctx) => {
+		if (ctx.model?.provider === "openai-codex") {
+			void ingestDirectPiLiveUsage({ headers: event.headers }).catch(() => undefined);
+		}
 		refreshBalancedAffinity(ctx);
 		requestRender();
 	});

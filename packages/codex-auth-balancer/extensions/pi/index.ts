@@ -10,7 +10,7 @@ import {
   type SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { finishTokenLease, startTokenLease, type TokenLeaseFinishStatus } from '../../src/index.js';
+import { finishTokenLease, ingestLiveUsage, startTokenLease, type TokenLeaseFinishStatus } from '../../src/index.js';
 
 const PROVIDER = 'bravo-codex-balanced';
 const UPSTREAM_PROVIDER = 'openai-codex';
@@ -88,7 +88,20 @@ function streamBalanced(model: Model<typeof API>, context: Context, options?: Si
         removeAbortListener = () => options.signal?.removeEventListener('abort', onAbort);
       }
       const upstreamModel = { ...model, id: upstreamModelId(model), provider: UPSTREAM_PROVIDER, api: API };
-      const upstream = streamSimpleOpenAICodexResponses(upstreamModel, context, { ...options, apiKey: lease.access_token });
+      const upstreamOptions = {
+        ...options,
+        // The upstream openai-codex provider defaults to WebSocket/auto, but only
+        // SSE exposes HTTP response headers to onResponse. Default this balanced
+        // path to SSE so live usage ingestion cannot silently miss rate-limit
+        // headers; preserve an explicit caller transport for debugging/opt-in use.
+        transport: options?.transport ?? 'sse',
+        apiKey: lease.access_token,
+        onResponse: async (response: { status: number; headers: Record<string, string> }, responseModel: Model<typeof API>) => {
+          await (options as any)?.onResponse?.(response, responseModel);
+          void ingestLiveUsage({ slot: lease.slot, reservation_id: lease.reservation_id, launch_id: lease.launch_id, headers: response.headers }).catch(() => undefined);
+        },
+      } as SimpleStreamOptions;
+      const upstream = streamSimpleOpenAICodexResponses(upstreamModel, context, upstreamOptions);
       try {
         for await (const event of upstream) {
           lastEvent = event;
