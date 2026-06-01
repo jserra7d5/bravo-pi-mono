@@ -1,0 +1,3188 @@
+{
+  "schema": 1,
+  "runner": "node:test",
+  "machine": "linux-x86_64",
+  "updated": "2026-06-01",
+  "unit_seconds": {
+    "async-subagents::catalogEntry derives capabilities only from tools, skills, and extensions": {
+      "median": 0.001671,
+      "min": 0.001637,
+      "samples": 3
+    },
+    "async-subagents::catalogEntry treats bash/edit/write as mutation-capable": {
+      "median": 0.000149,
+      "min": 0.000148,
+      "samples": 3
+    },
+    "async-subagents::catalogEntry derives variant overlays separately": {
+      "median": 0.004369,
+      "min": 0.004252,
+      "samples": 3
+    },
+    "async-subagents::renderAgentCatalog omits model identity and sanitizes metadata": {
+      "median": 0.000301,
+      "min": 0.000282,
+      "samples": 3
+    },
+    "async-subagents::agent parser falls back to filename for missing name": {
+      "median": 0.002478,
+      "min": 0.002023,
+      "samples": 3
+    },
+    "async-subagents::agent parser accepts default thinking levels": {
+      "median": 0.00108,
+      "min": 0.000585,
+      "samples": 3
+    },
+    "async-subagents::agent parser accepts snake-case thinking_level alias": {
+      "median": 0.000829,
+      "min": 0.000453,
+      "samples": 3
+    },
+    "async-subagents::agent parser accepts nested variants": {
+      "median": 0.002377,
+      "min": 0.00226,
+      "samples": 3
+    },
+    "async-subagents::discovery uses project over user over builtin precedence": {
+      "median": 0.002253,
+      "min": 0.001537,
+      "samples": 3
+    },
+    "async-subagents::packaged scout prompt teaches context-map handoff boundaries": {
+      "median": 0.00026,
+      "min": 0.000241,
+      "samples": 3
+    },
+    "async-subagents::missing description fails clearly": {
+      "median": 0.000803,
+      "min": 0.000669,
+      "samples": 3
+    },
+    "async-subagents::project path-based skills and extensions require explicit approval": {
+      "median": 0.000822,
+      "min": 0.000643,
+      "samples": 3
+    },
+    "async-subagents::child-control delivers inbox messages and emits structured events": {
+      "median": 0.029469,
+      "min": 0.012532,
+      "samples": 3
+    },
+    "async-subagents::session_compact hook injects an async status reminder when runs need attention": {
+      "median": 0.028812,
+      "min": 0.018094,
+      "samples": 3
+    },
+    "async-subagents::session_compact hook stays quiet when there is no in-flight or unread async work": {
+      "median": 0.016876,
+      "min": 0.015326,
+      "samples": 3
+    },
+    "async-subagents::compaction reminder is omitted when no async runs need attention": {
+      "median": 0.017318,
+      "min": 0.016742,
+      "samples": 3
+    },
+    "async-subagents::compaction reminder preserves active, blocked, and result-ready subagent state": {
+      "median": 0.025441,
+      "min": 0.024272,
+      "samples": 3
+    },
+    "async-subagents::compaction reminder omits terminal results after they are collected": {
+      "median": 0.013478,
+      "min": 0.011969,
+      "samples": 3
+    },
+    "async-subagents::compaction reminder includes task counts in text and details": {
+      "median": 0.025493,
+      "min": 0.013964,
+      "samples": 3
+    },
+    "async-subagents::defaultRunRoot uses harness-owned async subagents home by default": {
+      "median": 0.004505,
+      "min": 0.002412,
+      "samples": 3
+    },
+    "async-subagents::defaultRunRoot respects explicit configured root": {
+      "median": 0.000185,
+      "min": 0.000183,
+      "samples": 3
+    },
+    "async-subagents::defaultRunRoot respects ASYNC_SUBAGENTS_HOME": {
+      "median": 0.000156,
+      "min": 0.000152,
+      "samples": 3
+    },
+    "async-subagents::loadAsyncSubagentsConfig validates codexAuthBalancer": {
+      "median": 0.002259,
+      "min": 0.000732,
+      "samples": 3
+    },
+    "async-subagents::loadAsyncSubagentsConfig rejects unknown codexAuthBalancer keys": {
+      "median": 0.001181,
+      "min": 0.000659,
+      "samples": 3
+    },
+    "async-subagents::loadAsyncSubagentsConfig requires defaultMaxRunSeconds to be a positive integer JSON number": {
+      "median": 0.002259,
+      "min": 0.00109,
+      "samples": 3
+    },
+    "async-subagents::codex auth balancer merges prepare env and cleans up after sync-back success": {
+      "median": 0.086373,
+      "min": 0.075733,
+      "samples": 3
+    },
+    "async-subagents::codex auth balancer skips bravo-codex-balanced provider and propagates state dir": {
+      "median": 0.014288,
+      "min": 0.014124,
+      "samples": 3
+    },
+    "async-subagents::codex auth balancer fail-closed fails and warn fallback continues": {
+      "median": 0.039683,
+      "min": 0.032469,
+      "samples": 3
+    },
+    "async-subagents::codex auth balancer retains isolated dir with marker on sync-back conflict": {
+      "median": 0.563689,
+      "min": 0.548734,
+      "samples": 3
+    },
+    "async-subagents::preflight failure after prepare-launch syncs back and cleans isolated auth dir before failing": {
+      "median": 0.196316,
+      "min": 0.123005,
+      "samples": 3
+    },
+    "async-subagents::startSubagent drives a detached fake child lifecycle": {
+      "median": 0.385308,
+      "min": 0.34896,
+      "samples": 3
+    },
+    "async-subagents::startSubagent assigns and persists generated display names separately from agent type": {
+      "median": 0.059962,
+      "min": 0.053176,
+      "samples": 3
+    },
+    "async-subagents::assignDisplayName skips names already used by active runs": {
+      "median": 0.004163,
+      "min": 0.002464,
+      "samples": 3
+    },
+    "async-subagents::startSubagent can explicitly opt out of Pi session recording": {
+      "median": 0.019575,
+      "min": 0.014615,
+      "samples": 3
+    },
+    "async-subagents::startSubagent applies and persists definition thinking level with start override precedence": {
+      "median": 0.018498,
+      "min": 0.018196,
+      "samples": 3
+    },
+    "async-subagents::startSubagent applies a named agent variant before launch": {
+      "median": 0.017794,
+      "min": 0.014906,
+      "samples": 3
+    },
+    "async-subagents::model preflight fails before launch when isolated child Pi cannot see the requested model": {
+      "median": 0.166234,
+      "min": 0.12952,
+      "samples": 3
+    },
+    "async-subagents::model preflight uses the selected variant extension set": {
+      "median": 0.543004,
+      "min": 0.499942,
+      "samples": 3
+    },
+    "async-subagents::context fork fails clearly without a parent Pi session reference": {
+      "median": 0.016793,
+      "min": 0.014537,
+      "samples": 3
+    },
+    "async-subagents::context fork uses branch adapter returned path as actual Pi session path": {
+      "median": 0.021197,
+      "min": 0.019606,
+      "samples": 3
+    },
+    "async-subagents::context fork only falls back to fresh when explicitly allowed": {
+      "median": 0.023705,
+      "min": 0.014646,
+      "samples": 3
+    },
+    "async-subagents::startSubagent returns no polling follow-up for running async children": {
+      "median": 0.165018,
+      "min": 0.16158,
+      "samples": 3
+    },
+    "async-subagents::supervisor writes result before terminal status and terminal event": {
+      "median": 0.03706,
+      "min": 0.034756,
+      "samples": 3
+    },
+    "async-subagents::terminal finalization preserves an existing result when status is stale": {
+      "median": 0.009094,
+      "min": 0.008094,
+      "samples": 3
+    },
+    "async-subagents::spawn failure still records a terminal result after creating the run directory": {
+      "median": 0.274445,
+      "min": 0.219975,
+      "samples": 3
+    },
+    "async-subagents::waitOnce race mode returns the first ready run and coalesces terminal events into result readiness": {
+      "median": 0.013857,
+      "min": 0.01191,
+      "samples": 3
+    },
+    "async-subagents::waitSubagents all mode accumulates staggered non-terminal events across polls": {
+      "median": 0.100158,
+      "min": 0.094796,
+      "samples": 3
+    },
+    "async-subagents::waitSubagents each mode returns the first ready run in v1": {
+      "median": 0.004456,
+      "min": 0.003901,
+      "samples": 3
+    },
+    "async-subagents::sendSubagentMessage appends inbox messages and reports unsupported live delivery": {
+      "median": 0.003598,
+      "min": 0.003124,
+      "samples": 3
+    },
+    "async-subagents::status and result helpers read durable snapshots": {
+      "median": 0.004308,
+      "min": 0.003574,
+      "samples": 3
+    },
+    "async-subagents::extractCostFromSessionLog returns undefined for empty file": {
+      "median": 0.001242,
+      "min": 0.001238,
+      "samples": 3
+    },
+    "async-subagents::extractCostFromSessionLog returns undefined when no assistant messages present": {
+      "median": 0.000707,
+      "min": 0.00061,
+      "samples": 3
+    },
+    "async-subagents::extractCostFromSessionLog returns the single assistant cost when only one entry is present": {
+      "median": 0.000436,
+      "min": 0.000378,
+      "samples": 3
+    },
+    "async-subagents::extractCostFromSessionLog sums multiple assistant entries": {
+      "median": 0.000581,
+      "min": 0.000534,
+      "samples": 3
+    },
+    "async-subagents::extractCostFromSessionLog only counts assistant messages, ignoring user turns": {
+      "median": 0.000418,
+      "min": 0.000417,
+      "samples": 3
+    },
+    "async-subagents::extractCostFromSessionLog skips corrupt lines in the middle and still sums the rest": {
+      "median": 0.000448,
+      "min": 0.000399,
+      "samples": 3
+    },
+    "async-subagents::extractCostFromSessionLog returns undefined for nonexistent path": {
+      "median": 0.000184,
+      "min": 0.000183,
+      "samples": 3
+    },
+    "async-subagents::extractCostFromSessionLog returns undefined when piSessionPath is missing": {
+      "median": 7.2e-05,
+      "min": 6.7e-05,
+      "samples": 3
+    },
+    "async-subagents::extractCostFromSessionLog ignores assistant messages with non-numeric cost": {
+      "median": 0.000567,
+      "min": 0.000556,
+      "samples": 3
+    },
+    "async-subagents::extractCostFromSessionLogSync mirrors the async surface": {
+      "median": 0.001849,
+      "min": 0.000608,
+      "samples": 3
+    },
+    "async-subagents::aggregateCostForSubtree sums the root plus its descendants from persisted results": {
+      "median": 0.015148,
+      "min": 0.013389,
+      "samples": 3
+    },
+    "async-subagents::aggregateCostForSubtree returns undefined when no run in the subtree has cost": {
+      "median": 0.001828,
+      "min": 0.001342,
+      "samples": 3
+    },
+    "async-subagents::loadAsyncSubagentsConfig loads approved absolute default extensions and dedupes realpaths": {
+      "median": 0.005384,
+      "min": 0.002592,
+      "samples": 3
+    },
+    "async-subagents::loadAsyncSubagentsConfig rejects unapproved, unknown, relative, nonexistent, and invalid tool entries": {
+      "median": 0.005355,
+      "min": 0.004325,
+      "samples": 3
+    },
+    "async-subagents::startSubagent logs default extension provenance for launched children": {
+      "median": 0.035984,
+      "min": 0.031567,
+      "samples": 3
+    },
+    "async-subagents::buildPiCommand places default extensions before agent extensions and dedupes realpaths": {
+      "median": 0.001061,
+      "min": 0.000418,
+      "samples": 3
+    },
+    "async-subagents::frontmatter parser supports strings, booleans, numbers, inline arrays, block arrays, and body": {
+      "median": 0.002974,
+      "min": 0.00184,
+      "samples": 3
+    },
+    "async-subagents::frontmatter parser rejects unsupported nested maps": {
+      "median": 0.000342,
+      "min": 0.000317,
+      "samples": 3
+    },
+    "async-subagents::readJsonl ignores truncated final line and does not advance past it": {
+      "median": 0.010867,
+      "min": 0.005775,
+      "samples": 3
+    },
+    "async-subagents::atomicWriteJson writes complete JSON to the target path": {
+      "median": 0.001401,
+      "min": 0.001087,
+      "samples": 3
+    },
+    "async-subagents::latest non-expired root-session lease owns wake-up delivery": {
+      "median": 0.007689,
+      "min": 0.005236,
+      "samples": 3
+    },
+    "async-subagents::finalizeTerminalRun extracts assistant cost from the pi session log and writes it to metrics.cost.total": {
+      "median": 0.018519,
+      "min": 0.011506,
+      "samples": 3
+    },
+    "async-subagents::finalizeTerminalRun leaves metrics undefined when there is no pi session log to read": {
+      "median": 0.010456,
+      "min": 0.010423,
+      "samples": 3
+    },
+    "async-subagents::finalizeTerminalRun leaves metrics undefined when the session log has no assistant turns": {
+      "median": 0.007169,
+      "min": 0.006516,
+      "samples": 3
+    },
+    "async-subagents::finalizeTerminalRun does not charge shared continuation session history": {
+      "median": 0.009599,
+      "min": 0.007429,
+      "samples": 3
+    },
+    "async-subagents::live widget renders the chrome card with header, rows, and +N tail": {
+      "median": 0.074609,
+      "min": 0.070427,
+      "samples": 3
+    },
+    "async-subagents::live widget header omits empty count groups": {
+      "median": 0.008325,
+      "min": 0.004904,
+      "samples": 3
+    },
+    "async-subagents::live widget shows the need-you count when an urgent run is present": {
+      "median": 0.022426,
+      "min": 0.016305,
+      "samples": 3
+    },
+    "async-subagents::live widget does not count collected completed results as ready": {
+      "median": 0.015992,
+      "min": 0.014878,
+      "samples": 3
+    },
+    "async-subagents::live widget chrome holds a constant width across all rendered lines": {
+      "median": 0.015952,
+      "min": 0.015089,
+      "samples": 3
+    },
+    "async-subagents::live widget returns no lines when no rows are visible": {
+      "median": 0.003944,
+      "min": 0.003615,
+      "samples": 3
+    },
+    "async-subagents::live widget hides terminal runs older than the default one minute horizon": {
+      "median": 0.033364,
+      "min": 0.032999,
+      "samples": 3
+    },
+    "async-subagents::live widget honors an explicit longer completed visibility horizon": {
+      "median": 0.010164,
+      "min": 0.009226,
+      "samples": 3
+    },
+    "async-subagents::live widget header sums cost across mixed terminal + active rows": {
+      "median": 0.027445,
+      "min": 0.022525,
+      "samples": 3
+    },
+    "async-subagents::live widget header omits the cost segment when every row is below the threshold": {
+      "median": 0.007731,
+      "min": 0.007181,
+      "samples": 3
+    },
+    "async-subagents::live widget header drops cost first when the badge cannot fit at narrow widths": {
+      "median": 0.023437,
+      "min": 0.021809,
+      "samples": 3
+    },
+    "async-subagents::updateLiveWidget passes a component factory that renders at the width pi provides, not process.stdout.columns": {
+      "median": 0.013909,
+      "min": 0.012458,
+      "samples": 3
+    },
+    "async-subagents::live widget component render uses the precomputed task snapshot": {
+      "median": 0.019634,
+      "min": 0.016394,
+      "samples": 3
+    },
+    "async-subagents::updateLiveWidget keeps pi TUI as this when requesting render after an update": {
+      "median": 0.009629,
+      "min": 0.008791,
+      "samples": 3
+    },
+    "async-subagents::updateLiveWidget clears the widget when there are no visible rows": {
+      "median": 0.001597,
+      "min": 0.001448,
+      "samples": 3
+    },
+    "async-subagents::live widget renders task summary and maps task to run rows": {
+      "median": 0.017284,
+      "min": 0.01456,
+      "samples": 3
+    },
+    "async-subagents::live widget uses summary read-models instead of reading every run's events/results": {
+      "median": 1.86051,
+      "min": 1.792017,
+      "samples": 3
+    },
+    "async-subagents::manual retention dry-run skips active and unhandled result-ready runs": {
+      "median": 0.026963,
+      "min": 0.022677,
+      "samples": 3
+    },
+    "async-subagents::terminal result with missing summary delivers safe metadata once": {
+      "median": 0.02677,
+      "min": 0.024002,
+      "samples": 3
+    },
+    "async-subagents::two pending blocked/question events before poll both deliver once": {
+      "median": 0.019602,
+      "min": 0.016108,
+      "samples": 3
+    },
+    "async-subagents::watcher and live widget fall back when summary is missing": {
+      "median": 0.006429,
+      "min": 0.004633,
+      "samples": 3
+    },
+    "async-subagents::rebuildDerivedIndexes restores latest wake event metadata": {
+      "median": 0.011635,
+      "min": 0.008933,
+      "samples": 3
+    },
+    "async-subagents::corrupt summary falls back to canonical status": {
+      "median": 0.006341,
+      "min": 0.005713,
+      "samples": 3
+    },
+    "async-subagents::wakeup polling reads full result only for subscribed ready runs": {
+      "median": 1.261751,
+      "min": 1.239554,
+      "samples": 3
+    },
+    "async-subagents::buildPiCommand disables ambient context and allows only the control tool when no user tools are declared": {
+      "median": 0.004772,
+      "min": 0.001972,
+      "samples": 3
+    },
+    "async-subagents::buildPiCommand supports explicit session opt-out": {
+      "median": 0.000184,
+      "min": 0.000174,
+      "samples": 3
+    },
+    "async-subagents::buildPiCommand passes declared tools, skills, extensions, model, and thinking level explicitly": {
+      "median": 0.00014,
+      "min": 0.000135,
+      "samples": 3
+    },
+    "async-subagents::writeLaunchLog redacts secret-like environment values": {
+      "median": 0.001046,
+      "min": 0.000893,
+      "samples": 3
+    },
+    "async-subagents::readParentPiSessionRef extracts Pi session file and leaf id from extension context": {
+      "median": 0.001559,
+      "min": 0.001553,
+      "samples": 3
+    },
+    "async-subagents::readParentPiSessionRef returns null for in-memory or pre-leaf parent sessions": {
+      "median": 0.000131,
+      "min": 0.000125,
+      "samples": 3
+    },
+    "async-subagents::subagent_status tool defaults to root session direct children": {
+      "median": 0.023766,
+      "min": 0.020424,
+      "samples": 3
+    },
+    "async-subagents::task_list defaults to active queue after task_clear while includeCompleted shows cancelled history": {
+      "median": 0.047344,
+      "min": 0.036632,
+      "samples": 3
+    },
+    "async-subagents::model-facing tool catalog does not expose subagent_wait": {
+      "median": 0.009104,
+      "min": 0.008062,
+      "samples": 3
+    },
+    "async-subagents::subagent_message appends inbox messages and waits for child-control acknowledgement": {
+      "median": 0.514702,
+      "min": 0.510484,
+      "samples": 3
+    },
+    "async-subagents::subagent_message can append without required acknowledgement": {
+      "median": 0.511473,
+      "min": 0.510291,
+      "samples": 3
+    },
+    "async-subagents::subagent_message rejects lifecycle controls": {
+      "median": 0.009464,
+      "min": 0.008096,
+      "samples": 3
+    },
+    "async-subagents::subagent_interrupt cancel queues supervisor control without finalizing live run": {
+      "median": 0.017382,
+      "min": 0.016778,
+      "samples": 3
+    },
+    "async-subagents::subagent_continue rejects non-paused runs": {
+      "median": 0.0134,
+      "min": 0.007664,
+      "samples": 3
+    },
+    "async-subagents::subagent_continue queues resume control even when required ack fails": {
+      "median": 0.517394,
+      "min": 0.514218,
+      "samples": 3
+    },
+    "async-subagents::subagent_continue creates an async terminal continuation using the original Pi session": {
+      "median": 0.056355,
+      "min": 0.037689,
+      "samples": 3
+    },
+    "async-subagents::subagent_continue rejects concurrent terminal continuation starts for the same session": {
+      "median": 0.084473,
+      "min": 0.08358,
+      "samples": 3
+    },
+    "async-subagents::subagent_continue recovers stale terminal continuation startup locks": {
+      "median": 0.038221,
+      "min": 0.035308,
+      "samples": 3
+    },
+    "async-subagents::subagent_continue points to an active terminal continuation instead of launching another": {
+      "median": 0.016822,
+      "min": 0.015768,
+      "samples": 3
+    },
+    "async-subagents::subagent_continue returns a structured error for terminal runs without a recorded Pi session": {
+      "median": 0.010681,
+      "min": 0.010181,
+      "samples": 3
+    },
+    "async-subagents::Pi tool schemas expose thinking level controls and skill forwarding": {
+      "median": 0.000245,
+      "min": 0.000237,
+      "samples": 3
+    },
+    "async-subagents::subagent_start rejects path-like forwarded skills": {
+      "median": 0.005196,
+      "min": 0.005113,
+      "samples": 3
+    },
+    "async-subagents::every subagent tool opts into the self-rendered shell so card chrome sits on chat bg": {
+      "median": 8.3e-05,
+      "min": 8e-05,
+      "samples": 3
+    },
+    "async-subagents::startSubagent surfaces agent-definition detail and forwarded skills on the start result": {
+      "median": 0.028076,
+      "min": 0.026404,
+      "samples": 3
+    },
+    "async-subagents::subagent_result can recover by runDir": {
+      "median": 0.017535,
+      "min": 0.016916,
+      "samples": 3
+    },
+    "async-subagents::subagent_status reports result and status mismatches": {
+      "median": 0.0111,
+      "min": 0.010864,
+      "samples": 3
+    },
+    "async-subagents::subagent_name_pack inspects and changes the active pack for future runs": {
+      "median": 0.030992,
+      "min": 0.029666,
+      "samples": 3
+    },
+    "async-subagents::subagent_result omits model-facing body when includeBody is false": {
+      "median": 0.017116,
+      "min": 0.016551,
+      "samples": 3
+    },
+    "async-subagents::subagent_result returns body with truncation metadata": {
+      "median": 0.019105,
+      "min": 0.015871,
+      "samples": 3
+    },
+    "async-subagents::idle terminal result wakeups trigger the parent once": {
+      "median": 0.038821,
+      "min": 0.032781,
+      "samples": 3
+    },
+    "async-subagents::terminal result wakeup bodies are capped with subagent_result recovery marker": {
+      "median": 0.014683,
+      "min": 0.014557,
+      "samples": 3
+    },
+    "async-subagents::active terminal result wakeups also steer into the running parent turn": {
+      "median": 0.014438,
+      "min": 0.00966,
+      "samples": 3
+    },
+    "async-subagents::paused wakeups instruct continue or cancel": {
+      "median": 0.01281,
+      "min": 0.01167,
+      "samples": 3
+    },
+    "async-subagents::task wakeup polling persists a task-event cursor after catch-up": {
+      "median": 0.016311,
+      "min": 0.012449,
+      "samples": 3
+    },
+    "async-subagents::question wakeups remain steerable and trigger parent action": {
+      "median": 0.013957,
+      "min": 0.012723,
+      "samples": 3
+    },
+    "async-subagents::blocked wakeups remain steerable and trigger parent action": {
+      "median": 0.014716,
+      "min": 0.012392,
+      "samples": 3
+    },
+    "async-subagents::assemblePrompt writes isolated system and task prompts with explicit includes only": {
+      "median": 0.008536,
+      "min": 0.007559,
+      "samples": 3
+    },
+    "async-subagents::async subagents prompt module establishes neutral lifecycle rules": {
+      "median": 0.001091,
+      "min": 0.001045,
+      "samples": 3
+    },
+    "async-subagents::appendAsyncSubagentsPrompt appends once": {
+      "median": 0.000188,
+      "min": 0.000164,
+      "samples": 3
+    },
+    "async-subagents::identitySlot hashes deterministically into the 8-color palette": {
+      "median": 0.00123,
+      "min": 0.001175,
+      "samples": 3
+    },
+    "async-subagents::identitySlot accepts color collisions between distinct names (8 slots, more names)": {
+      "median": 8.7e-05,
+      "min": 8e-05,
+      "samples": 3
+    },
+    "async-subagents::idMention and idBar paint the same color for a name across calls": {
+      "median": 0.00013,
+      "min": 0.000126,
+      "samples": 3
+    },
+    "async-subagents::idBar override replaces the identity color with the supplied ANSI": {
+      "median": 7.4e-05,
+      "min": 7.1e-05,
+      "samples": 3
+    },
+    "async-subagents::stateGlyph maps each runtime state to its decision-2 glyph": {
+      "median": 0.000119,
+      "min": 0.000117,
+      "samples": 3
+    },
+    "async-subagents::stateGlyph colors are semantic": {
+      "median": 9.4e-05,
+      "min": 9.2e-05,
+      "samples": 3
+    },
+    "async-subagents::visWidth treats CJK and emoji as 2 cells and ignores ANSI escapes": {
+      "median": 0.000317,
+      "min": 0.000313,
+      "samples": 3
+    },
+    "async-subagents::truncAnsi caps visible width and appends an ellipsis": {
+      "median": 0.000214,
+      "min": 0.000211,
+      "samples": 3
+    },
+    "async-subagents::widget row hierarchy: urgent overrides identity color, done dims, active uses identity": {
+      "median": 0.000501,
+      "min": 0.000495,
+      "samples": 3
+    },
+    "async-subagents::widget responsive layout dispatches at the 54 and 70 boundaries": {
+      "median": 0.000258,
+      "min": 0.000255,
+      "samples": 3
+    },
+    "async-subagents::widget row layouts include or omit the role and age per width": {
+      "median": 0.000203,
+      "min": 0.000202,
+      "samples": 3
+    },
+    "async-subagents::widget header counts active/urgent/ready in their semantic colors and omits zeros": {
+      "median": 0.000857,
+      "min": 0.000511,
+      "samples": 3
+    },
+    "async-subagents::widget header treats unread failed results as ready but not active": {
+      "median": 0.000161,
+      "min": 0.000123,
+      "samples": 3
+    },
+    "async-subagents::card chrome holds its box at widths 72, 56, 44, and 32": {
+      "median": 0.00029,
+      "min": 0.000265,
+      "samples": 3
+    },
+    "async-subagents::display name is capped at 16 visible cells with an ellipsis in widget rows": {
+      "median": 0.00011,
+      "min": 9.4e-05,
+      "samples": 3
+    },
+    "async-subagents::launch card surfaces task, model, thinking, skills, tools, budget, and context": {
+      "median": 0.000269,
+      "min": 0.000256,
+      "samples": 3
+    },
+    "async-subagents::result card shows summary, metrics, artifacts, and duration in the badge": {
+      "median": 0.000211,
+      "min": 0.000206,
+      "samples": 3
+    },
+    "async-subagents::result card holds width when body lines contain default-wide emoji": {
+      "median": 0.002062,
+      "min": 0.001924,
+      "samples": 3
+    },
+    "async-subagents::result card normalizes child body tabs before rendering fixed-width rows": {
+      "median": 0.000364,
+      "min": 0.000218,
+      "samples": 3
+    },
+    "async-subagents::text block fallback normalizes tabs before returning render lines": {
+      "median": 0.000901,
+      "min": 0.000897,
+      "samples": 3
+    },
+    "async-subagents::generic tool result fallback normalizes tabs before returning render lines": {
+      "median": 0.000207,
+      "min": 0.000207,
+      "samples": 3
+    },
+    "async-subagents::wake card kind picks the correct badge without fake affordance chips": {
+      "median": 0.000277,
+      "min": 0.000275,
+      "samples": 3
+    },
+    "async-subagents::formatRunRow plain-text fallback preserves identity mention and state label": {
+      "median": 0.000255,
+      "min": 0.000248,
+      "samples": 3
+    },
+    "async-subagents::renderSubagentToolCallComponent renders a launch card when called with agent args": {
+      "median": 0.000245,
+      "min": 0.000245,
+      "samples": 3
+    },
+    "async-subagents::renderSubagentToolCallComponent keeps multiline args inside single physical rows": {
+      "median": 0.00046,
+      "min": 0.000446,
+      "samples": 3
+    },
+    "async-subagents::renderSubagentToolCallComponent renders a status card when no run is supplied": {
+      "median": 0.001712,
+      "min": 0.000256,
+      "samples": 3
+    },
+    "async-subagents::renderSubagentToolCallComponent renders task tool cards": {
+      "median": 0.000191,
+      "min": 0.000168,
+      "samples": 3
+    },
+    "async-subagents::renderSubagentToolResultComponent renders a result card from terminal result details": {
+      "median": 0.000187,
+      "min": 0.000176,
+      "samples": 3
+    },
+    "async-subagents::renderSubagentToolResultComponent launch card surfaces agent-definition detail": {
+      "median": 0.000214,
+      "min": 0.000206,
+      "samples": 3
+    },
+    "async-subagents::renderSubagentToolResultComponent falls back to text summary when not a card payload": {
+      "median": 5.3e-05,
+      "min": 5.2e-05,
+      "samples": 3
+    },
+    "async-subagents::renderSubagentToolResultComponent renders nested wait-body details when expanded": {
+      "median": 8.4e-05,
+      "min": 8.4e-05,
+      "samples": 3
+    },
+    "async-subagents::renderSubagentWakeMessage renders a wake card with badge and no fake affordance chips": {
+      "median": 0.000186,
+      "min": 0.000182,
+      "samples": 3
+    },
+    "async-subagents::renderSubagentWakeMessage preserves an explicitly empty inline body": {
+      "median": 0.000341,
+      "min": 0.00034,
+      "samples": 3
+    },
+    "async-subagents::renderSubagentWakeMessageComponent adapts the card width to the render viewport": {
+      "median": 0.000202,
+      "min": 0.000201,
+      "samples": 3
+    },
+    "async-subagents::run result summary preserves the child result summary": {
+      "median": 0.000195,
+      "min": 0.000186,
+      "samples": 3
+    },
+    "async-subagents::formatCost suppresses values under one cent and switches decimals at the dollar mark": {
+      "median": 7.5e-05,
+      "min": 7.1e-05,
+      "samples": 3
+    },
+    "async-subagents::costHeaderSegment paints in the shared cost color when present and disappears under threshold": {
+      "median": 4.9e-05,
+      "min": 4.7e-05,
+      "samples": 3
+    },
+    "async-subagents::widget header surfaces the cumulative cost segment when totalCost is at or above one cent": {
+      "median": 0.000127,
+      "min": 0.000124,
+      "samples": 3
+    },
+    "async-subagents::widget header omits the cost segment when totalCost is undefined or under the threshold": {
+      "median": 0.000202,
+      "min": 0.000201,
+      "samples": 3
+    },
+    "async-subagents::widget header drops the cost segment first when the badge cannot fit at narrow widths": {
+      "median": 0.000118,
+      "min": 0.000117,
+      "samples": 3
+    },
+    "async-subagents::widget chrome holds its declared width when the card includes a cost segment": {
+      "median": 0.000186,
+      "min": 0.000183,
+      "samples": 3
+    },
+    "async-subagents::stateGlyph maps ready state to \u25ab": {
+      "median": 4.1e-05,
+      "min": 4.1e-05,
+      "samples": 3
+    },
+    "async-subagents::renderWidgetRow formats row with task at different layouts": {
+      "median": 0.000107,
+      "min": 0.000106,
+      "samples": 3
+    },
+    "async-subagents::renderWidgetCard renders task section with priority and overflow": {
+      "median": 0.000359,
+      "min": 0.000356,
+      "samples": 3
+    },
+    "async-subagents::root sessions in the same repo keep direct-child defaults separate": {
+      "median": 0.010703,
+      "min": 0.005266,
+      "samples": 3
+    },
+    "async-subagents::readRootSession returns the latest session for a cwd when no Pi session id is available": {
+      "median": 0.009014,
+      "min": 0.006069,
+      "samples": 3
+    },
+    "async-subagents::readRootSession isolates roots by Pi session id within the same cwd": {
+      "median": 0.005825,
+      "min": 0.002467,
+      "samples": 3
+    },
+    "async-subagents::RunStore creates durable run layout and leaves result absent until completion": {
+      "median": 0.007726,
+      "min": 0.005436,
+      "samples": 3
+    },
+    "async-subagents::RunStore can resolve legacy project-local .subagents run indexes": {
+      "median": 0.008839,
+      "min": 0.005407,
+      "samples": 3
+    },
+    "async-subagents::RunStore writes and resolves runs through the harness global index from another cwd": {
+      "median": 0.008424,
+      "min": 0.004285,
+      "samples": 3
+    },
+    "async-subagents::RunStore reads and writes status, events, inbox, and terminal result": {
+      "median": 0.012402,
+      "min": 0.006276,
+      "samples": 3
+    },
+    "async-subagents::manual pause suspends runtime budget and resume reinstalls timeout": {
+      "median": 1.288861,
+      "min": 1.279456,
+      "samples": 3
+    },
+    "async-subagents::supervisor removes lifecycle listeners after child settles": {
+      "median": 0.083152,
+      "min": 0.068336,
+      "samples": 3
+    },
+    "async-subagents::TaskStore creates batch tasks with alias dependencies and derived states": {
+      "median": 0.016344,
+      "min": 0.013694,
+      "samples": 3
+    },
+    "async-subagents::TaskStore rejects dependency cycles": {
+      "median": 0.007324,
+      "min": 0.001904,
+      "samples": 3
+    },
+    "async-subagents::TaskStore claim, submit, and accept enforce token ownership": {
+      "median": 0.017719,
+      "min": 0.010998,
+      "samples": 3
+    },
+    "async-subagents::TaskStore force reopen invalidates transitive completed dependents": {
+      "median": 0.05349,
+      "min": 0.028873,
+      "samples": 3
+    },
+    "async-subagents::TaskStore readEvents supports incremental cursors": {
+      "median": 0.004078,
+      "min": 0.003946,
+      "samples": 3
+    },
+    "async-subagents::TaskStore updateOwnerDisplayName updates owner and attempts displayName": {
+      "median": 0.004019,
+      "min": 0.003612,
+      "samples": 3
+    },
+    "async-subagents::TaskStore clearTasks cancels all non-completed tasks": {
+      "median": 0.025297,
+      "min": 0.011887,
+      "samples": 3
+    },
+    "async-subagents::task_clear returns subagent_interrupt next-actions for owned running tasks": {
+      "median": 0.026927,
+      "min": 0.021608,
+      "samples": 3
+    },
+    "async-subagents::task_clear marks and suppresses affected task wakeups": {
+      "median": 0.021778,
+      "min": 0.017008,
+      "samples": 3
+    },
+    "async-subagents::parent tools create separate task roots for different Pi sessions in the same cwd": {
+      "median": 0.01277,
+      "min": 0.009207,
+      "samples": 3
+    },
+    "async-subagents::pollWakeups requires the owner lease and dedupes terminal results": {
+      "median": 0.02041,
+      "min": 0.01711,
+      "samples": 3
+    },
+    "async-subagents::pollWakeups includes capped terminal result body while keeping result body redacted": {
+      "median": 0.016594,
+      "min": 0.012759,
+      "samples": 3
+    },
+    "async-subagents::pollWakeups caps terminal result body by code point with recovery marker": {
+      "median": 0.021501,
+      "min": 0.014283,
+      "samples": 3
+    },
+    "async-subagents::pollWakeups ignores unsubscribed runs": {
+      "median": 0.005847,
+      "min": 0.005014,
+      "samples": 3
+    },
+    "async-subagents::markWakeupHandled records handled delivery metadata": {
+      "median": 0.010675,
+      "min": 0.010178,
+      "samples": 3
+    },
+    "async-subagents::markWakeupHandled suppresses terminal result before watcher delivery": {
+      "median": 0.008923,
+      "min": 0.006128,
+      "samples": 3
+    },
+    "async-subagents::pollWakeups does not redeliver durable results after collection clears readiness": {
+      "median": 0.014575,
+      "min": 0.009001,
+      "samples": 3
+    },
+    "async-subagents::model follow-up polling delivers terminal results once": {
+      "median": 0.013345,
+      "min": 0.010402,
+      "samples": 3
+    },
+    "async-subagents::model follow-up polling still delivers old completed results": {
+      "median": 0.008893,
+      "min": 0.008478,
+      "samples": 3
+    },
+    "async-subagents::pollWakeups remaps a question event onto waiting_for_input so the wake card badge picks 'needs you'": {
+      "median": 0.010395,
+      "min": 0.008824,
+      "samples": 3
+    },
+    "bravo-goals::init and prep scaffold durable goal workspace": {
+      "median": 0.036378,
+      "min": 0.021313,
+      "samples": 3
+    },
+    "bravo-goals::prep stores provided title without deriving title from goal id": {
+      "median": 0.006211,
+      "min": 0.004237,
+      "samples": 3
+    },
+    "bravo-goals::check rejects done tasks with missing receipts": {
+      "median": 0.01459,
+      "min": 0.011533,
+      "samples": 3
+    },
+    "bravo-goals::runtime index can recover from goal state": {
+      "median": 0.015873,
+      "min": 0.013934,
+      "samples": 3
+    },
+    "bravo-goals::listGoals sorts goals by newest goal-directory modification first": {
+      "median": 0.020843,
+      "min": 0.017748,
+      "samples": 3
+    },
+    "bravo-goals::next records boundary selection with runtime override": {
+      "median": 0.020079,
+      "min": 0.019009,
+      "samples": 3
+    },
+    "bravo-goals::archive enforces gates and forced archive records reason": {
+      "median": 0.072083,
+      "min": 0.0583,
+      "samples": 3
+    },
+    "bravo-goals::verify records user verification after final audit": {
+      "median": 0.039438,
+      "min": 0.029915,
+      "samples": 3
+    },
+    "bravo-goals::workspace discovery is explicit and scaffold creates required goal entries": {
+      "median": 0.04859,
+      "min": 0.024537,
+      "samples": 3
+    },
+    "bravo-goals::state checker rejects bad progress and invalid null active_task": {
+      "median": 0.021878,
+      "min": 0.011356,
+      "samples": 3
+    },
+    "bravo-goals::receipt validation requires evidence for complete worker claims": {
+      "median": 0.002618,
+      "min": 0.00098,
+      "samples": 3
+    },
+    "bravo-goals::done tasks require worker and judge receipts": {
+      "median": 0.036855,
+      "min": 0.014392,
+      "samples": 3
+    },
+    "bravo-goals::state machine transitions worker receipt through passing judge verdict": {
+      "median": 0.001081,
+      "min": 0.001018,
+      "samples": 3
+    },
+    "bravo-goals::boundary selection can use 45 percent context usage rule": {
+      "median": 0.000287,
+      "min": 0.000264,
+      "samples": 3
+    },
+    "bravo-goals::archive gates require final audit, user verification, and detached session": {
+      "median": 0.046959,
+      "min": 0.022255,
+      "samples": 3
+    },
+    "bravo-goals::goal check rejects forged Judge receipt without terminal run artifacts": {
+      "median": 0.028217,
+      "min": 0.020047,
+      "samples": 3
+    },
+    "bravo-goals::Judge launcher uses source extension path when running from an unbuilt source tree": {
+      "median": 0.015674,
+      "min": 0.006466,
+      "samples": 3
+    },
+    "bravo-goals::renders Bravo Goals footer status (v2 format)": {
+      "median": 0.000466,
+      "min": 0.000351,
+      "samples": 3
+    },
+    "bravo-goals::renders below-editor HUD lines from state (v2 three-gate layout)": {
+      "median": 0.000758,
+      "min": 0.000733,
+      "samples": 3
+    },
+    "bravo-goals::parses quoted command flags": {
+      "median": 0.000949,
+      "min": 0.000941,
+      "samples": 3
+    },
+    "bravo-goals::chooses explicit phase boundary flag": {
+      "median": 0.000106,
+      "min": 0.000102,
+      "samples": 3
+    },
+    "bravo-goals::/goal help renders command usage without a Bravo workspace": {
+      "median": 0.003924,
+      "min": 0.001347,
+      "samples": 3
+    },
+    "bravo-goals::/goal unknown subcommand renders help without a Bravo workspace": {
+      "median": 0.000621,
+      "min": 0.000601,
+      "samples": 3
+    },
+    "bravo-goals::/goal init creates Bravo workspace from Pi command context": {
+      "median": 0.003199,
+      "min": 0.00316,
+      "samples": 3
+    },
+    "bravo-goals::/goal prep creates a draft goal workspace from Pi command context": {
+      "median": 0.011229,
+      "min": 0.010402,
+      "samples": 3
+    },
+    "bravo-goals::/goal list renders goals sorted by recently modified first": {
+      "median": 0.009477,
+      "min": 0.008782,
+      "samples": 3
+    },
+    "bravo-goals::/goal prep without title leaves title TBD and asks the user before deriving it": {
+      "median": 0.010753,
+      "min": 0.005214,
+      "samples": 3
+    },
+    "bravo-goals::/goal pause creates the first resume.md checkpoint": {
+      "median": 0.029537,
+      "min": 0.02222,
+      "samples": 3
+    },
+    "bravo-goals::/goal check validates explicit goals from Pi command context": {
+      "median": 0.00808,
+      "min": 0.007635,
+      "samples": 3
+    },
+    "bravo-goals::/goal archive detaches the current verified session before archiving": {
+      "median": 0.029337,
+      "min": 0.024931,
+      "samples": 3
+    },
+    "bravo-goals::/goal next supports carry, compact, and fresh handoff modes from Pi slash commands": {
+      "median": 0.064069,
+      "min": 0.02939,
+      "samples": 3
+    },
+    "bravo-goals::worker prompt names receipt path, schema, and task_receipt_ready call": {
+      "median": 0.000285,
+      "min": 0.00023,
+      "samples": 3
+    },
+    "bravo-goals::no-task prompt does not mention task_receipt_ready": {
+      "median": 8.1e-05,
+      "min": 7e-05,
+      "samples": 3
+    },
+    "bravo-goals::task_receipt_ready runs Judge autonomously and applies a passing verdict": {
+      "median": 0.044526,
+      "min": 0.034007,
+      "samples": 3
+    },
+    "bravo-goals::Federal Judge pass announces human verification without queuing worker slash-command instructions": {
+      "median": 0.028809,
+      "min": 0.025609,
+      "samples": 3
+    },
+    "bravo-goals::Federal Judge failure appends remediation tasks and keeps autonomous goal active": {
+      "median": 0.027781,
+      "min": 0.025032,
+      "samples": 3
+    },
+    "bravo-goals::judge-control tool call renderers tolerate missing Pi args": {
+      "median": 0.00137,
+      "min": 0.001353,
+      "samples": 3
+    },
+    "bravo-goals::task_receipt_ready uses default active task receipt path": {
+      "median": 0.035866,
+      "min": 0.020341,
+      "samples": 3
+    },
+    "bravo-goals::task_receipt_ready pass queues wrapped next-task prompt and refreshes active-goals": {
+      "median": 0.02181,
+      "min": 0.016795,
+      "samples": 3
+    },
+    "bravo-goals::task_receipt_ready failure returns Judge ruling without queuing stale task prompt": {
+      "median": 0.020126,
+      "min": 0.015858,
+      "samples": 3
+    },
+    "bravo-goals::task_receipt_ready resumes an existing judging task after a crashed parent session": {
+      "median": 0.031223,
+      "min": 0.021411,
+      "samples": 3
+    },
+    "bravo-goals::task_receipt_ready recreates Judge run when judging state lost current run id": {
+      "median": 0.025017,
+      "min": 0.02076,
+      "samples": 3
+    },
+    "bravo-goals::task_receipt_ready rejects malformed, empty, and directory worker receipts without mutation": {
+      "median": 0.026513,
+      "min": 0.021519,
+      "samples": 3
+    },
+    "bravo-goals::task_receipt_ready does not mutate state when Judge run creation fails": {
+      "median": 0.007899,
+      "min": 0.005608,
+      "samples": 3
+    },
+    "bravo-goals::judge_event task.receipt_ready remains compatible": {
+      "median": 0.006449,
+      "min": 0.005876,
+      "samples": 3
+    },
+    "bravo-goals::judge_event task.receipt_ready rejects absolute receipt paths outside workspace without mutation or event": {
+      "median": 0.005048,
+      "min": 0.004648,
+      "samples": 3
+    },
+    "bravo-goals::judge_event task.receipt_ready rejects traversal outside goal receipts": {
+      "median": 0.004843,
+      "min": 0.003844,
+      "samples": 3
+    },
+    "bravo-goals::judge_event task.receipt_ready rejects malformed active goal paths": {
+      "median": 0.003984,
+      "min": 0.003683,
+      "samples": 3
+    },
+    "bravo-goals::judge_event task.receipt_ready does not mutate on session mismatch": {
+      "median": 0.004967,
+      "min": 0.003388,
+      "samples": 3
+    },
+    "bravo-goals::judge_event task.receipt_ready rejects authoritative state session mismatch without mutation or event": {
+      "median": 0.004404,
+      "min": 0.004183,
+      "samples": 3
+    },
+    "bravo-goals::judge_event task.receipt_ready requires current session id and fails closed": {
+      "median": 0.004073,
+      "min": 0.003832,
+      "samples": 3
+    },
+    "bravo-goals::judge_event task.receipt_ready fails without receipt evidence": {
+      "median": 0.009536,
+      "min": 0.004829,
+      "samples": 3
+    },
+    "bravo-goals::judge_event task.receipt_ready fails without an active task": {
+      "median": 0.004555,
+      "min": 0.003299,
+      "samples": 3
+    },
+    "bravo-goals::HUD shows judging chip for awaiting_judge active task": {
+      "median": 0.000328,
+      "min": 0.000295,
+      "samples": 3
+    },
+    "bravo-goals::judge_finish outside Judge run teaches workers to use task_receipt_ready": {
+      "median": 0.000218,
+      "min": 0.000209,
+      "samples": 3
+    },
+    "bravo-goals::validate_goal_state reports valid state for an explicit goal": {
+      "median": 0.00524,
+      "min": 0.005121,
+      "samples": 3
+    },
+    "bravo-goals::validate_goal_state returns actionable issues without mutating invalid state": {
+      "median": 0.004917,
+      "min": 0.004869,
+      "samples": 3
+    },
+    "bravo-goals::validate_goal_state includes task repair shape when state yaml cannot be parsed": {
+      "median": 0.003315,
+      "min": 0.002318,
+      "samples": 3
+    },
+    "bravo-goals::HUD discovers ancestor workspace and does not fall back to unrelated active goal": {
+      "median": 0.007514,
+      "min": 0.006118,
+      "samples": 3
+    },
+    "bravo-goals::agent_end watchdog queues idle recovery prompt rather than cold-start worker prompt": {
+      "median": 0.013235,
+      "min": 0.011302,
+      "samples": 3
+    },
+    "bravo-goals::agent_end watchdog rechecks state after deferred scheduling before sending": {
+      "median": 0.136884,
+      "min": 0.13561,
+      "samples": 3
+    },
+    "bravo-goals::idle recovery skips stale prompt when durable active task advances before send": {
+      "median": 0.009901,
+      "min": 0.008716,
+      "samples": 3
+    },
+    "bravo-goals::idle recovery does not emit worker instructions after goal is already done": {
+      "median": 0.008655,
+      "min": 0.007731,
+      "samples": 3
+    },
+    "bravo-goals::visWidth: plain ASCII counts 1 cell per character": {
+      "median": 0.001138,
+      "min": 0.001129,
+      "samples": 3
+    },
+    "bravo-goals::visWidth: ANSI escape sequences contribute 0 cells": {
+      "median": 0.000155,
+      "min": 0.000141,
+      "samples": 3
+    },
+    "bravo-goals::visWidth: emoji counts 2 cells": {
+      "median": 0.00014,
+      "min": 0.000137,
+      "samples": 3
+    },
+    "bravo-goals::visWidth: variation selector (U+FE0F) does not add cells": {
+      "median": 5.8e-05,
+      "min": 5.5e-05,
+      "samples": 3
+    },
+    "bravo-goals::visWidth: ZWJ sequences do not over-count": {
+      "median": 0.000101,
+      "min": 9.9e-05,
+      "samples": 3
+    },
+    "bravo-goals::visWidth: CJK ideographs count 2 cells": {
+      "median": 5.8e-05,
+      "min": 5.8e-05,
+      "samples": 3
+    },
+    "bravo-goals::visWidth: mixed ANSI + emoji + ASCII": {
+      "median": 4.7e-05,
+      "min": 4.5e-05,
+      "samples": 3
+    },
+    "bravo-goals::truncAnsi: string already within limit is returned unchanged": {
+      "median": 9.4e-05,
+      "min": 9.4e-05,
+      "samples": 3
+    },
+    "bravo-goals::truncAnsi: embedded newlines are normalized for single-line HUD rows": {
+      "median": 0.000229,
+      "min": 0.000228,
+      "samples": 3
+    },
+    "bravo-goals::truncAnsi: string exactly at limit is returned unchanged": {
+      "median": 0.000236,
+      "min": 0.00023,
+      "samples": 3
+    },
+    "bravo-goals::truncAnsi: plain string is truncated with ellipsis": {
+      "median": 0.000135,
+      "min": 0.000134,
+      "samples": 3
+    },
+    "bravo-goals::truncAnsi: ANSI escape at truncation boundary is handled correctly": {
+      "median": 7.1e-05,
+      "min": 6.7e-05,
+      "samples": 3
+    },
+    "bravo-goals::truncAnsi: ANSI codes in the middle are preserved": {
+      "median": 4.4e-05,
+      "min": 4.1e-05,
+      "samples": 3
+    },
+    "bravo-goals::truncAnsi: maxCells=1 returns just ellipsis with reset": {
+      "median": 2.9e-05,
+      "min": 2.7e-05,
+      "samples": 3
+    },
+    "bravo-goals::truncAnsi: emoji-bearing string truncated at correct cell boundary": {
+      "median": 3.3e-05,
+      "min": 3.1e-05,
+      "samples": 3
+    },
+    "bravo-goals::layout state 1: tasks in progress with judge running shows judging chip": {
+      "median": 0.000545,
+      "min": 0.00053,
+      "samples": 3
+    },
+    "bravo-goals::layout state 2: all tasks done awaiting final audit shows audit gate active": {
+      "median": 0.000203,
+      "min": 0.000203,
+      "samples": 3
+    },
+    "bravo-goals::judge glyph cycles deterministically by frame": {
+      "median": 3.9e-05,
+      "min": 3.9e-05,
+      "samples": 3
+    },
+    "bravo-goals::layout state 3: final audit passed shows verify gate active": {
+      "median": 0.00017,
+      "min": 0.000169,
+      "samples": 3
+    },
+    "bravo-goals::layout state 4: fully verified shows gold checkmark badge and done caption": {
+      "median": 0.00016,
+      "min": 0.000153,
+      "samples": 3
+    },
+    "bravo-goals::layout state 5: judge fail shows fail chip and verdict caption": {
+      "median": 9.3e-05,
+      "min": 9e-05,
+      "samples": 3
+    },
+    "bravo-goals::layout state 5b: needs_more_evidence shows fail chip": {
+      "median": 8.5e-05,
+      "min": 7.5e-05,
+      "samples": 3
+    },
+    "bravo-goals::layout state 5: progress bar is suppressed when judge-fail caption is present": {
+      "median": 0.0001,
+      "min": 9.4e-05,
+      "samples": 3
+    },
+    "bravo-goals::layout state 6: final_audit failed shows audit gate fail (red \u2717) and failure caption": {
+      "median": 9.1e-05,
+      "min": 8.6e-05,
+      "samples": 3
+    },
+    "bravo-goals::judge chip is not rendered when verdict is pass (no wallpaper)": {
+      "median": 0.000157,
+      "min": 0.000151,
+      "samples": 3
+    },
+    "bravo-goals::judge chip is not rendered when verdict is none and no active judge run": {
+      "median": 0.000131,
+      "min": 0.000126,
+      "samples": 3
+    },
+    "bravo-goals::judge chip shows for blocked active task as warn": {
+      "median": 9.3e-05,
+      "min": 8.6e-05,
+      "samples": 3
+    },
+    "bravo-goals::status line caption is just-tasks when work is in progress with no terminal signal": {
+      "median": 8.4e-05,
+      "min": 7.5e-05,
+      "samples": 3
+    },
+    "bravo-goals::full layout (width >= 56) produces box-chrome lines at width 64": {
+      "median": 0.001311,
+      "min": 0.000167,
+      "samples": 3
+    },
+    "bravo-goals::compact layout (36 <= width < 56) produces 4-line box": {
+      "median": 0.000183,
+      "min": 0.000123,
+      "samples": 3
+    },
+    "bravo-goals::minimal layout (width < 36) produces a single line with no box chrome": {
+      "median": 0.000108,
+      "min": 9e-05,
+      "samples": 3
+    },
+    "bravo-goals::renderHud leaves room for Pi string-widget horizontal padding": {
+      "median": 0.000189,
+      "min": 0.000178,
+      "samples": 3
+    },
+    "bravo-goals::layout dispatch boundary at width=56 picks full, width=55 picks compact": {
+      "median": 8.4e-05,
+      "min": 7.5e-05,
+      "samples": 3
+    },
+    "bravo-goals::layout dispatch boundary at width=36 picks compact, width=35 picks minimal": {
+      "median": 5e-05,
+      "min": 4.8e-05,
+      "samples": 3
+    },
+    "bravo-goals::normalizeGoalState populates final_audit from YAML data": {
+      "median": 0.000183,
+      "min": 0.000169,
+      "samples": 3
+    },
+    "bravo-goals::normalizeGoalState defaults final_audit and user_verification when absent": {
+      "median": 6.6e-05,
+      "min": 6e-05,
+      "samples": 3
+    },
+    "bravo-goals::normalizeGoalState populates task status field": {
+      "median": 9.6e-05,
+      "min": 8.3e-05,
+      "samples": 3
+    },
+    "bravo-goals::resolveGoalTitleSync returns undefined when no workspace exists above cwd": {
+      "median": 0.00458,
+      "min": 0.004377,
+      "samples": 3
+    },
+    "bravo-goals::resolveGoalTitleSync returns undefined when active-goals.yaml is missing and conventional path has no state": {
+      "median": 0.015791,
+      "min": 0.00871,
+      "samples": 3
+    },
+    "bravo-goals::resolveGoalTitleSync returns undefined when state.yaml is malformed YAML": {
+      "median": 0.0071,
+      "min": 0.0055,
+      "samples": 3
+    },
+    "bravo-goals::resolveGoalTitleSync returns undefined when active-goals.yaml is malformed YAML": {
+      "median": 0.002391,
+      "min": 0.002178,
+      "samples": 3
+    },
+    "bravo-goals::resolveGoalTitleSync returns undefined when goal_id is not in the index and no conventional state exists": {
+      "median": 0.002095,
+      "min": 0.002085,
+      "samples": 3
+    },
+    "bravo-goals::resolveGoalTitleSync returns the title when index + state.yaml are well-formed": {
+      "median": 0.002726,
+      "min": 0.002528,
+      "samples": 3
+    },
+    "bravo-goals::resolveGoalTitleSync returns the title when index is missing but conventional state.yaml exists": {
+      "median": 0.001331,
+      "min": 0.0013,
+      "samples": 3
+    },
+    "bravo-goals::discoverWorkspaceRootSync walks up from a nested subdirectory": {
+      "median": 0.001777,
+      "min": 0.000676,
+      "samples": 3
+    },
+    "bravo-goals::discoverWorkspaceRootSync returns null when no workspace exists in any ancestor": {
+      "median": 0.000844,
+      "min": 0.000772,
+      "samples": 3
+    },
+    "bravo-goals::renderToolResultComponent dispatches task_receipt_ready details to the receipt-ready card": {
+      "median": 0.001599,
+      "min": 0.001274,
+      "samples": 3
+    },
+    "bravo-goals::renderToolResultComponent renders failure card when task_receipt_ready returns isError": {
+      "median": 0.000549,
+      "min": 0.000458,
+      "samples": 3
+    },
+    "bravo-goals::renderToolResultComponent treats missing task_receipt_ready success details as failure": {
+      "median": 0.000315,
+      "min": 0.000303,
+      "samples": 3
+    },
+    "bravo-goals::renderToolResultComponent falls back to plain text for non-error task_receipt_ready without details": {
+      "median": 0.000907,
+      "min": 0.000899,
+      "samples": 3
+    },
+    "bravo-goals::renderToolResultComponent renders failure card with 'unknown' when args are absent": {
+      "median": 0.000213,
+      "min": 0.000207,
+      "samples": 3
+    },
+    "bravo-goals::renderToolResultComponent for judge_event with awaiting_judge dispatches to receipt-ready card": {
+      "median": 0.002624,
+      "min": 0.000292,
+      "samples": 3
+    },
+    "bravo-goals::renderToolResultComponent for judge_event with plain event renders the event card": {
+      "median": 0.000275,
+      "min": 0.000272,
+      "samples": 3
+    },
+    "bravo-goals::renderToolResultComponent for judge_event isError renders a failure card (not the receipt-ready card)": {
+      "median": 0.000193,
+      "min": 0.000188,
+      "samples": 3
+    },
+    "bravo-goals::renderToolResultComponent for judge_finish maps verdict details to the verdict card": {
+      "median": 0.000305,
+      "min": 0.000298,
+      "samples": 3
+    },
+    "bravo-goals::renderToolResultComponent for judge_finish isError renders a failure card with args fallback": {
+      "median": 0.000221,
+      "min": 0.000221,
+      "samples": 3
+    },
+    "bravo-goals::renderToolResultComponent fallback path renders just the text content when no card matches": {
+      "median": 0.000127,
+      "min": 0.000122,
+      "samples": 3
+    },
+    "bravo-goals::createJudgeRun writes canonical run files and goal-local pointers": {
+      "median": 0.025623,
+      "min": 0.023558,
+      "samples": 3
+    },
+    "bravo-goals::raw bash policy requires unsafe_raw_bash": {
+      "median": 0.000422,
+      "min": 0.000401,
+      "samples": 3
+    },
+    "bravo-goals::validateJudgeCompletion accepts terminal status with matching verdict and receipt": {
+      "median": 0.030687,
+      "min": 0.0256,
+      "samples": 3
+    },
+    "bravo-goals::validateJudgeCompletion rejects non-terminal status and verdict receipt disagreement": {
+      "median": 0.010388,
+      "min": 0.008023,
+      "samples": 3
+    },
+    "bravo-goals::timeout and cancellation are terminal without a verdict": {
+      "median": 0.018987,
+      "min": 0.013788,
+      "samples": 3
+    },
+    "bravo-goals::goal policy is controller-owned and blocks protected Bravo mutation paths": {
+      "median": 0.029563,
+      "min": 0.023867,
+      "samples": 3
+    },
+    "bravo-goals::goal policy blocks outside-workspace writes while bash scoping is disabled by default": {
+      "median": 0.004503,
+      "min": 0.003064,
+      "samples": 3
+    },
+    "bravo-goals::constrained bash policy blocks destructive commands when explicitly enabled": {
+      "median": 0.005315,
+      "min": 0.002876,
+      "samples": 3
+    },
+    "bravo-goals::worker start and resume prompts expose distinct lifecycle semantics": {
+      "median": 0.001626,
+      "min": 0.001227,
+      "samples": 3
+    },
+    "bravo-goals::carry, compact, fresh, and durable handoff prompts are lifecycle-specific": {
+      "median": 0.000278,
+      "min": 0.000266,
+      "samples": 3
+    },
+    "bravo-goals::idle recovery prompt diagnoses prior stop before continuing": {
+      "median": 0.000137,
+      "min": 0.000129,
+      "samples": 3
+    },
+    "bravo-goals::checkpoint prompt preserves in-session context without inventing completion": {
+      "median": 0.000103,
+      "min": 8.9e-05,
+      "samples": 3
+    },
+    "bravo-goals::runtime compatibility prompts keep absolute paths when cwd is omitted": {
+      "median": 0.00023,
+      "min": 0.000224,
+      "samples": 3
+    },
+    "bravo-goals::identitySlot hashes deterministically into the 8-color palette": {
+      "median": 0.003381,
+      "min": 0.002284,
+      "samples": 3
+    },
+    "bravo-goals::identitySlot key is the goal_id slug, not the title \u2014 twins with same title differ when slugs differ": {
+      "median": 0.000106,
+      "min": 0.000106,
+      "samples": 3
+    },
+    "bravo-goals::identity hash uses (h*31 + ch) >>> 0 % palette.length \u2014 pin known slots": {
+      "median": 0.000107,
+      "min": 0.000107,
+      "samples": 3
+    },
+    "bravo-goals::titleMaxFor scales the title budget at every width threshold": {
+      "median": 7.2e-05,
+      "min": 7.2e-05,
+      "samples": 3
+    },
+    "bravo-goals::idBar dim option enables the dim ANSI prefix on the identity bar": {
+      "median": 0.000135,
+      "min": 0.000134,
+      "samples": 3
+    },
+    "bravo-goals::idBar override replaces the identity color with the supplied ANSI": {
+      "median": 7.3e-05,
+      "min": 7.3e-05,
+      "samples": 3
+    },
+    "bravo-goals::visWidth ignores ANSI escapes and treats CJK/emoji widths correctly": {
+      "median": 0.000408,
+      "min": 0.000326,
+      "samples": 3
+    },
+    "bravo-goals::truncAnsi caps visible width and appends an ellipsis": {
+      "median": 0.000229,
+      "min": 0.000211,
+      "samples": 3
+    },
+    "bravo-goals::renderTaskReceiptReadyCall produces a title-bar with bold colored \\# title and tool name": {
+      "median": 0.000563,
+      "min": 0.000555,
+      "samples": 3
+    },
+    "bravo-goals::renderTaskReceiptReadyResult includes label rows and a slug footer": {
+      "median": 0.000716,
+      "min": 0.000687,
+      "samples": 3
+    },
+    "bravo-goals::judge_event title is dim (NOT bold) and bar is dim \u2014 administrative log strip": {
+      "median": 0.000297,
+      "min": 0.000293,
+      "samples": 3
+    },
+    "bravo-goals::judge_event result shows event name and run id when present": {
+      "median": 0.000183,
+      "min": 0.00018,
+      "samples": 3
+    },
+    "bravo-goals::judge_finish pass keeps identity hue on title and bar": {
+      "median": 0.00028,
+      "min": 0.000278,
+      "samples": 3
+    },
+    "bravo-goals::judge_finish fail overrides title and bar to red": {
+      "median": 0.000144,
+      "min": 0.000142,
+      "samples": 3
+    },
+    "bravo-goals::judge_finish needs_more_evidence overrides title and bar to amber": {
+      "median": 0.001515,
+      "min": 0.000536,
+      "samples": 3
+    },
+    "bravo-goals::judge_finish blocked overrides to red with warning glyph": {
+      "median": 0.000204,
+      "min": 0.000194,
+      "samples": 3
+    },
+    "bravo-goals::judge_finish call uses cyan judging badge before verdict lands": {
+      "median": 0.000196,
+      "min": 0.000187,
+      "samples": 3
+    },
+    "bravo-goals::renderFailureCard uses red bar and the failing tool's name": {
+      "median": 0.00025,
+      "min": 0.000232,
+      "samples": 3
+    },
+    "bravo-goals::validate_goal_state call renders as a checking card": {
+      "median": 0.000169,
+      "min": 0.000166,
+      "samples": 3
+    },
+    "bravo-goals::validate_goal_state result renders valid and invalid cards": {
+      "median": 0.003547,
+      "min": 0.00193,
+      "samples": 3
+    },
+    "bravo-goals::slug footer appears as the last row before the bottom border at widths >= 56": {
+      "median": 0.000236,
+      "min": 0.00022,
+      "samples": 3
+    },
+    "bravo-goals::title is `\\# `-prefixed across every tool/verdict": {
+      "median": 0.00029,
+      "min": 0.000287,
+      "samples": 3
+    },
+    "bravo-goals::long titles end-truncate cleanly inside the title budget": {
+      "median": 0.000172,
+      "min": 0.000128,
+      "samples": 3
+    },
+    "bravo-goals::chrome holds declared width across 56/72/96/120": {
+      "median": 0.000344,
+      "min": 0.000286,
+      "samples": 3
+    },
+    "bravo-goals::tool cards normalize embedded newlines before rendering chrome rows": {
+      "median": 0.000203,
+      "min": 0.000184,
+      "samples": 3
+    },
+    "bravo-goals::low-priority rows drop at narrow widths": {
+      "median": 0.001606,
+      "min": 0.000296,
+      "samples": 3
+    },
+    "bravo-goals::body row truncation uses the path-aware mid-trunc with ellipsis": {
+      "median": 0.000247,
+      "min": 0.000219,
+      "samples": 3
+    },
+    "bravo-goals::chromeRenderable returns a TextRenderable that renders at the supplied width": {
+      "median": 0.000192,
+      "min": 0.000188,
+      "samples": 3
+    },
+    "bravo-goals::missing goal_title falls back to the slug for the title text": {
+      "median": 6.7e-05,
+      "min": 6.5e-05,
+      "samples": 3
+    },
+    "bravo-goals::chrome row width math holds for blank label rows in judge_finish summary blocks": {
+      "median": 0.000226,
+      "min": 0.000223,
+      "samples": 3
+    },
+    "bravo-goals::chrome() emits well-formed rounded borders at the requested width": {
+      "median": 7.1e-05,
+      "min": 7e-05,
+      "samples": 3
+    },
+    "bravo-goals::judge_finish with empty summary still produces well-formed chrome (no blank-row break)": {
+      "median": 0.000142,
+      "min": 0.00014,
+      "samples": 3
+    },
+    "bravo-goals::judge_finish with empty-string summary skips the summary block (no stray label row)": {
+      "median": 0.000109,
+      "min": 0.000105,
+      "samples": 3
+    },
+    "bravo-goals::titles containing quotes / colons / brackets / arrows render without escape issues": {
+      "median": 0.000385,
+      "min": 0.000319,
+      "samples": 3
+    },
+    "bravo-goals::very long titles (140+ chars) end-truncate cleanly at the title budget for every width": {
+      "median": 0.000424,
+      "min": 0.000412,
+      "samples": 3
+    },
+    "bravo-goals::identity palette is byte-identical to the async-subagents palette (no drift)": {
+      "median": 0.002557,
+      "min": 0.001479,
+      "samples": 3
+    },
+    "bravo-goals::safeWidth chrome floor: width=0 / NaN / negative falls back to a renderable card": {
+      "median": 0.000273,
+      "min": 0.00026,
+      "samples": 3
+    },
+    "bravo-goals::safeWidth chrome ceiling: extreme widths clamp to 160": {
+      "median": 0.000107,
+      "min": 0.000104,
+      "samples": 3
+    },
+    "codex-auth-balancer::resolveStateRoot uses env override and default suffix": {
+      "median": 0.001201,
+      "min": 0.001116,
+      "samples": 3
+    },
+    "codex-auth-balancer::prepareLaunch creates isolated auth and syncBack success cleans via caller": {
+      "median": 0.020015,
+      "min": 0.019047,
+      "samples": 3
+    },
+    "codex-auth-balancer::syncBack copies Pi auth updates back to the selected slot": {
+      "median": 0.0111,
+      "min": 0.01088,
+      "samples": 3
+    },
+    "codex-auth-balancer::syncBack detects Pi auth conflicts": {
+      "median": 0.014539,
+      "min": 0.008729,
+      "samples": 3
+    },
+    "codex-auth-balancer::syncBack conflict retains isolated dir": {
+      "median": 0.010305,
+      "min": 0.007992,
+      "samples": 3
+    },
+    "codex-auth-balancer::concurrent syncBack for same generation is serialized by compare-and-swap": {
+      "median": 0.020007,
+      "min": 0.0131,
+      "samples": 3
+    },
+    "codex-auth-balancer::CLI concurrent sync-back for same generation allows only one writer": {
+      "median": 0.170684,
+      "min": 0.125649,
+      "samples": 3
+    },
+    "codex-auth-balancer::CLI JSON redacts token material": {
+      "median": 0.160527,
+      "min": 0.122341,
+      "samples": 3
+    },
+    "codex-auth-balancer::cleanupLaunch refuses unprepared directories": {
+      "median": 0.001898,
+      "min": 0.001061,
+      "samples": 3
+    },
+    "codex-auth-balancer::prepareLaunch removes isolated dir after partial secret copy failure": {
+      "median": 0.008678,
+      "min": 0.00757,
+      "samples": 3
+    },
+    "codex-auth-balancer::getUsage marks old v2 cache stale by generated_at": {
+      "median": 0.006643,
+      "min": 0.004747,
+      "samples": 3
+    },
+    "codex-auth-balancer::usage cache migration preserves legacy windows shape": {
+      "median": 0.003341,
+      "min": 0.003284,
+      "samples": 3
+    },
+    "codex-auth-balancer::usage cache migration accepts raw legacy slot map": {
+      "median": 0.004173,
+      "min": 0.003126,
+      "samples": 3
+    },
+    "codex-auth-balancer::refreshUsage probes Codex CLI for both slots and stores remaining percent": {
+      "median": 0.144284,
+      "min": 0.139338,
+      "samples": 3
+    },
+    "codex-auth-balancer::prepareLaunch does not hard-reject stale zero windows": {
+      "median": 0.007493,
+      "min": 0.005164,
+      "samples": 3
+    },
+    "codex-auth-balancer::prepareLaunch reserves active slots atomically and distributes concurrent launches": {
+      "median": 0.01395,
+      "min": 0.013898,
+      "samples": 3
+    },
+    "codex-auth-balancer::pi-balanced launches Pi with isolated auth and preserved config/session dirs": {
+      "median": 0.192012,
+      "min": 0.179335,
+      "samples": 3
+    },
+    "codex-auth-balancer::balanced provider mirrors installed openai-codex models with public provider id": {
+      "median": 0.000289,
+      "min": 0.000259,
+      "samples": 3
+    },
+    "codex-auth-balancer::startTokenLease extracts token from slot Pi auth, honors affinity, and finish is idempotent": {
+      "median": 0.009624,
+      "min": 0.00826,
+      "samples": 3
+    },
+    "codex-auth-balancer::startTokenLease refreshes near-expired OAuth credentials before leasing": {
+      "median": 0.00533,
+      "min": 0.003591,
+      "samples": 3
+    },
+    "codex-auth-balancer::startTokenLease fails closed on empty token and expires stale leases": {
+      "median": 0.013534,
+      "min": 0.013043,
+      "samples": 3
+    },
+    "codex-auth-balancer::CLI token prints only access token and stores redacted lease metadata": {
+      "median": 0.236319,
+      "min": 0.223007,
+      "samples": 3
+    },
+    "codex-auth-balancer::syncBack and cleanup preserve terminal reservation state": {
+      "median": 0.012602,
+      "min": 0.012123,
+      "samples": 3
+    },
+    "context-maps::stores and loads artifacts": {
+      "median": 0.005762,
+      "min": 0.005637,
+      "samples": 3
+    },
+    "context-maps::materializes selected line ranges": {
+      "median": 0.010976,
+      "min": 0.010847,
+      "samples": 3
+    },
+    "context-maps::rejects unknown slice ids": {
+      "median": 0.007786,
+      "min": 0.0068,
+      "samples": 3
+    },
+    "context-maps::reads maps from a stable repo root when called from a subdirectory": {
+      "median": 0.042352,
+      "min": 0.039041,
+      "samples": 3
+    },
+    "context-maps::refuses ignored or denied paths during materialization": {
+      "median": 0.007338,
+      "min": 0.007236,
+      "samples": 3
+    },
+    "context-maps::rejects artifacts whose workspace root differs from the caller workspace": {
+      "median": 0.013719,
+      "min": 0.013138,
+      "samples": 3
+    },
+    "context-maps::exclude refs normalize dot-dot paths for seeded refs": {
+      "median": 0.026675,
+      "min": 0.022974,
+      "samples": 3
+    },
+    "gemini-code-assist::parseCustomHeaders follows Gemini CLI semantics": {
+      "median": 0.001703,
+      "min": 0.001674,
+      "samples": 3
+    },
+    "gemini-code-assist::buildHeaders preserves Gemini CLI precedence except protected Authorization and User-Agent": {
+      "median": 0.023426,
+      "min": 0.020777,
+      "samples": 3
+    },
+    "gemini-code-assist::buildUserAgent uses override version and model": {
+      "median": 0.000139,
+      "min": 0.000132,
+      "samples": 3
+    },
+    "gemini-code-assist::isAccessTokenFresh requires token and more than refresh skew": {
+      "median": 9.7e-05,
+      "min": 9.2e-05,
+      "samples": 3
+    },
+    "gemini-code-assist::SSE parser extracts wrapped Code Assist candidate text parts": {
+      "median": 0.000299,
+      "min": 0.000284,
+      "samples": 3
+    },
+    "gemini-code-assist::codeAssistUrl creates v1internal SSE method URL": {
+      "median": 0.000119,
+      "min": 0.000118,
+      "samples": 3
+    },
+    "gemini-code-assist::buildTextOnlyRequest creates Code Assist text-only envelope": {
+      "median": 0.000392,
+      "min": 0.000343,
+      "samples": 3
+    },
+    "gemini-code-assist::assertSupportedSpikeModel rejects unverified models unless explicit diagnostic override is set": {
+      "median": 0.000319,
+      "min": 0.000302,
+      "samples": 3
+    },
+    "gemini-code-assist::reasoning continuity helpers preserve raw model parts and thought signatures": {
+      "median": 0.000463,
+      "min": 0.000445,
+      "samples": 3
+    },
+    "gemini-code-assist::reasoning continuity helpers detect function calls and signatures on function call parts": {
+      "median": 0.000433,
+      "min": 0.000375,
+      "samples": 3
+    },
+    "gemini-code-assist::reasoning continuity helpers collect usage/cache metrics and strip thought signatures": {
+      "median": 0.000407,
+      "min": 0.000387,
+      "samples": 3
+    },
+    "loom::vertical slice works from inside and outside loom root": {
+      "median": 4.618439,
+      "min": 4.538194,
+      "samples": 3
+    },
+    "loom::multiple looms under one container resolve by current and local name": {
+      "median": 0.857464,
+      "min": 0.823752,
+      "samples": 3
+    },
+    "loom::top-level create initializes or creates a Loom workstream": {
+      "median": 0.298465,
+      "min": 0.270657,
+      "samples": 3
+    },
+    "loom::json error envelope has stable code": {
+      "median": 0.108236,
+      "min": 0.083961,
+      "samples": 3
+    },
+    "loom::agent-friendly CLI helpers are handoff-safe": {
+      "median": 1.167727,
+      "min": 1.029947,
+      "samples": 3
+    },
+    "loom::Claude plugin exposes Loom commands and skills": {
+      "median": 0.001189,
+      "min": 0.000949,
+      "samples": 3
+    },
+    "loom::v2 noun-first commands, schema, and patch workflow work": {
+      "median": 1.972231,
+      "min": 1.907998,
+      "samples": 3
+    },
+    "monitor::always matches": {
+      "median": 0.001427,
+      "min": 0.000924,
+      "samples": 3
+    },
+    "monitor::observation_status equals": {
+      "median": 0.000139,
+      "min": 0.00013,
+      "samples": 3
+    },
+    "monitor::text_contains case sensitive": {
+      "median": 0.000104,
+      "min": 0.000103,
+      "samples": 3
+    },
+    "monitor::text_contains case insensitive": {
+      "median": 6.1e-05,
+      "min": 6e-05,
+      "samples": 3
+    },
+    "monitor::and requires all true": {
+      "median": 0.000149,
+      "min": 0.000147,
+      "samples": 3
+    },
+    "monitor::or requires any true": {
+      "median": 0.000108,
+      "min": 0.000108,
+      "samples": 3
+    },
+    "monitor::not inverts": {
+      "median": 5.6e-05,
+      "min": 5.4e-05,
+      "samples": 3
+    },
+    "monitor::default condition matches on matched status": {
+      "median": 4.7e-05,
+      "min": 4.7e-05,
+      "samples": 3
+    },
+    "monitor::scheduler skips command monitors": {
+      "median": 0.013811,
+      "min": 0.012318,
+      "samples": 3
+    },
+    "monitor::scheduler tick triggers timer monitor": {
+      "median": 1.203892,
+      "min": 1.202119,
+      "samples": 3
+    },
+    "monitor::scheduler file monitor triggers when file exists": {
+      "median": 1.202024,
+      "min": 1.20196,
+      "samples": 3
+    },
+    "monitor::scheduler persists wake delivery state for triggered monitors": {
+      "median": 0.152845,
+      "min": 0.152192,
+      "samples": 3
+    },
+    "monitor::status service backfills undelivered wake attention": {
+      "median": 0.001968,
+      "min": 0.001309,
+      "samples": 3
+    },
+    "monitor::scheduler does not claim or wake monitors owned by a different session": {
+      "median": 0.15101,
+      "min": 0.150794,
+      "samples": 3
+    },
+    "monitor::status service does not backfill wake attention owned by a different session": {
+      "median": 0.001141,
+      "min": 0.000972,
+      "samples": 3
+    },
+    "monitor::scheduler aborts stale claimed run when monitor was stopped": {
+      "median": 0.000795,
+      "min": 0.000753,
+      "samples": 3
+    },
+    "monitor::paused monitor does not run": {
+      "median": 1.205207,
+      "min": 1.202416,
+      "samples": 3
+    },
+    "monitor::backfill retries only missing wake and preserves prior notify delivery": {
+      "median": 0.001386,
+      "min": 0.001357,
+      "samples": 3
+    },
+    "monitor::backfill retries only missing notify and preserves prior wake delivery": {
+      "median": 0.000803,
+      "min": 0.000751,
+      "samples": 3
+    },
+    "monitor::notify exception does not throttle future retry": {
+      "median": 0.000677,
+      "min": 0.000614,
+      "samples": 3
+    },
+    "monitor::create and get": {
+      "median": 0.005411,
+      "min": 0.002704,
+      "samples": 3
+    },
+    "monitor::list filters by state": {
+      "median": 0.000669,
+      "min": 0.000583,
+      "samples": 3
+    },
+    "monitor::update increments version": {
+      "median": 0.000596,
+      "min": 0.000468,
+      "samples": 3
+    },
+    "monitor::update with wrong expected version throws": {
+      "median": 0.004271,
+      "min": 0.003015,
+      "samples": 3
+    },
+    "monitor::results append and list": {
+      "median": 0.000545,
+      "min": 0.000524,
+      "samples": 3
+    },
+    "monitor::claimDue returns running monitors with past next_run_at": {
+      "median": 0.001852,
+      "min": 0.000527,
+      "samples": 3
+    },
+    "monitor::releaseLease clears lease and sets next_run_at": {
+      "median": 0.000696,
+      "min": 0.000678,
+      "samples": 3
+    },
+    "monitor::prune archives old terminal monitors": {
+      "median": 0.00173,
+      "min": 0.000489,
+      "samples": 3
+    },
+    "monitor::results persist across restart": {
+      "median": 0.00281,
+      "min": 0.001962,
+      "samples": 3
+    },
+    "monitor::ack by monitor_id persists": {
+      "median": 0.003201,
+      "min": 0.001572,
+      "samples": 3
+    },
+    "monitor::ack by result_id persists": {
+      "median": 0.001487,
+      "min": 0.001092,
+      "samples": 3
+    },
+    "monitor::ack all persists": {
+      "median": 0.003988,
+      "min": 0.002687,
+      "samples": 3
+    },
+    "monitor::monitor_start creates a timer monitor": {
+      "median": 0.007448,
+      "min": 0.007061,
+      "samples": 3
+    },
+    "monitor::monitor_start creates a file monitor": {
+      "median": 0.000739,
+      "min": 0.000646,
+      "samples": 3
+    },
+    "monitor::monitor_start is idempotent and schedules immediate checks by default": {
+      "median": 0.000893,
+      "min": 0.000842,
+      "samples": 3
+    },
+    "monitor::monitor_attention lists unacked triggered results": {
+      "median": 0.001238,
+      "min": 0.00107,
+      "samples": 3
+    },
+    "monitor::monitor_result visible output includes persisted command observation metadata and ack state": {
+      "median": 0.106934,
+      "min": 0.105943,
+      "samples": 3
+    },
+    "monitor::monitor_list and monitor_attention default to current session only": {
+      "median": 0.003095,
+      "min": 0.002115,
+      "samples": 3
+    },
+    "monitor::monitor_start creates durable command monitor and monitor_output reads it": {
+      "median": 0.105175,
+      "min": 0.103805,
+      "samples": 3
+    },
+    "monitor::failing command monitor records error and useful look/output text": {
+      "median": 0.104277,
+      "min": 0.103571,
+      "samples": 3
+    },
+    "monitor::command monitor wake_agent false captures output without follow-up messages and notify flag controls ui notify": {
+      "median": 0.105302,
+      "min": 0.104063,
+      "samples": 3
+    },
+    "monitor::command monitor notify true and wake_agent false notifies without follow-up messages or backfill duplicates": {
+      "median": 0.104707,
+      "min": 0.103463,
+      "samples": 3
+    },
+    "monitor::command monitor notify true without ui.notify records undelivered and backfill can notify later": {
+      "median": 0.106905,
+      "min": 0.102733,
+      "samples": 3
+    },
+    "monitor::command monitor wake_agent true without sendMessage records undelivered and backfill can wake later": {
+      "median": 0.103267,
+      "min": 0.102121,
+      "samples": 3
+    },
+    "monitor::command monitor notification and wake exceptions do not prevent completion persistence": {
+      "median": 0.103819,
+      "min": 0.102626,
+      "samples": 3
+    },
+    "monitor::command monitor wake_agent true sends output and completion follow-up messages": {
+      "median": 0.105452,
+      "min": 0.102807,
+      "samples": 3
+    },
+    "monitor::monitor_output distinguishes not_ready and completed-empty visible text": {
+      "median": 0.106376,
+      "min": 0.104218,
+      "samples": 3
+    },
+    "monitor::monitor_output reports failed empty command without saying completed and monitor_look includes exit code": {
+      "median": 0.106626,
+      "min": 0.102104,
+      "samples": 3
+    },
+    "monitor::monitor_output returns timeout and stop kills non-exec shell child process group": {
+      "median": 0.102162,
+      "min": 0.095522,
+      "samples": 3
+    },
+    "monitor::monitor_stop escalates SIGTERM-ignoring non-exec command and persists stopped only after exit": {
+      "median": 0.046189,
+      "min": 0.04585,
+      "samples": 3
+    },
+    "monitor::monitor_stop stops a monitor": {
+      "median": 0.000835,
+      "min": 0.000784,
+      "samples": 3
+    },
+    "monitor::monitor_list returns monitors": {
+      "median": 0.000573,
+      "min": 0.000548,
+      "samples": 3
+    },
+    "monitor::monitor_look returns monitor details": {
+      "median": 0.000525,
+      "min": 0.000504,
+      "samples": 3
+    },
+    "monitor::command output wake success does not mark failed completion wake delivered and does not backfill successful completion": {
+      "median": 0.102713,
+      "min": 0.102524,
+      "samples": 3
+    },
+    "monitor::computeStatusSummary counts active triggered failed": {
+      "median": 0.001223,
+      "min": 0.001208,
+      "samples": 3
+    },
+    "monitor::renderMonitorStatus idle": {
+      "median": 0.000141,
+      "min": 0.000139,
+      "samples": 3
+    },
+    "monitor::renderMonitorStatus active": {
+      "median": 5.7e-05,
+      "min": 5.5e-05,
+      "samples": 3
+    },
+    "monitor::renderMonitorStatus with triggered and next": {
+      "median": 5.7e-05,
+      "min": 5.1e-05,
+      "samples": 3
+    },
+    "monitor::renderMonitorStatus with failed": {
+      "median": 6.2e-05,
+      "min": 5.4e-05,
+      "samples": 3
+    },
+    "monitor::truncateToWidth truncates long text": {
+      "median": 8.6e-05,
+      "min": 7.3e-05,
+      "samples": 3
+    },
+    "monitor::formatMonitorRow renders running monitor": {
+      "median": 0.000254,
+      "min": 0.000232,
+      "samples": 3
+    },
+    "monitor::validateCheck accepts timer": {
+      "median": 0.000959,
+      "min": 0.000936,
+      "samples": 3
+    },
+    "monitor::validateCheck accepts file exists": {
+      "median": 0.000135,
+      "min": 0.000132,
+      "samples": 3
+    },
+    "monitor::validateCheck rejects file contains without pattern": {
+      "median": 0.000262,
+      "min": 0.00026,
+      "samples": 3
+    },
+    "monitor::validateCheck rejects unknown check type": {
+      "median": 7.4e-05,
+      "min": 7.3e-05,
+      "samples": 3
+    },
+    "monitor::validateSchedule accepts empty schedule as immediate": {
+      "median": 9.2e-05,
+      "min": 9.1e-05,
+      "samples": 3
+    },
+    "monitor::validateSchedule accepts delay_ms": {
+      "median": 6.1e-05,
+      "min": 6e-05,
+      "samples": 3
+    },
+    "monitor::validateSchedule rejects delay_ms below minimum": {
+      "median": 5.7e-05,
+      "min": 5.6e-05,
+      "samples": 3
+    },
+    "monitor::validateSchedule rejects invalid start_at": {
+      "median": 6.9e-05,
+      "min": 6.5e-05,
+      "samples": 3
+    },
+    "monitor::validateCondition accepts always": {
+      "median": 0.000257,
+      "min": 0.000252,
+      "samples": 3
+    },
+    "monitor::validateCondition accepts and/or with children": {
+      "median": 0.000241,
+      "min": 0.000238,
+      "samples": 3
+    },
+    "monitor::validateCondition rejects and without children": {
+      "median": 0.000123,
+      "min": 0.000121,
+      "samples": 3
+    },
+    "monitor::validateStateTransition blocks terminal transitions": {
+      "median": 8e-05,
+      "min": 7.9e-05,
+      "samples": 3
+    },
+    "pi-extension-background-bash::package pi entrypoint points at loadable source": {
+      "median": 0.00186,
+      "min": 0.001693,
+      "samples": 3
+    },
+    "pi-extension-background-bash::registration and prompt guidance are consistently disabled unless load config enables": {
+      "median": 0.000325,
+      "min": 0.000299,
+      "samples": 3
+    },
+    "pi-extension-background-bash::registry registers tools when env opt-in is enabled": {
+      "median": 0.0004,
+      "min": 0.000382,
+      "samples": 3
+    },
+    "pi-extension-background-bash::output cap limits persisted bytes and stops appending": {
+      "median": 0.514756,
+      "min": 0.510163,
+      "samples": 3
+    },
+    "pi-extension-background-bash::stop refuses unverified persisted pid": {
+      "median": 0.001224,
+      "min": 0.001102,
+      "samples": 3
+    },
+    "pi-extension-background-bash::watchdog marks interactive prompt blocked without input": {
+      "median": 0.504245,
+      "min": 0.503316,
+      "samples": 3
+    },
+    "pi-extension-background-bash::invalid cwd spawn failure returns failed task": {
+      "median": 0.00422,
+      "min": 0.003635,
+      "samples": 3
+    },
+    "pi-extension-background-bash::blocked process exit becomes terminal with blocked reason retained": {
+      "median": 0.504219,
+      "min": 0.503284,
+      "samples": 3
+    },
+    "pi-extension-background-bash::activation guidance withheld when active bash override verification fails": {
+      "median": 0.000991,
+      "min": 0.000932,
+      "samples": 3
+    },
+    "pi-extension-background-bash::activation guidance withheld when extension bash exists but active bash is ambiguous": {
+      "median": 0.000465,
+      "min": 0.000446,
+      "samples": 3
+    },
+    "pi-extension-background-bash::activation guidance withheld for single bash without provenance": {
+      "median": 0.000275,
+      "min": 0.000274,
+      "samples": 3
+    },
+    "pi-extension-background-bash::activation guidance shown when active bash name maps to one extension-provenance bash": {
+      "median": 0.000291,
+      "min": 0.000234,
+      "samples": 3
+    },
+    "pi-extension-background-bash::activation guidance withheld for duplicate active bash entries even when allTools has extension provenance": {
+      "median": 0.000208,
+      "min": 0.000146,
+      "samples": 3
+    },
+    "pi-extension-background-bash::registered renderers produce bounded background task cards": {
+      "median": 0.002976,
+      "min": 0.001523,
+      "samples": 3
+    },
+    "pi-extension-background-bash::registered renderers normalize embedded newlines before chrome rendering": {
+      "median": 0.000383,
+      "min": 0.000312,
+      "samples": 3
+    },
+    "pi-extension-background-bash::bash timeout is seconds and background converts to milliseconds": {
+      "median": 1.308948,
+      "min": 1.307414,
+      "samples": 3
+    },
+    "pi-extension-background-bash::migration dry-run plans prompt and JSON tool-list updates without writing": {
+      "median": 0.01049,
+      "min": 0.007317,
+      "samples": 3
+    },
+    "pi-extension-background-bash::migration canary selection and run-artifact warnings gate writes": {
+      "median": 0.00923,
+      "min": 0.00828,
+      "samples": 3
+    },
+    "pi-extension-background-bash::migration does not append background task tools to JSON excludeTools": {
+      "median": 0.002054,
+      "min": 0.001498,
+      "samples": 3
+    },
+    "pi-extension-background-bash::migration backups can be rolled back": {
+      "median": 0.006359,
+      "min": 0.003728,
+      "samples": 3
+    },
+    "showcase::identitySlot hashes deterministically into the 8-color palette": {
+      "median": 0.001186,
+      "min": 0.00118,
+      "samples": 3
+    },
+    "showcase::identitySlot distributes across 8 distinct paths (uses \u2265 5 slots)": {
+      "median": 0.000102,
+      "min": 0.0001,
+      "samples": 3
+    },
+    "showcase::identity palette mirrors the async-subagents RGB triplets exactly": {
+      "median": 8.5e-05,
+      "min": 8.5e-05,
+      "samples": 3
+    },
+    "showcase::modeColor and modeBadgeText map every mode to expected color + badge text": {
+      "median": 9.1e-05,
+      "min": 8.3e-05,
+      "samples": 3
+    },
+    "showcase::modeBadgeText derives short abbreviation from language for code mode": {
+      "median": 0.00013,
+      "min": 0.000118,
+      "samples": 3
+    },
+    "showcase::topRule paints identity color on corners and filename": {
+      "median": 0.000347,
+      "min": 0.000328,
+      "samples": 3
+    },
+    "showcase::bottomRule paints identity color on corners and respects width": {
+      "median": 0.000167,
+      "min": 0.000157,
+      "samples": 3
+    },
+    "showcase::topRule uses short line range form at narrow widths": {
+      "median": 0.00011,
+      "min": 0.000108,
+      "samples": 3
+    },
+    "showcase::topRule drops the right segment when it cannot fit": {
+      "median": 0.000231,
+      "min": 0.000228,
+      "samples": 3
+    },
+    "showcase::topRule drops the mode badge at very narrow widths": {
+      "median": 0.000296,
+      "min": 0.000296,
+      "samples": 3
+    },
+    "showcase::topRule renders language-derived badge for code mode when language is provided": {
+      "median": 0.000143,
+      "min": 0.000132,
+      "samples": 3
+    },
+    "showcase::card renders at width 44 with rules 44 cells wide and no side bars on content": {
+      "median": 0.006335,
+      "min": 0.006182,
+      "samples": 3
+    },
+    "showcase::card renders at width 56 with rules 56 cells wide and no side bars on content": {
+      "median": 0.000576,
+      "min": 0.000569,
+      "samples": 3
+    },
+    "showcase::card renders at width 72 with rules 72 cells wide and no side bars on content": {
+      "median": 0.000279,
+      "min": 0.000276,
+      "samples": 3
+    },
+    "showcase::card renders at width 96 with rules 96 cells wide and no side bars on content": {
+      "median": 0.000198,
+      "min": 0.000197,
+      "samples": 3
+    },
+    "showcase::card renders at width 120 with rules 120 cells wide and no side bars on content": {
+      "median": 0.00021,
+      "min": 0.000197,
+      "samples": 3
+    },
+    "showcase::card uses parent dir only at widths \u2265 80": {
+      "median": 0.000398,
+      "min": 0.000352,
+      "samples": 3
+    },
+    "showcase::card renders parent dir verbatim (no ellipsis truncation)": {
+      "median": 0.000158,
+      "min": 0.000152,
+      "samples": 3
+    },
+    "showcase::custom title replaces filename in the bar": {
+      "median": 0.000362,
+      "min": 0.000335,
+      "samples": 3
+    },
+    "showcase::markdown details produce a card whose body lines come from pi-tui Markdown (not a single Text)": {
+      "median": 0.007032,
+      "min": 0.006912,
+      "samples": 3
+    },
+    "showcase::diff mode body uses diff coloring helpers": {
+      "median": 0.000321,
+      "min": 0.000299,
+      "samples": 3
+    },
+    "showcase::diff mode truncates long rendered rows to the component width": {
+      "median": 0.000192,
+      "min": 0.000183,
+      "samples": 3
+    },
+    "showcase::plain mode body has gutter line numbers and no syntax highlighting": {
+      "median": 0.000131,
+      "min": 0.00012,
+      "samples": 3
+    },
+    "showcase::cardSpecFromDetails derives filename and parentDir from path when no title": {
+      "median": 5.5e-05,
+      "min": 5.3e-05,
+      "samples": 3
+    },
+    "showcase::cardSpecFromDetails uses title verbatim as filename when supplied": {
+      "median": 5.5e-05,
+      "min": 5.3e-05,
+      "samples": 3
+    },
+    "showcase::renderShowcaseResult on a failed result returns a Text component with the error": {
+      "median": 0.000204,
+      "min": 0.000201,
+      "samples": 3
+    },
+    "showcase::renderShowcaseResult on success returns a ShowcaseCard component that adapts to width": {
+      "median": 0.000524,
+      "min": 0.000492,
+      "samples": 3
+    },
+    "showcase::buildCardLines uses identity color hashed off the path on both rules": {
+      "median": 0.000203,
+      "min": 0.000195,
+      "samples": 3
+    },
+    "showcase::code mode renders gutter by default": {
+      "median": 0.000202,
+      "min": 0.000192,
+      "samples": 3
+    },
+    "showcase::lineNumbers: false omits the gutter in code mode": {
+      "median": 0.000284,
+      "min": 0.000256,
+      "samples": 3
+    },
+    "showcase::lineNumbers: false omits the gutter in plain mode": {
+      "median": 0.000119,
+      "min": 0.000114,
+      "samples": 3
+    },
+    "showcase::lineNumbers: false omits the gutter in json mode": {
+      "median": 0.00085,
+      "min": 0.0008,
+      "samples": 3
+    },
+    "showcase::lineNumbers: false is a no-op for markdown mode (markdown has no gutter)": {
+      "median": 0.001764,
+      "min": 0.001734,
+      "samples": 3
+    },
+    "showcase::lineNumbers: false is a no-op for diff mode (renderDiff has its own format)": {
+      "median": 0.000192,
+      "min": 0.000178,
+      "samples": 3
+    },
+    "showcase::lineNumbers: true (explicit) keeps the gutter on": {
+      "median": 0.000252,
+      "min": 0.000248,
+      "samples": 3
+    },
+    "source-search::live query works without source-search config and honors agent ignore files": {
+      "median": 0.045774,
+      "min": 0.040922,
+      "samples": 3
+    },
+    "source-search::live query honors directory pi ignores and config excludes": {
+      "median": 0.026787,
+      "min": 0.018908,
+      "samples": 3
+    },
+    "source-search::live query searches non-git directories": {
+      "median": 0.02426,
+      "min": 0.008638,
+      "samples": 3
+    },
+    "source-search::workspace search can resolve opportunistic immediate child git repos without config": {
+      "median": 0.04016,
+      "min": 0.02521,
+      "samples": 3
+    },
+    "source-search::query emits structured snippets and matched fields": {
+      "median": 0.030767,
+      "min": 0.022613,
+      "samples": 3
+    },
+    "source-search::filename matches, boosts rerank, and excludeTerms filter": {
+      "median": 0.049932,
+      "min": 0.032574,
+      "samples": 3
+    },
+    "source-search::query rejects backend syntax and invalid boost weights": {
+      "median": 0.015703,
+      "min": 0.013796,
+      "samples": 3
+    },
+    "source-search::extension registers ranked_search only and does not mutate environment": {
+      "median": 0.000353,
+      "min": 0.000344,
+      "samples": 3
+    },
+    "source-search::renders ranked search hits": {
+      "median": 0.001101,
+      "min": 0.001094,
+      "samples": 3
+    },
+    "source-search::renders structured snippet windows without flattening whitespace": {
+      "median": 0.000216,
+      "min": 0.000216,
+      "samples": 3
+    },
+    "source-search::renders snippet enclosing context metadata": {
+      "median": 8.7e-05,
+      "min": 8.4e-05,
+      "samples": 3
+    },
+    "source-search::renders directional snippet truncation metadata": {
+      "median": 0.000131,
+      "min": 0.00013,
+      "samples": 3
+    },
+    "source-search::renders disjoint snippet ranges in the hit location": {
+      "median": 8.7e-05,
+      "min": 8.6e-05,
+      "samples": 3
+    },
+    "source-search::renders failed search warnings instead of hiding details behind unknown error": {
+      "median": 6.1e-05,
+      "min": 6.1e-05,
+      "samples": 3
+    },
+    "source-search::renders no-match warnings for partial workspace failures": {
+      "median": 0.000106,
+      "min": 0.000105,
+      "samples": 3
+    },
+    "source-search::renders repo discovery prompt": {
+      "median": 7.7e-05,
+      "min": 7.6e-05,
+      "samples": 3
+    },
+    "tango::A2A coordination cleanup slice": {
+      "median": 1.054922,
+      "min": 0.05687,
+      "samples": 3
+    },
+    "tango::attention records": {
+      "median": 0.115264,
+      "min": 0.11026,
+      "samples": 3
+    },
+    "tango::Claude harness": {
+      "median": 0.014667,
+      "min": 0.013728,
+      "samples": 3
+    },
+    "tango::buildDashboard": {
+      "median": 0.011285,
+      "min": 0.008435,
+      "samples": 3
+    },
+    "tango::buildOperations": {
+      "median": 0.005954,
+      "min": 0.00424,
+      "samples": 3
+    },
+    "tango::buildWorkstreams": {
+      "median": 0.001122,
+      "min": 0.00093,
+      "samples": 3
+    },
+    "tango::buildWorkstreamDetail": {
+      "median": 0.018223,
+      "min": 0.016243,
+      "samples": 3
+    },
+    "tango::buildWorkstreamAgents": {
+      "median": 0.002175,
+      "min": 0.001709,
+      "samples": 3
+    },
+    "tango::buildAttention": {
+      "median": 0.002534,
+      "min": 0.001828,
+      "samples": 3
+    },
+    "tango::buildArtifacts": {
+      "median": 0.010124,
+      "min": 0.006717,
+      "samples": 3
+    },
+    "tango::buildTimeline": {
+      "median": 0.003822,
+      "min": 0.002489,
+      "samples": 3
+    },
+    "tango::buildHistory": {
+      "median": 0.000855,
+      "min": 0.000655,
+      "samples": 3
+    },
+    "tango::eventMatchesLineage": {
+      "median": 0.076312,
+      "min": 0.067353,
+      "samples": 3
+    },
+    "tango::Tango CLI/runtime hardening": {
+      "median": 12.098036,
+      "min": 11.842792,
+      "samples": 3
+    },
+    "tango::inbox activity inspection": {
+      "median": 0.020018,
+      "min": 0.015856,
+      "samples": 3
+    },
+    "tango::root owner leases": {
+      "median": 0.005764,
+      "min": 0.004599,
+      "samples": 3
+    },
+    "tango::interactive lifecycle UX": {
+      "median": 0.038706,
+      "min": 0.030232,
+      "samples": 3
+    },
+    "tango::prune": {
+      "median": 0.182646,
+      "min": 0.1596,
+      "samples": 3
+    },
+    "tango::result readiness": {
+      "median": 2.173337,
+      "min": 1.917899,
+      "samples": 3
+    },
+    "tango::rollout compatibility": {
+      "median": 7.372745,
+      "min": 7.149206,
+      "samples": 3
+    },
+    "tango::classifyAgent": {
+      "median": 0.00532,
+      "min": 0.005015,
+      "samples": 3
+    },
+    "tango::buildAgentForest": {
+      "median": 0.002104,
+      "min": 0.001756,
+      "samples": 3
+    },
+    "tango::buildAgentCommands": {
+      "median": 0.003025,
+      "min": 0.002014,
+      "samples": 3
+    },
+    "tango::groupByRootSession": {
+      "median": 0.000251,
+      "min": 0.000235,
+      "samples": 3
+    },
+    "tango::gatherAttentionItems": {
+      "median": 0.000223,
+      "min": 0.000215,
+      "samples": 3
+    },
+    "tango::computeSessionCounts": {
+      "median": 0.000146,
+      "min": 0.000142,
+      "samples": 3
+    },
+    "tango::server routes": {
+      "median": 0.216032,
+      "min": 0.191166,
+      "samples": 3
+    },
+    "tango::parent subscriptions": {
+      "median": 0.018258,
+      "min": 0.010634,
+      "samples": 3
+    },
+    "tango::resolveTarget": {
+      "median": 0.051227,
+      "min": 0.039273,
+      "samples": 3
+    },
+    "tango::isChildOf": {
+      "median": 0.010899,
+      "min": 0.010161,
+      "samples": 3
+    },
+    "web-evidence-cache::Brave config accepts BRAVE_SEARCH_API_KEY before BRAVE_API_KEY": {
+      "median": 0.000829,
+      "min": 0.000794,
+      "samples": 3
+    },
+    "web-evidence-cache::Brave config throws ContextError when missing key": {
+      "median": 0.000303,
+      "min": 0.000293,
+      "samples": 3
+    },
+    "web-evidence-cache::shapeBraveQuery applies exact mode and domain operators": {
+      "median": 0.00025,
+      "min": 0.000238,
+      "samples": 3
+    },
+    "web-evidence-cache::shapeBraveQuery treats multiple included domains as alternatives": {
+      "median": 0.000127,
+      "min": 9.7e-05,
+      "samples": 3
+    },
+    "web-evidence-cache::assignSearchIdentities adds UUIDs, aliases, ranks, and timestamps": {
+      "median": 0.00072,
+      "min": 0.000653,
+      "samples": 3
+    },
+    "web-evidence-cache::sanitizeBraveSnippet strips tags, decodes entities, and normalizes whitespace": {
+      "median": 0.000331,
+      "min": 0.000329,
+      "samples": 3
+    },
+    "web-evidence-cache::searchContentSummary shows both alias and UUID id": {
+      "median": 0.000196,
+      "min": 0.000195,
+      "samples": 3
+    },
+    "web-evidence-cache::chunkSemanticHtml preserves heading paths and marks chunks": {
+      "median": 0.006392,
+      "min": 0.00354,
+      "samples": 3
+    },
+    "web-evidence-cache::extractDocument returns sanitized semantic HTML, markdown, and text": {
+      "median": 0.065866,
+      "min": 0.04503,
+      "samples": 3
+    },
+    "web-evidence-cache::extractDocument strips unsafe href/src protocols and preserves http(s)": {
+      "median": 0.006705,
+      "min": 0.004525,
+      "samples": 3
+    },
+    "web-evidence-cache::refresh:auto reuses an existing page by original redirected URL without network": {
+      "median": 0.007128,
+      "min": 0.006825,
+      "samples": 3
+    },
+    "web-evidence-cache::appendWebEvidencePrompt appends the compact web evidence module once": {
+      "median": 0.00092,
+      "min": 0.000911,
+      "samples": 3
+    },
+    "web-evidence-cache::web evidence prompt module stays compact and selection-prior focused": {
+      "median": 8.9e-05,
+      "min": 8.4e-05,
+      "samples": 3
+    },
+    "web-evidence-cache::renderer cards hold declared width at common cutoffs": {
+      "median": 0.001697,
+      "min": 0.001672,
+      "samples": 3
+    },
+    "web-evidence-cache::visWidth handles emoji, text dingbats, and variation selectors": {
+      "median": 0.000103,
+      "min": 0.0001,
+      "samples": 3
+    },
+    "web-evidence-cache::truncateEnd path through card rows keeps variation-selector emoji within width": {
+      "median": 0.001786,
+      "min": 0.00051,
+      "samples": 3
+    },
+    "web-evidence-cache::card rows normalize embedded newlines before rendering": {
+      "median": 0.00222,
+      "min": 0.001113,
+      "samples": 3
+    },
+    "web-evidence-cache::ANSI-colored error rows truncate without counting escape bytes as cells": {
+      "median": 0.000266,
+      "min": 0.000258,
+      "samples": 3
+    },
+    "web-evidence-cache::truncateMiddle keeps path head and tail": {
+      "median": 0.000103,
+      "min": 0.000102,
+      "samples": 3
+    },
+    "web-evidence-cache::canonicalizeUrl rejects unsupported protocols and credentials": {
+      "median": 0.006319,
+      "min": 0.003658,
+      "samples": 3
+    },
+    "web-evidence-cache::URL safety internals classify local/private/metadata addresses as blocked": {
+      "median": 0.00119,
+      "min": 0.001166,
+      "samples": 3
+    },
+    "web-evidence-cache::composeAbortSignal propagates user aborts": {
+      "median": 0.001268,
+      "min": 0.00124,
+      "samples": 3
+    },
+    "web-evidence-cache::SQLite FTS5 probe passes on supported runtime": {
+      "median": 0.001395,
+      "min": 0.001325,
+      "samples": 3
+    },
+    "web-evidence-cache::EvidenceDatabase inserts page/chunks and returns lookup hits without scores": {
+      "median": 0.014412,
+      "min": 0.012315,
+      "samples": 3
+    },
+    "web-evidence-cache::EvidenceDatabase lookup handles punctuation-heavy identifiers without FTS syntax errors": {
+      "median": 0.004547,
+      "min": 0.004441,
+      "samples": 3
+    },
+    "web-evidence-cache::EvidenceDatabase domain filter matches hostnames, not spoofed paths or queries": {
+      "median": 0.005687,
+      "min": 0.004129,
+      "samples": 3
+    },
+    "web-evidence-cache::lookup suppresses text line hints when returning semantic HTML or markdown paths": {
+      "median": 0.006006,
+      "min": 0.004543,
+      "samples": 3
+    },
+    "web-evidence-cache::EvidenceDatabase lookup match modes reduce noisy broad matches": {
+      "median": 0.002961,
+      "min": 0.002829,
+      "samples": 3
+    },
+    "web-evidence-cache::normalizeFtsQuery quotes dangerous punctuation instead of emitting FTS syntax": {
+      "median": 0.000151,
+      "min": 0.000145,
+      "samples": 3
+    },
+    "web-evidence-cache::all web evidence tools use self-rendering shell and prompt guidance": {
+      "median": 0.001615,
+      "min": 0.001575,
+      "samples": 3
+    },
+    "web-evidence-cache::advanced string options avoid opaque core enum validation": {
+      "median": 0.000128,
+      "min": 0.000116,
+      "samples": 3
+    },
+    "web-evidence-cache::web evidence extension appends the extension-wide prompt section before agent start": {
+      "median": 0.000168,
+      "min": 0.00016,
+      "samples": 3
+    }
+  }
+}

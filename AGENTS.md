@@ -57,3 +57,12 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `tango roles list` — inspect available Tango roles when the CLI is on PATH.
 - Gemini Tango roles use only `gemini-3.1-pro-preview` or `gemini-3-flash-preview`; see `packages/tango/docs/gemini-harness.md` and `docs/specs/tango-gemini-cli-runtime/design.md`.
 - `loom agent guide` — print the compact runtime-agnostic Loom guide for agents.
+
+## Testing
+
+- See `docs/TESTING.md` for how the categorized `node:test` suite runs and the
+  committed latency baseline (`.quantiiv/test-baseline.json`). The whole suite is
+  credential- and network-free (all IO is local fs/subprocess/in-process sqlite).
+  Fastest tier: `node --test packages/gemini-code-assist/dist/test/*.test.js
+  packages/showcase/dist/test/*.test.js`. `loom` and `tango` are the slow,
+  subprocess-heavy packages.
