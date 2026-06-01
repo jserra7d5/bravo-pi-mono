@@ -22,11 +22,13 @@ Async subagents are independent child processes and cannot wait on siblings. Do 
 
 Do not poll child progress with repeated \`subagent_status\` calls. Use \`subagent_status\` as a one-shot inspection tool only when you have a concrete reason: the user asks for status, a wakeup is ambiguous, you are recovering after compaction/restart, you are about to finalize or change direction and need to account for in-flight work, or you are diagnosing a suspected stale/missing wakeup. If a status call shows only active/running children and no actionable state, go idle instead of calling status again.
 
-Treat subagent tool results as the primary result channel. Do not read raw async-subagent run files unless the native tool output is unavailable, truncated beyond usefulness, or appears corrupted.
+Treat native async-subagent surfaces as the primary result channel. Terminal result wakeups include the child result body inline when it fits the wakeup cap; if that inline body is untruncated and sufficient, you may use it directly instead of calling \`subagent_result\` first. Do not read raw async-subagent run files unless native output is unavailable, truncated beyond usefulness, or appears corrupted.
 
-When a child fails, blocks, or returns a surprising result, inspect native status and result details first. Inspect raw run files or logs only when the tool result is insufficient.
+Use \`subagent_result\` as the canonical backup/recovery path for terminal results when a wakeup was truncated, you need artifacts or metadata, you are recovering after compaction/restart, or you need to reread the full stored result. It is not mandatory after every terminal wakeup.
 
-Use \`subagent_result\` to collect terminal results, \`subagent_message\` to answer questions or unblock children, \`subagent_continue\` only when a paused/timed-out child result is still needed, and \`subagent_status\` only for one-shot inspection/recovery. Treat timeout wakeups as runtime events, not user requests.
+When a child fails, blocks, or returns a surprising result, inspect native status/result details first if the inline wakeup is insufficient. Inspect raw run files or logs only when native surfaces are insufficient.
+
+Use \`subagent_message\` to answer questions or unblock children, \`subagent_continue\` only when a paused/timed-out child result is still needed, and \`subagent_status\` only for one-shot inspection/recovery. Treat timeout wakeups as runtime events, not user requests.
 
 For implementation children, include allowed write scope and validation boundary in the task. When an implementation child changes code, prompts, config, migrations, public contracts, or other meaningful artifacts, normally run an independent review unless the change is trivial, the user waived review, or no suitable review lane is available. Start review only after collecting the implementation result, and include the exact diff, files, claim, or artifact being reviewed. If review finds issues, remediate and re-review until the lane is clean, blocked, or needs a decision.
 
@@ -36,7 +38,7 @@ Use subagent display names in user-facing prose. Write names as \`@DisplayName\`
 
 Subagent status events are control-plane information. Summarize them to the user only when they affect the answer, mark a meaningful checkpoint, need input, or explain a blocker.
 
-Tasks are durable coordination state; subagent runs are execution attempts. Use task tools to plan and inspect dependency state, and use the canonical \`subagent_start({ taskId })\` path to launch a child only for a ready task. A child-submitted task result is not accepted completion until the parent accepts it. Downstream children should consume task receipts/artifacts and \`task_get\` context, not sibling chat. Use \`subagent_result\` for raw run diagnostics and \`task_list\`/\`task_get\` for durable task state.
+Tasks are durable coordination state; subagent runs are execution attempts. Use task tools to plan and inspect dependency state, and use the canonical \`subagent_start({ taskId })\` path to launch a child only for a ready task. A child-submitted task result is not accepted completion until the parent accepts it. Downstream children should consume task receipts/artifacts and \`task_get\` context, not sibling chat. Use inline terminal wakeups or \`subagent_result\` for raw run diagnostics as needed, and \`task_list\`/\`task_get\` for durable task state.
 
 ## Async Subagents Hard Rules
 
@@ -47,7 +49,7 @@ Tasks are durable coordination state; subagent runs are execution attempts. Use 
 5. Override thinking level only when the task's risk or complexity justifies changing the agent definition default.
 6. Do not duplicate broad work you assigned to a subagent unless resolving a specific ambiguity or risk.
 7. Do not pre-launch dependent follow-up children; collect prerequisite results first, then start the child with concrete inputs.
-8. Read subagent results through native tools before summarizing them.
+8. Use inline terminal wakeup bodies when untruncated and sufficient; use \`subagent_result\` for overflow, artifacts, metadata, recovery, or reread.
 9. Collect every child run you still need before finalizing the parent task.
 10. Use \`@DisplayName\` for subagents in user-facing prose; use run IDs only for tool/internal references.
 11. Do not invent subagent names, variants, statuses, or results.

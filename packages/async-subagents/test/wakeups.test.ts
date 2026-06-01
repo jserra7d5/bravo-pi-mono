@@ -8,7 +8,7 @@ import { createRunResult } from "../src/result.js";
 import { RunStore } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
 import { SCHEMA_VERSION } from "../src/types.js";
-import { pollWakeups, markWakeupHandled, isWakeupKeyHandled, writeDeliverySubscription } from "../extensions/pi/wakeups.js";
+import { pollWakeups, markWakeupHandled, markDeliveredWakeupHandled, isWakeupKeyHandled, writeDeliverySubscription } from "../extensions/pi/wakeups.js";
 
 function workspace() {
   const root = mkdtempSync(join(tmpdir(), "async-subagents-wakeups-"));
@@ -55,12 +55,76 @@ test("pollWakeups requires the owner lease and dedupes terminal results", () => 
   assert.equal(first.length, 1);
   assert.equal(first[0]?.runId, runId);
   assert.match(first[0]?.deliveryKey ?? "", /^terminal:/);
+  assert.equal(first[0]?.message.result?.body, undefined);
+  assert.equal(first[0]?.message.body, undefined);
 
   const second = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_a" });
   assert.equal(second.length, 0);
 
   const stale = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_b" });
   assert.equal(stale.length, 0);
+});
+
+test("pollWakeups includes capped terminal result body while keeping result body redacted", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const { runId } = store.createRunDirectory({ cwd: root, parentRunId, rootSessionId: parentRunId });
+  const status = createInitialStatus({
+    runId,
+    parentRunId,
+    rootSessionId: parentRunId,
+    agentName: "scout",
+    agentSource: "builtin",
+    definitionPath: "/builtin/scout.md",
+    mode: "oneshot",
+    cwd: root,
+    state: "completed",
+  });
+  store.writeStatus({ ...status, resultReady: true });
+  store.writeResult(createRunResult({ runId, parentRunId, agentName: "scout", state: "completed", summary: "Done", body: "abc" }));
+  writeDeliverySubscription(store, { schemaVersion: SCHEMA_VERSION, parentRunId, runId, notifyOn: ["result"], createdAt: new Date().toISOString() });
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const [delivery] = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(delivery?.message.body, "abc");
+  assert.equal(delivery?.message.bodyTruncation?.truncated, false);
+  assert.equal(delivery?.message.result?.body, undefined);
+  assert.deepEqual(delivery?.message.next, []);
+  markDeliveredWakeupHandled(store, parentRunId, delivery!);
+  assert.equal(isWakeupKeyHandled(store, parentRunId, delivery?.deliveryKey ?? ""), true);
+  assert.equal(store.readStatus(runId).resultReady, false);
+});
+
+test("pollWakeups caps terminal result body by code point with recovery marker", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const { runId } = store.createRunDirectory({ cwd: root, parentRunId, rootSessionId: parentRunId });
+  const status = createInitialStatus({
+    runId,
+    parentRunId,
+    rootSessionId: parentRunId,
+    agentName: "scout",
+    agentSource: "builtin",
+    definitionPath: "/builtin/scout.md",
+    mode: "oneshot",
+    cwd: root,
+    state: "completed",
+  });
+  store.writeStatus({ ...status, resultReady: true });
+  const body = "🦊".repeat(32_001);
+  store.writeResult(createRunResult({ runId, parentRunId, agentName: "scout", state: "completed", summary: "Done", body }));
+  writeDeliverySubscription(store, { schemaVersion: SCHEMA_VERSION, parentRunId, runId, notifyOn: ["result"], createdAt: new Date().toISOString() });
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const [delivery] = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal([...String(delivery?.message.body)].length, 32_000);
+  assert.equal(delivery?.message.bodyTruncation?.truncated, true);
+  assert.match(delivery?.message.body ?? "", /subagent_result\(\{ runId: "/);
+  assert.equal(delivery?.message.result?.body, undefined);
+  assert.deepEqual(delivery?.message.next, [{ tool: "subagent_result", args: { runId } }]);
+  markDeliveredWakeupHandled(store, parentRunId, delivery!);
+  assert.equal(isWakeupKeyHandled(store, parentRunId, delivery?.deliveryKey ?? ""), false);
+  assert.equal(store.readStatus(runId).resultReady, true);
 });
 
 test("pollWakeups ignores unsubscribed runs", () => {

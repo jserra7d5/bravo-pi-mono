@@ -897,7 +897,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     {
       name: "subagent_result",
       label: "Subagent Result",
-      description: "Read a terminal child result from result.json.",
+      description: "Canonical backup/recovery read for a terminal child result from result.json; use for truncated wakeups, artifacts, metadata, or reread.",
       parameters: subagentResultSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const cwd = ctxCwd(ctx);

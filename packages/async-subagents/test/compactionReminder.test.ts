@@ -66,7 +66,7 @@ test("compaction reminder preserves active, blocked, and result-ready subagent s
   assert.match(reminder?.content ?? "", new RegExp(blocked));
   assert.match(reminder?.content ?? "", /@Rex \(scout\).*blocked.*subagent_message/);
   assert.match(reminder?.content ?? "", new RegExp(completed));
-  assert.match(reminder?.content ?? "", /@Mira \(scout\).*completed.*subagent_result/);
+  assert.match(reminder?.content ?? "", /@Mira \(scout\).*completed.*delivered wakeup body.*subagent_result/);
   assert.equal(reminder?.details.active, 1);
   assert.equal(reminder?.details.waiting, 1);
   assert.equal(reminder?.details.resultReady, 1);

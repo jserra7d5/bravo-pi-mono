@@ -129,7 +129,7 @@ The canonical files remain `run-index.jsonl`, `status.json`, `events.jsonl`, `in
 - Per-run `summary.json` is updated by status, event, and result mutations. Widgets, compaction reminders, and wake-up polling use this compact summary for broad discovery and avoid scanning full event/result files for every historical run. They still open canonical files in bounded cases: result-ready rows may read `result.json` for current display/handled checks, and subscribed wake polling may scan `events.jsonl` to deliver every pending question/blocked/paused timeout event exactly once.
 - `pruneRuns(store, { olderThanMs, dryRun })` provides conservative manual retention. It never prunes active runs, `resultReady` runs, or runs with delivered-but-unhandled wakeups. `dryRun` defaults to true.
 
-Model-facing wakeups are runtime envelopes marked `NOT USER INPUT`; they include metadata and short summaries only. Full child result bodies are stored in `result.json` and are collected with `subagent_result`.
+Model-facing wakeups are runtime envelopes marked `NOT USER INPUT`. Terminal result wakeups include the terminal `RunResult.body` inline, capped at 32,000 user-facing characters by default, while `message.details.result` keeps the full body redacted to avoid duplicate payloads. If the inline body is truncated, the wakeup includes a clear marker; use `subagent_result` as the canonical recovery path for overflow, artifacts, metadata, or rereading the stored `result.json`. If the inline body is untruncated and sufficient, the parent can continue without first calling `subagent_result`.
 
 ## Task orchestration
 
@@ -173,7 +173,7 @@ Choose the smallest reasonable `additionalRunSeconds` for the remaining work. If
 
 - `subagent_start`: start a durable async child run and return immediately.
 - `subagent_status`: inspect current and recent child state.
-- `subagent_result`: read terminal `result.json` and mark terminal delivery handled.
+- `subagent_result`: canonical backup/recovery read of terminal `result.json`; use for truncated wakeups, artifacts, metadata, or reread, and to mark terminal delivery handled.
 - `subagent_message`: send normal parent input only (`instruction`, `answer`, `context`).
 - `subagent_interrupt`: pause or cancel an active child.
 - `subagent_continue`: resume a paused/timed-out child, optionally with `additionalRunSeconds`, or create a continuation for terminal runs.
@@ -186,7 +186,7 @@ Async subagents are sibling child processes, not a task graph. A child cannot wa
 
 - Start independent child lanes concurrently when their inputs already exist.
 - Do not pre-launch a dependent follow-up child with instructions to wait for another child to finish; it will run immediately.
-- Collect prerequisite results first with `subagent_result`, then start the follow-up child with concrete files, diffs, artifacts, or claims to inspect.
+- Collect prerequisite results from terminal wakeup bodies when untruncated/sufficient, or with `subagent_result` when you need overflow, artifacts, metadata, recovery, or a reread; then start the follow-up child with concrete files, diffs, artifacts, or claims to inspect.
 - Prefer lane-level pipelining over batch barriers: when one lane becomes reviewable or otherwise ready for a downstream step, start that step without waiting for unrelated lanes.
 - For delegated implementation that changes meaningful artifacts, normally run an independent review/remediation loop unless the change is trivial, review was explicitly waived, or no suitable review lane is available.
 

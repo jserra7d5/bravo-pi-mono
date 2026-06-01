@@ -40,6 +40,7 @@ export interface WakeupMessage {
   summary?: string;
   body?: string;
   bodyAvailable?: boolean;
+  bodyTruncation?: Record<string, unknown>;
   event?: RunEvent;
   taskEvent?: TaskEvent;
   task?: { taskId: string; title?: string; status?: string; owner?: { runId?: string; displayName?: string; agent?: string }; receiptPath?: string };
@@ -757,29 +758,6 @@ function cardWidth(opts?: { width?: number }): number {
   return Math.max(32, Math.min(96, raw));
 }
 
-function affordanceChip(text: string): string {
-  return ANSI.gray + "[ " + ANSI.reset + ANSI.white + text + ANSI.reset + ANSI.gray + " ]" + ANSI.reset;
-}
-
-function packAffordances(width: number, ch: Chrome, affordances: string[]): string[] {
-  const rendered = affordances.map(affordanceChip);
-  const sep = "   ";
-  const maxRowWidth = width - 4;
-  const out: string[] = [];
-  let current = "";
-  for (const a of rendered) {
-    const candidate = current ? current + sep + a : a;
-    if (visWidth(candidate) <= maxRowWidth) {
-      current = candidate;
-    } else {
-      if (current) out.push(ch.row(current));
-      current = a;
-    }
-  }
-  if (current) out.push(ch.row(current));
-  return out;
-}
-
 export interface LaunchCardInput {
   width?: number;
   displayName: string;
@@ -867,7 +845,6 @@ export interface WakeCardInput {
   badge?: string;
   headline?: string;
   body?: string;
-  affordances?: string[];
 }
 
 export function renderWakeCard(input: WakeCardInput): string[] {
@@ -883,10 +860,6 @@ export function renderWakeCard(input: WakeCardInput): string[] {
   if (input.body) {
     out.push(ch.row(""));
     for (const line of input.body.split("\n")) out.push(ch.row(ANSI.white + line + ANSI.reset));
-  }
-  if (input.affordances?.length) {
-    out.push(ch.row(""));
-    out.push(...packAffordances(width, ch, input.affordances));
   }
   out.push(ch.bot());
   return out;
@@ -930,21 +903,6 @@ function describeContext(args: Record<string, unknown>): string | undefined {
   if (ctx === "fork") return "forked from this session";
   if (ctx === "fresh") return "fresh session";
   return undefined;
-}
-
-function describeAffordances(kind: string | undefined): string[] {
-  switch (kind) {
-    case "waiting_for_input":
-    case "question": return ["reply", "status", "dismiss"];
-    case "blocked": return ["recheck", "skip", "dismiss"];
-    case "failed": return ["retry", "dismiss"];
-    case "paused": return ["continue", "cancel"];
-    case "completed":
-    case "result_ready": return ["view", "continue"];
-    case "cancelled":
-    case "expired": return ["dismiss"];
-    default: return [];
-  }
 }
 
 function deriveWakeKind(state: string | undefined, hasResult: boolean): string {
@@ -1220,7 +1178,7 @@ export function renderSubagentToolResultComponent(result: unknown, options?: Ren
 // Wake messages
 // ----------------------------------------------------------------------------
 
-function wakeCardInputFor(message: WakeupMessage, options?: RenderOptions): WakeCardInput {
+function wakeCardInputFor(message: WakeupMessage, _options?: RenderOptions): WakeCardInput {
   const hasResult = Boolean(message.result);
   const kind = deriveWakeKind(message.state, hasResult);
   const result = message.result;
@@ -1230,8 +1188,8 @@ function wakeCardInputFor(message: WakeupMessage, options?: RenderOptions): Wake
   const summaryText = message.summary ?? message.result?.summary ?? message.event?.summary;
   const headline = summaryText ? preview(summaryText, 96) : undefined;
   const body = (() => {
-    if (options?.expanded && message.body) return message.body;
-    if (message.bodyAvailable) return "Full child body available via subagent_result.";
+    if (message.body !== undefined) return message.body;
+    if (message.bodyAvailable) return hasResult ? "Full child body available via subagent_result if you need recovery, artifacts, metadata, or a reread." : "Child event body available in wakeup details.";
     return undefined;
   })();
   return {
@@ -1241,7 +1199,6 @@ function wakeCardInputFor(message: WakeupMessage, options?: RenderOptions): Wake
     badge: deriveWakeBadge(kind),
     headline,
     body,
-    affordances: describeAffordances(kind),
   };
 }
 

@@ -197,22 +197,6 @@ test("display name is capped at 16 visible cells with an ellipsis in widget rows
   assert.ok(stripped.includes("…"));
 });
 
-test("affordances wrap onto multiple rows instead of truncating", () => {
-  const card = renderWakeCard({
-    width: 72,
-    displayName: "blip",
-    role: "auditor",
-    kind: "waiting_for_input",
-    badge: "needs you",
-    headline: "hi",
-    affordances: ["draft 1", "draft 2", "draft 3", "matrix first", "wait"],
-  });
-  // Each row exactly width=72 visible cells; affordance brackets appear at least twice.
-  const stripped = card.map(stripAnsi).join("\n");
-  const opens = (stripped.match(/\[ /g) ?? []).length;
-  assert.equal(opens, 5);
-});
-
 test("launch card surfaces task, model, thinking, skills, tools, budget, and context", () => {
   const card = renderLaunchCard({
     width: 72,
@@ -298,7 +282,7 @@ test("generic tool result fallback normalizes tabs before returning render lines
   assert.deepEqual(lines, ["plain  fallback"]);
 });
 
-test("wake card kind picks the correct badge and affordances", () => {
+test("wake card kind picks the correct badge without fake affordance chips", () => {
   const needs = renderWakeCard({
     width: 72,
     displayName: "blip",
@@ -306,7 +290,6 @@ test("wake card kind picks the correct badge and affordances", () => {
     kind: "waiting_for_input",
     badge: "needs you",
     headline: "creds?",
-    affordances: ["reply", "wait", "dismiss"],
   });
   const failed = renderWakeCard({
     width: 72,
@@ -315,14 +298,13 @@ test("wake card kind picks the correct badge and affordances", () => {
     kind: "failed",
     badge: "failed",
     headline: "perm denied",
-    affordances: ["retry", "dismiss"],
   });
   const needsText = needs.map(stripAnsi).join("\n");
   const failedText = failed.map(stripAnsi).join("\n");
   assert.ok(needsText.includes("needs you"));
-  assert.ok(needsText.includes("[ reply ]"));
+  assert.doesNotMatch(needsText, /\[ reply \]|\[ wait \]|\[ dismiss \]/);
   assert.ok(failedText.includes("failed"));
-  assert.ok(failedText.includes("[ retry ]"));
+  assert.doesNotMatch(failedText, /\[ retry \]|\[ dismiss \]/);
 });
 
 test("formatRunRow plain-text fallback preserves identity mention and state label", () => {
@@ -462,7 +444,7 @@ test("renderSubagentToolResultComponent renders nested wait-body details when ex
   assert.ok(rendered.includes("Reviewer found path safety gaps"));
 });
 
-test("renderSubagentWakeMessage renders a wake card with badge and affordances", () => {
+test("renderSubagentWakeMessage renders a wake card with badge and no fake affordance chips", () => {
   const rendered = renderSubagentWakeMessage({
     kind: "subagent_wakeup",
     title: "scout",
@@ -473,7 +455,22 @@ test("renderSubagentWakeMessage renders a wake card with badge and affordances",
   const stripped = stripAnsi(rendered);
   assert.ok(stripped.includes("@scout"));
   assert.ok(stripped.includes("needs you"));
-  assert.ok(stripped.includes("[ reply ]"));
+  assert.doesNotMatch(stripped, /\[ reply \]|\[ view \]|\[ continue \]/);
+});
+
+test("renderSubagentWakeMessage preserves an explicitly empty inline body", () => {
+  const rendered = renderSubagentWakeMessage({
+    kind: "subagent_wakeup",
+    title: "scout",
+    runId: "run_a",
+    state: "completed",
+    summary: "done",
+    body: "",
+    bodyAvailable: true,
+    result: { runId: "run_a", parentRunId: "root", agentName: "scout", state: "completed", success: true, createdAt: new Date().toISOString() } as any,
+  });
+  const stripped = stripAnsi(rendered);
+  assert.doesNotMatch(stripped, /Full child body available via subagent_result/);
 });
 
 test("renderSubagentWakeMessageComponent adapts the card width to the render viewport", () => {

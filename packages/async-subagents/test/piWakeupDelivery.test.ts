@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import asyncSubagentsPiExtension from "../extensions/pi/index.js";
 import { createRunResult } from "../src/result.js";
 import { readRootSession } from "../src/rootSession.js";
 import { RunStore } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
+import { TaskStore, hashTaskToken, newTaskToken } from "../src/taskStore.js";
 import { SCHEMA_VERSION, type EventType, type RunState } from "../src/types.js";
 import { writeDeliverySubscription } from "../extensions/pi/wakeups.js";
 
@@ -18,6 +19,7 @@ interface SentMessage {
 
 function makePi() {
   const handlers = new Map<string, Function>();
+  const renderers = new Map<string, Function>();
   const sent: SentMessage[] = [];
   const pi = {
     sendMessage(message: any, options?: any) {
@@ -28,9 +30,11 @@ function makePi() {
     },
     registerTool() {},
     registerCommand() {},
-    registerMessageRenderer() {},
+    registerMessageRenderer(name: string, renderer: Function) {
+      renderers.set(name, renderer);
+    },
   };
-  return { pi, handlers, sent };
+  return { pi, handlers, renderers, sent };
 }
 
 async function withStartedExtension() {
@@ -49,6 +53,7 @@ async function withStartedExtension() {
     store,
     identity,
     sent: harness.sent,
+    renderers: harness.renderers,
     poll: async (ctxOverride: Record<string, unknown> = {}) => handlersMustGet(harness.handlers, "session_start")({}, { cwd, hasUI: false, ...ctxOverride }),
     shutdown: async () => {
       await handlersMustGet(harness.handlers, "session_shutdown")();
@@ -103,15 +108,51 @@ test("idle terminal result wakeups trigger the parent once", async () => {
     assert.equal(wakeup.message.display, true);
     assert.equal(wakeup.message.details?.result?.runId, runId);
     assert.match(wakeup.message.content, /NOT USER INPUT/);
-    assert.doesNotMatch(wakeup.message.content, /full terminal body/);
-    assert.equal(wakeup.message.details?.body, undefined);
+    assert.match(wakeup.message.content, /full terminal body/);
+    assert.equal(wakeup.message.details?.body, "full terminal body");
     assert.equal(wakeup.message.details?.bodyAvailable, true);
+    assert.equal(wakeup.message.details?.bodyTruncation?.truncated, false);
     assert.equal(wakeup.message.details?.result?.body, undefined);
+    assert.equal(session.store.readStatus(runId).resultReady, false);
+    const renderer = session.renderers.get("async-subagent-message");
+    assert.ok(renderer);
+    const rendered = renderer(wakeup.message, {}, {}).render(80).join("\n");
+    assert.match(rendered, /full terminal body/);
     assert.deepEqual(wakeup.options, { triggerTurn: true, deliverAs: "steer" });
 
     const sentAfterFirstPoll = session.sent.length;
     await session.poll();
     assert.equal(session.sent.length, sentAfterFirstPoll, "terminal result body is displayed once and not delivered again");
+  } finally {
+    await session.shutdown();
+  }
+});
+
+test("terminal result wakeup bodies are capped with subagent_result recovery marker", async () => {
+  const session = await withStartedExtension();
+  try {
+    const runId = createRun(session.store, session.cwd, session.identity.parentRunId, "completed");
+    const body = "x".repeat(32_050);
+    session.store.writeStatus({ ...session.store.readStatus(runId), resultReady: true });
+    session.store.writeResult(createRunResult({ runId, parentRunId: session.identity.parentRunId, agentName: "scout", state: "completed", summary: "### Summary", body }));
+    writeDeliverySubscription(session.store, {
+      schemaVersion: SCHEMA_VERSION,
+      parentRunId: session.identity.parentRunId,
+      runId,
+      notifyOn: ["result", "completed", "failed", "cancelled", "expired"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await session.poll();
+
+    const wakeup = session.sent.find((item) => item.message?.customType === "async-subagent-message");
+    assert.ok(wakeup);
+    assert.equal([...String(wakeup.message.details?.body)].length, 32_000);
+    assert.equal(wakeup.message.details?.bodyTruncation?.truncated, true);
+    assert.match(wakeup.message.details?.body ?? "", /subagent_result\(\{ runId: "/);
+    assert.match(wakeup.message.content, /recover the full result/);
+    assert.equal(wakeup.message.details?.result?.body, undefined);
+    assert.equal(session.store.readStatus(runId).resultReady, true);
   } finally {
     await session.shutdown();
   }
@@ -181,6 +222,33 @@ test("paused wakeups instruct continue or cancel", async () => {
   }
 });
 
+test("task wakeup polling persists a task-event cursor after catch-up", async () => {
+  const session = await withStartedExtension();
+  try {
+    const taskStore = new TaskStore(session.store);
+    const [task] = taskStore.createTasks(session.identity.rootSessionId, { parentRunId: session.identity.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+    const token = newTaskToken();
+    taskStore.claimTask(session.identity.rootSessionId, task.id, { runId: "task_run_1", agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+    taskStore.submitResult(session.identity.rootSessionId, task.id, { runId: "task_run_1", taskToken: token, summary: "task done" });
+
+    await session.poll();
+
+    const wakeup = session.sent.find((item) => item.message?.customType === "async-subagent-message" && item.message.details?.kind === "task_wakeup");
+    assert.ok(wakeup);
+    assert.equal(wakeup.message.details?.taskEvent?.type, "task.result_submitted");
+
+    const deliveryPath = join(resolve(session.store.runRoot, ".."), "delivery", `${session.identity.parentRunId}.json`);
+    const state = JSON.parse(readFileSync(deliveryPath, "utf8"));
+    assert.ok(state.taskEventCursors?.[session.identity.rootSessionId]?.eventOffset > 0);
+
+    const sentAfterFirstPoll = session.sent.length;
+    await session.poll();
+    assert.equal(session.sent.length, sentAfterFirstPoll, "delivered task wakeup is not delivered again");
+  } finally {
+    await session.shutdown();
+  }
+});
+
 for (const eventType of ["question", "blocked"] as const) {
   test(`${eventType} wakeups remain steerable and trigger parent action`, async () => {
     const session = await withStartedExtension();
@@ -194,6 +262,7 @@ for (const eventType of ["question", "blocked"] as const) {
         type: eventType as EventType,
         createdAt: new Date().toISOString(),
         summary: `${eventType} summary`,
+        body: `${eventType} detailed body`,
         wake: true,
       });
       writeDeliverySubscription(session.store, {
@@ -209,6 +278,10 @@ for (const eventType of ["question", "blocked"] as const) {
       const wakeup = session.sent.find((item) => item.message?.customType === "async-subagent-message");
       assert.ok(wakeup);
       assert.equal(wakeup.message.details?.event?.type, eventType);
+      assert.equal(wakeup.message.details?.event?.body, undefined);
+      assert.equal(wakeup.message.details?.body, `${eventType} detailed body`);
+      assert.match(wakeup.message.content, new RegExp(`${eventType} detailed body`));
+      assert.doesNotMatch(wakeup.message.content, /available via subagent_result/);
       assert.match(wakeup.message.content, /subagent_message/);
       assert.doesNotMatch(wakeup.message.content, /subagent_status/);
       assert.match(wakeup.message.content, /Do not call subagent_result/);

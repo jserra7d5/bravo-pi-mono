@@ -4,8 +4,9 @@ import { atomicWriteJson } from "../../src/jsonl.js";
 import { ownsRootSessionLease } from "../../src/leases.js";
 import { isInterestingEvent } from "../../src/schemas.js";
 import { RunStore } from "../../src/runStore.js";
+import { updateRunStatus } from "../../src/status.js";
 import { TaskStore } from "../../src/taskStore.js";
-import type { DeliverySubscription, EventType, RunEvent, RunIndexRecord, RunResult, TaskEvent } from "../../src/types.js";
+import type { DeliverySubscription, EventType, RunEvent, RunIndexRecord, RunResult, TaskEvent, WaitCursor } from "../../src/types.js";
 import { SCHEMA_VERSION } from "../../src/types.js";
 import type { WakeupMessage } from "./renderers.js";
 
@@ -14,6 +15,7 @@ export interface DeliveryState {
   parentRunId: string;
   delivered: Record<string, string>;
   handled: Record<string, string>;
+  taskEventCursors?: Record<string, WaitCursor>;
 }
 
 export interface WakeupPollInput {
@@ -48,7 +50,7 @@ function claimPath(store: RunStore, deliveryKey: string): string {
 function readDeliveryState(store: RunStore, parentRunId: string): DeliveryState {
   const path = deliveryPath(store, parentRunId);
   if (!existsSync(path)) {
-    return { schemaVersion: SCHEMA_VERSION, parentRunId, delivered: {}, handled: {} };
+    return { schemaVersion: SCHEMA_VERSION, parentRunId, delivered: {}, handled: {}, taskEventCursors: {} };
   }
   const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<DeliveryState>;
   return {
@@ -56,7 +58,17 @@ function readDeliveryState(store: RunStore, parentRunId: string): DeliveryState 
     parentRunId,
     delivered: parsed.delivered ?? {},
     handled: parsed.handled ?? {},
+    taskEventCursors: parsed.taskEventCursors ?? {},
   };
+}
+
+function mergeTaskEventCursors(existing: Record<string, WaitCursor> | undefined, incoming: Record<string, WaitCursor> | undefined): Record<string, WaitCursor> {
+  const merged = { ...(existing ?? {}) };
+  for (const [rootSessionId, cursor] of Object.entries(incoming ?? {})) {
+    const previous = merged[rootSessionId];
+    if (!previous || cursor.eventOffset >= previous.eventOffset) merged[rootSessionId] = cursor;
+  }
+  return merged;
 }
 
 function writeDeliveryState(store: RunStore, state: DeliveryState): void {
@@ -66,6 +78,7 @@ function writeDeliveryState(store: RunStore, state: DeliveryState): void {
     parentRunId: state.parentRunId,
     delivered: { ...existing.delivered, ...state.delivered },
     handled: { ...existing.handled, ...state.handled },
+    taskEventCursors: mergeTaskEventCursors(existing.taskEventCursors, state.taskEventCursors),
   });
 }
 
@@ -91,8 +104,30 @@ function redactedEvent(event: RunEvent): RunEvent & { bodyAvailable?: boolean } 
   return { ...rest, bodyAvailable: body !== undefined } as RunEvent & { bodyAvailable?: boolean };
 }
 
+export const DEFAULT_WAKEUP_RESULT_BODY_CHAR_CAP = 32_000;
+
+function capBodyForWakeup(body: string | undefined, marker: string, maxChars = DEFAULT_WAKEUP_RESULT_BODY_CHAR_CAP): { body?: string; truncated: boolean; originalChars: number; returnedChars: number; maxChars: number } {
+  if (body === undefined) return { body: undefined, truncated: false, originalChars: 0, returnedChars: 0, maxChars };
+  const chars = [...body];
+  if (chars.length <= maxChars) return { body, truncated: false, originalChars: chars.length, returnedChars: chars.length, maxChars };
+  const markerChars = [...marker];
+  const fittedMarker = markerChars.length <= maxChars ? marker : markerChars.slice(0, Math.max(0, maxChars)).join("");
+  const prefixChars = Math.max(0, maxChars - [...fittedMarker].length);
+  const capped = `${chars.slice(0, prefixChars).join("")}${fittedMarker}`;
+  return { body: capped, truncated: true, originalChars: chars.length, returnedChars: [...capped].length, maxChars };
+}
+
+function capResultBodyForWakeup(runId: string, body: string | undefined, maxChars = DEFAULT_WAKEUP_RESULT_BODY_CHAR_CAP): { body?: string; truncated: boolean; originalChars: number; returnedChars: number; maxChars: number } {
+  return capBodyForWakeup(body, `\n\n[Subagent result truncated to ${maxChars} characters for this wakeup; call subagent_result({ runId: "${runId}" }) to recover the full result.]`, maxChars);
+}
+
+function capEventBodyForWakeup(runId: string, body: string | undefined, maxChars = DEFAULT_WAKEUP_RESULT_BODY_CHAR_CAP): { body?: string; truncated: boolean; originalChars: number; returnedChars: number; maxChars: number } {
+  return capBodyForWakeup(body, `\n\n[Subagent event body truncated to ${maxChars} characters for this wakeup; reply with subagent_message({ runId: "${runId}", type: "answer", ... }) if you need more detail.]`, maxChars);
+}
+
 function resultDelivery(runId: string, result: RunResult): WakeupDelivery {
   const summary = result.summary ?? result.error?.message ?? `Run ${result.state}`;
+  const body = capResultBodyForWakeup(runId, result.body);
   return {
     deliveryKey: resultDeliveryKey(runId, result),
     runId,
@@ -102,9 +137,11 @@ function resultDelivery(runId: string, result: RunResult): WakeupDelivery {
       runId,
       state: result.state,
       summary,
+      body: body.body,
       bodyAvailable: result.body !== undefined,
+      bodyTruncation: { included: result.body !== undefined, truncated: body.truncated, originalChars: body.originalChars, returnedChars: body.returnedChars, maxChars: body.maxChars },
       result: redactedResult(result),
-      next: [{ tool: "subagent_result", args: { runId } }],
+      next: body.truncated ? [{ tool: "subagent_result", args: { runId } }] : [],
     },
   };
 }
@@ -113,6 +150,7 @@ function eventDelivery(event: RunEvent, status?: { agentName?: string; displayNa
   // Map the event type onto a run-state-ish string so wake-card glyph/badge selection works
   // (event types like "question" → "waiting_for_input").
   const state = event.type === "question" ? "waiting_for_input" : event.type === "status" && event.data?.reason === "timeout" ? "paused" : event.type;
+  const body = capEventBodyForWakeup(event.runId, event.body);
   return {
     deliveryKey: eventDeliveryKey(event),
     runId: event.runId,
@@ -122,7 +160,9 @@ function eventDelivery(event: RunEvent, status?: { agentName?: string; displayNa
       runId: event.runId,
       state,
       summary: event.summary,
+      body: body.body,
       bodyAvailable: event.body !== undefined,
+      bodyTruncation: { included: event.body !== undefined, truncated: body.truncated, originalChars: body.originalChars, returnedChars: body.returnedChars, maxChars: body.maxChars },
       event: redactedEvent(event),
       status,
       next: event.type === "question" || event.type === "blocked" ? [{ tool: "subagent_message", args: { runId: event.runId, type: "answer" } }] : state === "paused" ? [{ tool: "subagent_continue", args: { runId: event.runId, additionalRunSeconds: 900 } }, { tool: "subagent_interrupt", args: { runId: event.runId, action: "cancel" } }] : [],
@@ -224,6 +264,24 @@ function claimDelivery(store: RunStore, deliveryKey: string, ownerId: string, no
   }
 }
 
+function releaseDeliveryClaim(store: RunStore, deliveryKey: string): void {
+  rmSync(claimPath(store, deliveryKey), { force: true });
+}
+
+export function markDeliveredWakeupHandled(store: RunStore, parentRunId: string, delivery: WakeupDelivery, handledAt = new Date().toISOString()): void {
+  if (!delivery.message.result || delivery.message.bodyTruncation?.truncated === true) return;
+  const state = readDeliveryState(store, parentRunId);
+  state.handled[delivery.deliveryKey] = handledAt;
+  writeDeliveryState(store, state);
+  try {
+    const status = store.readStatus(delivery.runId);
+    if (status.resultReady) store.writeStatus(updateRunStatus(status, { resultReady: false }));
+  } catch {
+    // Best effort: delivery state still records the result as handled so it will
+    // not keep resurfacing after the inline body was delivered.
+  }
+}
+
 export function writeDeliverySubscription(store: RunStore, subscription: DeliverySubscription): void {
   const subscriptions = readDeliverySubscriptions(store, subscription.parentRunId).filter((item) => item.runId !== subscription.runId);
   subscriptions.push(subscription);
@@ -277,18 +335,30 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
 
   const state = readDeliveryState(input.store, input.parentRunId);
   const deliveries: WakeupDelivery[] = [];
+  const deliveredKeys: string[] = [];
+  let stateChanged = false;
   const subscriptions = new Map(readDeliverySubscriptions(input.store, input.parentRunId).map((item) => [item.runId, item]));
   const taskStore = new TaskStore(input.store);
-  for (const event of taskStore.readEvents(input.rootSessionId).filter((event) => event.parentRunId === input.parentRunId && event.wake === true && ["task.result_submitted", "task.failed", "task.needs_input", "task.ready"].includes(event.type))) {
+  const cursor = state.taskEventCursors?.[input.rootSessionId] ?? { eventOffset: 0 };
+  const taskEventRead = taskStore.readEvents(input.rootSessionId, cursor);
+  let taskCursorBlocked = false;
+  for (const event of taskEventRead.records.filter((event) => event.parentRunId === input.parentRunId && event.wake === true && ["task.result_submitted", "task.failed", "task.needs_input", "task.ready"].includes(event.type))) {
     if (state.delivered[taskEventDeliveryKey(event)] || state.handled[taskEventDeliveryKey(event)]) continue;
     let task; try { task = taskStore.readTask(input.rootSessionId, event.taskId); } catch { /* event remains deliverable without task details */ }
     const delivery = taskDelivery(event, task);
     if (input.modelFollowUpOnly && !isActionableModelWakeup(delivery)) continue;
-    if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) continue;
-    if (isWakeupKeyHandled(input.store, input.parentRunId, delivery.deliveryKey)) continue;
+    if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) { taskCursorBlocked = true; break; }
+    if (isWakeupKeyHandled(input.store, input.parentRunId, delivery.deliveryKey)) { releaseDeliveryClaim(input.store, delivery.deliveryKey); continue; }
     deliveries.push(delivery);
-    state.delivered[delivery.deliveryKey] = new Date(input.nowMs ?? Date.now()).toISOString();
-    if (deliveries.length >= (input.limit ?? 5)) break;
+    const deliveredAt = new Date(input.nowMs ?? Date.now()).toISOString();
+    state.delivered[delivery.deliveryKey] = deliveredAt;
+    stateChanged = true;
+    deliveredKeys.push(delivery.deliveryKey);
+    if (deliveries.length >= (input.limit ?? 5)) { taskCursorBlocked = true; break; }
+  }
+  if (!taskCursorBlocked && taskEventRead.cursor.eventOffset !== cursor.eventOffset) {
+    state.taskEventCursors = { ...(state.taskEventCursors ?? {}), [input.rootSessionId]: taskEventRead.cursor };
+    stateChanged = true;
   }
   const records = deliveries.length >= (input.limit ?? 5) ? [] : subscriptions.size
     ? (input.records ?? input.store.listDirectChildren(input.parentRunId)).filter((record) => subscriptions.has(record.runId))
@@ -301,11 +371,15 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
       if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) continue;
       if (isWakeupKeyHandled(input.store, input.parentRunId, delivery.deliveryKey)) continue;
       deliveries.push(delivery);
-      state.delivered[delivery.deliveryKey] = new Date(input.nowMs ?? Date.now()).toISOString();
+      const deliveredAt = new Date(input.nowMs ?? Date.now()).toISOString();
+      state.delivered[delivery.deliveryKey] = deliveredAt;
+      stateChanged = true;
+      deliveredKeys.push(delivery.deliveryKey);
       if (deliveries.length >= (input.limit ?? 5)) break;
     }
     if (deliveries.length >= (input.limit ?? 5)) break;
   }
-  if (deliveries.length) writeDeliveryState(input.store, state);
+  if (stateChanged) writeDeliveryState(input.store, state);
+  for (const key of deliveredKeys) releaseDeliveryClaim(input.store, key);
   return deliveries;
 }

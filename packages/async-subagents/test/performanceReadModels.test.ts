@@ -91,7 +91,7 @@ test("terminal result with missing summary delivers safe metadata once", () => {
   acquireRootSessionLease({ cwd: w.root, rootSessionId: w.parentRunId, ownerId: "owner", nowMs, ttlMs: 10_000 });
   const first = pollWakeups({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, ownerId: "owner", limit: 5, nowMs });
   assert.equal(first.length, 1);
-  assert.equal(first[0].message.body, undefined);
+  assert.equal(first[0].message.body, "full body once");
   assert.equal(first[0].message.bodyAvailable, true);
   assert.equal(first[0].message.result?.body, undefined);
   const second = pollWakeups({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, ownerId: "owner", limit: 5, nowMs: nowMs + 1 });
@@ -189,7 +189,7 @@ test("wakeup polling reads full result only for subscribed ready runs", () => {
   acquireRootSessionLease({ cwd: w.root, rootSessionId: w.parentRunId, ownerId: "owner", nowMs, ttlMs: 10_000 });
   const deliveries = pollWakeups({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, ownerId: "owner", limit: 5, nowMs });
   assert.equal(deliveries.length, 1);
-  assert.equal(deliveries[0].message.body, undefined);
+  assert.equal(deliveries[0].message.body, "full body");
   assert.equal(deliveries[0].message.bodyAvailable, true);
   assert.equal(deliveries[0].message.result?.body, undefined);
   assert.equal(readEvents, 0);

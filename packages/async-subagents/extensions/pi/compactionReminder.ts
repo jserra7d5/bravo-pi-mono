@@ -69,7 +69,7 @@ function rowLabel(row: RunSummaryRow): string {
 
 function nextAction(row: RunSummaryRow): string {
   if (row.state === "waiting_for_input" || row.state === "blocked") return "respond with subagent_message; inspect once with subagent_status only if needed";
-  if (row.resultReady || row.result || isTerminalRunState(row.state)) return "read with subagent_result";
+  if (row.resultReady || row.result || isTerminalRunState(row.state)) return "use the delivered wakeup body if available; use subagent_result for recovery, artifacts, metadata, overflow, or reread";
   return "active; no per-row action needed until an async wakeup";
 }
 

@@ -12,7 +12,7 @@ import { renderDiscoveredAgentCatalog } from "./agentCatalog.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
 import { registerSubagentTools, type ToolRuntime } from "./tools.js";
-import { isResultWakeupCurrent, isWakeupKeyHandled, pollWakeups } from "./wakeups.js";
+import { isWakeupKeyHandled, markDeliveredWakeupHandled, pollWakeups } from "./wakeups.js";
 
 const OWNER_ID = `pi-${process.pid}-${Date.now().toString(36)}`;
 const roots = new Map<string, RootSessionIdentity>();
@@ -94,13 +94,29 @@ function wakeupEnvelope(wakeup: WakeupMessage): string {
   else if (wakeup.status?.agentName) lines.push(`Subagent: ${wakeup.status.agentName}`);
   if (wakeup.state) lines.push(`State: ${wakeup.state}`);
   if (wakeup.summary) lines.push(`Summary: ${wakeup.summary}`);
-  lines.push("", wakeup.bodyAvailable ? "The child body is ready but not included in this wakeup." : "Full child output is not included in this wakeup.");
+  const terminalResultWakeup = Boolean(wakeup.result);
+  if (wakeup.body !== undefined) {
+    lines.push("", terminalResultWakeup ? "Result body:" : "Event body:", wakeup.body);
+    if (wakeup.bodyTruncation?.truncated === true && terminalResultWakeup) {
+      lines.push("", `This wakeup includes a truncated result body; call subagent_result({ runId: "${wakeup.runId}" }) to recover the full result, artifacts, metadata, or for a reread.`);
+    } else if (wakeup.bodyTruncation?.truncated === true) {
+      lines.push("", "This wakeup includes a truncated event body; use subagent_message if you need the child to provide more detail.");
+    } else if (terminalResultWakeup) {
+      lines.push("", "This wakeup includes the terminal result body. Use subagent_result only if you need artifacts, metadata, recovery, or a reread.");
+    } else {
+      lines.push("", "This wakeup includes the child event body.");
+    }
+  } else {
+    lines.push("", wakeup.bodyAvailable ? "The child body is available in the wakeup details but was not rendered inline." : "Full child output is not included in this wakeup.");
+  }
   if (wakeup.state === "waiting_for_input" || wakeup.event?.type === "question" || wakeup.state === "blocked" || wakeup.event?.type === "blocked") {
     lines.push(`Reply with subagent_message({ runId: "${wakeup.runId}", type: "answer", ... }) when you have the requested input. Do not call subagent_result for this non-terminal wakeup.`);
   } else if (wakeup.state === "paused") {
     lines.push(`If this result is still needed, choose a bounded extension and call subagent_continue({ runId: "${wakeup.runId}", additionalRunSeconds: 900 }) to resume. Adjust additionalRunSeconds to the smallest reasonable budget for the remaining work, or call subagent_interrupt({ runId: "${wakeup.runId}", action: "cancel" }) if it is no longer needed.`);
-  } else {
-    lines.push(`Call subagent_result({ runId: "${wakeup.runId}" }) if this result is relevant before continuing.`);
+  } else if (wakeup.bodyTruncation?.truncated === true && terminalResultWakeup) {
+    lines.push(`Call subagent_result({ runId: "${wakeup.runId}" }) if you need the overflow/full canonical result before continuing.`);
+  } else if (terminalResultWakeup) {
+    lines.push(`You may continue from the inline result if it is sufficient; call subagent_result({ runId: "${wakeup.runId}" }) only for recovery, artifacts, metadata, overflow, or reread.`);
   }
   return lines.join("\n");
 }
@@ -122,6 +138,7 @@ function pollAndSendWakeups(pi: ExtensionAPI, store: RunStore, identity: RootSes
   for (const delivery of pollWakeups({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, ownerId: OWNER_ID, modelFollowUpOnly: true, records })) {
     if (isWakeupKeyHandled(store, identity.parentRunId, delivery.deliveryKey)) continue;
     sendWakeup(pi, delivery.message);
+    markDeliveredWakeupHandled(store, identity.parentRunId, delivery);
   }
 }
 
@@ -214,11 +231,6 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   pi.registerMessageRenderer("async-subagent-message", (message: unknown, options: unknown, theme: unknown): Component => {
     const details = (message as { details?: WakeupMessage })?.details;
     if (!details) return new Text("", 0, 0);
-    if (details.result && currentCtx) {
-      const store = new RunStore({ cwd: cwdOf(currentCtx) });
-      const parentRunId = details.result.parentRunId;
-      if (!isResultWakeupCurrent(store, parentRunId, details.runId, details.result)) return new Text("", 0, 0);
-    }
     return renderSubagentWakeMessageComponent(details, options as { expanded?: boolean }, theme as { fg?: (name: string, value: string) => string });
   });
 
