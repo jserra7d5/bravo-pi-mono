@@ -87,9 +87,9 @@ If it's a small change, resolve the fixture path relative to the test file / pac
 
 ## Out of scope (report, don't fix)
 
-- Two **pre-existing failing tests** (unrelated to these changes):
-  `async-subagents :: packaged scout prompt teaches context-map handoff boundaries` and `tango :: prune`.
-  Leave them to the maintainer; just confirm your changes didn't introduce or mask them.
+- One **pre-existing failing test** (unrelated to these changes):
+  `tango :: prune`.
+  Leave it to the maintainer; just confirm your changes didn't introduce or mask it.
 
 ## Verify before you finish
 

@@ -108,13 +108,12 @@ Project scout body.
   assert.deepEqual(scout?.tools, ["read"]);
 });
 
-test("packaged scout prompt teaches context-map handoff boundaries", () => {
+test("packaged scout prompt teaches direct evidence handoff boundaries", () => {
   const body = readFileSync(join(process.cwd(), "agents", "scout.md"), "utf8");
-  assert.match(body, /context_map_create/);
-  assert.match(body, /context_map_read/);
-  assert.match(body, /broad, ambiguous, cross-surface, or handoff-oriented/);
-  assert.match(body, /For named files, narrow lexical lookups, or small known scopes, use direct/);
-  assert.match(body, /context_map:<map_id>/);
+  assert.match(body, /Use scout only for context retrieval/);
+  assert.match(body, /Separate direct evidence from any minimal orientation notes/);
+  assert.match(body, /List relevant files, symbols, commands, and observations/);
+  assert.doesNotMatch(body, /context_map_/);
 });
 
 test("missing description fails clearly", () => {

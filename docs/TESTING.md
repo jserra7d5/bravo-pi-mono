@@ -23,7 +23,7 @@ credentials** — the whole suite is safe to run on any dev box. The "gates" are
 |--------|---------|----------|
 | `pure-unit` | No IO of any kind; pure functions / renderers. Fastest tier. | `gemini-code-assist`, `showcase` (whole pkg); plus most files in `async-subagents`, `bravo-goals`, `monitor`, `web-evidence-cache` |
 | `needs-fs` | Reads/writes real filesystem (tmp dirs, fixture files). Safe anywhere. | most packages (54 of 76 test files) |
-| `needs-subprocess` | Spawns a local binary — `process.execPath` (node) running the package CLI, or `git` / `ps` / `sqlite3`. Needs those tools on PATH. | `codex-auth-balancer`, `context-maps`, `loom`, `monitor`, `source-search`, `tango` |
+| `needs-subprocess` | Spawns a local binary — `process.execPath` (node) running the package CLI, or `git` / `ps` / `sqlite3`. Needs those tools on PATH. | `codex-auth-balancer`, `loom`, `monitor`, `source-search`, `tango` |
 | `needs-db` | In-process sqlite (`node:sqlite` FTS5) or the `sqlite3` CLI on a real db file. No external DB server. | `web-evidence-cache` (sqlite.test.ts), `loom` |
 | `integration` | Spans modules + a real local resource. `tango/src/server.test.ts` starts an **in-process** HTTP server on `127.0.0.1:0` and `fetch`es it — local only, no external network. | `tango` |
 
@@ -39,7 +39,7 @@ or string literals — see the categorization report.
 | One package, skip rebuild (dist already built) | `node --test packages/<pkg>/dist/test/*.test.js` |
 | tango (flat dist layout) | `node --test packages/tango/dist/*.test.js` |
 | Fast tier only (pure-unit pkgs, sub-second) | `node --test packages/gemini-code-assist/dist/test/*.test.js packages/showcase/dist/test/*.test.js` |
-| Everything (build all, then run all) | `npm run build && for p in async-subagents bravo-goals codex-auth-balancer context-maps gemini-code-assist loom monitor pi-extension-background-bash showcase source-search web-evidence-cache; do node --test packages/$p/dist/test/*.test.js; done; node --test packages/tango/dist/*.test.js` |
+| Everything (build all, then run all) | `npm run build && for p in async-subagents bravo-goals codex-auth-balancer gemini-code-assist loom monitor pi-extension-background-bash showcase source-search web-evidence-cache; do node --test packages/$p/dist/test/*.test.js; done; node --test packages/tango/dist/*.test.js` |
 | Slowest tier (subprocess-heavy; deselect from fast loop) | `loom`, `tango`, `pi-extension-background-bash`, `monitor` scheduler tests |
 
 Whole-suite wall time is ~**40s** serial on a linux-x86_64 dev box (~817 test
@@ -48,8 +48,7 @@ cases across 12 packages). `loom` (~9s for 7 CLI-spawning tests) and `tango`
 
 ### Known pre-existing failures (as of baseline)
 
-Two tests failed during baseline capture and are **not** caused by this setup:
-- `async-subagents` → `packaged scout prompt teaches context-map handoff boundaries` (prompt-content assertion)
+One test failed during baseline capture and is **not** caused by this setup:
 - `tango` → `prune` (filesystem/timing sensitive)
 
 These are flagged for the maintainer; the baseline records timings for passing tests.

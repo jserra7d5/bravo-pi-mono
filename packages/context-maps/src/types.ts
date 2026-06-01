@@ -1,9 +1,0 @@
-export interface ContextRef { path: string; start_line: number; end_line: number; }
-export type SliceRole = "primary" | "supporting" | "background" | "negative-space";
-export type Confidence = "high" | "medium" | "low";
-export interface ContextSlice { slice_id: number; ref: ContextRef; role: SliceRole; why: string; confidence: Confidence; preview: string; score?: number; }
-export interface RetrievalEvent { backend: "ranked_search" | "read" | "grep" | "bash"; query_or_command?: string; command_class?: "filesystem_metadata" | "git_metadata" | "source_dump" | "unknown"; result_count?: number; }
-export interface ContextMapArtifact { schema_version: 1; map_id: string; query: string; workspace_root: string; git_commit?: string; git_dirty?: boolean; async_subagents_root_session_id?: string; async_subagents_parent_run_id?: string; async_subagents_child_run_id?: string; created_at: string; package_version: string; retrieval_backends: string[]; provenance: RetrievalEvent[]; coverage: { searched_roots: string[]; searched_methods: string[]; excluded_roots: string[]; failed_roots: string[]; confidence: Confidence; }; gaps: string[]; slices: ContextSlice[]; load_bearing_slice_ids: number[]; read_history: Array<{ at: string; slice_ids: number[] }>; }
-export interface ContextMapCreateArgs { query: string; roots?: string[]; max_slices?: number; seed?: ContextRef[]; exclude?: ContextRef[]; }
-export interface ContextMapCreateResult { map_id: string; evidence_status: "orientation_only_requires_context_map_read"; orientation: { routing_summary: string; load_bearing_refs: ContextSlice[]; suggested_read_order: number[]; gaps: string[]; coverage: ContextMapArtifact["coverage"]; }; }
-export interface ContextMapReadResult { map_id: string; slices: Array<{ slice_id: number; ref: ContextRef; content: string; truncated: boolean }>; truncated: boolean; warnings: string[]; }
