@@ -2,12 +2,74 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { join, resolve } from "node:path";
 import { asyncSubagentsHome, defaultRunRoot, findProjectRoot } from "./config.js";
 import { SubagentError } from "./errors.js";
-import { appendJsonl, atomicWriteJson, readJsonl } from "./jsonl.js";
+import { appendJsonl, atomicWriteJson, readJsonl, readJsonlRange } from "./jsonl.js";
 import { newRunId } from "./ids.js";
 import { nowIso } from "./time.js";
 import { applyEventToSummary, applyResultToSummary, readSummaryFile, summaryFromStatus, summaryPathForRunDir, type RunIndexCache, type RunSummaryReadModel } from "./readModels.js";
 import type { InboxMessage, RunEvent, RunIndexRecord, RunPaths, RunResult, RunStatus, WaitCursor } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
+
+interface IndexSourceState {
+  path: string;
+  exists: boolean;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  dev: number;
+  ino: number;
+  parsedOffset: number;
+}
+
+interface MemoryIndexCache {
+  key: string;
+  sources: IndexSourceState[];
+  cache: RunIndexCache;
+}
+
+const memoryIndexCaches = new Map<string, MemoryIndexCache>();
+
+function sourceKey(paths: string[]): string {
+  return paths.map((path) => resolve(path)).join("\0");
+}
+
+function statIndexSource(path: string): IndexSourceState {
+  if (!existsSync(path)) return { path, exists: false, size: 0, mtimeMs: 0, ctimeMs: 0, dev: 0, ino: 0, parsedOffset: 0 };
+  const stat = statSync(path);
+  return { path, exists: true, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino, parsedOffset: 0 };
+}
+
+function sourcesUnchanged(previous: IndexSourceState[], current: IndexSourceState[]): boolean {
+  return previous.length === current.length && previous.every((source, index) => {
+    const next = current[index];
+    return Boolean(next) && source.path === next.path && source.exists === next.exists && source.size === next.size && source.mtimeMs === next.mtimeMs && source.ctimeMs === next.ctimeMs && source.dev === next.dev && source.ino === next.ino;
+  });
+}
+
+function sourceIdentityMatches(previous: IndexSourceState, next: IndexSourceState): boolean {
+  return previous.path === next.path && previous.exists === next.exists && previous.dev === next.dev && previous.ino === next.ino;
+}
+
+function hasUnparsedTail(sources: IndexSourceState[]): boolean {
+  return sources.some((source) => source.exists && source.parsedOffset < source.size);
+}
+
+function cloneRecord(record: RunIndexRecord): RunIndexRecord {
+  return { ...record };
+}
+
+function cloneStringArrayMap(map: Record<string, string[]>): Record<string, string[]> {
+  return Object.fromEntries(Object.entries(map).map(([key, value]) => [key, [...value]]));
+}
+
+function cloneIndexCache(cache: RunIndexCache): RunIndexCache {
+  return {
+    ...cache,
+    records: cache.records.map(cloneRecord),
+    byRunId: Object.fromEntries(Object.entries(cache.byRunId).map(([key, value]) => [key, cloneRecord(value)])),
+    childrenByParentRunId: cloneStringArrayMap(cache.childrenByParentRunId),
+    byRootSessionId: cloneStringArrayMap(cache.byRootSessionId),
+  };
+}
 
 export interface CreateRunDirectoryInput {
   runId?: string;
@@ -116,7 +178,7 @@ export class RunStore {
   appendRunIndex(record: RunIndexRecord): void {
     appendJsonl(this.indexPath(), record);
     if (resolve(this.globalIndexPath()) !== resolve(this.indexPath())) appendJsonl(this.globalIndexPath(), record);
-    this.writeIndexCache(this.buildIndexCache(this.readRunIndexUncached()));
+    if (memoryIndexCaches.has(this.indexCacheKey())) this.getIndexCache();
   }
 
   fallbackIndexPaths(): string[] {
@@ -131,64 +193,148 @@ export class RunStore {
     return [...new Set([this.indexPath(), this.globalIndexPath(), ...this.fallbackIndexPaths()].map((path) => resolve(path)))];
   }
 
-  private readRunIndexUncached(): RunIndexRecord[] {
-    const records = readJsonl<RunIndexRecord>(this.indexPath()).records;
-    for (const path of this.fallbackIndexPaths()) {
-      if (existsSync(path)) records.push(...readJsonl<RunIndexRecord>(path).records);
-    }
-    return records;
+  private indexSourcePaths(): string[] {
+    return [...new Set([this.indexPath(), ...this.fallbackIndexPaths()].map((path) => resolve(path)))];
   }
 
-  private buildIndexCache(records: RunIndexRecord[]): RunIndexCache {
-    const byRunId: Record<string, RunIndexRecord> = {};
-    const childrenByParentRunId: Record<string, string[]> = {};
-    const byRootSessionId: Record<string, string[]> = {};
-    for (const record of records) {
-      byRunId[record.runId] = record;
-      (childrenByParentRunId[record.parentRunId] ??= []).push(record.runId);
-      if (record.rootSessionId) (byRootSessionId[record.rootSessionId] ??= []).push(record.runId);
+  private indexCacheKey(): string {
+    return sourceKey(this.indexSourcePaths());
+  }
+
+  private readRunIndexSourcesUncached(): { records: RunIndexRecord[]; sources: IndexSourceState[] } {
+    const records: RunIndexRecord[] = [];
+    const sources: IndexSourceState[] = [];
+    for (const path of this.indexSourcePaths()) {
+      const state = statIndexSource(path);
+      if (state.exists) {
+        const result = readJsonl<RunIndexRecord>(path);
+        records.push(...result.records.map(cloneRecord));
+        state.parsedOffset = result.nextOffset;
+      }
+      sources.push(state);
     }
-    const sourcePath = this.indexPath();
-    const sourceMtimeMs = existsSync(sourcePath) ? statSync(sourcePath).mtimeMs : 0;
-    return { schemaVersion: SCHEMA_VERSION, rebuiltAt: nowIso(), sourcePath, sourceMtimeMs, records, byRunId, childrenByParentRunId, byRootSessionId };
+    return { records, sources };
+  }
+
+  private readRunIndexUncached(): RunIndexRecord[] {
+    return this.readRunIndexSourcesUncached().records;
+  }
+
+  private applyIndexRecord(cache: RunIndexCache, record: RunIndexRecord): void {
+    const cloned = cloneRecord(record);
+    cache.records.push(cloned);
+    cache.byRunId[cloned.runId] = cloned;
+    (cache.childrenByParentRunId[cloned.parentRunId] ??= []).push(cloned.runId);
+    if (cloned.rootSessionId) (cache.byRootSessionId[cloned.rootSessionId] ??= []).push(cloned.runId);
+  }
+
+  private buildIndexCache(records: RunIndexRecord[], sourceMtimeMs?: number): RunIndexCache {
+    const cache: RunIndexCache = {
+      schemaVersion: SCHEMA_VERSION,
+      rebuiltAt: nowIso(),
+      sourcePath: this.indexPath(),
+      sourceMtimeMs: sourceMtimeMs ?? (existsSync(this.indexPath()) ? statSync(this.indexPath()).mtimeMs : 0),
+      records: [],
+      byRunId: {},
+      childrenByParentRunId: {},
+      byRootSessionId: {},
+    };
+    for (const record of records) this.applyIndexRecord(cache, record);
+    return cache;
   }
 
   private writeIndexCache(cache: RunIndexCache): void {
     atomicWriteJson(this.indexCachePath(), cache);
   }
 
-  readIndexCache(): RunIndexCache {
-    const cachePath = this.indexCachePath();
-    const sourceMtimeMs = existsSync(this.indexPath()) ? statSync(this.indexPath()).mtimeMs : 0;
-    if (existsSync(cachePath)) {
+  private currentIndexSourceStates(): IndexSourceState[] {
+    return this.indexSourcePaths().map(statIndexSource);
+  }
+
+  private rebuildMemoryIndexCache(key: string): MemoryIndexCache {
+    let before = this.currentIndexSourceStates();
+    let { records, sources } = this.readRunIndexSourcesUncached();
+    let after = this.currentIndexSourceStates();
+    for (let attempts = 0; !sourcesUnchanged(before, after) && attempts < 2; attempts += 1) {
+      before = after;
+      ({ records, sources } = this.readRunIndexSourcesUncached());
+      after = this.currentIndexSourceStates();
+    }
+    sources = sources.map((source, index) => ({ ...after[index], parsedOffset: source.parsedOffset }));
+    const cache = this.buildIndexCache(records, after[0]?.mtimeMs ?? 0);
+    return { key, sources, cache };
+  }
+
+  private refreshMemoryIndexCache(warm: MemoryIndexCache, current: IndexSourceState[]): MemoryIndexCache {
+    try {
+      for (let index = 0; index < current.length; index += 1) {
+        const previous = warm.sources[index];
+        const next = current[index];
+        if (!previous || !sourceIdentityMatches(previous, next) || (previous.exists && !next.exists) || next.size < previous.parsedOffset) {
+          return this.rebuildMemoryIndexCache(warm.key);
+        }
+        if (!next.exists || next.size === previous.parsedOffset) {
+          warm.sources[index] = { ...next, parsedOffset: previous.parsedOffset };
+          continue;
+        }
+        const result = readJsonlRange<RunIndexRecord>(next.path, previous.parsedOffset, next.size);
+        if (result.nextOffset < previous.parsedOffset || result.nextOffset > next.size) return this.rebuildMemoryIndexCache(warm.key);
+        for (const record of result.records) this.applyIndexRecord(warm.cache, record);
+        warm.sources[index] = { ...next, parsedOffset: result.nextOffset };
+      }
+      warm.cache.sourceMtimeMs = current[0]?.mtimeMs ?? 0;
+      return warm;
+    } catch {
+      return this.rebuildMemoryIndexCache(warm.key);
+    }
+  }
+
+  // Shared internal cache: hot-path callers must treat returned records/maps as read-only and never expose them by reference.
+  private getIndexCache(): RunIndexCache {
+    const key = this.indexCacheKey();
+    const current = this.currentIndexSourceStates();
+    const warm = memoryIndexCaches.get(key);
+    if (!warm) {
+      const rebuilt = this.rebuildMemoryIndexCache(key);
+      memoryIndexCaches.set(key, rebuilt);
+      return rebuilt.cache;
+    }
+    if (!sourcesUnchanged(warm.sources, current) || hasUnparsedTail(warm.sources)) {
       try {
-        const cache = JSON.parse(readFileSync(cachePath, "utf8")) as RunIndexCache;
-        if (cache.schemaVersion === SCHEMA_VERSION && cache.sourceMtimeMs >= sourceMtimeMs) return cache;
-      } catch {
-        // Rebuild below.
+        const refreshed = this.refreshMemoryIndexCache(warm, current);
+        memoryIndexCaches.set(key, refreshed);
+        return refreshed.cache;
+      } catch (error) {
+        memoryIndexCaches.delete(key);
+        throw error;
       }
     }
-    const cache = this.buildIndexCache(this.readRunIndexUncached());
-    this.writeIndexCache(cache);
-    return cache;
+    return warm.cache;
+  }
+
+  readIndexCache(): RunIndexCache {
+    return cloneIndexCache(this.getIndexCache());
   }
 
   rebuildDerivedIndexes(): RunIndexCache {
-    const cache = this.buildIndexCache(this.readRunIndexUncached());
+    const key = this.indexCacheKey();
+    const rebuilt = this.rebuildMemoryIndexCache(key);
+    memoryIndexCaches.set(key, rebuilt);
+    const cache = rebuilt.cache;
     this.writeIndexCache(cache);
     for (const record of cache.records) {
       const summary = this.rebuildSummaryByRunDir(record.runDir, this.readSummaryByRunDir(record.runDir));
       if (summary) atomicWriteJson(summaryPathForRunDir(record.runDir), summary);
     }
-    return cache;
+    return this.readIndexCache();
   }
 
   readRunIndex(): RunIndexRecord[] {
-    return this.readIndexCache().records;
+    return this.getIndexCache().records.map(cloneRecord);
   }
 
   readLookupRunIndex(): RunIndexRecord[] {
-    const primary = this.readIndexCache().records;
+    const primary = this.getIndexCache().records.map(cloneRecord);
     const records: RunIndexRecord[] = [...primary];
     for (const path of [this.globalIndexPath(), ...this.fallbackIndexPaths()].map((path) => resolve(path))) {
       if (path !== resolve(this.indexPath()) && existsSync(path)) records.push(...readJsonl<RunIndexRecord>(path).records);
@@ -197,7 +343,7 @@ export class RunStore {
   }
 
   resolveRunDir(runId: string): string {
-    const cached = this.readIndexCache().byRunId[runId];
+    const cached = this.getIndexCache().byRunId[runId];
     if (cached) return cached.runDir;
     const records = this.readLookupRunIndex().filter((record) => record.runId === runId);
     const latest = records.at(-1);
@@ -225,7 +371,7 @@ export class RunStore {
   }
 
   readRunSummaries(filter: Partial<Pick<RunIndexRecord, "parentRunId" | "rootSessionId">> = {}): RunSummaryReadModel[] {
-    const cache = this.readIndexCache();
+    const cache = this.getIndexCache();
     const records = filter.parentRunId
       ? (cache.childrenByParentRunId[filter.parentRunId] ?? []).map((runId) => cache.byRunId[runId]).filter(Boolean)
       : filter.rootSessionId
@@ -284,14 +430,14 @@ export class RunStore {
   }
 
   listDirectChildren(parentRunId: string): RunIndexRecord[] {
-    const cache = this.readIndexCache();
-    return (cache.childrenByParentRunId[parentRunId] ?? []).map((runId) => cache.byRunId[runId]).filter(Boolean);
+    const cache = this.getIndexCache();
+    return (cache.childrenByParentRunId[parentRunId] ?? []).map((runId) => cache.byRunId[runId]).filter(Boolean).map(cloneRecord);
   }
 
   listRecentRuns(filter: Partial<Pick<RunIndexRecord, "parentRunId" | "rootSessionId">> = {}): RunIndexRecord[] {
     if (filter.parentRunId) return this.listDirectChildren(filter.parentRunId).filter((record) => !filter.rootSessionId || record.rootSessionId === filter.rootSessionId);
-    const cache = this.readIndexCache();
-    if (filter.rootSessionId) return (cache.byRootSessionId[filter.rootSessionId] ?? []).map((runId) => cache.byRunId[runId]).filter(Boolean);
-    return cache.records;
+    const cache = this.getIndexCache();
+    if (filter.rootSessionId) return (cache.byRootSessionId[filter.rootSessionId] ?? []).map((runId) => cache.byRunId[runId]).filter(Boolean).map(cloneRecord);
+    return cache.records.map(cloneRecord);
   }
 }

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { RunStore } from "../src/runStore.js";
@@ -77,6 +77,70 @@ test("RunStore writes and resolves runs through the harness global index from an
 
   const second = new RunStore({ cwd: join(w.root, "project-b"), env: { HOME: home } as NodeJS.ProcessEnv });
   assert.equal(second.readStatus(runId).state, "completed");
+});
+
+test("RunStore does not full re-read the index when the warmed index is unchanged", () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  store.createRunDirectory({ cwd: w.root, parentRunId: "root_warm", rootSessionId: "root_warm" });
+  assert.equal(store.listDirectChildren("root_warm").length, 1);
+
+  (store as unknown as { readRunIndexUncached: () => never; readRunIndexSourcesUncached: () => never }).readRunIndexUncached = () => {
+    throw new Error("unexpected full index re-read");
+  };
+  (store as unknown as { readRunIndexSourcesUncached: () => never }).readRunIndexSourcesUncached = () => {
+    throw new Error("unexpected full index source re-read");
+  };
+
+  assert.equal(store.listDirectChildren("root_warm").length, 1);
+  assert.equal(store.readRunIndex().length, 1);
+});
+
+test("RunStore observes externally appended index records after the cache is warm", () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  store.createRunDirectory({ cwd: w.root, parentRunId: "root_external", rootSessionId: "root_external" });
+  assert.equal(store.listDirectChildren("root_external").length, 1);
+
+  const external = {
+    schemaVersion: 1,
+    runId: "run_external_append",
+    runDir: join(w.runRoot, "run_external_append"),
+    projectRoot: w.root,
+    parentRunId: "root_external",
+    rootSessionId: "root_external",
+    createdAt: new Date().toISOString(),
+  };
+  const before = statSync(store.indexPath());
+  writeFileSync(store.indexPath(), `${JSON.stringify(external)}\n`, { encoding: "utf8", flag: "a" });
+  utimesSync(store.indexPath(), before.atime, before.mtime);
+
+  const children = store.listDirectChildren("root_external").map((record) => record.runId).sort();
+  assert.deepEqual(children, ["run_external_append", store.readRunIndex()[0].runId].sort());
+});
+
+test("RunStore keeps unparsed tail bytes live until a partial index record completes", () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  store.createRunDirectory({ cwd: w.root, parentRunId: "root_partial", rootSessionId: "root_partial" });
+  assert.equal(store.listDirectChildren("root_partial").length, 1);
+
+  const external = JSON.stringify({
+    schemaVersion: 1,
+    runId: "run_partial_append",
+    runDir: join(w.runRoot, "run_partial_append"),
+    projectRoot: w.root,
+    parentRunId: "root_partial",
+    rootSessionId: "root_partial",
+    createdAt: new Date().toISOString(),
+  });
+  const split = Math.floor(external.length / 2);
+  writeFileSync(store.indexPath(), external.slice(0, split), { encoding: "utf8", flag: "a" });
+  assert.equal(store.listDirectChildren("root_partial").some((record) => record.runId === "run_partial_append"), false);
+  assert.equal(store.listDirectChildren("root_partial").some((record) => record.runId === "run_partial_append"), false);
+
+  writeFileSync(store.indexPath(), `${external.slice(split)}\n`, { encoding: "utf8", flag: "a" });
+  assert.equal(store.listDirectChildren("root_partial").some((record) => record.runId === "run_partial_append"), true);
 });
 
 test("RunStore reads and writes status, events, inbox, and terminal result", () => {

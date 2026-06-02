@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { SubagentError } from "./errors.js";
 
@@ -46,23 +46,19 @@ function idFromRecord(record: unknown): string | undefined {
   return typeof object.eventId === "string" ? object.eventId : typeof object.messageId === "string" ? object.messageId : undefined;
 }
 
-export function readJsonl<T = unknown>(path: string, options: ReadJsonlOptions = {}): ReadJsonlResult<T> {
-  const offset = options.offset ?? 0;
-  if (!existsSync(path)) return { records: [], nextOffset: offset };
-  const buffer = readFileSync(path);
-  if (offset >= buffer.length) return { records: [], nextOffset: buffer.length };
-
+function parseJsonlBuffer<T>(path: string, buffer: Buffer, baseOffset: number, maxRecords?: number): ReadJsonlResult<T> {
   const records: T[] = [];
-  let lineStart = offset;
-  let nextOffset = offset;
+  let lineStart = 0;
+  let nextOffset = baseOffset;
   let lastId: string | undefined;
 
-  for (let i = offset; i < buffer.length; i++) {
+  for (let i = 0; i < buffer.length; i++) {
     if (buffer[i] !== 0x0a) continue;
     let lineEnd = i;
     if (lineEnd > lineStart && buffer[lineEnd - 1] === 0x0d) lineEnd--;
     const raw = buffer.subarray(lineStart, lineEnd).toString("utf8");
-    nextOffset = i + 1;
+    const recordOffset = baseOffset + lineStart;
+    nextOffset = baseOffset + i + 1;
     lineStart = i + 1;
     if (!raw.trim()) continue;
     try {
@@ -72,12 +68,41 @@ export function readJsonl<T = unknown>(path: string, options: ReadJsonlOptions =
     } catch (error) {
       throw new SubagentError("INVALID_JSONL", `invalid complete JSONL record in ${path}`, {
         path,
-        offset: lineStart,
+        offset: recordOffset,
         cause: error instanceof Error ? error.message : String(error),
       });
     }
-    if (options.maxRecords && records.length >= options.maxRecords) break;
+    if (maxRecords && records.length >= maxRecords) break;
   }
 
   return { records, nextOffset, lastId };
+}
+
+export function readJsonl<T = unknown>(path: string, options: ReadJsonlOptions = {}): ReadJsonlResult<T> {
+  const offset = options.offset ?? 0;
+  if (!existsSync(path)) return { records: [], nextOffset: offset };
+  const buffer = readFileSync(path);
+  if (offset >= buffer.length) return { records: [], nextOffset: buffer.length };
+  return parseJsonlBuffer<T>(path, buffer.subarray(offset), offset, options.maxRecords);
+}
+
+export function readJsonlRange<T = unknown>(path: string, offset: number, endExclusive?: number): ReadJsonlResult<T> {
+  if (!existsSync(path)) return { records: [], nextOffset: offset };
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const end = Math.min(endExclusive ?? size, size);
+    if (offset >= end) return { records: [], nextOffset: end };
+    const length = end - offset;
+    const buffer = Buffer.allocUnsafe(length);
+    let total = 0;
+    while (total < length) {
+      const bytesRead = readSync(fd, buffer, total, length - total, offset + total);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    return parseJsonlBuffer<T>(path, total === length ? buffer : buffer.subarray(0, total), offset);
+  } finally {
+    closeSync(fd);
+  }
 }

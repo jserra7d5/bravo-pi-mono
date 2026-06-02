@@ -60,6 +60,22 @@ test("live widget uses summary read-models instead of reading every run's events
   assert.equal(readResults, 0);
 });
 
+test("live widget does not full re-read the warmed run index on unchanged ticks", () => {
+  const w = workspace();
+  for (let i = 0; i < 25; i += 1) addRun(w.store, w.root, w.parentRunId, "completed");
+  renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
+
+  (w.store as unknown as { readRunIndexUncached: () => never; readRunIndexSourcesUncached: () => never }).readRunIndexUncached = () => {
+    throw new Error("unexpected full index re-read");
+  };
+  (w.store as unknown as { readRunIndexSourcesUncached: () => never }).readRunIndexSourcesUncached = () => {
+    throw new Error("unexpected full index source re-read");
+  };
+
+  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
+  assert.ok(lines.length > 0);
+});
+
 test("manual retention dry-run skips active and unhandled result-ready runs", () => {
   const w = workspace();
   const old = new Date(Date.now() - 10 * 60_000).toISOString();
