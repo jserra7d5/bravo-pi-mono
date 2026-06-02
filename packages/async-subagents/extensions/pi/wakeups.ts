@@ -47,19 +47,68 @@ function claimPath(store: RunStore, deliveryKey: string): string {
   return join(resolve(store.runRoot, ".."), "delivery", "claims", `${deliveryKey.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
 }
 
+interface DeliveryFileState { path: string; exists: boolean; size: number; mtimeMs: number; ctimeMs: number; dev: number; ino: number }
+interface MemoryDeliveryStateCacheEntry { state: DeliveryFileState; deliveryState: DeliveryState }
+interface MemoryDeliverySubscriptionsCacheEntry { state: DeliveryFileState; subscriptions: DeliverySubscription[] }
+
+const memoryDeliveryStateCaches = new Map<string, MemoryDeliveryStateCacheEntry>();
+const memoryDeliverySubscriptionsCaches = new Map<string, MemoryDeliverySubscriptionsCacheEntry>();
+let deliveryStateParseCountForTest = 0;
+let subscriptionParseCountForTest = 0;
+
+function statDeliveryFile(path: string): DeliveryFileState {
+  const key = resolve(path);
+  if (!existsSync(key)) return { path: key, exists: false, size: 0, mtimeMs: 0, ctimeMs: 0, dev: 0, ino: 0 };
+  const stat = statSync(key);
+  return { path: key, exists: true, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino };
+}
+
+function deliveryFileStateUnchanged(previous: DeliveryFileState, current: DeliveryFileState): boolean {
+  return previous.path === current.path && previous.exists === current.exists && previous.size === current.size && previous.mtimeMs === current.mtimeMs && previous.ctimeMs === current.ctimeMs && previous.dev === current.dev && previous.ino === current.ino;
+}
+
+function cloneJsonValue<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => cloneJsonValue(item)) as T;
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, cloneJsonValue(item)])) as T;
+  return value;
+}
+
+function cloneDeliveryState(state: DeliveryState): DeliveryState { return cloneJsonValue(state); }
+function cloneDeliverySubscriptions(subscriptions: DeliverySubscription[]): DeliverySubscription[] { return cloneJsonValue(subscriptions); }
+function defaultDeliveryState(parentRunId: string): DeliveryState { return { schemaVersion: SCHEMA_VERSION, parentRunId, delivered: {}, handled: {}, taskEventCursors: {} }; }
+function invalidateDeliveryStateCache(path: string): void { memoryDeliveryStateCaches.delete(resolve(path)); }
+function invalidateDeliverySubscriptionsCache(path: string): void { memoryDeliverySubscriptionsCaches.delete(resolve(path)); }
+
+export function deliveryCacheStatsForTest(): { deliveryStateParses: number; subscriptionParses: number } {
+  return { deliveryStateParses: deliveryStateParseCountForTest, subscriptionParses: subscriptionParseCountForTest };
+}
+
+export function resetDeliveryCacheStatsForTest(): void {
+  deliveryStateParseCountForTest = 0;
+  subscriptionParseCountForTest = 0;
+}
+
 function readDeliveryState(store: RunStore, parentRunId: string): DeliveryState {
-  const path = deliveryPath(store, parentRunId);
-  if (!existsSync(path)) {
-    return { schemaVersion: SCHEMA_VERSION, parentRunId, delivered: {}, handled: {}, taskEventCursors: {} };
+  const path = resolve(deliveryPath(store, parentRunId));
+  const current = statDeliveryFile(path);
+  const cached = memoryDeliveryStateCaches.get(path);
+  if (cached && deliveryFileStateUnchanged(cached.state, current)) return cloneDeliveryState(cached.deliveryState);
+  if (!current.exists) {
+    const state = defaultDeliveryState(parentRunId);
+    memoryDeliveryStateCaches.set(path, { state: current, deliveryState: cloneDeliveryState(state) });
+    return cloneDeliveryState(state);
   }
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<DeliveryState>;
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    parentRunId,
-    delivered: parsed.delivered ?? {},
-    handled: parsed.handled ?? {},
-    taskEventCursors: parsed.taskEventCursors ?? {},
-  };
+  try {
+    const raw = readFileSync(path, "utf8");
+    deliveryStateParseCountForTest += 1;
+    const parsed = JSON.parse(raw) as Partial<DeliveryState>;
+    const state = { schemaVersion: SCHEMA_VERSION, parentRunId, delivered: parsed.delivered ?? {}, handled: parsed.handled ?? {}, taskEventCursors: parsed.taskEventCursors ?? {} };
+    memoryDeliveryStateCaches.set(path, { state: current, deliveryState: cloneDeliveryState(state) });
+    return cloneDeliveryState(state);
+  } catch (error) {
+    memoryDeliveryStateCaches.delete(path);
+    throw error;
+  }
 }
 
 function mergeTaskEventCursors(existing: Record<string, WaitCursor> | undefined, incoming: Record<string, WaitCursor> | undefined): Record<string, WaitCursor> {
@@ -72,14 +121,16 @@ function mergeTaskEventCursors(existing: Record<string, WaitCursor> | undefined,
 }
 
 function writeDeliveryState(store: RunStore, state: DeliveryState): void {
+  const path = deliveryPath(store, state.parentRunId);
   const existing = readDeliveryState(store, state.parentRunId);
-  atomicWriteJson(deliveryPath(store, state.parentRunId), {
+  atomicWriteJson(path, {
     schemaVersion: SCHEMA_VERSION,
     parentRunId: state.parentRunId,
     delivered: { ...existing.delivered, ...state.delivered },
     handled: { ...existing.handled, ...state.handled },
     taskEventCursors: mergeTaskEventCursors(existing.taskEventCursors, state.taskEventCursors),
   });
+  invalidateDeliveryStateCache(path);
 }
 
 export function resultDeliveryKey(runId: string, result: RunResult): string {
@@ -283,16 +334,33 @@ export function markDeliveredWakeupHandled(store: RunStore, parentRunId: string,
 }
 
 export function writeDeliverySubscription(store: RunStore, subscription: DeliverySubscription): void {
+  const path = subscriptionsPath(store, subscription.parentRunId);
   const subscriptions = readDeliverySubscriptions(store, subscription.parentRunId).filter((item) => item.runId !== subscription.runId);
   subscriptions.push(subscription);
-  atomicWriteJson(subscriptionsPath(store, subscription.parentRunId), { schemaVersion: SCHEMA_VERSION, parentRunId: subscription.parentRunId, subscriptions });
+  atomicWriteJson(path, { schemaVersion: SCHEMA_VERSION, parentRunId: subscription.parentRunId, subscriptions });
+  invalidateDeliverySubscriptionsCache(path);
 }
 
 export function readDeliverySubscriptions(store: RunStore, parentRunId: string): DeliverySubscription[] {
-  const path = subscriptionsPath(store, parentRunId);
-  if (!existsSync(path)) return [];
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as { subscriptions?: DeliverySubscription[] };
-  return parsed.subscriptions ?? [];
+  const path = resolve(subscriptionsPath(store, parentRunId));
+  const current = statDeliveryFile(path);
+  const cached = memoryDeliverySubscriptionsCaches.get(path);
+  if (cached && deliveryFileStateUnchanged(cached.state, current)) return cloneDeliverySubscriptions(cached.subscriptions);
+  if (!current.exists) {
+    memoryDeliverySubscriptionsCaches.set(path, { state: current, subscriptions: [] });
+    return [];
+  }
+  try {
+    const raw = readFileSync(path, "utf8");
+    subscriptionParseCountForTest += 1;
+    const parsed = JSON.parse(raw) as { subscriptions?: DeliverySubscription[] };
+    const subscriptions = parsed.subscriptions ?? [];
+    memoryDeliverySubscriptionsCaches.set(path, { state: current, subscriptions: cloneDeliverySubscriptions(subscriptions) });
+    return cloneDeliverySubscriptions(subscriptions);
+  } catch (error) {
+    memoryDeliverySubscriptionsCaches.delete(path);
+    throw error;
+  }
 }
 
 export function isWakeupKeyHandled(store: RunStore, parentRunId: string, deliveryKey: string): boolean {

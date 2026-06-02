@@ -182,3 +182,54 @@ and writes the hwm; migrated session with `L` pre-existing events continues at `
 > second finding (`offset > size` no longer returning `nextOffset = size`) was rejected after
 > verifying `readJsonlRangeInternal` returns `nextOffset = end = size`, identical to the old
 > whole-file path.
+
+## Fix 5 — delivery-state / subscription read cache (`extensions/pi/wakeups.ts`)
+
+**Before.** `pollWakeups` runs on the ~2s lead tick. `readDeliveryState` did a full
+`readFileSync` + `JSON.parse` of `delivery/<parentRunId>.json` on **every** tick — and that
+file's `delivered` and `handled` maps grow **one entry per wakeup ever delivered/handled**, so
+even in steady state (every subagent long completed, nothing new to deliver) each tick re-parsed
+an ever-growing JSON blob: O(cumulative subagents) CPU + GC per tick that never recovered.
+`readDeliverySubscriptions` was a second per-tick full parse. Both are also called by
+`writeDeliveryState`'s merge-on-write and by every `markX`/`isWakeupKeyHandled` helper.
+
+**After.** Stat-validated in-memory caches (same pattern as Fixes 1–2:
+identity = `exists + size + mtimeMs + ctimeMs + dev + ino`) for both the delivery-state and the
+subscriptions files. Each read `stat`s the file; unchanged ⇒ return a **deep clone** of the
+cached value with **no read, no parse**; changed/absent ⇒ re-parse (or fresh default) and
+recache. The dominant steady-state cost (whole-file parse every tick) is gone — a quiescent tick
+is now a `stat` + clone.
+
+**Correctness.**
+- **Deep clones out.** `pollWakeups` mutates the returned state in place
+  (`state.delivered[key] = …`, reassigns `state.taskEventCursors`) and the
+  `markDeliveredWakeupHandled` / `markWakeupKeyHandled` / `markTaskWakeupHandled` /
+  `markWakeupHandled` helpers read-modify-write it, so reads return a deep clone (recursing into
+  the nested `taskEventCursors` `WaitCursor` objects); the cache can never be poisoned by a
+  caller's mutation. The file-absent default is a fresh object each call.
+- **Invalidate-on-write, not write-through.** `writeDeliveryState` /
+  `writeDeliverySubscription` keep their existing read-existing → merge → `atomicWriteJson`
+  flow and then **delete** the cache key. Write-through would be unsafe: another process could
+  `atomicWriteJson` the same file between our write and a post-write `stat`, leaving us caching
+  *our* merged value under *its* file identity — stale forever. Invalidation forces the next
+  read to re-`stat` and parse whatever is actually on disk.
+- **Cross-process freshness.** The delivery file is shared by the lead process and detached
+  supervisor processes. Re-`stat`ing on every call (identity includes `size`/`ctime`/`dev`/`ino`,
+  not just `mtime`) guarantees an external write is always observed — even one that restores the
+  original `mtime`. No on-disk format, delivery-key, cursor, claim, or lease behavior changed;
+  public output is byte-identical. Map growth is **not** pruned here (that is destructive and
+  deferred); this fix only removes the redundant per-tick re-parse.
+
+**Tests.** `test/wakeups.test.ts`: a parse counter (`deliveryCacheStatsForTest`) proves repeated
+steady-state polls do **zero** delivery-state *and* subscription parses after warm-up (the run is
+subscribed, so the subscriptions file exists and is genuinely cache-served); and an external
+on-disk delivery-state change with its `mtime` restored via `utimesSync` is still re-parsed
+exactly once and observed (the run's result key reads back as handled), proving stale state is
+never returned.
+
+> Implemented by a GPT-5.5 (`pi`) agent under adversarial GPT-5.5 review; approved after
+> independent verification (`npm run check`, 36/36 targeted tests). One reviewer MINOR (parse
+> counter incremented before `readFileSync`, so a stat→read race could over-count) was applied
+> (increment moved to immediately before `JSON.parse`). A second MINOR (claiming the subscription
+> cache test only exercised an absent file) was rejected after confirming the test's run is
+> subscribed, so an existing subscriptions file is cache-served.

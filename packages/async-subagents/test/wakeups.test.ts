@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { acquireRootSessionLease } from "../src/leases.js";
 import { createRunResult } from "../src/result.js";
@@ -10,12 +10,16 @@ import { RunStore } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
 import { TaskStore, hashTaskToken, newTaskToken } from "../src/taskStore.js";
 import { SCHEMA_VERSION } from "../src/types.js";
-import { pollWakeups, markWakeupHandled, markDeliveredWakeupHandled, isWakeupKeyHandled, writeDeliverySubscription } from "../extensions/pi/wakeups.js";
+import { pollWakeups, markWakeupHandled, markDeliveredWakeupHandled, isWakeupKeyHandled, writeDeliverySubscription, resultDeliveryKey, deliveryCacheStatsForTest, resetDeliveryCacheStatsForTest } from "../extensions/pi/wakeups.js";
 
 function workspace() {
   const root = mkdtempSync(join(tmpdir(), "async-subagents-wakeups-"));
   const store = new RunStore({ cwd: root, runRoot: join(root, ".subagents", "runs") });
   return { root, store };
+}
+
+function deliveryStatePath(store: RunStore, parentRunId: string): string {
+  return join(resolve(store.runRoot, ".."), "delivery", `${parentRunId}.json`);
 }
 
 function createCompletedRun(store: RunStore, cwd: string, parentRunId: string, updatedAt?: string): string {
@@ -65,6 +69,49 @@ test("pollWakeups requires the owner lease and dedupes terminal results", () => 
 
   const stale = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_b" });
   assert.equal(stale.length, 0);
+});
+
+test("pollWakeups does not parse unchanged delivery state in steady state", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const runId = createCompletedRun(store, root, parentRunId);
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const first = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(first.length, 1);
+  assert.equal(first[0]?.runId, runId);
+
+  const warm = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(warm.length, 0);
+
+  resetDeliveryCacheStatsForTest();
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" }).length, 0);
+  }
+  assert.deepEqual(deliveryCacheStatsForTest(), { deliveryStateParses: 0, subscriptionParses: 0 });
+});
+
+test("delivery state cache observes external writes even when mtime is restored", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const runId = createCompletedRun(store, root, parentRunId);
+  const result = store.readResult(runId);
+  assert.ok(result);
+  const key = resultDeliveryKey(runId, result);
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const path = deliveryStatePath(store, parentRunId);
+  writeFileSync(path, `${JSON.stringify({ schemaVersion: SCHEMA_VERSION, parentRunId, delivered: {}, handled: {}, taskEventCursors: {} }, null, 2)}\n`, "utf8");
+  assert.equal(isWakeupKeyHandled(store, parentRunId, key), false);
+  const before = statSync(path);
+  writeFileSync(path, `${JSON.stringify({ schemaVersion: SCHEMA_VERSION, parentRunId, delivered: {}, handled: { [key]: new Date().toISOString() }, taskEventCursors: {} }, null, 2)}\n`, "utf8");
+  utimesSync(path, before.atime, before.mtime);
+
+  resetDeliveryCacheStatsForTest();
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(deliveries.length, 0);
+  assert.equal(deliveryCacheStatsForTest().deliveryStateParses, 1);
+  assert.equal(isWakeupKeyHandled(store, parentRunId, key), true);
 });
 
 test("pollWakeups includes capped terminal result body while keeping result body redacted", () => {
