@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { mkdirSync, appendFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import type { Readable } from "node:stream";
 import { join } from "node:path";
 import { resolveStateRoot } from "../store/state-path.js";
@@ -57,12 +57,16 @@ export type StreamStartParams = {
   timeout_ms?: number;
   notify?: boolean;
   wake_agent?: boolean;
+  wake_on_line?: boolean;
+  wake_on_completion?: boolean;
+  wake_on_failure?: boolean;
   event_throttle_ms?: number;
   max_lines_per_turn?: number;
   stream_id?: string;
   shell?: boolean;
   store?: JsonlMonitorStore;
   monitor_id?: string;
+  output_file?: string;
 };
 
 export type StopOutcome = {
@@ -96,12 +100,31 @@ function streamDir(root?: string): string {
   return dir;
 }
 
+function monitorOutputFile(streamId: string, root?: string): string {
+  const dir = join(root ?? resolveStateRoot(), "monitors", streamId);
+  mkdirSync(dir, { recursive: true });
+  return join(dir, "output.log");
+}
+
 function nowISO(): string {
   return new Date().toISOString();
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function appendCapped(path: string, chunk: string | Buffer, capBytes = 5_000_000): void {
+  const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  if (existsSync(path)) {
+    const current = readFileSync(path);
+    const next = Buffer.concat([current, incoming]);
+    if (next.length > capBytes) {
+      writeFileSync(path, Buffer.concat([Buffer.from("[monitor output truncated to last 5MB]\n"), next.subarray(next.length - capBytes)]));
+      return;
+    }
+  }
+  appendFileSync(path, incoming);
 }
 
 export class StreamMonitorManager {
@@ -133,12 +156,12 @@ export class StreamMonitorManager {
   }
 
   outputFile(streamId: string): string {
-    return this.get(streamId)?.output_file ?? join(streamDir(this.root), `${streamId}.log`);
+    return this.get(streamId)?.output_file ?? monitorOutputFile(streamId, this.root);
   }
 
   start(params: StreamStartParams, ctx?: any): StreamMonitorState {
     const streamId = params.stream_id ?? makeStreamId();
-    const outputFile = join(streamDir(this.root), `${streamId}.log`);
+    const outputFile = params.output_file ?? monitorOutputFile(streamId, this.root);
     const child = spawn(params.command, {
       cwd: params.cwd || process.cwd(),
       shell: params.shell ?? true,
@@ -167,7 +190,7 @@ export class StreamMonitorManager {
       store: params.store,
       monitorId: params.monitor_id ?? params.stream_id,
       notify: params.notify !== false,
-      wakeAgent: params.wake_agent === true,
+      wakeAgent: params.wake_agent === true || params.wake_on_line === true || params.wake_on_completion === true || params.wake_on_failure === true,
       notify_attempted: false,
       notify_delivered: false,
       wake_attempted: false,
@@ -182,33 +205,33 @@ export class StreamMonitorManager {
     this.streams.set(streamId, runtime);
 
     const onData = (chunk: Buffer, source: "stdout" | "stderr") => {
-      appendFileSync(outputFile, chunk);
+      appendCapped(outputFile, chunk);
       runtime.buffer += chunk.toString("utf8");
       let idx: number;
       while ((idx = runtime.buffer.indexOf("\n")) >= 0) {
         const line = runtime.buffer.slice(0, idx).replace(/\r$/, "");
         runtime.buffer = runtime.buffer.slice(idx + 1);
-        if (line.length > 0) this.deliverLine(runtime, line, source, params.notify !== false, params.wake_agent === true);
+        if (line.length > 0) this.deliverLine(runtime, line, source, params.notify !== false, params.wake_on_line ?? params.wake_agent === true);
       }
     };
 
     child.stdout.on("data", (c: Buffer) => onData(c, "stdout"));
     child.stderr.on("data", (c: Buffer) => onData(c, "stderr"));
     child.on("error", async (err) => {
-      appendFileSync(outputFile, `\n[command monitor error] ${err.message}\n`);
+      appendCapped(outputFile, `\n[command monitor error] ${err.message}\n`);
       runtime.status = "failed";
       runtime.end_time = nowISO();
       const summary = `Command monitor "${runtime.description}" failed: ${err.message}`;
-      this.deliverCompletion(runtime, summary, "error", params.notify !== false, params.wake_agent === true);
+      this.deliverCompletion(runtime, summary, "error", params.notify !== false, params.wake_on_line === true || params.wake_on_completion === true || params.wake_on_failure === true || params.wake_agent === true);
       await this.persistCompletion(runtime, summary).catch((persistErr) => console.error("[monitor] command error persistence failed:", persistErr));
       runtime.resolveClose();
     });
     child.on("close", async (code, signal) => {
       if (runtime.buffer.trim().length > 0) {
-        this.deliverLine(runtime, runtime.buffer.trimEnd(), "stdout", params.notify !== false, params.wake_agent === true);
+        this.deliverLine(runtime, runtime.buffer.trimEnd(), "stdout", params.notify !== false, params.wake_on_line ?? params.wake_agent === true);
         runtime.buffer = "";
       }
-      this.flushEvents(runtime, params.wake_agent === true);
+      this.flushEvents(runtime, params.wake_on_line ?? params.wake_agent === true);
       runtime.exit_code = code;
       runtime.signal = signal;
       runtime.end_time = nowISO();
@@ -218,7 +241,7 @@ export class StreamMonitorManager {
         : runtime.status === "stopped"
           ? `Command monitor "${runtime.description}" stopped`
           : `Command monitor "${runtime.description}" failed${code !== null ? ` (exit ${code})` : signal ? ` (${signal})` : ""}`;
-      this.deliverCompletion(runtime, summary, runtime.status === "failed" ? "error" : "info", params.notify !== false, params.wake_agent === true);
+      this.deliverCompletion(runtime, summary, runtime.status === "failed" ? "error" : "info", params.notify !== false, params.wake_on_completion === true || (runtime.status === "failed" && (params.wake_on_line === true || params.wake_on_failure === true)) || params.wake_agent === true);
       await this.persistCompletion(runtime, summary).catch((err) => console.error("[monitor] command completion persistence failed:", err));
       runtime.resolveClose();
     });
@@ -318,17 +341,24 @@ export class StreamMonitorManager {
       return;
     }
     const events = runtime.pendingEvents.splice(0, runtime.maxLinesPerTurn);
-    const content = `Command monitor output${events.length === 1 ? "" : " batch"}: ${runtime.description}\n\n${events.map((e) => e.line).join("\n")}`;
+    const instructions = [
+      "This is control-plane evidence, not a user request.",
+      "Inspect Output path with the read tool only if needed.",
+      "Continue the active workstream.",
+      "Tell the user only if this changes the outcome, blocks progress, or completes the task.",
+    ];
+    const summary = `${events.length} stream event${events.length === 1 ? "" : "s"} captured for ${runtime.description}`;
+    const content = `[MONITOR EVENT — NOT USER INPUT]\n\nMonitor ID: ${runtime.stream_id}\nName: ${runtime.description}\nKind: stream\nState: event\nSummary: ${summary}\nOutput: ${runtime.output_file}\n\nInstructions:\n${instructions.map((line) => `- ${line}`).join("\n")}`;
     runtime.wake_attempted = true;
     if (!this.pi.sendMessage) {
       runtime.wake_error = "pi.sendMessage unavailable";
     } else {
       try {
         this.pi.sendMessage({
-          customType: "command-monitor-event",
+          customType: "monitor-event",
           content,
           display: true,
-          details: { stream_id: runtime.stream_id, description: runtime.description, events, output_file: runtime.output_file, line_count: runtime.line_count },
+          details: { monitor_id: runtime.stream_id, name: runtime.description, kind: "stream", state: "event", event_type: "event", summary, output_path: runtime.output_file, event: { line_count: runtime.line_count, batch_count: events.length }, instructions },
         }, { deliverAs: "followUp", triggerTurn: true });
         runtime.wake_delivered = true;
         runtime.wake_error = undefined;
@@ -387,11 +417,19 @@ export class StreamMonitorManager {
       return;
     }
     try {
+      const eventType = runtime.status === "failed" ? "failed" : "ended";
+      const header = eventType === "failed" ? "[MONITOR FAILED — NOT USER INPUT]" : "[MONITOR ENDED — NOT USER INPUT]";
+      const instructions = [
+        "This is control-plane evidence, not a user request.",
+        "Inspect Output path with the read tool only if needed.",
+        "Continue the active workstream.",
+        "Tell the user only if this changes the outcome, blocks progress, or completes the task.",
+      ];
       this.pi.sendMessage({
-        customType: "command-monitor-status",
-        content: `${summary}\n\nOutput file: ${runtime.output_file}`,
+        customType: "monitor-event",
+        content: `${header}\n\nMonitor ID: ${runtime.stream_id}\nName: ${runtime.description}\nKind: stream\nState: ${eventType}\nSummary: ${summary}\nOutput: ${runtime.output_file}\n\nInstructions:\n${instructions.map((line) => `- ${line}`).join("\n")}`,
         display: true,
-        details: this.get(runtime.stream_id),
+        details: { monitor_id: runtime.stream_id, name: runtime.description, kind: "stream", state: eventType, event_type: eventType, summary, output_path: runtime.output_file, event: { exit_code: runtime.exit_code, signal: runtime.signal }, instructions },
       }, { deliverAs: "followUp", triggerTurn: true });
       runtime.completion_wake_delivered = true;
       runtime.completion_wake_error = undefined;

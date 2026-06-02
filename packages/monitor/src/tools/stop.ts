@@ -34,7 +34,7 @@ export function buildStopTool(_pi: ExtensionAPI, store: JsonlMonitorStore, statu
       await status?.refresh(ctx);
       return {
         content: [{ type: "text" as const, text: `Monitor ${updated.monitor_id} stopped` }],
-        details: { ok: true, message: `Monitor ${updated.monitor_id} stopped`, monitor_id: updated.monitor_id, task_type: (m.check as any).type, command: (m.check as any).command, state: "stopped" },
+        details: { ok: true, monitor_id: updated.monitor_id, state: "stopped", output_path: (updated.metadata as any)?.output_path ?? (updated.check as any).output_path },
       };
     },
   };

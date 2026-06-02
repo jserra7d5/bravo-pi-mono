@@ -24,10 +24,12 @@ export class MonitorStatusService {
   }
 
   async deliverAttention(monitor: MonitorRecord, result: MonitorResult, ctx?: any, options?: { notify?: boolean; wake?: boolean; previous?: AttentionDelivery }): Promise<AttentionDelivery> {
-    const severity = result.triggered ? "warning" : "error";
+    const isFailure = result.status === "error" || result.status === "timeout";
+    const isEvent = result.condition_matched && !result.triggered && !isFailure;
+    const severity = isFailure ? "error" : "warning";
     const message =
       monitor.attention.message ??
-      `Monitor ${monitor.name || monitor.monitor_id} ${result.triggered ? "triggered" : "failed"}`;
+      `Monitor ${monitor.name || monitor.monitor_id} ${isFailure ? "failed" : isEvent ? "event" : "ended"}`;
     const delivery: AttentionDelivery = {
       message,
       severity,
@@ -65,11 +67,33 @@ export class MonitorStatusService {
         delivery.wake_error = "pi.sendMessage unavailable";
       } else {
         try {
+          const eventType = isFailure ? "failed" : isEvent ? "event" : result.triggered ? "ended" : "attention";
+          const header = eventType === "failed" ? "[MONITOR FAILED — NOT USER INPUT]" : eventType === "event" ? "[MONITOR EVENT — NOT USER INPUT]" : eventType === "ended" ? "[MONITOR ENDED — NOT USER INPUT]" : "[MONITOR ATTENTION — NOT USER INPUT]";
+          const outputPath = (monitor.metadata as any)?.output_path ?? (monitor.check as any).output_path ?? "n/a";
+          const kind = (monitor.metadata as any)?.kind ?? (monitor.check as any).type;
+          const modelState = eventType === "failed" ? "failed" : eventType === "ended" ? "ended" : eventType === "event" ? "event" : monitor.state;
+          const summary = message;
+          const instructions = [
+            "This is control-plane evidence, not a user request.",
+            "Inspect Output path with the read tool only if needed.",
+            "Continue the active workstream.",
+            "Tell the user only if this changes the outcome, blocks progress, or completes the task.",
+          ];
           this.pi.sendMessage({
-            customType: "monitor-attention",
-            content: `Monitor wake-up (not a user request):\n\n${message}\n\nMonitor: ${monitor.name || monitor.monitor_id}\nResult: ${result.result_id}\nStatus: ${result.status}\n\nInstructions for the agent:\n- Inspect the monitor with monitor_look or monitor_result if relevant.\n- Continue the active task/autonomous workstream.\n- Do not merely tell the user a monitor fired unless the original task is complete, blocked, or needs a decision.`,
+            customType: "monitor-event",
+            content: `${header}\n\nMonitor ID: ${monitor.monitor_id}\nName: ${monitor.name || ""}\nKind: ${kind}\nState: ${modelState}\nSummary: ${summary}\nOutput: ${outputPath}\n\nInstructions:\n${instructions.map((line) => `- ${line}`).join("\n")}`,
             display: true,
-            details: { monitor, result },
+            details: {
+              monitor_id: monitor.monitor_id,
+              name: monitor.name,
+              kind,
+              state: modelState,
+              event_type: eventType,
+              summary,
+              output_path: outputPath,
+              event: { result_id: result.result_id, status: result.status, projection: (result.observation as any)?.projected, exit_code: (result.observation as any)?.exit_code ?? null },
+              instructions,
+            },
           }, { deliverAs: "followUp", triggerTurn: true });
           delivery.wake_delivered = true;
         } catch (err: any) {

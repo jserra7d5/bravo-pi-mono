@@ -1,7 +1,9 @@
 import type { JsonlMonitorStore } from "../store/jsonl-store.js";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { MonitorStatusService } from "../runtime/status.js";
 import type { MonitorRecord, MonitorEvent, MonitorResult } from "../schema/types.js";
-import { runTimerCheck, runFileCheck } from "../checks/index.js";
+import { runTimerCheck, runFileCheck, runCommandPollCheck } from "../checks/index.js";
 import { evaluateCondition } from "../conditions/evaluator.js";
 import { generateEventId, generateLeaseId } from "../ids.js";
 import { nowISO, addMs } from "../time.js";
@@ -64,7 +66,7 @@ export class MonitorScheduler {
       const due = await this.store.claimDue(
         now,
         { lease_id: generateLeaseId(), ttl_ms: this.opts.leaseTtlMs },
-        (monitor) => monitorBelongsToRuntime(monitor, identity) && monitor.check.type !== "command"
+        (monitor) => monitorBelongsToRuntime(monitor, identity) && (monitor.check.type !== "command" || (monitor.check as any).mode === "poll")
       );
       for (const m of due) {
         if (this.activeRuns.size >= this.opts.maxConcurrentRuns) break;
@@ -81,7 +83,7 @@ export class MonitorScheduler {
   }
 
   private async runOne(monitor: MonitorRecord): Promise<void> {
-    if (monitor.check.type === "command") {
+    if (monitor.check.type === "command" && (monitor.check as any).mode !== "poll") {
       await this.store.releaseLease(monitor.monitor_id, monitor.lease_id ?? "", undefined);
       return;
     }
@@ -103,9 +105,12 @@ export class MonitorScheduler {
       };
     }
 
+    this.appendObservation(monitor, result);
+
     const conditionMatched = evaluateCondition(monitor.condition, result);
     result.condition_matched = conditionMatched;
-    result.triggered = conditionMatched && result.status === "matched";
+    const nonterminalV2PollChange = (monitor.metadata as any)?.monitor_v2 === true && (monitor.metadata as any)?.kind === "poll" && result.status === "matched";
+    result.triggered = conditionMatched && result.status === "matched" && !nonterminalV2PollChange;
 
     const current = await this.store.get(monitor.monitor_id);
     if (!current || current.lease_id !== monitor.lease_id || current.state !== "running") return;
@@ -127,8 +132,11 @@ export class MonitorScheduler {
       lease_expires_at: undefined,
     });
 
-    if (result.triggered || result.status === "error") {
-      const attention_delivery = await this.statusService?.deliverAttention(current, result, this.ctx);
+    const monitorEvent = result.triggered || (nonterminalV2PollChange && result.condition_matched);
+    if (monitorEvent || result.status === "error") {
+      const wakeMode = (current.metadata as any)?.wake as string | undefined;
+      const wake = wakeMode === "on_event" ? (monitorEvent || result.status === "error") : wakeMode === "on_failure" ? result.status === "error" : wakeMode === "on_terminal" ? ["failed", "succeeded", "completed", "expired", "triggered"].includes(nextState) : undefined;
+      const attention_delivery = await this.statusService?.deliverAttention(current, result, this.ctx, { wake });
       if (attention_delivery) result.attention_delivery = attention_delivery;
     }
 
@@ -155,12 +163,25 @@ export class MonitorScheduler {
     await this.statusService?.refresh(this.ctx);
   }
 
+  private appendObservation(monitor: MonitorRecord, result: MonitorResult): void {
+    const outputPath = (monitor.metadata as any)?.output_path ?? (monitor.check as any).output_path;
+    if (!outputPath || monitor.check.type === "command") return;
+    try {
+      mkdirSync(dirname(outputPath), { recursive: true });
+      appendFileSync(outputPath, `${result.created_at} status=${result.status} triggered=${result.triggered} observation=${JSON.stringify(result.observation)}\n`);
+    } catch (err) {
+      console.error("[monitor] failed to append observation output:", err);
+    }
+  }
+
   private async executeCheck(monitor: MonitorRecord): Promise<MonitorResult> {
     switch (monitor.check.type) {
       case "timer":
         return runTimerCheck(monitor);
       case "file":
         return runFileCheck(monitor);
+      case "command":
+        return runCommandPollCheck(monitor, this.store);
       default:
         throw new Error(`Unsupported check type: ${(monitor.check as any).type}`);
     }

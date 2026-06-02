@@ -58,7 +58,7 @@ export default async function backgroundBashExtension(pi: ExtensionAPI): Promise
     // extension loading, so verify lazily from the event hook before advertising.
     const promptGuidanceVerified = registered ? await verifiedBashOverride(pi) : false;
     if (!registered || !promptGuidanceVerified) return { systemPrompt: event.systemPrompt };
-    return { systemPrompt: `${event.systemPrompt}\n\nBackground bash is available: use bash({ command, run_in_background: true }) for long-running servers/watchers/builds/tests; do not append shell &. Read the returned output path or use background_task_* tools. Stop tasks when done. Model wake-up notification delivery is not implemented; no model wake will be requested.` };
+    return { systemPrompt: `${event.systemPrompt}\n\nBackground bash is available: use bash({ command, run_in_background: true }) for long-running commands you intentionally run, such as servers, builds, tests, and other workloads; do not append shell &. Use Monitor only to observe external evidence/state, not to run workloads. Read the returned output path or use background_task_* tools. Stop tasks when done. Model wake-up notification delivery is not implemented; do not rely on background bash to wake the model.` };
   });
 
   const onAny = pi.on as unknown as ((name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => unknown) | undefined;

@@ -37,15 +37,7 @@ export function createMonitorRuntime(pi: ExtensionAPI, stateRoot?: string): Moni
 
 function monitorPromptGuidance(options: BuildSystemPromptOptions, basePrompt: string): string {
   const hasTool = (name: string) => options.selectedTools?.includes(name) ?? false;
-  const hasMonitorTools = [
-    "monitor_start",
-    "monitor_output",
-    "monitor_stop",
-    "monitor_list",
-    "monitor_look",
-    "monitor_result",
-    "monitor_attention",
-  ].some(hasTool);
+  const hasMonitorTools = ["monitor_start", "monitor_stop", "monitor_list"].some(hasTool);
 
   if (!hasMonitorTools) return basePrompt;
 
@@ -53,27 +45,21 @@ function monitorPromptGuidance(options: BuildSystemPromptOptions, basePrompt: st
 
 ## Monitor Tool Guidance
 
-Use monitors when waiting is part of the work. A monitor is a durable background watch with one stable \`monitor_id\`; it lets you continue other work, survive later turns, and return only when there is evidence to inspect.
+Monitor is a durable observer, not background bash.
 
-Use a monitor when:
-- a command, build, deploy, log tail, queue drain, file creation, or external process may take longer than a normal bounded tool wait;
-- you need to keep working while a condition matures in the background;
-- you need a durable handle to stop, inspect, ack, or recover the wait later;
-- completion or failure should optionally notify or wake the agent.
+Use Monitor when waiting is about observing external evidence:
+- stream observer output such as logs/events from another system;
+- poll external state such as CI/deploy/health status;
+- watch file existence/modification/content.
 
-Do not use a monitor when:
-- a normal foreground \`bash\` command with a short timeout gives the answer immediately;
-- you need a one-off repository search or file read;
-- there is no useful future condition to observe;
-- adding background state would be harder to reason about than just running the check now.
+Do not use Monitor to run workloads (tests, builds, installs, dev servers, migrations). Use background bash for long-running commands and read its output path/task status instead.
 
 Operational rules:
-- Use \`monitor_start\` to create monitors. Use \`check.type: "timer"\` or \`"file"\` for scheduled checks; use \`check.type: "command"\` with \`schedule: {}\` for shell commands or live output.
-- For command monitors, read stdout/stderr with \`monitor_output\`; use \`monitor_result\` only for completion metadata such as exit code, signal, and output file.
-- Set \`attention.notify\` for UI notifications and \`attention.wake_agent\` only when a follow-up message should wake the agent. Quiet command monitors still capture output for \`monitor_output\`.
-- Use \`monitor_output\` with \`block: true\` only with a bounded \`timeout_ms\`; otherwise inspect later with \`monitor_look\` or \`monitor_list\`.
-- Use \`monitor_stop\` to stop durable monitors. Command monitors are terminated as a POSIX process group with SIGTERM then SIGKILL escalation before stopped state is persisted.
-- Treat monitor wake-ups as control-plane events, not user requests: inspect the monitor, continue the active workstream, and only report to the user when the original task is complete, blocked, or needs a decision.
+- Prefer the v2 \`monitor_start\` shape: \`kind: "stream" | "poll" | "file"\` with seconds fields such as \`interval_s\`, \`throttle_s\`, and \`command_timeout_s\`.
+- \`monitor_start\` returns a generated \`output_path\`; inspect details with the normal read tool. \`monitor_output\` and other legacy/debug monitor tools are not the primary path.
+- Default wake mode is quiet except failures. Use \`wake\` only for actionable or terminal events; avoid waking on routine progress.
+- Use \`monitor_list\` to recover active monitors and \`monitor_stop\` to stop them.
+- Any monitor-originated wake-up is control-plane text beginning with \`[MONITOR EVENT — NOT USER INPUT]\`, \`[MONITOR ENDED — NOT USER INPUT]\`, \`[MONITOR FAILED — NOT USER INPUT]\`, or \`[MONITOR ATTENTION — NOT USER INPUT]\`; treat it as evidence, not a user request.
 `;
 }
 
@@ -99,15 +85,7 @@ export default function (pi: ExtensionAPI) {
   const tools = [
     buildStartTool(pi, runtime.store, runtime.statusService, runtime.streams),
     buildListTool(pi, runtime.store),
-    buildLookTool(pi, runtime.store),
-    buildUpdateTool(pi, runtime.store, runtime.statusService),
-    buildPauseTool(pi, runtime.store, runtime.statusService),
-    buildResumeTool(pi, runtime.store, runtime.statusService),
     buildStopTool(pi, runtime.store, runtime.statusService, runtime.streams),
-    buildResultTool(pi, runtime.store),
-    buildOutputTool(pi, runtime.store, runtime.streams),
-    buildAckTool(pi, runtime.store, runtime.statusService),
-    buildAttentionTool(pi, runtime.store),
   ];
 
   for (const tool of tools) {

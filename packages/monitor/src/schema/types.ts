@@ -25,12 +25,15 @@ export type CommandCheckSpec = {
   type: "command";
   command: string;
   cwd?: string;
-  mode?: "stream" | "exit";
+  mode?: "stream" | "exit" | "poll";
   shell?: boolean;
   timeout_ms?: number;
   event_throttle_ms?: number;
   max_lines_per_turn?: number;
   tail_bytes?: number;
+  output_path?: string;
+  emit?: "line" | "state_change" | "terminal";
+  projection?: unknown;
 };
 
 export type FileCheckSpec = {

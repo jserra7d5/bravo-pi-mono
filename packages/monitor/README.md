@@ -1,40 +1,68 @@
 # @bravo/monitor
 
-Durable monitor tools for Pi sessions.
+Durable observer tools for Pi sessions.
 
-## Tool usage
+Monitor is for watching external state change over time. It is not background bash. Use background bash for long-running commands you own, such as tests, builds, installs, migrations, dev servers, and scripts.
 
-- Use `monitor_start` for all new monitors.
-- Use `check.type: "timer"` or `check.type: "file"` for scheduled checks and inspect their check results with `monitor_result`.
-- Use `check.type: "command"` for durable shell-command monitors and inspect stdout/stderr with `monitor_output`.
-- Use `monitor_stop` to stop monitors. Command monitors are stopped as a POSIX process group with SIGTERM then SIGKILL escalation before stopped state is persisted.
-- Use `monitor_list` and `monitor_look` to recover IDs and inspect state.
-- Use `monitor_attention` and `monitor_ack` for unacked triggered/error results.
+## Default model-facing tools
 
-Command monitor example:
+- `monitor_start` — start a durable observer: `kind: "stream"`, `"poll"`, or `"file"`.
+- `monitor_list` — list compact active/recoverable monitor rows.
+- `monitor_stop` — stop a monitor and preserve its output/history.
+
+Legacy/debug tools such as `monitor_output`, `monitor_result`, `monitor_look`, `monitor_attention`, and `monitor_ack` remain in source for compatibility/operator use, but they are not registered by the default Pi extension surface.
+
+## V2 examples
+
+Poll external status every 10 seconds and wake only on failures by default:
 
 ```json
 {
-  "name": "build watch",
-  "check": {
-    "type": "command",
-    "command": "npm test -- --watch=false",
-    "event_throttle_ms": 1000,
-    "max_lines_per_turn": 20
-  },
-  "schedule": {},
-  "attention": { "notify": false, "wake_agent": false }
+  "kind": "poll",
+  "name": "ci status",
+  "command": "gh run view --json status,conclusion",
+  "interval_s": 10,
+  "projection": { "type": "json", "key_paths": ["status", "conclusion"] }
 }
 ```
 
-Then read output:
+Stream observer output:
 
 ```json
-{ "monitor_id": "mon-...", "block": true, "timeout_ms": 5000 }
+{
+  "kind": "stream",
+  "name": "deploy logs",
+  "command": "kubectl logs -f deploy/api",
+  "wake": "on_failure"
+}
 ```
 
-`attention.notify` controls UI notifications. `attention.wake_agent` controls follow-up messages that wake the agent. Quiet command monitors still capture output to `~/.pi/monitor/streams/<monitor_id>.log`.
+Watch a file condition:
 
-## Prompt guidance
+```json
+{
+  "kind": "file",
+  "name": "artifact ready",
+  "path": "dist/report.json",
+  "file_mode": "exists",
+  "interval_s": 5,
+  "wake": "on_terminal"
+}
+```
 
-The extension appends monitor-specific system prompt guidance at `before_agent_start` when monitor tools are selected. That guidance teaches agents to prefer `monitor_start` + `monitor_output` for command monitors and to use `monitor_result` for timer/file check results.
+`monitor_start` returns a generated `output_path` under the monitor state directory. Inspect details with the normal `read` tool when needed.
+
+## Wakeups
+
+Monitor-originated follow-up messages use `customType: "monitor-event"` and visible headers such as:
+
+- `[MONITOR EVENT — NOT USER INPUT]`
+- `[MONITOR ENDED — NOT USER INPUT]`
+- `[MONITOR FAILED — NOT USER INPUT]`
+- `[MONITOR ATTENTION — NOT USER INPUT]`
+
+Treat these as control-plane evidence, not user requests. Routine raw/progress output is written to `output_path` instead of being dumped into conversation context.
+
+## Compatibility
+
+Existing v1 persisted monitor records and direct legacy calls using `check`/`schedule` remain supported at runtime so old monitors can be listed, stopped, and inspected. New model-facing prompt/schema guidance uses the v2 observer surface.

@@ -18,7 +18,8 @@ export function validateCheck(check: CheckSpec): void {
     case "command": {
       const c = check as any;
       if (!c.command || typeof c.command !== "string" || c.command.trim().length === 0) throw new ValidationError("Command check requires non-empty command");
-      if (c.mode !== undefined && c.mode !== "stream" && c.mode !== "exit") throw new ValidationError(`Invalid command mode: ${c.mode}`);
+      if (c.mode !== undefined && c.mode !== "stream" && c.mode !== "exit" && c.mode !== "poll") throw new ValidationError(`Invalid command mode: ${c.mode}`);
+      if (c.emit !== undefined && !["line", "state_change", "terminal"].includes(c.emit)) throw new ValidationError(`Invalid command emit: ${c.emit}`);
       for (const key of ["timeout_ms", "event_throttle_ms", "tail_bytes"] as const) {
         if (c[key] !== undefined && (!Number.isFinite(c[key]) || c[key] < 0 || c[key] > 24 * 60 * 60 * 1000)) throw new ValidationError(`${key} is out of bounds`);
       }
