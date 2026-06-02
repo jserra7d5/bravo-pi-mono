@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { eventIdForSequence } from "../src/ids.js";
+import { appendJsonl } from "../src/jsonl.js";
 import { RunStore } from "../src/runStore.js";
 import { TaskStore, hashTaskToken, newTaskToken } from "../src/taskStore.js";
 import { deriveTaskState } from "../src/taskState.js";
@@ -22,6 +24,9 @@ test("TaskStore creates batch tasks with alias dependencies and derived states",
   assert.equal(created.aliasToId.impl, "T-0001");
   assert.equal(created.aliasToId.review, "T-0002");
   assert.ok(existsSync(s.tasks.pathsFor(s.rootSessionId).tasksDir));
+  const events = s.tasks.readEvents(s.rootSessionId);
+  assert.deepEqual(events.map((event) => [event.sequence, event.eventId]), [[1, "evt_000001"], [2, "evt_000002"]]);
+  assert.equal(Number(readFileSync(s.tasks.pathsFor(s.rootSessionId).eventHighwatermarkPath, "utf8")), 2);
   const all = s.tasks.listTasks(s.rootSessionId);
   assert.equal(deriveTaskState(all[0], all), "ready");
   assert.equal(deriveTaskState(all[1], all), "blocked");
@@ -83,6 +88,58 @@ test("TaskStore readEvents supports incremental cursors", () => {
   assert.equal(second.records.length, 1);
   assert.equal(second.records[0]?.type, "task.claimed");
   assert.ok(second.cursor.eventOffset > first.cursor.eventOffset);
+});
+
+test("TaskStore initializes migrated task-event sequence from existing event count", () => {
+  const s = store();
+  const paths = s.tasks.pathsFor(s.rootSessionId);
+  assert.equal(existsSync(paths.eventHighwatermarkPath), false);
+  for (let sequence = 1; sequence <= 2; sequence += 1) {
+    appendJsonl(paths.eventsPath, {
+      schemaVersion: 1,
+      eventId: eventIdForSequence(sequence),
+      sequence,
+      rootSessionId: s.rootSessionId,
+      parentRunId: s.parentRunId,
+      taskId: `T-000${sequence}`,
+      type: "task.created",
+      summary: `legacy ${sequence}`,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Migrated next", description: "Do it" }] });
+
+  const events = s.tasks.readEvents(s.rootSessionId);
+  assert.deepEqual(events.map((event) => [event.sequence, event.eventId]), [[1, "evt_000001"], [2, "evt_000002"], [3, "evt_000003"]]);
+  assert.equal(Number(readFileSync(paths.eventHighwatermarkPath, "utf8")), 3);
+});
+
+test("TaskStore recovers invalid task-event highwatermark from max existing sequence", () => {
+  for (const corruptValue of ["", "abc"]) {
+    const s = store();
+    const paths = s.tasks.pathsFor(s.rootSessionId);
+    for (const sequence of [1, 3]) {
+      appendJsonl(paths.eventsPath, {
+        schemaVersion: 1,
+        eventId: eventIdForSequence(sequence),
+        sequence,
+        rootSessionId: s.rootSessionId,
+        parentRunId: s.parentRunId,
+        taskId: `T-000${sequence}`,
+        type: "task.created",
+        summary: `legacy ${sequence}`,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    writeFileSync(paths.eventHighwatermarkPath, corruptValue, "utf8");
+
+    s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Recovered next", description: "Do it" }] });
+
+    const events = s.tasks.readEvents(s.rootSessionId);
+    assert.deepEqual(events.map((event) => [event.sequence, event.eventId]), [[1, "evt_000001"], [3, "evt_000003"], [4, "evt_000004"]]);
+    assert.equal(Number(readFileSync(paths.eventHighwatermarkPath, "utf8")), 4);
+  }
 });
 
 test("TaskStore updateOwnerDisplayName updates owner and attempts displayName", () => {

@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { acquireRootSessionLease } from "../src/leases.js";
 import { createRunResult } from "../src/result.js";
+import { jsonlReadStatsForTest, resetJsonlReadStatsForTest } from "../src/jsonl.js";
 import { RunStore } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
+import { TaskStore, hashTaskToken, newTaskToken } from "../src/taskStore.js";
 import { SCHEMA_VERSION } from "../src/types.js";
 import { pollWakeups, markWakeupHandled, markDeliveredWakeupHandled, isWakeupKeyHandled, writeDeliverySubscription } from "../extensions/pi/wakeups.js";
 
@@ -125,6 +127,27 @@ test("pollWakeups caps terminal result body by code point with recovery marker",
   markDeliveredWakeupHandled(store, parentRunId, delivery!);
   assert.equal(isWakeupKeyHandled(store, parentRunId, delivery?.deliveryKey ?? ""), false);
   assert.equal(store.readStatus(runId).resultReady, true);
+});
+
+test("pollWakeups task cursor catch-up does not full-read unchanged task events", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const token = newTaskToken();
+  taskStore.claimTask(parentRunId, task.id, { runId: "task_run_1", agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.submitResult(parentRunId, task.id, { runId: "task_run_1", taskToken: token, summary: "task done" });
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const first = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(first.length, 1);
+  assert.equal(first[0]?.message.kind, "task_wakeup");
+  assert.equal(first[0]?.message.taskEvent?.type, "task.result_submitted");
+
+  resetJsonlReadStatsForTest();
+  const second = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(second.length, 0);
+  assert.equal(jsonlReadStatsForTest().fullFileReads, 0);
 });
 
 test("pollWakeups ignores unsubscribed runs", () => {

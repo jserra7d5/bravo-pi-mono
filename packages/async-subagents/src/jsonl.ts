@@ -78,15 +78,17 @@ function parseJsonlBuffer<T>(path: string, buffer: Buffer, baseOffset: number, m
   return { records, nextOffset, lastId };
 }
 
-export function readJsonl<T = unknown>(path: string, options: ReadJsonlOptions = {}): ReadJsonlResult<T> {
-  const offset = options.offset ?? 0;
-  if (!existsSync(path)) return { records: [], nextOffset: offset };
-  const buffer = readFileSync(path);
-  if (offset >= buffer.length) return { records: [], nextOffset: buffer.length };
-  return parseJsonlBuffer<T>(path, buffer.subarray(offset), offset, options.maxRecords);
+let jsonlFullFileReadCountForTest = 0;
+
+export function jsonlReadStatsForTest(): { fullFileReads: number } {
+  return { fullFileReads: jsonlFullFileReadCountForTest };
 }
 
-export function readJsonlRange<T = unknown>(path: string, offset: number, endExclusive?: number): ReadJsonlResult<T> {
+export function resetJsonlReadStatsForTest(): void {
+  jsonlFullFileReadCountForTest = 0;
+}
+
+function readJsonlRangeInternal<T = unknown>(path: string, offset: number, endExclusive: number | undefined, maxRecords?: number): ReadJsonlResult<T> {
   if (!existsSync(path)) return { records: [], nextOffset: offset };
   const fd = openSync(path, "r");
   try {
@@ -101,8 +103,22 @@ export function readJsonlRange<T = unknown>(path: string, offset: number, endExc
       if (bytesRead === 0) break;
       total += bytesRead;
     }
-    return parseJsonlBuffer<T>(path, total === length ? buffer : buffer.subarray(0, total), offset);
+    return parseJsonlBuffer<T>(path, total === length ? buffer : buffer.subarray(0, total), offset, maxRecords);
   } finally {
     closeSync(fd);
   }
+}
+
+export function readJsonl<T = unknown>(path: string, options: ReadJsonlOptions = {}): ReadJsonlResult<T> {
+  const offset = options.offset ?? 0;
+  if (offset > 0) return readJsonlRangeInternal<T>(path, offset, undefined, options.maxRecords);
+  if (!existsSync(path)) return { records: [], nextOffset: offset };
+  jsonlFullFileReadCountForTest += 1;
+  const buffer = readFileSync(path);
+  if (offset >= buffer.length) return { records: [], nextOffset: buffer.length };
+  return parseJsonlBuffer<T>(path, buffer.subarray(offset), offset, options.maxRecords);
+}
+
+export function readJsonlRange<T = unknown>(path: string, offset: number, endExclusive?: number): ReadJsonlResult<T> {
+  return readJsonlRangeInternal<T>(path, offset, endExclusive);
 }

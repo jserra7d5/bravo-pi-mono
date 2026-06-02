@@ -134,3 +134,51 @@ is byte-equal; a different effective width rebuilds; `invalidate()` forces a reb
 > Implemented by a GPT-5.5 (`pi`) agent under adversarial GPT-5.5 review; approved after
 > independent verification (47/47 renderer tests). Reviewer flagged returning the cached
 > array by reference; resolved by returning a defensive `slice()`.
+
+## Fix 4 — JSONL tail reads + O(1) task-event sequence (`src/jsonl.ts`, `src/taskStore.ts`)
+
+**Before.** `readJsonl(path, { offset })` `readFileSync`'d the **whole** file and then sliced
+to `offset`, so every cursor catch-up read of the task event log re-read all historical bytes
+even when only the tail was wanted — the wakeup poll and `readEvents(cursor)` paid O(total
+events) per call. Separately, `appendTaskEvent` allocated each event's sequence number with
+`this.readEvents(rootSessionId).length + 1`, i.e. a **full read + parse of the entire event
+log on every single append** — O(E) per event → O(E²) over a session, on the lock-held mutate
+path.
+
+**After.**
+- **Tail reads.** `readJsonl(path, { offset })` with `offset > 0` now `openSync` +
+  `fstatSync` + `readSync`s only `[offset, EOF)` (shared `readJsonlRangeInternal`), parsing
+  just the appended bytes. `offset === 0` still whole-file reads. Absolute `nextOffset`,
+  absolute `INVALID_JSONL` offsets, partial-trailing-line handling (advance only past the last
+  complete newline), `maxRecords`, and the `offset >= size ⇒ { records: [], nextOffset: size }`
+  result are all byte-for-byte preserved.
+- **O(1) sequence allocation.** A per-session `event-highwatermark` file holds the last
+  allocated sequence. `nextTaskEventSequence` reads it (tiny), returns `hwm + 1`, and persists
+  the new hwm via `atomicWriteJson` **before** the event is appended — all under the existing
+  `withLock`. The full event-log read is gone from the hot path.
+
+**Crash-consistency.** Sequences/eventIds must never **duplicate** (they key delivery dedup);
+gaps are fine. The hwm is committed before the append, so a crash between commit and append
+leaves a *gap* (sequence skipped, never reused as a duplicate); a crash before the commit
+leaves the hwm unchanged so the same sequence is safely retried. The allocator only trusts the
+hwm when it parses to a **positive safe integer**; an absent/empty/corrupt hwm (migration of a
+pre-existing session, or a torn write) recovers from `max(0, …existing event.sequence)` rather
+than the record count — so a log with a pre-existing gap (e.g. sequences `[1,3]`) recovers to
+`4`, never re-issuing `3`. For a contiguous legacy log of `L` events this yields `L + 1`,
+byte-identical to the old `length + 1`. The whole allocator stays inside the per-session task
+lock, so concurrent supervisors cannot interleave allocations.
+
+**Tests.** `test/jsonl.test.ts` (offset reads preserve records/`nextOffset`/`lastId`/
+`maxRecords`/partial-line/`offset>=size` with **zero** full-file reads via a read counter;
+absolute invalid-offset reporting), `test/taskStore.test.ts` (new session sequences `1,2,…`
+and writes the hwm; migrated session with `L` pre-existing events continues at `L+1`; empty
+**and** corrupt hwm with a gapped log recover to `max+1` with no duplicate), and
+`test/wakeups.test.ts` (a second unchanged poll catches up with no full-file event read).
+
+> Implemented by a GPT-5.5 (`pi`) agent under adversarial GPT-5.5 review; approved after
+> independent verification (`npm run check`, 38/38 targeted tests). Reviewer's BLOCKER —
+> empty/corrupt hwm could re-init from record count and duplicate a sequence after a gap — was
+> valid and fixed (strict positive-safe-integer validation + `max(sequence)` recovery). A
+> second finding (`offset > size` no longer returning `nextOffset = size`) was rejected after
+> verifying `readJsonlRangeInternal` returns `nextOffset = end = size`, identical to the old
+> whole-file path.
