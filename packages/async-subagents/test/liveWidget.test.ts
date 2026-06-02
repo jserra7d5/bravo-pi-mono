@@ -11,6 +11,7 @@ import { TaskStore } from "../src/taskStore.js";
 import { resetTaskStateDerivationStatsForTest, taskStateDerivationStatsForTest } from "../src/taskState.js";
 import { createRunResult } from "../src/result.js";
 import { createInitialStatus } from "../src/status.js";
+import { createRunEvent } from "../src/events.js";
 import type { RunMetrics, RunState } from "../src/types.js";
 
 function isoAgo(ms: number): string {
@@ -26,7 +27,7 @@ function workspace() {
   return { root, store: new RunStore({ cwd: root }), parentRunId: "root_live" };
 }
 
-function addRun(input: { store: RunStore; root: string; parentRunId: string; displayName: string; state: RunState; summary: string; updatedAt?: string; metrics?: RunMetrics }) {
+function addRun(input: { store: RunStore; root: string; parentRunId: string; displayName: string; state: RunState; summary: string; updatedAt?: string; metrics?: RunMetrics; pid?: number; processHealth?: "unknown" | "alive" | "dead" }) {
   const { runId } = input.store.createRunDirectory({ cwd: input.root, parentRunId: input.parentRunId, rootSessionId: input.parentRunId });
   const status = createInitialStatus({
     runId,
@@ -46,6 +47,8 @@ function addRun(input: { store: RunStore; root: string; parentRunId: string; dis
     resultReady: input.state === "completed",
     updatedAt: input.updatedAt ?? status.updatedAt,
     lastActivityAt: input.updatedAt ?? status.updatedAt,
+    pid: input.pid,
+    processHealth: input.processHealth,
     ...(input.metrics ? { metrics: input.metrics } : {}),
   });
   return runId;
@@ -145,6 +148,86 @@ test("live widget honors an explicit longer completed visibility horizon", () =>
   const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, terminalCompletedVisibleMs: 5 * 60_000, width: 72 });
   const body = lines.map(stripAnsi).join("\n");
   assert.ok(body.includes("@OldDone"));
+});
+
+test("live widget reconciles old dead cancel-request rows so they do not remain active", () => {
+  const w = workspace();
+  const old = isoAgo(10 * 60_000);
+  const runId = addRun({
+    ...w,
+    displayName: "Harper",
+    state: "running",
+    summary: "Cancel requested: User pivoted to no-edit planning",
+    updatedAt: old,
+    pid: 999_999_999,
+    processHealth: "alive",
+  });
+
+  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
+  assert.deepEqual(lines, []);
+
+  const status = w.store.readStatus(runId);
+  assert.equal(status.state, "cancelled");
+  assert.equal(status.processHealth, "dead");
+  assert.equal(status.resultReady, false);
+  assert.equal(status.updatedAt, old);
+  assert.equal(w.store.readResult(runId), undefined);
+});
+
+test("live widget does not finalize non-cancel dead-pid rows from the render path", () => {
+  const w = workspace();
+  const old = isoAgo(10 * 60_000);
+  const runId = addRun({
+    ...w,
+    displayName: "Alex",
+    state: "running",
+    summary: "working",
+    updatedAt: old,
+    pid: 999_999_999,
+    processHealth: "alive",
+  });
+
+  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
+  const body = lines.map(stripAnsi).join("\n");
+  assert.ok(body.includes("@Alex"));
+
+  const status = w.store.readStatus(runId);
+  assert.equal(status.state, "running");
+  assert.equal(status.resultReady, false);
+  assert.equal(w.store.readResult(runId), undefined);
+});
+
+test("live widget leaves recent dead cancel requests for the supervisor to finalize", () => {
+  const w = workspace();
+  const oldStatusTime = isoAgo(10 * 60_000);
+  const runId = addRun({
+    ...w,
+    displayName: "FreshCancel",
+    state: "running",
+    summary: "working before cancel",
+    updatedAt: oldStatusTime,
+    pid: 999_999_999,
+    processHealth: "alive",
+  });
+  w.store.appendEvent(runId, createRunEvent({
+    sequence: 2,
+    runId,
+    parentRunId: w.parentRunId,
+    type: "status",
+    summary: "Cancel requested: recent pivot",
+    wake: false,
+    data: { action: "cancel" }
+  }));
+
+  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
+  const body = lines.map(stripAnsi).join("\n");
+  assert.ok(body.includes("@FreshCancel"));
+
+  const status = w.store.readStatus(runId);
+  assert.equal(status.state, "running");
+  assert.equal(status.resultReady, false);
+  assert.equal(status.updatedAt, oldStatusTime);
+  assert.equal(w.store.readResult(runId), undefined);
 });
 
 test("live widget header sums cost across mixed terminal + active rows", () => {

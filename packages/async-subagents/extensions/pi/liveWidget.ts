@@ -3,6 +3,7 @@ import type { DerivedTaskState, RunIndexRecord, TaskRecord } from "../../src/typ
 import { readWatcherSnapshot, type RunSummaryRow } from "../../src/watcher.js";
 import { renderWidgetCard, widgetRowFromSummary, type WidgetRowInput } from "./renderers.js";
 import { isResultWakeupCurrent } from "./wakeups.js";
+import { updateRunStatus } from "../../src/status.js";
 import { TaskStore } from "../../src/taskStore.js";
 import { deriveTaskStates, unresolvedDependencyIdsByTask } from "../../src/taskState.js";
 
@@ -76,6 +77,67 @@ function rowWithCurrentResultReady(input: LiveWidgetInput, row: RunSummaryRow): 
   return { ...row, resultReady: false };
 }
 
+function processHealth(pid: number | undefined): "unknown" | "alive" | "dead" {
+  if (!pid) return "unknown";
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch {
+    return "dead";
+  }
+}
+
+function cancelRequestAtMs(row: RunSummaryRow): number | undefined {
+  if (!row.summary?.startsWith("Cancel requested:")) return undefined;
+  const rowUpdatedAtMs = Date.parse(row.updatedAt);
+  return Number.isFinite(rowUpdatedAtMs) ? rowUpdatedAtMs : undefined;
+}
+
+function reconcileStaleCancelledLiveRow(input: LiveWidgetInput, row: RunSummaryRow, now: number, terminalCompletedVisibleMs: number): RunSummaryRow {
+  if (isTerminal(row)) return row;
+  const cancelAtMs = cancelRequestAtMs(row);
+  if (cancelAtMs === undefined || now - cancelAtMs <= terminalCompletedVisibleMs) return row;
+
+  let status;
+  try {
+    status = input.store.readStatus(row.runId);
+  } catch {
+    return row;
+  }
+  if (TERMINAL_STATES.has(status.state) || !status.pid || processHealth(status.pid) !== "dead") return row;
+
+  const summary = "Cancelled after recorded child process exited before supervisor finalization";
+  const error = { code: "PARENT_CANCELLED_PROCESS_EXITED", message: summary, details: { pid: status.pid, processHealth: "dead" } };
+
+  try {
+    input.store.writeStatus({
+      ...updateRunStatus(status, {
+        state: "cancelled",
+        writerRole: "parent-runtime",
+        processHealth: "dead",
+        resultReady: false,
+        lastActivityAt: row.updatedAt,
+        summary,
+        error,
+      }),
+      updatedAt: row.updatedAt,
+    });
+    const updated = input.store.readRunSummary(row.runId);
+    return {
+      ...row,
+      state: "cancelled",
+      summary: updated?.summary ?? summary,
+      resultReady: false,
+      updatedAt: updated?.updatedAt ?? row.updatedAt,
+      lastActivityAt: updated?.lastActivityAt ?? row.updatedAt,
+      result: undefined,
+      metrics: updated?.metrics ?? row.metrics,
+    };
+  } catch {
+    return row;
+  }
+}
+
 function totalCostForRows(rows: RunSummaryRow[]): number | undefined {
   let total = 0;
   let any = false;
@@ -98,6 +160,7 @@ function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVis
     records: input.records,
   });
   const rows = snapshot.rows
+    .map((row) => reconcileStaleCancelledLiveRow(input, row, now, terminalCompletedVisibleMs))
     .map((row) => rowWithCurrentResultReady(input, row))
     .filter((row) => visible(row, now, terminalCompletedVisibleMs))
     .sort((a, b) => rowPriority(a) - rowPriority(b) || b.updatedAt.localeCompare(a.updatedAt));
