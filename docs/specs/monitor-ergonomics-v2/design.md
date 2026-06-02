@@ -12,7 +12,7 @@ The current Pi monitor package exposes a broad durable-watch subsystem directly 
 - monitor wakeups appear as user-channel pressure even when they are control-plane events;
 - command monitor output can spam the conversation with repeated status blocks;
 - agent-facing duration parameters are in milliseconds even though shell/tool ergonomics are in seconds;
-- `notify`, `wake_agent`, `monitor_attention`, and `monitor_ack` expose internal delivery/bookkeeping decisions as model work.
+- notification and acknowledgement controls expose internal delivery/bookkeeping decisions as model work.
 
 This is a harness issue, not a model issue. The prompt, tool descriptions, return shapes, and unsolicited event messages currently teach conflicting concepts:
 
@@ -62,7 +62,7 @@ Additionally, the lead session agent used monitor as a background bash command s
 ### Triage
 
 - Category: tool exposure / tool responsibility issue plus prompt-vs-tool-description contradiction.
-- Load-bearing source: monitor guidance and `monitor_start` schema describe command monitors as durable shell-command monitors for long-running work.
+- Load-bearing source: previous monitor guidance and `monitor_start` schema described command monitors as suitable for long-running work.
 - Correct intervention layer: redesign tool contract and coupled prompt modules; do not add a one-off "do not use monitor for X" behavior list without changing the tool boundary.
 
 ## North-star contract
@@ -96,20 +96,9 @@ Do not use Monitor to run the workload being waited on. Use background bash for 
 | `monitor_stop` | Stop a monitor permanently | yes | Required cleanup/control |
 | `monitor_list` | Recover/list active monitors | yes | Compact only |
 
-### Hidden/operator/debug tools
+### Removed debug/helper tools
 
-| Current tool | v2 disposition | Rationale |
-|---|---|---|
-| `monitor_output` | hidden/deprecated for model default | output path + `read` is simpler and matches Claude Code |
-| `monitor_result` | hidden/debug | result bookkeeping should not be the normal surface |
-| `monitor_look` | hidden/debug | full config is useful for operator forensics, not routine agent work |
-| `monitor_update` | hidden/deprecated | stop + recreate is simpler than mutable monitors |
-| `monitor_pause` | hidden/deprecated | not enough value for model-facing surface |
-| `monitor_resume` | hidden/deprecated | not enough value for model-facing surface |
-| `monitor_attention` | hidden/recovery | pending attention is internal recovery state |
-| `monitor_ack` | hidden/internal | ack should be implicit or operator-only |
-
-Hidden does not necessarily mean deleted immediately. The package may retain operator commands or migration compatibility, but they should not be in the normal model tool set or prompt module.
+The v2 package surface is intentionally limited to `monitor_start`, `monitor_list`, and `monitor_stop`. Former helper tools are removed rather than hidden. Output is inspected through the generated `output_path` with normal file-reading tools; result, acknowledgement, and attention bookkeeping remain internal implementation details.
 
 ## `monitor_start` v2 schema
 
@@ -219,7 +208,7 @@ Validation errors should be recovery-oriented: state the violated limit and the 
 - Writes must not follow model-provided paths, symlinks, or project file paths.
 - Output files should support normal `read` offsets and `grep` workflows.
 - Large output is capped and marked with a truncation notice in the file.
-- If normal `read` cannot tail/offset monitor logs ergonomically enough, add a narrow `monitor_tail` later rather than reviving the broad `monitor_output` surface.
+- If normal `read` cannot tail/offset monitor logs ergonomically enough, add a narrow `monitor_tail` later rather than reviving a broad output helper surface.
 - `monitor_stop` preserves output by default. A separate operator cleanup path may delete monitor directories.
 - Retention should be configurable by age/count/bytes. Defaults should prevent unbounded `.pi/monitors` growth.
 
@@ -430,16 +419,14 @@ There is intentionally no model-facing "no-op" tool in v2. A no-op tool would re
 
 ## Acknowledgement model
 
-`monitor_ack` should not be model-facing by default.
+There is no acknowledgement tool in the v2 surface.
 
 Preferred behavior:
 
 - monitor events are delivered once via durable delivery keys;
 - reading/handling an event marks it consumed internally;
-- session recovery can surface unhandled terminal/failure events through `monitor_list` or an operator-only attention command;
+- session recovery is handled through `monitor_list` and persisted output files;
 - no routine agent call is required just to clear bookkeeping.
-
-If explicit acknowledgement remains for operators, expose it as a slash command or debug-only tool.
 
 ## Prompting touch points
 
@@ -566,57 +553,27 @@ Likely files/packages:
   - implement `poll` semantics distinctly from `stream`;
   - state projection/deduplication.
 - `packages/monitor/src/schema/types.ts`
-  - new model-facing state/kind/event types;
-  - internal compatibility mapping if needed.
+  - new model-facing state/kind/event types.
 - `packages/pi-extension-background-bash/src/index.ts`
   - update background bash prompt guidance.
 - `packages/pi-extension-background-bash/src/bash-tool.ts`
   - consider bash schema/prompt description alignment if needed.
 
-## Migration plan
+## Implementation status
 
-### Phase 1 — prompt and schema clarity
+The local development package is v2-only:
 
-- Update monitor prompt module with the responsibility boundary.
-- Update background bash prompt module with matching boundary.
-- Introduce v2 seconds-based fields while accepting old `*_ms` fields for old records and non-model compatibility only.
-- Convert persisted old records on read/write where safe; preserve original data for rollback until migration completes.
-- Keep old tools hidden or still available only where compatibility requires.
+- `monitor_start` requires `kind: "stream" | "poll" | "file"` and seconds-based fields.
+- Legacy direct start inputs using `check`/`schedule`/`attention`/`retention` without `kind` are rejected.
+- Default and exported tool surface is `monitor_start`, `monitor_list`, and `monitor_stop` only.
+- Former helper tools have been removed.
+- Output is persisted to generated monitor output files and read through normal file tooling.
+- Monitor-originated wakeups use the standardized `monitor-event` envelope.
+- Poll monitors suppress unchanged state and remain running after state-change events.
 
-### Phase 2 — event envelope and renderer
+### No v1 compatibility requirement
 
-- Replace `Command monitor output batch` messages with `customType: "monitor-event"`.
-- Add standardized `[MONITOR ... — NOT USER INPUT]` text envelopes.
-- Add a renderer that clearly shows control-plane status.
-
-### Phase 3 — tool surface reduction
-
-- Default model tools: `monitor_start`, `monitor_stop`, `monitor_list`.
-- Move `monitor_output`, `monitor_result`, `monitor_look`, `monitor_update`, `monitor_pause`, `monitor_resume`, `monitor_attention`, `monitor_ack` to operator/debug only.
-- Ensure output paths are readable via normal `read`.
-
-### Phase 4 — poll/state-change semantics
-
-- Add `kind: "poll"` with required `interval_s`.
-- Add `emit: "state_change"` and projection support.
-- Suppress duplicate projection output.
-- Wake only according to `wake` mode.
-
-### Phase 5 — cleanup and deprecation
-
-- Remove stale prompt guidance mentioning command monitors as durable shell-command monitors.
-- Add migration notes for old saved monitors/configs.
-- Remove old model-facing ack/attention guidance.
-- Define rollback behavior for persisted monitor records and queued events.
-
-### Compatibility requirements
-
-- Existing monitor records with `check.type: "command"` remain readable.
-- Existing `timeout_ms`, `interval_ms`, `delay_ms`, and `throttle_ms` are converted to seconds for model-facing display, but internal migration must not multiply/divide twice.
-- In-flight command monitors created under v1 continue until terminal/stopped; their wakeups should be wrapped in the new envelope where possible.
-- Stopped monitors must not deliver stale queued line events after stop. If stale events are drained for bookkeeping, mark `event.stale: true` and do not wake the agent.
-- Pending v1 attention/ack records are either auto-consumed during migration or exposed only through operator/debug recovery.
-- Rollback preserves enough v1 fields to list/stop old monitors.
+This is a local development extension, not a production compatibility surface. There is no migration/rollback contract for pre-v2 saved monitors, outdated `monitor_start` calls, or hidden operator tools. Stale pre-v2 records may be removed by deleting local monitor state.
 
 ## Validation strategy
 
@@ -639,7 +596,7 @@ Likely files/packages:
 - stopped/recreated monitor with same name but different ID does not receive old output;
 - concurrent monitors preserve distinct output paths and delivery keys;
 - user message arriving near a monitor wakeup is ordered so the agent can prioritize real user input;
-- v1 monitor records remain listable/stoppable during migration;
+- stale local v1 monitor state may be deleted; no v1 recovery guarantee is provided;
 - output caps write truncation markers and do not exceed retention limits;
 - resource guardrails reject too-small intervals and too many concurrent monitors with actionable validation errors.
 
@@ -662,7 +619,6 @@ Run pre/post if possible. The target improvement is fewer monitor-as-background-
 
 ## Open questions
 
-- Should old monitor tools remain installable behind an explicit debug tool allowlist?
 - Is key-path JSON projection sufficient for v2, or should raw `jq` remain operator/debug only?
 - Should `wake` default be `on_failure` or `on_terminal` for `poll` monitors?
 - Should UI alerts exist as a user/operator preference rather than a tool parameter?

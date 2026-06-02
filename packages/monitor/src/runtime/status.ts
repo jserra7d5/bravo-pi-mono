@@ -129,10 +129,10 @@ export class MonitorStatusService {
 
   async backfillPending(ctx?: any): Promise<number> {
     const identity = getRuntimeIdentity(ctx);
-    const monitors = (await this.store.list({ include_archived: false, limit: 1000 })).filter((m) => monitorBelongsToRuntime(m, identity));
+    const monitors = (await this.store.list({ include_archived: false, limit: 1000 })).filter((m) => m.state === "running" && monitorBelongsToRuntime(m, identity));
     let delivered = 0;
     for (const monitor of monitors) {
-      const results = await this.store.listResults(monitor.monitor_id, { acked: false, limit: 100 });
+      const results = await this.store.listResults(monitor.monitor_id, { limit: 100 });
       for (const result of results) {
         if (!result.triggered && result.status !== "error") continue;
         const previous = result.attention_delivery;
@@ -147,8 +147,4 @@ export class MonitorStatusService {
     return delivered;
   }
 
-  /** Backward-compatible wrapper. Prefer deliverAttention so callers can persist delivery state. */
-  async notify(monitor: MonitorRecord, result: MonitorResult, ctx?: any): Promise<void> {
-    await this.deliverAttention(monitor, result, ctx);
-  }
 }

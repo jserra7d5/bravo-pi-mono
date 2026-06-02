@@ -6,12 +6,11 @@ import { truncateToWidth, formatMonitorRow } from '../src/tui/format.js';
 test('computeStatusSummary counts active triggered failed', () => {
   const monitors = [
     { state: 'running', next_run_at: new Date(Date.now() + 12000).toISOString() },
-    { state: 'paused' },
     { state: 'triggered' },
     { state: 'failed' },
   ];
   const s = computeStatusSummary(monitors as any);
-  assert.equal(s.active, 2);
+  assert.equal(s.active, 1);
   assert.equal(s.triggered, 1);
   assert.equal(s.failed, 1);
   assert.ok(s.nextRunIn);
@@ -48,7 +47,7 @@ test('formatMonitorRow renders running monitor', () => {
     name: 'build',
     state: 'running',
     next_run_at: new Date(Date.now() + 8000).toISOString(),
-    check: { type: 'timer' },
+    check: { type: 'file', path: '/tmp/watch', mode: 'exists' },
   });
   assert.match(line, /build/);
   assert.match(line, /running/);

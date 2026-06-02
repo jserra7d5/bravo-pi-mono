@@ -15,7 +15,7 @@ export function formatMonitorRow(m: {
   const icon = stateIcon(m.state);
   const name = (m.name || m.monitor_id).slice(0, 20);
   const state = m.state.padEnd(10);
-  const timing = m.state === "paused" ? "—" : m.next_run_at ? `next ${formatShortDuration(Date.parse(m.next_run_at) - Date.now())}` : m.last_run_at ? `${formatShortDuration(Date.now() - Date.parse(m.last_run_at))} ago` : "—";
+  const timing = m.next_run_at ? `next ${formatShortDuration(Date.parse(m.next_run_at) - Date.now())}` : m.last_run_at ? `${formatShortDuration(Date.now() - Date.parse(m.last_run_at))} ago` : "—";
   const check = `${m.check.type}${m.check.mode ? ` ${m.check.mode}` : ""}${m.check.path ? ` ${m.check.path}` : ""}`;
   const line = `${icon} ${name.padEnd(22)} ${state} ${timing.padEnd(12)} ${check}`;
   return truncateToWidth(line, width);
@@ -24,7 +24,6 @@ export function formatMonitorRow(m: {
 function stateIcon(state: string): string {
   switch (state) {
     case "running": return "●";
-    case "paused": return "⏸";
     case "triggered": return "!";
     case "failed": return "✗";
     case "succeeded": return "✓";

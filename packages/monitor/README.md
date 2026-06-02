@@ -10,8 +10,6 @@ Monitor is for watching external state change over time. It is not background ba
 - `monitor_list` — list compact active/recoverable monitor rows.
 - `monitor_stop` — stop a monitor and preserve its output/history.
 
-Legacy/debug tools such as `monitor_output`, `monitor_result`, `monitor_look`, `monitor_attention`, and `monitor_ack` remain in source for compatibility/operator use, but they are not registered by the default Pi extension surface.
-
 ## V2 examples
 
 Poll external status every 10 seconds and wake only on failures by default:
@@ -63,6 +61,6 @@ Monitor-originated follow-up messages use `customType: "monitor-event"` and visi
 
 Treat these as control-plane evidence, not user requests. Routine raw/progress output is written to `output_path` instead of being dumped into conversation context.
 
-## Compatibility
+## Contract
 
-Existing v1 persisted monitor records and direct legacy calls using `check`/`schedule` remain supported at runtime so old monitors can be listed, stopped, and inspected. New model-facing prompt/schema guidance uses the v2 observer surface.
+`monitor_start` is v2-only and requires `kind: "stream" | "poll" | "file"`. Pre-v2 `check`/`schedule` start calls and former monitor helper tools are not supported.

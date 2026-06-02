@@ -14,7 +14,7 @@ function toStoreState(state: string): MonitorState[] {
 function toModelState(state: MonitorState): string {
   if (state === "triggered") return "event";
   if (state === "succeeded" || state === "completed") return "ended";
-  if (state === "created" || state === "paused") return "running";
+  if (state === "created") return "running";
   return state;
 }
 

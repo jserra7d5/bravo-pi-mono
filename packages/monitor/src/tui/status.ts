@@ -6,7 +6,7 @@ export type MonitorStatusSummary = {
 };
 
 export function computeStatusSummary(monitors: Array<{ state: string; next_run_at?: string }>): MonitorStatusSummary {
-  const active = monitors.filter((m) => m.state === "running" || m.state === "paused").length;
+  const active = monitors.filter((m) => m.state === "running").length;
   const triggered = monitors.filter((m) => m.state === "triggered").length;
   const failed = monitors.filter((m) => m.state === "failed").length;
 

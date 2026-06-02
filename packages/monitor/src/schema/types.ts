@@ -1,7 +1,6 @@
 export type MonitorState =
   | "created"
   | "running"
-  | "paused"
   | "triggered"
   | "succeeded"
   | "completed"
@@ -18,8 +17,6 @@ export type MonitorOwner = {
   root_session_id?: string;
   workspace_id?: string;
 };
-
-export type TimerCheckSpec = { type: "timer" };
 
 export type CommandCheckSpec = {
   type: "command";
@@ -44,20 +41,11 @@ export type FileCheckSpec = {
   encoding?: "utf8";
 };
 
-export type CheckSpec = TimerCheckSpec | FileCheckSpec | CommandCheckSpec;
+export type CheckSpec = FileCheckSpec | CommandCheckSpec;
 
 export type ScheduleSpec = {
-  start_at?: string;
-  delay_ms?: number;
   interval_ms?: number;
   deadline_at?: string;
-  max_runs?: number;
-  timeout_ms?: number;
-  backoff?: {
-    strategy: "none" | "linear" | "exponential";
-    initial_ms?: number;
-    max_ms?: number;
-  };
 };
 
 export type ConditionSpec =
@@ -132,7 +120,6 @@ export type MonitorResult = {
   condition_matched: boolean;
   triggered: boolean;
   created_at: string;
-  acked_at?: string;
   error_message?: string;
   attention_delivery?: AttentionDelivery;
 };
@@ -140,14 +127,11 @@ export type MonitorResult = {
 export type MonitorEventType =
   | "created"
   | "started"
-  | "paused"
-  | "resumed"
   | "stopped"
   | "triggered"
   | "failed"
   | "succeeded"
   | "completed"
-  | "ack"
   | "expired"
   | "archived";
 
@@ -171,7 +155,6 @@ export type ResultQuery = {
   limit?: number;
   before?: string;
   after?: string;
-  acked?: boolean;
 };
 
 export type EventFilter = {

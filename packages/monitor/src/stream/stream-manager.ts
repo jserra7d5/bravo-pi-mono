@@ -219,19 +219,23 @@ export class StreamMonitorManager {
     child.stderr.on("data", (c: Buffer) => onData(c, "stderr"));
     child.on("error", async (err) => {
       appendCapped(outputFile, `\n[command monitor error] ${err.message}\n`);
-      runtime.status = "failed";
+      runtime.status = runtime.stopped ? "stopped" : "failed";
       runtime.end_time = nowISO();
-      const summary = `Command monitor "${runtime.description}" failed: ${err.message}`;
-      this.deliverCompletion(runtime, summary, "error", params.notify !== false, params.wake_on_line === true || params.wake_on_completion === true || params.wake_on_failure === true || params.wake_agent === true);
+      const summary = runtime.status === "stopped"
+        ? `Command monitor "${runtime.description}" stopped`
+        : `Command monitor "${runtime.description}" failed: ${err.message}`;
+      this.deliverCompletion(runtime, summary, runtime.status === "failed" ? "error" : "info", params.notify !== false, !runtime.stopped && (params.wake_on_line === true || params.wake_on_completion === true || params.wake_on_failure === true || params.wake_agent === true));
       await this.persistCompletion(runtime, summary).catch((persistErr) => console.error("[monitor] command error persistence failed:", persistErr));
       runtime.resolveClose();
     });
     child.on("close", async (code, signal) => {
-      if (runtime.buffer.trim().length > 0) {
+      if (!runtime.stopped && runtime.buffer.trim().length > 0) {
         this.deliverLine(runtime, runtime.buffer.trimEnd(), "stdout", params.notify !== false, params.wake_on_line ?? params.wake_agent === true);
         runtime.buffer = "";
+      } else if (runtime.stopped) {
+        runtime.buffer = "";
       }
-      this.flushEvents(runtime, params.wake_on_line ?? params.wake_agent === true);
+      if (!runtime.stopped) this.flushEvents(runtime, params.wake_on_line ?? params.wake_agent === true);
       runtime.exit_code = code;
       runtime.signal = signal;
       runtime.end_time = nowISO();
@@ -241,7 +245,7 @@ export class StreamMonitorManager {
         : runtime.status === "stopped"
           ? `Command monitor "${runtime.description}" stopped`
           : `Command monitor "${runtime.description}" failed${code !== null ? ` (exit ${code})` : signal ? ` (${signal})` : ""}`;
-      this.deliverCompletion(runtime, summary, runtime.status === "failed" ? "error" : "info", params.notify !== false, params.wake_on_completion === true || (runtime.status === "failed" && (params.wake_on_line === true || params.wake_on_failure === true)) || params.wake_agent === true);
+      this.deliverCompletion(runtime, summary, runtime.status === "failed" ? "error" : "info", params.notify !== false, !runtime.stopped && (params.wake_on_completion === true || (runtime.status === "failed" && (params.wake_on_line === true || params.wake_on_failure === true)) || params.wake_agent === true));
       await this.persistCompletion(runtime, summary).catch((err) => console.error("[monitor] command completion persistence failed:", err));
       runtime.resolveClose();
     });
@@ -257,7 +261,7 @@ export class StreamMonitorManager {
   stop(streamId: string): boolean {
     const runtime = this.streams.get(streamId);
     if (!runtime || runtime.status !== "running") return false;
-    runtime.stopped = true;
+    this.markStopped(runtime);
     this.signalProcessTree(runtime, "SIGTERM");
     return true;
   }
@@ -268,7 +272,7 @@ export class StreamMonitorManager {
     const wasRunning = runtime.status === "running";
     if (!wasRunning) return { found: true, wasRunning: false, stopped: runtime.status !== "running", timedOut: false };
 
-    runtime.stopped = true;
+    this.markStopped(runtime);
     this.signalProcessTree(runtime, "SIGTERM");
     await withTimeout(runtime.closePromise, timeoutMs);
     if (runtime.status !== "running") return { found: true, wasRunning, stopped: true, timedOut: false };
@@ -287,6 +291,15 @@ export class StreamMonitorManager {
       }
     }
     await Promise.all(waits);
+  }
+
+  private markStopped(runtime: StreamRuntime): void {
+    runtime.stopped = true;
+    if (runtime.flushTimer) {
+      clearTimeout(runtime.flushTimer);
+      runtime.flushTimer = undefined;
+    }
+    runtime.pendingEvents = [];
   }
 
   private signalProcessTree(runtime: StreamRuntime, signal: NodeJS.Signals): void {
@@ -317,7 +330,7 @@ export class StreamMonitorManager {
         }
       }
     }
-    if (!wakeAgent) return;
+    if (!wakeAgent || runtime.stopped) return;
     runtime.wake_attempted = true;
     runtime.pendingEvents.push({ line, source, line_count: runtime.line_count });
     if (runtime.pendingEvents.length >= runtime.maxLinesPerTurn) {
@@ -336,7 +349,7 @@ export class StreamMonitorManager {
       runtime.flushTimer = undefined;
     }
     if (!runtime.pendingEvents.length) return;
-    if (!wakeAgent) {
+    if (!wakeAgent || runtime.stopped) {
       runtime.pendingEvents = [];
       return;
     }
@@ -410,7 +423,7 @@ export class StreamMonitorManager {
         }
       }
     }
-    if (!wakeAgent) return;
+    if (!wakeAgent || runtime.stopped) return;
     runtime.completion_wake_attempted = true;
     if (!this.pi.sendMessage) {
       runtime.completion_wake_error = "pi.sendMessage unavailable";

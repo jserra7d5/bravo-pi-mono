@@ -9,13 +9,12 @@ import type { MonitorRecord } from "../schema/types.js";
 import type { StreamMonitorManager } from "../stream/stream-manager.js";
 import { generateMonitorId } from "../ids.js";
 import { nowISO } from "../time.js";
-import { validateCheck, validateSchedule, validateCondition, validateAttention, validateRetention, validateLabels } from "../validation.js";
+import { validateCheck, validateSchedule, validateAttention, validateRetention, validateLabels } from "../validation.js";
 import { getRuntimeIdentity, monitorBelongsToRuntime } from "../runtime/identity.js";
 import { resolveStateRoot } from "../store/state-path.js";
 import { ValidationError } from "../errors.js";
 
-const DEFAULT_ATTENTION = { notify: true, wake_agent: false, throttle_ms: 30000 };
-const DEFAULT_V2_ATTENTION = { notify: false, wake_agent: false, throttle_ms: 5000 };
+const DEFAULT_ATTENTION = { notify: false, wake_agent: false, throttle_ms: 5000 };
 const DEFAULT_RETENTION = { max_results: 100, max_events: 500 };
 
 type WakeMode = "never" | "on_event" | "on_failure" | "on_terminal";
@@ -32,13 +31,11 @@ function toMs(seconds: unknown, name: string): number | undefined {
   return Math.round((seconds as number) * 1000);
 }
 
-function attentionFromWake(wake: WakeMode | undefined, throttleS: unknown, legacy: any) {
-  const mode = wake ?? (legacy ? undefined : "on_failure");
-  const attention = { ...(legacy ? DEFAULT_ATTENTION : DEFAULT_V2_ATTENTION), ...(legacy ?? {}) };
-  if (mode) {
-    attention.notify = false;
-    attention.wake_agent = mode !== "never";
-  }
+function attentionFromWake(wake: WakeMode | undefined, throttleS: unknown) {
+  const mode = wake ?? "on_failure";
+  const attention = { ...DEFAULT_ATTENTION };
+  attention.notify = false;
+  attention.wake_agent = mode !== "never";
   const throttle = toMs(throttleS, "throttle_s");
   if (throttle !== undefined) attention.throttle_ms = throttle;
   return attention;
@@ -48,27 +45,18 @@ function isObviousWorkload(command: string): boolean {
   return /(^|\s)(npm|pnpm|yarn)\s+(run\s+)?(test|build|dev|start)\b|(^|\s)(pytest|cargo\s+test|go\s+test|make\s+(test|build|install)|docker\s+build)\b/.test(command);
 }
 
-function normalizeStartParams(params: any, monitorId: string): { check: any; schedule: any; attention: any; condition: any; metadata: Record<string, unknown>; outputPath?: string; warnings: string[]; v2: boolean } {
+function normalizeStartParams(params: any, monitorId: string): { check: any; schedule: any; attention: any; metadata: Record<string, unknown>; outputPath: string; warnings: string[] } {
   const warnings: string[] = [];
   if (!params.kind) {
-    if (!params.check || typeof params.check !== "object") {
-      throw new ValidationError("monitor_start requires either v2 kind ('stream', 'poll', or 'file') or a legacy check object. Recovery: pass kind with command/path fields, or pass legacy check and schedule.");
-    }
-    const check: any = { type: params.check.type };
-    if (params.check.command) check.command = params.check.command;
-    if (params.check.cwd) check.cwd = params.check.cwd;
-    if (params.check.shell !== undefined) check.shell = params.check.shell;
-    for (const k of ["timeout_ms", "event_throttle_ms", "max_lines_per_turn", "tail_bytes"] as const) if (params.check[k] !== undefined) check[k] = params.check[k];
-    if (params.check.path) check.path = params.check.path;
-    if (params.check.mode) check.mode = params.check.mode;
-    if (params.check.pattern) check.pattern = params.check.pattern;
-    if (params.check.encoding) check.encoding = params.check.encoding;
-    return { check, schedule: params.schedule, attention: { ...DEFAULT_ATTENTION, ...(params.attention ?? {}) }, condition: params.condition, metadata: params.metadata ?? {}, warnings, v2: false };
+    throw new ValidationError("monitor_start requires v2 kind ('stream', 'poll', or 'file'). Recovery: pass kind with the matching v2 fields.");
+  }
+  for (const unsupportedField of ["check", "schedule", "condition", "attention", "retention"] as const) {
+    if (params[unsupportedField] !== undefined) throw new ValidationError(`monitor_start is v2-only; remove unsupported field '${unsupportedField}' and use kind-specific v2 fields.`);
   }
 
   const outputPath = outputPathFor(monitorId);
   const commonMetadata = { ...(params.metadata ?? {}), monitor_v2: true, kind: params.kind, output_path: outputPath, wake: params.wake ?? "on_failure" };
-  const attention = attentionFromWake(params.wake, params.throttle_s, undefined);
+  const attention = attentionFromWake(params.wake, params.throttle_s);
   const lifespanMs = toMs(params.monitor_lifespan_s, "monitor_lifespan_s");
   const commandTimeoutMs = toMs(params.command_timeout_s, "command_timeout_s");
   const scheduleBase: any = { ...(lifespanMs ? { deadline_at: new Date(Date.now() + lifespanMs).toISOString() } : {}) };
@@ -77,7 +65,7 @@ function normalizeStartParams(params: any, monitorId: string): { check: any; sch
     if (!params.command || typeof params.command !== "string") throw new ValidationError("stream monitor requires command");
     if (isObviousWorkload(params.command)) throw new ValidationError("Monitor is an observer, not background bash: use background bash for workload commands such as tests/builds/dev servers.");
     const check = { type: "command", command: params.command, cwd: params.cwd, shell: params.shell, timeout_ms: commandTimeoutMs, event_throttle_ms: toMs(params.throttle_s, "throttle_s"), mode: "stream", output_path: outputPath, emit: params.emit ?? "line", projection: params.projection };
-    return { check, schedule: scheduleBase, attention, condition: undefined, metadata: commonMetadata, outputPath, warnings, v2: true };
+    return { check, schedule: scheduleBase, attention, metadata: commonMetadata, outputPath, warnings };
   }
 
   if (params.kind === "poll") {
@@ -86,7 +74,7 @@ function normalizeStartParams(params: any, monitorId: string): { check: any; sch
     if (params.shell === false) throw new ValidationError("poll monitor shell:false is not supported for command strings; omit shell or set shell:true. True shellless execution requires argv form, which monitor_start does not expose.");
     if (isObviousWorkload(params.command)) throw new ValidationError("Monitor poll commands must observe external state, not run workloads; use background bash for tests/builds.");
     const check = { type: "command", command: params.command, cwd: params.cwd, shell: params.shell, timeout_ms: commandTimeoutMs, mode: "poll", output_path: outputPath, emit: params.emit ?? "state_change", projection: params.projection };
-    return { check, schedule: { ...scheduleBase, interval_ms: toMs(params.interval_s, "interval_s") }, attention, condition: undefined, metadata: commonMetadata, outputPath, warnings, v2: true };
+    return { check, schedule: { ...scheduleBase, interval_ms: toMs(params.interval_s, "interval_s") }, attention, metadata: commonMetadata, outputPath, warnings };
   }
 
   if (params.kind === "file") {
@@ -95,7 +83,7 @@ function normalizeStartParams(params: any, monitorId: string): { check: any; sch
     const check = { type: "file", path: params.path, mode, pattern: params.pattern, encoding: params.encoding ?? "utf8" };
     if (params.interval_s !== undefined && (!Number.isFinite(params.interval_s) || params.interval_s < 5)) throw new ValidationError("file monitor requires interval_s >= 5");
     const schedule = { ...scheduleBase, interval_ms: toMs(params.interval_s ?? 5, "interval_s") };
-    return { check, schedule, attention, condition: undefined, metadata: commonMetadata, outputPath, warnings, v2: true };
+    return { check, schedule, attention, metadata: commonMetadata, outputPath, warnings };
   }
 
   throw new ValidationError(`Unsupported monitor kind: ${params.kind}`);
@@ -150,42 +138,38 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
         }
       }
 
-      const active = (await store.list({ include_archived: false })).filter((m) => monitorBelongsToRuntime(m, identity) && ["created", "running", "paused"].includes(m.state));
+      const active = (await store.list({ include_archived: false })).filter((m) => monitorBelongsToRuntime(m, identity) && ["created", "running"].includes(m.state));
       if (active.length >= 25) throw new ValidationError("active monitor cap reached (25); stop unused monitors before starting another.");
 
       const monitorId = generateMonitorId();
       const normalized = normalizeStartParams(params, monitorId);
-      const { check, schedule, attention, condition, metadata, outputPath, warnings, v2 } = normalized;
+      const { check, schedule, attention, metadata, outputPath, warnings } = normalized;
 
       validateCheck(check);
       validateSchedule(schedule);
-      validateCondition(condition);
       validateAttention(attention);
-      validateRetention(params.retention ?? DEFAULT_RETENTION);
+      validateRetention(DEFAULT_RETENTION);
       validateLabels(params.labels ?? {});
 
       const now = nowISO();
       let nextRunAt: string | undefined;
       if (check.type !== "command" || check.mode === "poll") {
-        if (schedule.start_at) nextRunAt = schedule.start_at;
-        else if (typeof schedule.delay_ms === "number") nextRunAt = new Date(Date.now() + schedule.delay_ms).toISOString();
-        else if (typeof schedule.interval_ms === "number") nextRunAt = v2 ? now : new Date(Date.now() + schedule.interval_ms).toISOString();
-        else nextRunAt = now;
+        nextRunAt = now;
       }
 
       const record: MonitorRecord = {
         monitor_id: monitorId,
         version: 1,
         owner: { actor_id: ctx?.actor_id ?? "system", actor_type: "system", session_id: identity.session_id ?? "", root_session_id: identity.root_session_id, workspace_id: identity.workspace_id },
-        scope: params.scope ?? "session",
+        scope: "session",
         name: params.name,
         description: params.description,
         state: "running",
         check,
         schedule,
-        condition,
+        condition: undefined,
         attention,
-        retention: { ...DEFAULT_RETENTION, ...(params.retention ?? {}) },
+        retention: DEFAULT_RETENTION,
         labels: params.labels ?? {},
         metadata: { ...metadata, ...(params.idempotency_key ? { idempotency_key: params.idempotency_key } : {}) },
         created_at: now,
@@ -200,14 +184,14 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
       let streamState: any;
       if (check.type === "command" && check.mode !== "poll") {
         if (!streams) throw new Error("Stream monitors are not available");
-        const wake = (params.wake ?? (params.kind ? "on_failure" : undefined)) as WakeMode | undefined;
-        streamState = streams.start({ command: check.command, description: params.description ?? params.name ?? monitorId, cwd: check.cwd, timeout_ms: check.timeout_ms, notify: record.attention.notify, wake_agent: !params.kind && record.attention.wake_agent, wake_on_line: params.kind ? wake === "on_event" : undefined, wake_on_completion: params.kind ? wake === "on_terminal" : undefined, wake_on_failure: params.kind ? wake === "on_failure" : undefined, event_throttle_ms: check.event_throttle_ms, max_lines_per_turn: check.max_lines_per_turn, shell: check.shell, stream_id: monitorId, monitor_id: monitorId, output_file: check.output_path, store }, ctx);
+        const wake = (params.wake ?? "on_failure") as WakeMode;
+        streamState = streams.start({ command: check.command, description: params.description ?? params.name ?? monitorId, cwd: check.cwd, timeout_ms: check.timeout_ms, notify: record.attention.notify, wake_agent: false, wake_on_line: wake === "on_event", wake_on_completion: wake === "on_terminal", wake_on_failure: wake === "on_failure", event_throttle_ms: check.event_throttle_ms, max_lines_per_turn: check.max_lines_per_turn, shell: check.shell, stream_id: monitorId, monitor_id: monitorId, output_file: check.output_path, store }, ctx);
       }
       await status?.refresh(ctx);
 
       return {
         content: [{ type: "text" as const, text: startMessage(monitorId, record, nextRunAt, outputPath ?? streamState?.output_file, warnings) }],
-        details: { ok: true, monitor_id: monitorId, state: record.state, kind: params.kind ?? (check as any).type, name: record.name, output_path: outputPath ?? streamState?.output_file, wake: (metadata as any).wake, next_action: nextRunAt ? "wait" : "inspect_output", next_run_at: nextRunAt, idempotent: false },
+        details: { ok: true, monitor_id: monitorId, state: record.state, kind: params.kind, name: record.name, output_path: outputPath ?? streamState?.output_file, wake: (metadata as any).wake, next_action: nextRunAt ? "wait" : "inspect_output", next_run_at: nextRunAt, idempotent: false },
       };
     },
   };

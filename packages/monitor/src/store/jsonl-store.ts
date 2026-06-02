@@ -20,6 +20,9 @@ const SNAPSHOT_FILE = "monitors.snapshot.json";
 const EVENTS_FILE = "monitors.events.jsonl";
 const RESULTS_FILE = "monitors.results.jsonl";
 
+const TERMINAL_STATES = new Set(["completed", "stopped", "canceled", "expired", "archived", "succeeded", "failed", "triggered"]);
+const STATE_EVENT_TYPES = new Set(["started", "stopped", "triggered", "failed", "succeeded", "completed", "expired", "archived"]);
+
 export class JsonlMonitorStore {
   private stateRoot: string;
   private monitors = new Map<string, MonitorRecord>();
@@ -145,28 +148,22 @@ export class JsonlMonitorStore {
     switch (event.type) {
       case "created":
       case "started":
-      case "paused":
-      case "resumed":
       case "stopped":
       case "triggered":
       case "failed":
       case "succeeded":
       case "completed":
       case "expired":
-      case "archived":
-      case "ack": {
+      case "archived": {
         const m = this.monitors.get(event.monitor_id);
         if (!m) return;
+        if (TERMINAL_STATES.has(m.state) && STATE_EVENT_TYPES.has(event.type) && event.type !== "archived" && event.type !== m.state) {
+          return;
+        }
         switch (event.type) {
           case "created":
             break;
           case "started":
-            m.state = "running";
-            break;
-          case "paused":
-            m.state = "paused";
-            break;
-          case "resumed":
             m.state = "running";
             break;
           case "stopped":
@@ -190,8 +187,6 @@ export class JsonlMonitorStore {
             break;
           case "archived":
             m.state = "archived";
-            break;
-          case "ack":
             break;
         }
         m.updated_at = event.created_at;
@@ -257,6 +252,9 @@ export class JsonlMonitorStore {
     if (expectedVersion !== undefined && m.version !== expectedVersion) {
       throw new ConflictError();
     }
+    if (patch.state !== undefined && TERMINAL_STATES.has(m.state) && patch.state !== m.state && patch.state !== "archived") {
+      throw new ConflictError();
+    }
     const next = { ...m, ...patch, monitor_id: m.monitor_id, version: m.version + 1, updated_at: nowISO() };
     this.monitors.set(monitorId, next);
     this.saveSnapshot();
@@ -275,9 +273,6 @@ export class JsonlMonitorStore {
   async listResults(monitorId: string, options: ResultQuery): Promise<MonitorResult[]> {
     await this.init();
     let arr = this.results.get(monitorId) ?? [];
-    if (options.acked !== undefined) {
-      arr = arr.filter((r) => (options.acked ? r.acked_at : !r.acked_at));
-    }
     if (options.after) {
       arr = arr.filter((r) => r.created_at > options.after!);
     }
@@ -367,56 +362,6 @@ export class JsonlMonitorStore {
     this.saveSnapshot();
   }
 
-  async ackResults(opts: { monitor_id?: string; result_id?: string; all?: boolean }): Promise<number> {
-    await this.init();
-    let acked = 0;
-    const now = nowISO();
-    let eventMonitorId = opts.monitor_id ?? "all";
-
-    if (opts.all) {
-      for (const arr of this.results.values()) {
-        for (const r of arr) {
-          if (!r.acked_at) {
-            r.acked_at = now;
-            acked++;
-          }
-        }
-      }
-    } else if (opts.result_id) {
-      for (const [mid, arr] of this.results) {
-        const r = arr.find((x) => x.result_id === opts.result_id);
-        if (r) {
-          if (!r.acked_at) {
-            r.acked_at = now;
-            acked++;
-          }
-          eventMonitorId = mid;
-          break;
-        }
-      }
-    } else if (opts.monitor_id) {
-      const arr = this.results.get(opts.monitor_id) ?? [];
-      for (const r of arr) {
-        if (!r.acked_at) {
-          r.acked_at = now;
-          acked++;
-        }
-      }
-    }
-
-    if (acked > 0) {
-      this.saveResults();
-      await this.appendEvent({
-        event_id: generateEventId(),
-        monitor_id: eventMonitorId,
-        type: "ack",
-        payload: { all: opts.all, result_id: opts.result_id, count: acked },
-        created_at: now,
-      });
-    }
-
-    return acked;
-  }
 
   async prune(_now: Date): Promise<PruneSummary> {
     await this.init();

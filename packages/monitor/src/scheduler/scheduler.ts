@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { MonitorStatusService } from "../runtime/status.js";
 import type { MonitorRecord, MonitorEvent, MonitorResult } from "../schema/types.js";
-import { runTimerCheck, runFileCheck, runCommandPollCheck } from "../checks/index.js";
+import { runFileCheck, runCommandPollCheck } from "../checks/index.js";
 import { evaluateCondition } from "../conditions/evaluator.js";
 import { generateEventId, generateLeaseId } from "../ids.js";
 import { nowISO, addMs } from "../time.js";
@@ -89,9 +89,12 @@ export class MonitorScheduler {
     }
 
     const startAt = nowISO();
+    const claimed = await this.store.get(monitor.monitor_id);
+    if (!this.isCurrentClaim(claimed, monitor)) return;
+
     let result: MonitorResult;
     try {
-      result = await this.executeCheck(monitor);
+      result = await this.executeCheck(claimed);
     } catch (err: any) {
       result = {
         result_id: `res-${Date.now()}`,
@@ -105,15 +108,18 @@ export class MonitorScheduler {
       };
     }
 
-    this.appendObservation(monitor, result);
+    const afterCheck = await this.store.get(monitor.monitor_id);
+    if (!this.isCurrentClaim(afterCheck, monitor)) return;
 
-    const conditionMatched = evaluateCondition(monitor.condition, result);
+    this.appendObservation(afterCheck, result);
+
+    const conditionMatched = evaluateCondition(afterCheck.condition, result);
     result.condition_matched = conditionMatched;
-    const nonterminalV2PollChange = (monitor.metadata as any)?.monitor_v2 === true && (monitor.metadata as any)?.kind === "poll" && result.status === "matched";
+    const nonterminalV2PollChange = (afterCheck.metadata as any)?.monitor_v2 === true && (afterCheck.metadata as any)?.kind === "poll" && result.status === "matched";
     result.triggered = conditionMatched && result.status === "matched" && !nonterminalV2PollChange;
 
     const current = await this.store.get(monitor.monitor_id);
-    if (!current || current.lease_id !== monitor.lease_id || current.state !== "running") return;
+    if (!this.isCurrentClaim(current, monitor)) return;
 
     const nextState = this.computeNextState(current, result);
     const nextRunAt = this.computeNextRun(current, result);
@@ -121,7 +127,21 @@ export class MonitorScheduler {
     const consecutiveFailureCount = result.status === "error" ? current.consecutive_failure_count + 1 : 0;
     const runCount = current.run_count + 1;
 
-    await this.store.update(current.monitor_id, current.version, {
+    const monitorEvent = result.triggered || (nonterminalV2PollChange && result.condition_matched);
+    if (monitorEvent || result.status === "error") {
+      const wakeMode = (current.metadata as any)?.wake as string | undefined;
+      const wake = wakeMode === "on_event" ? (monitorEvent || result.status === "error") : wakeMode === "on_failure" ? result.status === "error" : wakeMode === "on_terminal" ? ["failed", "succeeded", "completed", "expired", "triggered"].includes(nextState) : undefined;
+      const beforeDelivery = await this.store.get(monitor.monitor_id);
+      if (this.isCurrentClaim(beforeDelivery, monitor)) {
+        const attention_delivery = await this.statusService?.deliverAttention(beforeDelivery, result, this.ctx, { wake });
+        if (attention_delivery) result.attention_delivery = attention_delivery;
+      }
+    }
+
+    const beforeUpdate = await this.store.get(monitor.monitor_id);
+    if (!this.isCurrentClaim(beforeUpdate, monitor)) return;
+
+    await this.store.update(beforeUpdate.monitor_id, beforeUpdate.version, {
       state: nextState,
       last_run_at: startAt,
       next_run_at: nextRunAt,
@@ -131,14 +151,6 @@ export class MonitorScheduler {
       lease_id: undefined,
       lease_expires_at: undefined,
     });
-
-    const monitorEvent = result.triggered || (nonterminalV2PollChange && result.condition_matched);
-    if (monitorEvent || result.status === "error") {
-      const wakeMode = (current.metadata as any)?.wake as string | undefined;
-      const wake = wakeMode === "on_event" ? (monitorEvent || result.status === "error") : wakeMode === "on_failure" ? result.status === "error" : wakeMode === "on_terminal" ? ["failed", "succeeded", "completed", "expired", "triggered"].includes(nextState) : undefined;
-      const attention_delivery = await this.statusService?.deliverAttention(current, result, this.ctx, { wake });
-      if (attention_delivery) result.attention_delivery = attention_delivery;
-    }
 
     await this.store.appendResult(result);
 
@@ -163,6 +175,10 @@ export class MonitorScheduler {
     await this.statusService?.refresh(this.ctx);
   }
 
+  private isCurrentClaim(current: MonitorRecord | undefined, claimed: MonitorRecord): current is MonitorRecord {
+    return !!current && current.state === "running" && current.lease_id === claimed.lease_id;
+  }
+
   private appendObservation(monitor: MonitorRecord, result: MonitorResult): void {
     const outputPath = (monitor.metadata as any)?.output_path ?? (monitor.check as any).output_path;
     if (!outputPath || monitor.check.type === "command") return;
@@ -176,8 +192,6 @@ export class MonitorScheduler {
 
   private async executeCheck(monitor: MonitorRecord): Promise<MonitorResult> {
     switch (monitor.check.type) {
-      case "timer":
-        return runTimerCheck(monitor);
       case "file":
         return runFileCheck(monitor);
       case "command":
@@ -194,35 +208,19 @@ export class MonitorScheduler {
     const terminalStates = new Set(["completed", "stopped", "canceled", "expired", "archived"]);
     if (terminalStates.has(monitor.state)) return monitor.state;
 
-    // Check max_runs
-    if (monitor.schedule.max_runs && monitor.run_count + 1 >= monitor.schedule.max_runs) {
-      return "succeeded";
-    }
-    // Check deadline
     if (monitor.schedule.deadline_at && Date.parse(monitor.schedule.deadline_at) <= Date.now()) {
       return "expired";
     }
 
-    return (monitor.state === "paused" ? "paused" : "running") as MonitorRecord["state"];
+    return "running";
   }
 
   private computeNextRun(monitor: MonitorRecord, result: MonitorResult): string | undefined {
     const terminalStates = new Set(["completed", "stopped", "canceled", "expired", "archived", "succeeded"]);
     if (terminalStates.has(monitor.state as string)) return undefined;
-    if (monitor.schedule.max_runs && monitor.run_count + 1 >= monitor.schedule.max_runs) return undefined;
     if (monitor.schedule.deadline_at && Date.parse(monitor.schedule.deadline_at) <= Date.now()) return undefined;
-    if (monitor.state === "paused") return monitor.next_run_at;
 
-    let interval = monitor.schedule.interval_ms ?? monitor.schedule.delay_ms ?? 60000;
-    if (result.status === "error" && monitor.schedule.backoff) {
-      const backoff = monitor.schedule.backoff;
-      const failCount = monitor.consecutive_failure_count + 1;
-      if (backoff.strategy === "linear") {
-        interval = Math.min(interval * failCount, backoff.max_ms ?? interval * 5);
-      } else if (backoff.strategy === "exponential") {
-        interval = Math.min(interval * Math.pow(2, failCount - 1), backoff.max_ms ?? interval * 8);
-      }
-    }
+    const interval = monitor.schedule.interval_ms ?? 60000;
     return addMs(nowISO(), interval);
   }
 }

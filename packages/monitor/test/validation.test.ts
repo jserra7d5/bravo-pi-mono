@@ -8,10 +8,6 @@ import {
 } from '../src/validation.js';
 import { ValidationError } from '../src/errors.js';
 
-test('validateCheck accepts timer', () => {
-  validateCheck({ type: 'timer' });
-});
-
 test('validateCheck accepts file exists', () => {
   validateCheck({ type: 'file', path: '/tmp/test', mode: 'exists' });
 });
@@ -28,16 +24,16 @@ test('validateSchedule accepts empty schedule as immediate', () => {
   validateSchedule({});
 });
 
-test('validateSchedule accepts delay_ms', () => {
-  validateSchedule({ delay_ms: 5000 });
+test('validateSchedule accepts interval_ms', () => {
+  validateSchedule({ interval_ms: 5000 });
 });
 
-test('validateSchedule rejects delay_ms below minimum', () => {
-  assert.throws(() => validateSchedule({ delay_ms: 100 }), ValidationError);
+test('validateSchedule rejects interval_ms below minimum', () => {
+  assert.throws(() => validateSchedule({ interval_ms: 100 }), ValidationError);
 });
 
-test('validateSchedule rejects invalid start_at', () => {
-  assert.throws(() => validateSchedule({ start_at: 'not-a-date' }), ValidationError);
+test('validateSchedule rejects invalid deadline_at', () => {
+  assert.throws(() => validateSchedule({ deadline_at: 'not-a-date' }), ValidationError);
 });
 
 test('validateCondition accepts always', () => {
@@ -54,4 +50,7 @@ test('validateCondition rejects and without children', () => {
 
 test('validateStateTransition blocks terminal transitions', () => {
   assert.throws(() => validateStateTransition('stopped', 'running'), ValidationError);
+  assert.throws(() => validateStateTransition('failed', 'running'), ValidationError);
+  assert.throws(() => validateStateTransition('triggered', 'running'), ValidationError);
+  assert.doesNotThrow(() => validateStateTransition('running', 'failed'));
 });

@@ -4,8 +4,6 @@ import { ValidationError } from "./errors.js";
 export function validateCheck(check: CheckSpec): void {
   if (!check || typeof check !== "object") throw new ValidationError("Check must be an object");
   switch (check.type) {
-    case "timer":
-      return;
     case "file": {
       if (!check.path || typeof check.path !== "string") throw new ValidationError("File check requires path");
       const allowedModes = new Set(["exists", "missing", "modified_since_start", "contains"]);
@@ -34,36 +32,14 @@ export function validateCheck(check: CheckSpec): void {
 
 export function validateSchedule(schedule: ScheduleSpec): void {
   if (!schedule || typeof schedule !== "object") throw new ValidationError("Schedule must be an object");
-  // Empty schedules are valid and mean "run immediately once, then use the default interval if not terminal".
-  if (typeof schedule.delay_ms === "number") {
-    if (!Number.isFinite(schedule.delay_ms) || schedule.delay_ms < 1000) {
-      throw new ValidationError("delay_ms must be at least 1000ms");
-    }
-  }
   if (typeof schedule.interval_ms === "number") {
     if (!Number.isFinite(schedule.interval_ms) || schedule.interval_ms < 1000) {
       throw new ValidationError("interval_ms must be at least 1000ms");
     }
   }
-  if (typeof schedule.start_at === "string") {
-    const d = Date.parse(schedule.start_at);
-    if (!Number.isFinite(d)) throw new ValidationError("Invalid start_at date");
-  }
-  if (typeof schedule.max_runs === "number") {
-    if (!Number.isInteger(schedule.max_runs) || schedule.max_runs < 1) {
-      throw new ValidationError("max_runs must be a positive integer");
-    }
-  }
-  if (typeof schedule.timeout_ms === "number") {
-    if (!Number.isFinite(schedule.timeout_ms) || schedule.timeout_ms < 1000) {
-      throw new ValidationError("timeout_ms must be at least 1000ms");
-    }
-  }
-  if (schedule.backoff) {
-    const strategies = new Set(["none", "linear", "exponential"]);
-    if (!strategies.has(schedule.backoff.strategy)) {
-      throw new ValidationError(`Invalid backoff strategy: ${schedule.backoff.strategy}`);
-    }
+  if (typeof schedule.deadline_at === "string") {
+    const d = Date.parse(schedule.deadline_at);
+    if (!Number.isFinite(d)) throw new ValidationError("Invalid deadline_at date");
   }
 }
 
@@ -122,7 +98,7 @@ export function validateOwner(owner: MonitorOwner): void {
 }
 
 export function validateStateTransition(from: MonitorState, to: MonitorState): void {
-  const terminal = new Set(["completed", "stopped", "canceled", "expired", "archived"]);
+  const terminal = new Set(["completed", "stopped", "canceled", "expired", "archived", "succeeded", "failed", "triggered"]);
   if (terminal.has(from) && from !== to) {
     throw new ValidationError(`Cannot transition from terminal state ${from} to ${to}`);
   }
