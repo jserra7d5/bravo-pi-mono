@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   chrome,
+  chromeRenderable,
   costHeaderSegment,
   formatCost,
   formatRunRow,
@@ -269,6 +270,59 @@ test("result card normalizes child body tabs before rendering fixed-width rows",
     assert.equal(visWidth(line), 93, `expected width 93 at line "${stripAnsi(line)}"`);
     assert.equal(line.includes("\t"), false, "rendered card must not contain raw tabs");
   }
+});
+
+test("chromeRenderable caches same-width card output without exposing the cached lines array", () => {
+  let builds = 0;
+  const comp = chromeRenderable((width) => {
+    builds += 1;
+    const ch = chrome(width);
+    return [ch.top(), ch.row("cached\tcard"), ch.bot()];
+  });
+
+  const first = comp.render(72);
+  const expected = first.slice();
+  first[1] = "poisoned caller mutation";
+  const second = comp.render(72);
+
+  assert.equal(builds, 1);
+  assert.notEqual(second, first);
+  assert.deepEqual(second, expected);
+});
+
+test("chromeRenderable rebuilds for a different effective width", () => {
+  let builds = 0;
+  const comp = chromeRenderable((width) => {
+    builds += 1;
+    const ch = chrome(width);
+    return [ch.top(), ch.row(`width ${width}`), ch.bot()];
+  });
+
+  const wide = comp.render(72);
+  const narrow = comp.render(56);
+
+  assert.equal(builds, 2);
+  assert.notEqual(narrow, wide);
+  assert.equal(visWidth(wide[0]), 72);
+  assert.equal(visWidth(narrow[0]), 56);
+});
+
+test("chromeRenderable invalidate clears the width cache and preserves output bytes", () => {
+  let builds = 0;
+  const comp = chromeRenderable((width) => {
+    builds += 1;
+    const ch = chrome(width);
+    return [ch.top(), ch.row("stable output"), ch.bot()];
+  });
+
+  const before = comp.render(72);
+  const beforeBytes = before.join("\n");
+  comp.invalidate();
+  const after = comp.render(72);
+
+  assert.equal(builds, 2);
+  assert.notEqual(after, before);
+  assert.equal(after.join("\n"), beforeBytes);
 });
 
 test("text block fallback normalizes tabs before returning render lines", () => {

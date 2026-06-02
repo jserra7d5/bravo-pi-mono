@@ -334,15 +334,22 @@ export function textBlock(value: string | string[]): TextRenderable {
 // width. This lets the card adapt to the actual terminal width when Pi asks
 // for layout. The builder MUST return lines that are exactly `width` cells wide.
 export function chromeRenderable(build: (width: number) => string[]): TextRenderable {
+  let cachedWidth: number | undefined;
+  let cachedLines: string[] | undefined;
   return {
-    invalidate() {},
+    invalidate() {
+      cachedWidth = undefined;
+      cachedLines = undefined;
+    },
     render(width: number) {
       const w = Math.max(32, Math.min(96, safeWidth(width)));
-      const lines = build(w);
-      return lines.map((line) => {
+      if (cachedWidth === w && cachedLines) return cachedLines.slice();
+      cachedWidth = w;
+      cachedLines = build(w).map((line) => {
         const normalized = normalizeTabs(line);
         return visWidth(normalized) <= w ? normalized : truncAnsi(normalized, w);
       });
+      return cachedLines.slice();
     },
   };
 }

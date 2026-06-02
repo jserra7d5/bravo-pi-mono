@@ -97,3 +97,40 @@ not re-read from disk via a cache disk-read counter; active mutation and new run
 > review; approved after independent verification (88/88 targeted tests). One reviewer
 > finding (`deriveTaskStates` "divergence") was rejected as a false positive after checking
 > that the original `isTaskReady` already required `!task.owner`.
+
+## Fix 3 — transcript card memoization (`extensions/pi/renderers.ts`)
+
+**Before.** The async-subagents transcript cards (wakeup messages and tool-call/result
+cards) are produced by `chromeRenderable(build)`, whose `render(width)` rebuilt the card and
+re-ran per-codepoint `visWidth` ANSI/width math on **every** call, with a no-op
+`invalidate()`. The pi host re-renders the whole transcript tree each frame with no
+container-level caching, so every accumulated card re-ran its ANSI math every frame — CPU
+that grew with the number of cards in the transcript (until the next compaction). Plain
+`Text` cards in pi-tui already cache by `(text,width)`; these chrome cards were the
+non-caching outliers.
+
+**After.** `chromeRenderable` memoizes by **clamped** width: a same-width render returns the
+cached lines without rebuilding or re-measuring; a width change or `invalidate()` rebuilds.
+Card content is fixed at creation (all callers — `renderSubagentToolCallComponent`,
+`renderSubagentToolResultComponent`, `renderSubagentWakeMessageComponent` — capture fixed
+data with no time/mutable input), so width-keying is sufficient and output bytes are
+identical. The internal cache is never exposed: `render()` returns a defensive `slice()` so a
+caller mutating the returned array cannot poison the cache. The time-relative live-widget
+component (`createLiveWidgetComponent`, which renders with `Date.now()`) is a separate path
+and is intentionally left uncached.
+
+(The other half originally scoped here — collapsing `renderWidgetCard`'s five O(T²)
+`deriveTaskState` count passes into one — was already done in Fix 2 via the precomputed
+`taskStates` map.)
+
+**Scope note.** This bounds the *async-subagents* contribution to per-frame transcript cost.
+The host-side full-transcript re-render + line-diff (pi-mono `tui.ts` `Container.render`) is
+out of scope and remains; it is itself bounded by compaction, which rebuilds the transcript
+from the compacted context.
+
+**Tests.** `test/renderers.test.ts`: same-width render builds exactly once (build-count) and
+is byte-equal; a different effective width rebuilds; `invalidate()` forces a rebuild.
+
+> Implemented by a GPT-5.5 (`pi`) agent under adversarial GPT-5.5 review; approved after
+> independent verification (47/47 renderer tests). Reviewer flagged returning the cached
+> array by reference; resolved by returning a defensive `slice()`.
