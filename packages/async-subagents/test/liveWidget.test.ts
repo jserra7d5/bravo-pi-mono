@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { renderLiveWidget, updateLiveWidget } from "../extensions/pi/liveWidget.js";
@@ -8,6 +8,7 @@ import { markWakeupHandled } from "../extensions/pi/wakeups.js";
 import { visWidth } from "../extensions/pi/renderers.js";
 import { RunStore } from "../src/runStore.js";
 import { TaskStore } from "../src/taskStore.js";
+import { resetTaskStateDerivationStatsForTest, taskStateDerivationStatsForTest } from "../src/taskState.js";
 import { createRunResult } from "../src/result.js";
 import { createInitialStatus } from "../src/status.js";
 import type { RunMetrics, RunState } from "../src/types.js";
@@ -225,7 +226,7 @@ test("live widget component render uses the precomputed task snapshot", () => {
     parentRunId: w.parentRunId,
     tasks: [{ alias: "t1", title: "Task 1", description: "First" }]
   });
-  addRun({ ...w, displayName: "Rex", state: "running", summary: "working" });
+  const runId = addRun({ ...w, displayName: "Rex", state: "running", summary: "working" });
 
   type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void };
   let captured: WidgetFactory | undefined;
@@ -241,12 +242,137 @@ test("live widget component render uses the precomputed task snapshot", () => {
   assert.ok(captured, "expected setWidget to receive a factory function");
   const component = captured!(undefined, undefined);
   rmSync(taskStore.pathsFor(w.parentRunId).tasksDir, { recursive: true, force: true });
+  rmSync(w.store.pathsFor({ runId }).runDir, { recursive: true, force: true });
   w.store.readRunSummaries = (() => { throw new Error("render must not read run summaries"); }) as RunStore["readRunSummaries"];
   w.store.readRunSummary = (() => { throw new Error("render must not read run summary"); }) as RunStore["readRunSummary"];
   w.store.readResult = (() => { throw new Error("render must not read run result"); }) as RunStore["readResult"];
 
   const body = component.render(72).map(stripAnsi).join("\n");
   assert.ok(body.includes("Task 1"), "render should use the task data captured during update");
+});
+
+test("live widget task snapshot uses non-blocking reconcile", () => {
+  const empty = workspace();
+  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
+
+  const w = workspace();
+  const taskStore = new TaskStore(w.store);
+  taskStore.createTasks(w.parentRunId, {
+    parentRunId: w.parentRunId,
+    tasks: [{ alias: "t1", title: "Task 1", description: "First" }]
+  });
+  addRun({ ...w, displayName: "Rex", state: "running", summary: "working" });
+
+  const original = TaskStore.prototype.listTasks;
+  const reconcileValues: Array<boolean | "nonblocking" | undefined> = [];
+  TaskStore.prototype.listTasks = function(this: TaskStore, rootSessionId, options) {
+    reconcileValues.push(options?.reconcile);
+    return original.call(this, rootSessionId, options);
+  } as TaskStore["listTasks"];
+  try {
+    updateLiveWidget({ ui: { setWidget() {} } }, { store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+  } finally {
+    TaskStore.prototype.listTasks = original;
+  }
+  assert.deepEqual(reconcileValues, ["nonblocking"]);
+});
+
+test("live widget non-blocking reconcile detects terminal owner runs", () => {
+  const empty = workspace();
+  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
+
+  const w = workspace();
+  const taskStore = new TaskStore(w.store);
+  const created = taskStore.createTasks(w.parentRunId, {
+    parentRunId: w.parentRunId,
+    tasks: [{ alias: "t1", title: "Task 1", description: "First" }]
+  });
+  const taskId = created.aliasToId["t1"];
+  const runId = addRun({ ...w, displayName: "Rex", state: "running", summary: "working" });
+  taskStore.claimTask(w.parentRunId, taskId, {
+    runId,
+    agent: "worker",
+    displayName: "Rex",
+    assignedAt: new Date().toISOString(),
+    tokenHash: "hash"
+  });
+  w.store.writeStatus({ ...w.store.readStatus(runId), state: "failed", summary: "failed", updatedAt: new Date().toISOString() });
+
+  updateLiveWidget({ ui: { setWidget() {} } }, { store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+
+  const [task] = taskStore.listTasks(w.parentRunId, { reconcile: false });
+  assert.equal(task.status, "failed");
+  assert.ok(taskStore.readEvents(w.parentRunId).some((event) => event.type === "task.failed" && event.taskId === taskId && event.wake === true));
+});
+
+test("live widget non-blocking reconcile skips contended task locks without sleeping", () => {
+  const empty = workspace();
+  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
+
+  const w = workspace();
+  const taskStore = new TaskStore(w.store);
+  const created = taskStore.createTasks(w.parentRunId, {
+    parentRunId: w.parentRunId,
+    tasks: [{ alias: "t1", title: "Task 1", description: "First" }]
+  });
+  const taskId = created.aliasToId["t1"];
+  const runId = addRun({ ...w, displayName: "Rex", state: "running", summary: "working" });
+  taskStore.claimTask(w.parentRunId, taskId, {
+    runId,
+    agent: "worker",
+    displayName: "Rex",
+    assignedAt: new Date().toISOString(),
+    tokenHash: "hash"
+  });
+  w.store.writeStatus({ ...w.store.readStatus(runId), state: "failed", summary: "failed", updatedAt: new Date().toISOString() });
+
+  const paths = taskStore.pathsFor(w.parentRunId);
+  mkdirSync(paths.lockDir, { recursive: true });
+  writeFileSync(join(paths.lockDir, "held.json"), JSON.stringify({ pid: process.pid, host: "other-host", createdAt: new Date().toISOString() }), "utf8");
+
+  const originalWait = Atomics.wait;
+  Atomics.wait = (() => { throw new Error("non-blocking reconcile must not sleep"); }) as typeof Atomics.wait;
+  try {
+    updateLiveWidget({ ui: { setWidget() {} } }, { store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+  } finally {
+    Atomics.wait = originalWait;
+    rmSync(paths.lockDir, { recursive: true, force: true });
+  }
+
+  const [task] = taskStore.listTasks(w.parentRunId, { reconcile: false });
+  assert.equal(task.status, "running");
+});
+
+test("live widget precomputes task states once per snapshot and reuses them on render", () => {
+  const empty = workspace();
+  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
+
+  const w = workspace();
+  const taskStore = new TaskStore(w.store);
+  taskStore.createTasks(w.parentRunId, {
+    parentRunId: w.parentRunId,
+    tasks: Array.from({ length: 80 }, (_, index) => ({
+      alias: `t${index}`,
+      title: `Task ${index}`,
+      description: `Task ${index}`,
+      dependsOn: index === 0 ? [] : [`t${index - 1}`]
+    }))
+  });
+  addRun({ ...w, displayName: "Rex", state: "running", summary: "working" });
+
+  type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void };
+  let captured: WidgetFactory | undefined;
+  const ctx = { ui: { setWidget(_key: string, value: unknown) { if (typeof value === "function") captured = value as WidgetFactory; } } };
+
+  resetTaskStateDerivationStatsForTest();
+  updateLiveWidget(ctx, { store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+  assert.ok(captured, "expected setWidget to receive a factory function");
+  assert.deepEqual(taskStateDerivationStatsForTest(), { deriveTaskState: 0, deriveTaskStates: 1 });
+
+  const component = captured!(undefined, undefined);
+  component.render(72);
+  component.render(72);
+  assert.deepEqual(taskStateDerivationStatsForTest(), { deriveTaskState: 0, deriveTaskStates: 1 });
 });
 
 test("updateLiveWidget keeps pi TUI as this when requesting render after an update", () => {

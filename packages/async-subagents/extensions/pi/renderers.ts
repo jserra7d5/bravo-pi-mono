@@ -1,5 +1,5 @@
 import type { RunSummaryRow } from "../../src/watcher.js";
-import type { RunEvent, RunResult, RunStatus, SubagentMessageResult, SubagentStartResult, TaskEvent, TaskRecord } from "../../src/types.js";
+import type { DerivedTaskState, RunEvent, RunResult, RunStatus, SubagentMessageResult, SubagentStartResult, TaskEvent, TaskRecord } from "../../src/types.js";
 import { deriveTaskState, unresolvedDependencies } from "../../src/taskState.js";
 
 export interface TextTheme {
@@ -514,6 +514,8 @@ export interface WidgetCardInput {
   totalCost?: number;
   tasks?: TaskRecord[];
   allTasks?: TaskRecord[];
+  taskStates?: Map<string, DerivedTaskState>;
+  taskUnresolvedDependencyIds?: Map<string, string[]>;
   now?: number;
 }
 
@@ -539,8 +541,8 @@ function taskPriority(state: string): number {
   }
 }
 
-export function renderTaskSectionRow(width: number, task: TaskRecord, allTasks: TaskRecord[]): string {
-  const state = deriveTaskState(task, allTasks);
+export function renderTaskSectionRow(width: number, task: TaskRecord, allTasks: TaskRecord[], precomputedState?: DerivedTaskState, precomputedUnresolvedDependencyIds?: string[]): string {
+  const state = precomputedState ?? deriveTaskState(task, allTasks);
   const gl = stateGlyph(state);
   const glyph = gl.color + gl.g + ANSI.reset;
 
@@ -552,9 +554,9 @@ export function renderTaskSectionRow(width: number, task: TaskRecord, allTasks: 
 
   let statusText: string = state;
   if (state === "blocked") {
-    const deps = unresolvedDependencies(task, allTasks);
-    if (deps.length > 0) {
-      statusText = `blocked by ${deps.map(d => d.id).join(", ")}`;
+    const depIds = precomputedUnresolvedDependencyIds ?? unresolvedDependencies(task, allTasks).map(d => d.id);
+    if (depIds.length > 0) {
+      statusText = `blocked by ${depIds.join(", ")}`;
     }
   } else if (state === "result_ready") {
     statusText = "result ready";
@@ -632,8 +634,10 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
   const allTasks = input.allTasks ?? [];
   const now = input.now ?? Date.now();
   const graceMs = 5_000;
+  const taskStates = input.taskStates;
+  const stateFor = (task: TaskRecord): DerivedTaskState => taskStates?.get(task.id) ?? deriveTaskState(task, allTasks);
   const visibleTasks = (input.tasks ?? []).filter(t => {
-    const state = deriveTaskState(t, allTasks);
+    const state = stateFor(t);
     if (state === "completed" || state === "failed" || state === "cancelled") {
       const updatedAtMs = Date.parse(t.updatedAt);
       if (Number.isFinite(updatedAtMs)) {
@@ -644,11 +648,19 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
   });
 
   if (visibleTasks.length > 0) {
-    const tReadyCount = allTasks.filter(t => deriveTaskState(t, allTasks) === "ready").length;
-    const tRunningCount = allTasks.filter(t => deriveTaskState(t, allTasks) === "running").length;
-    const tResultReadyCount = allTasks.filter(t => deriveTaskState(t, allTasks) === "result_ready").length;
-    const tBlockedCount = allTasks.filter(t => deriveTaskState(t, allTasks) === "blocked").length;
-    const tFailedCount = allTasks.filter(t => deriveTaskState(t, allTasks) === "failed").length;
+    let tReadyCount = 0;
+    let tRunningCount = 0;
+    let tResultReadyCount = 0;
+    let tBlockedCount = 0;
+    let tFailedCount = 0;
+    for (const t of allTasks) {
+      const state = stateFor(t);
+      if (state === "ready") tReadyCount += 1;
+      else if (state === "running") tRunningCount += 1;
+      else if (state === "result_ready") tResultReadyCount += 1;
+      else if (state === "blocked") tBlockedCount += 1;
+      else if (state === "failed") tFailedCount += 1;
+    }
 
     const taskSegments = [
       tReadyCount ? `${tReadyCount} ready` : "",
@@ -666,8 +678,8 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
 
     if (width >= 36) {
       const sortedTasks = [...visibleTasks].sort((a, b) => {
-        const pA = taskPriority(deriveTaskState(a, allTasks));
-        const pB = taskPriority(deriveTaskState(b, allTasks));
+        const pA = taskPriority(stateFor(a));
+        const pB = taskPriority(stateFor(b));
         if (pA !== pB) return pA - pB;
         return a.id.localeCompare(b.id);
       });
@@ -675,7 +687,7 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
       const maxTaskRows = 4;
       const visibleTaskRows = sortedTasks.slice(0, maxTaskRows);
       for (const task of visibleTaskRows) {
-        const line = renderTaskSectionRow(width, task, allTasks);
+        const line = renderTaskSectionRow(width, task, allTasks, stateFor(task), input.taskUnresolvedDependencyIds?.get(task.id));
         out.push(ch.row(line));
       }
 
@@ -684,7 +696,7 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
         const omittedTasks = sortedTasks.slice(maxTaskRows);
         const omittedCounts: Record<string, number> = {};
         for (const task of omittedTasks) {
-          const state = deriveTaskState(task, allTasks);
+          const state = stateFor(task);
           omittedCounts[state] = (omittedCounts[state] || 0) + 1;
         }
         const omittedParts: string[] = [];

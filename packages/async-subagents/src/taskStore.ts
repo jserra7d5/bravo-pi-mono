@@ -25,9 +25,75 @@ export interface FailTaskInput { actor?: string; reason: string; runId?: string 
 export interface CancelTaskInput { actor?: string; reason: string }
 export interface ReleaseTaskClaimInput { runId: string; reason?: string }
 export interface ReconcileOwnedRunInput { runId: string; state: TerminalRunState; summary?: string; actor?: string }
+type ReconcileMode = boolean | "nonblocking";
 
 const LOCK_TTL_MS = 30_000;
 const RECEIPT_MAX_BYTES = 32 * 1024;
+
+interface TaskFileState {
+  path: string;
+  exists: boolean;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  dev: number;
+  ino: number;
+}
+
+interface MemoryTaskFileCacheEntry {
+  state: TaskFileState;
+  task: TaskRecord;
+}
+
+const memoryTaskFileCaches = new Map<string, MemoryTaskFileCacheEntry>();
+
+function statTaskFile(path: string): TaskFileState {
+  if (!existsSync(path)) return { path, exists: false, size: 0, mtimeMs: 0, ctimeMs: 0, dev: 0, ino: 0 };
+  const stat = statSync(path);
+  return { path, exists: true, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino };
+}
+
+function taskFileStateUnchanged(previous: TaskFileState, current: TaskFileState): boolean {
+  return previous.path === current.path && previous.exists === current.exists && previous.size === current.size && previous.mtimeMs === current.mtimeMs && previous.ctimeMs === current.ctimeMs && previous.dev === current.dev && previous.ino === current.ino;
+}
+
+function cloneJsonValue<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => cloneJsonValue(item)) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, cloneJsonValue(item)])) as T;
+  }
+  return value;
+}
+
+function cloneTask(task: TaskRecord): TaskRecord {
+  return cloneJsonValue(task);
+}
+
+function readTaskFileCached(path: string): TaskRecord | undefined {
+  const current = statTaskFile(path);
+  const cached = memoryTaskFileCaches.get(path);
+  if (cached && taskFileStateUnchanged(cached.state, current)) return cloneTask(cached.task);
+  if (!current.exists) {
+    memoryTaskFileCaches.delete(path);
+    return undefined;
+  }
+  try {
+    const task = JSON.parse(readFileSync(path, "utf8")) as TaskRecord;
+    memoryTaskFileCaches.set(path, { state: current, task: cloneTask(task) });
+    return cloneTask(task);
+  } catch (error) {
+    memoryTaskFileCaches.delete(path);
+    throw error;
+  }
+}
+
+function writeTaskFileCache(path: string, task: TaskRecord): void {
+  try {
+    memoryTaskFileCaches.set(path, { state: statTaskFile(path), task: cloneTask(task) });
+  } catch {
+    memoryTaskFileCaches.delete(path);
+  }
+}
 
 export function newTaskToken(): string { return randomBytes(24).toString("base64url"); }
 export function hashTaskToken(token: string): string { return createHash("sha256").update(token).digest("hex"); }
@@ -53,11 +119,11 @@ export class TaskStore {
     return { taskRoot, highwatermarkPath: join(taskRoot, "highwatermark"), eventsPath: join(taskRoot, "events.jsonl"), lockDir: join(taskRoot, "lock"), tasksDir: join(taskRoot, "tasks"), receiptsDir: join(taskRoot, "receipts"), artifactsDir: join(taskRoot, "artifacts") };
   }
 
-  listTasks(rootSessionId: string, options: { reconcile?: boolean } = {}): TaskRecord[] {
+  listTasks(rootSessionId: string, options: { reconcile?: ReconcileMode } = {}): TaskRecord[] {
     const tasks = this.listTasksRaw(rootSessionId);
     if (options.reconcile === false) return tasks;
     let changed = false;
-    for (const task of tasks) changed = this.lazyReconcile(rootSessionId, task) || changed;
+    for (const task of tasks) changed = this.lazyReconcile(rootSessionId, task, options.reconcile) || changed;
     return changed ? this.listTasksRaw(rootSessionId) : tasks;
   }
 
@@ -81,7 +147,7 @@ export class TaskStore {
 
   claimTask(rootSessionId: string, taskId: string, owner: TaskOwner): TaskRecord { return this.withLock(rootSessionId, "claim", () => { const all = this.listTasksRaw(rootSessionId); const task = this.mustFind(all, taskId); if (deriveTaskState(task, all) !== "ready") throw new SubagentError("TASK_NOT_READY", `task ${taskId} is not ready`); const updated = { ...task, status: "running" as const, owner, attempts: [...task.attempts, { runId: owner.runId, agent: owner.agent, displayName: owner.displayName, startedAt: owner.assignedAt, status: "running" as const }], updatedAt: nowIso() }; this.writeTask(rootSessionId, updated); this.appendTaskEvent(rootSessionId, updated.parentRunId, taskId, "task.claimed", `Claimed ${taskId}`, { runId: owner.runId }); return updated; }); }
   releaseClaim(rootSessionId: string, taskId: string, input: ReleaseTaskClaimInput): TaskRecord { return this.withLock(rootSessionId, "release", () => { const task = this.readTaskRaw(rootSessionId, taskId); if (task.owner?.runId !== input.runId) throw new SubagentError("TASK_OWNER_MISMATCH", "task owner mismatch"); const updated = { ...task, status: "pending" as const, owner: undefined, attempts: task.attempts.map((attempt) => attempt.runId === input.runId && !attempt.endedAt ? { ...attempt, endedAt: nowIso(), status: "cancelled" as const } : attempt), updatedAt: nowIso() }; this.writeTask(rootSessionId, updated); this.appendTaskEvent(rootSessionId, task.parentRunId, taskId, "task.released", input.reason ?? `Released ${taskId}`, { runId: input.runId }); return updated; }); }
-  reconcileOwnedRun(rootSessionId: string, runId: string, input: ReconcileOwnedRunInput): TaskRecord | undefined { return this.withLock(rootSessionId, "reconcile", () => { const task = this.listTasksRaw(rootSessionId).find((item) => item.owner?.runId === runId && item.status === "running"); if (!task) return undefined; const attempt = task.attempts.find((item) => item.runId === runId); if (attempt?.endedAt) return undefined; const terminal = input.state; const failed = terminal !== "completed"; const updated = { ...task, status: failed ? "failed" as const : "running" as const, attempts: task.attempts.map((item) => item.runId === runId && !item.endedAt ? { ...item, endedAt: nowIso(), status: failed ? "failed" as const : item.status } : item), updatedAt: nowIso() }; this.writeTask(rootSessionId, updated); const type: TaskEventType = failed ? "task.failed" : "task.needs_input"; this.appendTaskEvent(rootSessionId, task.parentRunId, task.id, type, failed ? `Task owner run ended ${terminal}` : `Owner run completed without task_submit_result`, { runId, wake: true, data: { runState: terminal, summary: input.summary } }); return updated; }); }
+  reconcileOwnedRun(rootSessionId: string, runId: string, input: ReconcileOwnedRunInput): TaskRecord | undefined { return this.withLock(rootSessionId, "reconcile", () => this.reconcileOwnedRunLocked(rootSessionId, runId, input)); }
 
   submitResult(rootSessionId: string, taskId: string, input: SubmitTaskResultInput): TaskRecord { return this.withLock(rootSessionId, "submit", () => { const task = this.readTaskRaw(rootSessionId, taskId); this.assertOwned(task, input.runId, input.taskToken); const summary = input.summary.trim(); if (!summary) throw new SubagentError("EMPTY_TASK_RESULT", "summary is required"); const paths = this.pathsFor(rootSessionId); const artifactPaths = input.artifactPaths?.map((p) => { ensureUnder(p, [paths.artifactsDir, this.cwd]); return p; }); let receiptPath: string | undefined; if (input.receipt) { const bytes = Buffer.byteLength(JSON.stringify(input.receipt), "utf8"); if (bytes > RECEIPT_MAX_BYTES) throw new SubagentError("TASK_RECEIPT_TOO_LARGE", "receipt exceeds 32KB"); receiptPath = join(paths.receiptsDir, `${taskId}-${input.runId}.json`); atomicWriteJson(receiptPath, { schemaVersion: SCHEMA_VERSION, taskId, runId: input.runId, submittedAt: nowIso(), receipt: input.receipt }); }
     const result: TaskResultReceipt = { state: "submitted", summary, receiptPath, artifactPaths, evidence: input.evidence, commandsRun: input.commandsRun, notes: input.notes, submittedAt: nowIso() }; const updated = { ...task, status: "result_ready" as const, result, attempts: task.attempts.map((attempt) => attempt.runId === input.runId && !attempt.endedAt ? { ...attempt, endedAt: result.submittedAt, status: "result_ready" as const } : attempt), updatedAt: nowIso() }; this.writeTask(rootSessionId, updated); this.appendTaskEvent(rootSessionId, task.parentRunId, taskId, "task.result_submitted", summary, { runId: input.runId, wake: true, data: { receiptPath } }); return updated; }); }
@@ -125,15 +191,17 @@ export class TaskStore {
     return { records: result.records, cursor: { eventOffset: result.nextOffset, lastEventId: result.lastId ?? cursor.lastEventId } };
   }
 
-  private readTaskRaw(rootSessionId: string, taskId: string): TaskRecord { const path = join(this.pathsFor(rootSessionId).tasksDir, `${safeSegment(taskId)}.json`); if (!existsSync(path)) throw new SubagentError("TASK_NOT_FOUND", `task not found: ${taskId}`); return JSON.parse(readFileSync(path, "utf8")) as TaskRecord; }
-  private listTasksRaw(rootSessionId: string): TaskRecord[] { const paths = this.pathsFor(rootSessionId); mkdirSync(paths.tasksDir, { recursive: true }); return readdirSync(paths.tasksDir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(paths.tasksDir, name), "utf8")) as TaskRecord).sort((a, b) => a.id.localeCompare(b.id)); }
-  private writeTask(rootSessionId: string, task: TaskRecord): void { atomicWriteJson(join(this.pathsFor(rootSessionId).tasksDir, `${task.id}.json`), task); }
+  private readTaskRaw(rootSessionId: string, taskId: string): TaskRecord { const path = join(this.pathsFor(rootSessionId).tasksDir, `${safeSegment(taskId)}.json`); const task = readTaskFileCached(path); if (!task) throw new SubagentError("TASK_NOT_FOUND", `task not found: ${taskId}`); return task; }
+  private listTasksRaw(rootSessionId: string): TaskRecord[] { const paths = this.pathsFor(rootSessionId); mkdirSync(paths.tasksDir, { recursive: true }); return readdirSync(paths.tasksDir).filter((name) => name.endsWith(".json")).flatMap((name) => readTaskFileCached(join(paths.tasksDir, name)) ?? []).sort((a, b) => a.id.localeCompare(b.id)); }
+  private writeTask(rootSessionId: string, task: TaskRecord): void { const path = join(this.pathsFor(rootSessionId).tasksDir, `${task.id}.json`); atomicWriteJson(path, task); writeTaskFileCache(path, task); }
   private nextTaskId(rootSessionId: string): string { const p = this.pathsFor(rootSessionId); mkdirSync(p.taskRoot, { recursive: true }); const current = existsSync(p.highwatermarkPath) ? Number(readFileSync(p.highwatermarkPath, "utf8")) : 0; const next = Number.isFinite(current) ? current + 1 : 1; writeFileSync(p.highwatermarkPath, String(next), "utf8"); return `T-${String(next).padStart(4, "0")}`; }
   private mustFind(tasks: TaskRecord[], taskId: string): TaskRecord { const task = tasks.find((item) => item.id === taskId); if (!task) throw new SubagentError("TASK_NOT_FOUND", `task not found: ${taskId}`); return task; }
   private assertAcyclic(tasks: TaskRecord[]): void { const visiting = new Set<string>(); const visited = new Set<string>(); const byId = new Map(tasks.map((task) => [task.id, task])); const visit = (id: string) => { if (visiting.has(id)) throw new SubagentError("CIRCULAR_DEPENDENCY_DETECTED", "task dependencies contain a cycle"); if (visited.has(id)) return; visiting.add(id); for (const dep of byId.get(id)?.dependsOn ?? []) if (byId.has(dep)) visit(dep); visiting.delete(id); visited.add(id); }; for (const task of tasks) visit(task.id); }
   private assertOwned(task: TaskRecord, runId: string, token: string): void { if (task.status !== "running" || !task.owner) throw new SubagentError("TASK_NOT_RUNNING", `task ${task.id} is not running`); if (task.owner.runId !== runId || !taskTokenMatches(token, task.owner.tokenHash)) throw new SubagentError("TASK_OWNER_MISMATCH", "task owner identity did not match"); }
   private appendTaskEvent(rootSessionId: string, parentRunId: string, taskId: string, type: TaskEventType, summary: string, options: { actor?: string; runId?: string; wake?: boolean; data?: Record<string, unknown> } = {}): void { const sequence = this.readEvents(rootSessionId).length + 1; this.appendEvent(rootSessionId, { schemaVersion: SCHEMA_VERSION, eventId: eventIdForSequence(sequence), sequence, rootSessionId, parentRunId, taskId, type, summary, actor: options.actor, runId: options.runId, wake: options.wake, data: options.data, createdAt: nowIso() }); }
-  private lazyReconcile(rootSessionId: string, task: TaskRecord): boolean { if (!task.owner || task.status !== "running") return false; const attempt = task.attempts.find((item) => item.runId === task.owner?.runId); if (attempt?.endedAt) return false; try { const statusPath = join(this.runRoot, task.owner.runId, "status.json"); if (!existsSync(statusPath)) return false; const status = JSON.parse(readFileSync(statusPath, "utf8")) as { state?: string; summary?: string }; if (status.state && isTerminalRunState(status.state as RunState)) return Boolean(this.reconcileOwnedRun(rootSessionId, task.owner.runId, { runId: task.owner.runId, state: status.state as TerminalRunState, summary: status.summary })); } catch { /* best effort */ } return false; }
+  private reconcileOwnedRunLocked(rootSessionId: string, runId: string, input: ReconcileOwnedRunInput): TaskRecord | undefined { const task = this.listTasksRaw(rootSessionId).find((item) => item.owner?.runId === runId && item.status === "running"); if (!task) return undefined; const attempt = task.attempts.find((item) => item.runId === runId); if (attempt?.endedAt) return undefined; const terminal = input.state; const failed = terminal !== "completed"; const updated = { ...task, status: failed ? "failed" as const : "running" as const, attempts: task.attempts.map((item) => item.runId === runId && !item.endedAt ? { ...item, endedAt: nowIso(), status: failed ? "failed" as const : item.status } : item), updatedAt: nowIso() }; this.writeTask(rootSessionId, updated); const type: TaskEventType = failed ? "task.failed" : "task.needs_input"; this.appendTaskEvent(rootSessionId, task.parentRunId, task.id, type, failed ? `Task owner run ended ${terminal}` : `Owner run completed without task_submit_result`, { runId, wake: true, data: { runState: terminal, summary: input.summary } }); return updated; }
+  private lazyReconcile(rootSessionId: string, task: TaskRecord, mode: ReconcileMode = true): boolean { if (!task.owner || task.status !== "running") return false; const attempt = task.attempts.find((item) => item.runId === task.owner?.runId); if (attempt?.endedAt) return false; try { const statusPath = join(this.runRoot, task.owner.runId, "status.json"); if (!existsSync(statusPath)) return false; const status = JSON.parse(readFileSync(statusPath, "utf8")) as { state?: string; summary?: string }; if (status.state && isTerminalRunState(status.state as RunState)) { if (mode === "nonblocking") { const result = this.tryWithLock(rootSessionId, "reconcile", () => this.reconcileOwnedRunLocked(rootSessionId, task.owner!.runId, { runId: task.owner!.runId, state: status.state as TerminalRunState, summary: status.summary })); return result.acquired ? Boolean(result.value) : false; } return Boolean(this.reconcileOwnedRun(rootSessionId, task.owner.runId, { runId: task.owner.runId, state: status.state as TerminalRunState, summary: status.summary })); } } catch { /* best effort */ } return false; }
+  private tryWithLock<T>(rootSessionId: string, command: string, fn: () => T): { acquired: true; value: T } | { acquired: false } { const paths = this.pathsFor(rootSessionId); mkdirSync(paths.taskRoot, { recursive: true }); for (let attempt = 0; attempt < 2; attempt += 1) { let acquired = false; try { mkdirSync(paths.lockDir); writeFileSync(join(paths.lockDir, "held.json"), JSON.stringify({ pid: process.pid, host: hostname(), ownerId: process.pid, command, createdAt: nowIso() })); acquired = true; } catch { if (attempt === 0 && this.breakStaleLock(paths.lockDir)) continue; return { acquired: false }; } if (acquired) { try { return { acquired: true, value: fn() }; } finally { this.releaseLock(paths.lockDir); } } } return { acquired: false }; }
   private withLock<T>(rootSessionId: string, command: string, fn: () => T): T { const paths = this.pathsFor(rootSessionId); mkdirSync(paths.taskRoot, { recursive: true }); const started = Date.now(); while (true) { try { mkdirSync(paths.lockDir); writeFileSync(join(paths.lockDir, "held.json"), JSON.stringify({ pid: process.pid, host: hostname(), ownerId: process.pid, command, createdAt: nowIso() })); break; } catch { if (this.breakStaleLock(paths.lockDir)) continue; if (Date.now() - started > 5_000) throw new SubagentError("TASK_LOCK_CONTENTION", "timed out acquiring task list lock"); sleep(75); } } try { return fn(); } finally { this.releaseLock(paths.lockDir); } }
   private releaseLock(lockDir: string): void { const path = join(lockDir, "held.json"); try { const held = JSON.parse(readFileSync(path, "utf8")) as { pid?: number; host?: string }; if (held.host === hostname() && held.pid === process.pid) rmSync(lockDir, { recursive: true, force: true }); } catch { /* do not delete a lock we cannot prove we own */ } }
   private breakStaleLock(lockDir: string): boolean { const path = join(lockDir, "held.json"); try { const dirStat = statSync(lockDir); if (!existsSync(path)) { if (Date.now() - dirStat.mtimeMs > LOCK_TTL_MS) { rmSync(lockDir, { recursive: true, force: true }); return true; } return false; } const stat = statSync(path); if (Date.now() - stat.mtimeMs > LOCK_TTL_MS) { rmSync(lockDir, { recursive: true, force: true }); return true; } const held = JSON.parse(readFileSync(path, "utf8")) as { pid?: number; host?: string }; if (held.host === hostname() && held.pid) { try { process.kill(held.pid, 0); } catch { rmSync(lockDir, { recursive: true, force: true }); return true; } } } catch { try { const dirStat = statSync(lockDir); if (Date.now() - dirStat.mtimeMs <= LOCK_TTL_MS) return false; } catch { /* no usable lock dir */ } if (existsSync(lockDir)) rmSync(lockDir, { recursive: true, force: true }); return true; } return false; }

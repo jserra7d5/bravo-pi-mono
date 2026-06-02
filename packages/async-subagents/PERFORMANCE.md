@@ -47,3 +47,53 @@ and `test/performanceReadModels.test.ts` (live-widget repeated reads do not full
 
 > Implemented by a GPT-5.5 (`pi`) agent under adversarial GPT-5.5 review; approved after
 > independent verification (`npm run check`, targeted `node --test`).
+
+## Fix 2 — live-widget tick + per-frame render (`extensions/pi/liveWidget.ts`, `renderers.ts`, `src/runStore.ts`, `src/taskStore.ts`, `src/taskState.ts`)
+
+**Before.** The 2s `tickPi` rebuilt the whole widget snapshot every tick:
+`readWatcherSnapshot` `readFileSync`+`JSON.parse`d **every** run's `summary.json` (O(total
+runs)/tick, including long-completed ones); `TaskStore.listTasks` `readdir`+read+parse
+**every** task file each tick *and*, with reconcile on, could take the task lock whose
+contention path `Atomics.wait`-sleeps the lead's main thread; `deriveTaskState` was called
+per-task building a fresh `Map(allTasks)` each time → O(T²)/tick; and `renderAt` rebuilt
+`runIdToTask` and re-derived task state on **every render frame**, with `renderWidgetCard`
+doing five O(T²) count passes.
+
+**After.**
+- **Stat-validated per-summary and per-task-file caches** (same pattern as Fix 1:
+  identity+size+mtime+ctime+dev+ino). Unchanged files are `stat`'d but not re-parsed; the
+  dominant cost (`readFileSync`+`JSON.parse` of all history every tick) is gone. Caches
+  return deep clones; summary writes invalidate the entry (no cross-process write race —
+  summaries aren't lock-guarded), task writes update it (safe — task writes are
+  `withLock`-serialized). Cache keys are `resolve()`-normalized.
+- **One derived-state map per snapshot.** `deriveTaskStates(tasks)` builds a single
+  `byId` map and derives every task's state in O(T) (semantics identical to
+  `deriveTaskState`), threaded through `visibleTasksFor`, `renderAt`, and `renderWidgetCard`
+  (which now counts in a single O(T) pass). No more O(T²).
+- **Non-blocking reconciliation.** The widget reads tasks with a new
+  `reconcile: "nonblocking"` mode backed by `tryWithLock` (atomic `mkdirSync` lock attempt,
+  break-stale at most once, **never** `sleep`/`Atomics.wait`). Owner-run termination is
+  still detected and still emits the `task.failed`/`needs_input` wake event (so autonomous
+  failure detection is preserved), but the render/tick thread never blocks on the lock.
+  Explicit/mutating task paths keep the blocking default.
+- **Self-contained snapshot.** The prepared `LiveWidgetSnapshot` carries rows, task states,
+  `runIdToTask`, and unresolved-dependency ids, so the mounted component's `render(width)`
+  does **zero** filesystem reads, task/run scans, map rebuilds, or state derivation per
+  frame — only cheap time-relative visibility/label recomputation from `now`.
+
+**Trade-off.** A run read-memo that tried to skip even the `stat` of cold terminal runs was
+removed as unsafe (it could permanently skip a run whose summary later changed). The
+remaining per-tick cost is O(total) cheap `stat` syscalls with O(changed) parses — there is
+no parent-dir change signal that would let a run's summary stat be safely skipped — which is
+~50–100× cheaper than the previous O(total) read+parse and does not block on I/O of file
+contents.
+
+**Tests.** `test/liveWidget.test.ts` (non-blocking reconcile emits the wake event; contended
+lock skips without sleeping; self-contained render after task/run files removed; one
+derivation per snapshot) and `test/performanceReadModels.test.ts` (unchanged summaries are
+not re-read from disk via a cache disk-read counter; active mutation and new runs reflected).
+
+> Implemented by a GPT-5.5 (`pi`) agent under adversarial GPT-5.5 review + a confirmation
+> review; approved after independent verification (88/88 targeted tests). One reviewer
+> finding (`deriveTaskStates` "divergence") was rejected as a false positive after checking
+> that the original `isTaskReady` already required `!task.owner`.

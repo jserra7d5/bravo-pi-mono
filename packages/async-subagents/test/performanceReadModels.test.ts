@@ -9,7 +9,7 @@ import { pollWakeups, writeDeliverySubscription } from "../extensions/pi/wakeups
 import { acquireRootSessionLease } from "../src/leases.js";
 import { pruneRuns } from "../src/retention.js";
 import { createRunResult } from "../src/result.js";
-import { RunStore } from "../src/runStore.js";
+import { resetSummaryCacheStatsForTest, RunStore, summaryCacheStatsForTest } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
 import { SCHEMA_VERSION, type EventType, type RunState } from "../src/types.js";
 
@@ -74,6 +74,35 @@ test("live widget does not full re-read the warmed run index on unchanged ticks"
 
   const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
   assert.ok(lines.length > 0);
+});
+
+test("live widget summary cache avoids disk re-reading unchanged terminal summaries while reflecting active mutations and new runs", () => {
+  const w = workspace();
+  const old = new Date(Date.now() - 10 * 60_000).toISOString();
+  for (let i = 0; i < 200; i += 1) addRun(w.store, w.root, w.parentRunId, "completed", old);
+  const activeRunId = addRun(w.store, w.root, w.parentRunId, "running");
+
+  let records = w.store.listRecentRuns({ parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+  resetSummaryCacheStatsForTest();
+  let lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, records, width: 72 });
+  assert.ok(lines.join("\n").includes(activeRunId));
+  const warmDiskReads = summaryCacheStatsForTest().diskReads;
+  assert.ok(warmDiskReads > 0);
+
+  records = w.store.listRecentRuns({ parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+  lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, records, width: 72 });
+  assert.ok(lines.join("\n").includes(activeRunId));
+  assert.equal(summaryCacheStatsForTest().diskReads, warmDiskReads);
+
+  w.store.writeStatus({ ...w.store.readStatus(activeRunId), summary: "mutated active summary", updatedAt: new Date().toISOString(), lastActivityAt: new Date().toISOString() });
+  records = w.store.listRecentRuns({ parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+  lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, records, width: 72 });
+  assert.ok(lines.join("\n").includes("mutated active summary"));
+
+  const newRunId = addRun(w.store, w.root, w.parentRunId, "running");
+  records = w.store.listRecentRuns({ parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+  lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, records, width: 72 });
+  assert.ok(lines.join("\n").includes(newRunId));
 });
 
 test("manual retention dry-run skips active and unhandled result-ready runs", () => {

@@ -5,7 +5,7 @@ import { SubagentError } from "./errors.js";
 import { appendJsonl, atomicWriteJson, readJsonl, readJsonlRange } from "./jsonl.js";
 import { newRunId } from "./ids.js";
 import { nowIso } from "./time.js";
-import { applyEventToSummary, applyResultToSummary, readSummaryFile, summaryFromStatus, summaryPathForRunDir, type RunIndexCache, type RunSummaryReadModel } from "./readModels.js";
+import { applyEventToSummary, applyResultToSummary, summaryFromStatus, summaryPathForRunDir, type RunIndexCache, type RunSummaryReadModel } from "./readModels.js";
 import type { InboxMessage, RunEvent, RunIndexRecord, RunPaths, RunResult, RunStatus, WaitCursor } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
@@ -26,7 +26,23 @@ interface MemoryIndexCache {
   cache: RunIndexCache;
 }
 
+interface SummaryFileState {
+  path: string;
+  exists: boolean;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  dev: number;
+  ino: number;
+}
+
+interface MemorySummaryCacheEntry {
+  state: SummaryFileState;
+  summary: RunSummaryReadModel;
+}
+
 const memoryIndexCaches = new Map<string, MemoryIndexCache>();
+const memorySummaryCaches = new Map<string, MemorySummaryCacheEntry>();
 
 function sourceKey(paths: string[]): string {
   return paths.map((path) => resolve(path)).join("\0");
@@ -38,6 +54,13 @@ function statIndexSource(path: string): IndexSourceState {
   return { path, exists: true, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino, parsedOffset: 0 };
 }
 
+function statSummaryFile(path: string): SummaryFileState {
+  const key = resolve(path);
+  if (!existsSync(key)) return { path: key, exists: false, size: 0, mtimeMs: 0, ctimeMs: 0, dev: 0, ino: 0 };
+  const stat = statSync(key);
+  return { path: key, exists: true, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino };
+}
+
 function sourcesUnchanged(previous: IndexSourceState[], current: IndexSourceState[]): boolean {
   return previous.length === current.length && previous.every((source, index) => {
     const next = current[index];
@@ -47,6 +70,56 @@ function sourcesUnchanged(previous: IndexSourceState[], current: IndexSourceStat
 
 function sourceIdentityMatches(previous: IndexSourceState, next: IndexSourceState): boolean {
   return previous.path === next.path && previous.exists === next.exists && previous.dev === next.dev && previous.ino === next.ino;
+}
+
+function summaryStateUnchanged(previous: SummaryFileState, current: SummaryFileState): boolean {
+  return previous.path === current.path && previous.exists === current.exists && previous.size === current.size && previous.mtimeMs === current.mtimeMs && previous.ctimeMs === current.ctimeMs && previous.dev === current.dev && previous.ino === current.ino;
+}
+
+function cloneJsonValue<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => cloneJsonValue(item)) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, cloneJsonValue(item)])) as T;
+  }
+  return value;
+}
+
+function cloneSummary(summary: RunSummaryReadModel): RunSummaryReadModel {
+  return cloneJsonValue(summary);
+}
+
+let summaryCacheDiskReadCountForTest = 0;
+
+function readSummaryFileCached(path: string): RunSummaryReadModel | undefined {
+  const key = resolve(path);
+  const current = statSummaryFile(key);
+  const cached = memorySummaryCaches.get(key);
+  if (cached && summaryStateUnchanged(cached.state, current)) return cloneSummary(cached.summary);
+  if (!current.exists) {
+    memorySummaryCaches.delete(key);
+    return undefined;
+  }
+  try {
+    summaryCacheDiskReadCountForTest += 1;
+    const summary = JSON.parse(readFileSync(key, "utf8")) as RunSummaryReadModel;
+    memorySummaryCaches.set(key, { state: current, summary: cloneSummary(summary) });
+    return cloneSummary(summary);
+  } catch {
+    memorySummaryCaches.delete(key);
+    return undefined;
+  }
+}
+
+function invalidateSummaryCache(path: string): void {
+  memorySummaryCaches.delete(resolve(path));
+}
+
+export function summaryCacheStatsForTest(): { diskReads: number } {
+  return { diskReads: summaryCacheDiskReadCountForTest };
+}
+
+export function resetSummaryCacheStatsForTest(): void {
+  summaryCacheDiskReadCountForTest = 0;
 }
 
 function hasUnparsedTail(sources: IndexSourceState[]): boolean {
@@ -324,7 +397,11 @@ export class RunStore {
     this.writeIndexCache(cache);
     for (const record of cache.records) {
       const summary = this.rebuildSummaryByRunDir(record.runDir, this.readSummaryByRunDir(record.runDir));
-      if (summary) atomicWriteJson(summaryPathForRunDir(record.runDir), summary);
+      if (summary) {
+        const path = summaryPathForRunDir(record.runDir);
+        atomicWriteJson(path, summary);
+        invalidateSummaryCache(path);
+      }
     }
     return this.readIndexCache();
   }
@@ -363,7 +440,7 @@ export class RunStore {
   }
 
   private readSummaryByRunDir(runDir: string): RunSummaryReadModel | undefined {
-    return readSummaryFile(summaryPathForRunDir(runDir)) ?? this.rebuildSummaryByRunDir(runDir);
+    return readSummaryFileCached(summaryPathForRunDir(runDir)) ?? this.rebuildSummaryByRunDir(runDir);
   }
 
   readRunSummary(runId: string): RunSummaryReadModel | undefined {
@@ -386,7 +463,10 @@ export class RunStore {
   writeStatus(status: RunStatus): void {
     const paths = this.pathsFor({ runId: status.runId });
     atomicWriteJson(paths.statusPath, status);
-    atomicWriteJson(summaryPathForRunDir(paths.runDir), summaryFromStatus(status, paths.runDir, this.readSummaryByRunDir(paths.runDir)));
+    const summaryPath = summaryPathForRunDir(paths.runDir);
+    const summary = summaryFromStatus(status, paths.runDir, this.readSummaryByRunDir(paths.runDir));
+    atomicWriteJson(summaryPath, summary);
+    invalidateSummaryCache(summaryPath);
   }
 
   readStatus(runId: string): RunStatus {
@@ -399,7 +479,12 @@ export class RunStore {
     const paths = this.pathsFor({ runId });
     appendJsonl(paths.eventsPath, event);
     const previous = this.readSummaryByRunDir(paths.runDir);
-    if (previous) atomicWriteJson(summaryPathForRunDir(paths.runDir), applyEventToSummary(previous, event));
+    if (previous) {
+      const summaryPath = summaryPathForRunDir(paths.runDir);
+      const summary = applyEventToSummary(previous, event);
+      atomicWriteJson(summaryPath, summary);
+      invalidateSummaryCache(summaryPath);
+    }
   }
 
   readEvents(runId: string, cursor?: WaitCursor): { records: RunEvent[]; cursor: WaitCursor } {
@@ -420,7 +505,12 @@ export class RunStore {
     const paths = this.pathsFor({ runId: result.runId });
     atomicWriteJson(paths.resultPath, result);
     const previous = this.readSummaryByRunDir(paths.runDir);
-    if (previous) atomicWriteJson(summaryPathForRunDir(paths.runDir), applyResultToSummary(previous, result));
+    if (previous) {
+      const summaryPath = summaryPathForRunDir(paths.runDir);
+      const summary = applyResultToSummary(previous, result);
+      atomicWriteJson(summaryPath, summary);
+      invalidateSummaryCache(summaryPath);
+    }
   }
 
   readResult(runId: string): RunResult | undefined {

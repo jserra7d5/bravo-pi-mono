@@ -1,15 +1,18 @@
 import { RunStore } from "../../src/runStore.js";
-import type { RunIndexRecord, TaskRecord } from "../../src/types.js";
+import type { DerivedTaskState, RunIndexRecord, TaskRecord } from "../../src/types.js";
 import { readWatcherSnapshot, type RunSummaryRow } from "../../src/watcher.js";
 import { renderWidgetCard, widgetRowFromSummary, type WidgetRowInput } from "./renderers.js";
 import { isResultWakeupCurrent } from "./wakeups.js";
 import { TaskStore } from "../../src/taskStore.js";
-import { deriveTaskState } from "../../src/taskState.js";
+import { deriveTaskStates, unresolvedDependencyIdsByTask } from "../../src/taskState.js";
 
 export interface LiveWidgetSnapshot {
   rows: RunSummaryRow[];
   totalCost: number | undefined;
   tasks: TaskRecord[];
+  taskStates: Map<string, DerivedTaskState>;
+  taskUnresolvedDependencyIds: Map<string, string[]>;
+  runIdToTask: Map<string, TaskRecord>;
   visibleTasks: TaskRecord[];
 }
 
@@ -73,6 +76,19 @@ function rowWithCurrentResultReady(input: LiveWidgetInput, row: RunSummaryRow): 
   return { ...row, resultReady: false };
 }
 
+function totalCostForRows(rows: RunSummaryRow[]): number | undefined {
+  let total = 0;
+  let any = false;
+  for (const row of rows) {
+    const cost = row.metrics?.cost?.total;
+    if (typeof cost === "number" && Number.isFinite(cost)) {
+      total += cost;
+      any = true;
+    }
+  }
+  return any ? total : undefined;
+}
+
 function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVisibleMs: number): BuildResult {
   const snapshot = readWatcherSnapshot(input.store, {
     parentRunId: input.parentRunId,
@@ -85,22 +101,13 @@ function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVis
     .map((row) => rowWithCurrentResultReady(input, row))
     .filter((row) => visible(row, now, terminalCompletedVisibleMs))
     .sort((a, b) => rowPriority(a) - rowPriority(b) || b.updatedAt.localeCompare(a.updatedAt));
-  let total = 0;
-  let any = false;
-  for (const row of rows) {
-    const cost = row.metrics?.cost?.total;
-    if (typeof cost === "number" && Number.isFinite(cost)) {
-      total += cost;
-      any = true;
-    }
-  }
-  return { rows, totalCost: any ? total : undefined };
+  return { rows, totalCost: totalCostForRows(rows) };
 }
 
-function visibleTasksFor(tasks: TaskRecord[], now: number): TaskRecord[] {
+function visibleTasksFor(tasks: TaskRecord[], taskStates: Map<string, DerivedTaskState>, now: number): TaskRecord[] {
   const graceMs = 5_000;
   return tasks.filter(t => {
-    const state = deriveTaskState(t, tasks);
+    const state = taskStates.get(t.id) ?? t.status;
     if (state === "completed" || state === "failed" || state === "cancelled") {
       const updatedAtMs = Date.parse(t.updatedAt);
       if (Number.isFinite(updatedAtMs)) {
@@ -111,29 +118,7 @@ function visibleTasksFor(tasks: TaskRecord[], now: number): TaskRecord[] {
   });
 }
 
-function readTasksForSnapshot(input: LiveWidgetInput): TaskRecord[] {
-  if (!input.rootSessionId) return [];
-  try {
-    return new TaskStore(input.store).listTasks(input.rootSessionId);
-  } catch {
-    return [];
-  }
-}
-
-function prepareLiveWidgetSnapshot(input: LiveWidgetInput, now: number): LiveWidgetSnapshot {
-  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
-  const { rows, totalCost } = buildSnapshot(input, now, terminalCompletedVisibleMs);
-  const tasks = readTasksForSnapshot(input);
-  return { rows, totalCost, tasks, visibleTasks: visibleTasksFor(tasks, now) };
-}
-
-function renderAt(input: LiveWidgetInput, width: number, now: number): string[] {
-  const maxRows = input.maxRows ?? 5;
-  const snapshot = input.snapshot ?? prepareLiveWidgetSnapshot(input, now);
-  const { rows, totalCost, tasks, visibleTasks } = snapshot;
-
-  if (!rows.length && !visibleTasks.length) return [];
-
+function runIdTaskMap(tasks: TaskRecord[]): Map<string, TaskRecord> {
   const runIdToTask = new Map<string, TaskRecord>();
   for (const task of tasks) {
     if (task.owner?.runId) {
@@ -145,15 +130,53 @@ function renderAt(input: LiveWidgetInput, width: number, now: number): string[] 
       }
     }
   }
+  return runIdToTask;
+}
 
-  const widgetRows: WidgetRowInput[] = rows.map((row) => {
+function readTasksForSnapshot(input: LiveWidgetInput): TaskRecord[] {
+  if (!input.rootSessionId) return [];
+  try {
+    return new TaskStore(input.store).listTasks(input.rootSessionId, { reconcile: "nonblocking" });
+  } catch {
+    return [];
+  }
+}
+
+function prepareLiveWidgetSnapshot(input: LiveWidgetInput, now: number): LiveWidgetSnapshot {
+  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
+  const { rows, totalCost } = buildSnapshot(input, now, terminalCompletedVisibleMs);
+  const tasks = readTasksForSnapshot(input);
+  const taskStates = deriveTaskStates(tasks);
+  const taskUnresolvedDependencyIds = unresolvedDependencyIdsByTask(tasks);
+  return {
+    rows,
+    totalCost,
+    tasks,
+    taskStates,
+    taskUnresolvedDependencyIds,
+    runIdToTask: runIdTaskMap(tasks),
+    visibleTasks: visibleTasksFor(tasks, taskStates, now),
+  };
+}
+
+function renderAt(input: LiveWidgetInput, width: number, now: number): string[] {
+  const maxRows = input.maxRows ?? 5;
+  const snapshot = input.snapshot ?? prepareLiveWidgetSnapshot(input, now);
+  const { rows, tasks, taskStates, taskUnresolvedDependencyIds, runIdToTask } = snapshot;
+  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
+  const visibleRows = rows.filter((row) => visible(row, now, terminalCompletedVisibleMs));
+  const visibleTasks = visibleTasksFor(tasks, taskStates, now);
+
+  if (!visibleRows.length && !visibleTasks.length) return [];
+
+  const widgetRows: WidgetRowInput[] = visibleRows.map((row) => {
     const task = runIdToTask.get(row.runId);
     const baseRow = widgetRowFromSummary(row, now);
     if (task) {
       baseRow.task = {
         id: task.id,
         title: task.title,
-        status: deriveTaskState(task, tasks),
+        status: taskStates.get(task.id) ?? task.status,
         activeForm: task.activeForm
       };
     }
@@ -164,9 +187,11 @@ function renderAt(input: LiveWidgetInput, width: number, now: number): string[] 
     width: clampWidth(width),
     rows: widgetRows,
     maxRows,
-    totalCost,
+    totalCost: totalCostForRows(visibleRows),
     tasks: visibleTasks,
     allTasks: tasks,
+    taskStates,
+    taskUnresolvedDependencyIds,
     now
   });
 }
