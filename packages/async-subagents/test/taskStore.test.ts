@@ -92,6 +92,16 @@ test("TaskStore reopen re-emits a ready wakeup so the task can be restarted", ()
   assert.equal(s.tasks.readTask(s.rootSessionId, task.id).status, "pending");
 });
 
+test("TaskStore reopen of an already-pending ready task does not duplicate the ready wakeup", () => {
+  const s = store();
+  const [task] = s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  // The task is pending + ready from creation (one create-time task.ready exists).
+  const readyBefore = s.tasks.readEvents(s.rootSessionId).filter((event) => event.type === "task.ready" && event.taskId === task.id).length;
+  s.tasks.reopenTask(s.rootSessionId, task.id, { reason: "no-op reopen" });
+  const readyAfter = s.tasks.readEvents(s.rootSessionId).filter((event) => event.type === "task.ready" && event.taskId === task.id).length;
+  assert.equal(readyAfter, readyBefore); // no new ready event: the task was already ready, no transition
+});
+
 test("TaskStore readEvents supports incremental cursors", () => {
   const s = store();
   const [task] = s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;

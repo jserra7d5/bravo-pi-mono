@@ -15,11 +15,12 @@ export function isTaskReady(task: TaskRecord, allTasks: TaskRecord[]): boolean {
 
 // A delivered `task.ready` wakeup is a one-shot nudge to start a ready task. By
 // the time the parent polls, the task may already have been claimed/started (the
-// good path) or otherwise moved off `pending`. Treat anything that is no longer
-// an unowned pending task as a stale nudge so we do not re-surface work the
-// parent already picked up.
-export function isReadyWakeupStillActionable(task: TaskRecord | undefined): boolean {
-  return Boolean(task) && task!.status === "pending" && !task!.owner;
+// good path), or its dependencies may have regressed (e.g. an upstream task was
+// reopened), leaving it pending-but-blocked. Only deliver the nudge if the task
+// is still actually ready by derived state — otherwise `subagent_start` would
+// reject it as not-ready. This requires the full task set to resolve deps.
+export function isReadyWakeupStillActionable(task: TaskRecord | undefined, allTasks: TaskRecord[]): boolean {
+  return Boolean(task) && isTaskReady(task!, allTasks);
 }
 
 export function deriveTaskState(task: TaskRecord, allTasks: TaskRecord[]): DerivedTaskState {

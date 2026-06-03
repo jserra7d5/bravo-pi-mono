@@ -433,13 +433,21 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
   const cursor = state.taskEventCursors?.[input.rootSessionId] ?? { eventOffset: 0 };
   const taskEventRead = taskStore.readEvents(input.rootSessionId, cursor);
   let taskCursorBlocked = false;
+  // Lazily loaded only if a task.ready event is encountered; used to confirm the
+  // task is still ready by derived state (deps satisfied, unowned) before nudging.
+  let readyCheckTasks: ReturnType<TaskStore["listTasks"]> | undefined;
   for (const event of taskEventRead.records.filter((event) => event.parentRunId === input.parentRunId && event.wake === true && ["task.result_submitted", "task.failed", "task.needs_input", "task.ready"].includes(event.type))) {
     if (state.delivered[taskEventDeliveryKey(event)] || state.handled[taskEventDeliveryKey(event)]) continue;
     let task; try { task = taskStore.readTask(input.rootSessionId, event.taskId); } catch { /* event remains deliverable without task details */ }
-    // A `task.ready` nudge is only worth delivering if the task is still an
-    // unowned pending task. If the parent already claimed/started it (the good
-    // path) the nudge is stale; skip it but let the cursor advance past it.
-    if (event.type === "task.ready" && !isReadyWakeupStillActionable(task)) continue;
+    // A `task.ready` nudge is only worth delivering if the task is still ready
+    // by derived state — unowned, pending, and all dependencies satisfied. If the
+    // parent already claimed/started it, or an upstream task was reopened and
+    // re-blocked it, the nudge is stale; skip it but let the cursor advance past
+    // it (continue, not break).
+    if (event.type === "task.ready") {
+      if (!readyCheckTasks) readyCheckTasks = taskStore.listTasks(input.rootSessionId, { reconcile: false });
+      if (!isReadyWakeupStillActionable(task, readyCheckTasks)) continue;
+    }
     const delivery = taskDelivery(event, task);
     if (input.modelFollowUpOnly && !isActionableModelWakeup(delivery)) continue;
     if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) { taskCursorBlocked = true; break; }

@@ -250,6 +250,28 @@ test("accepting a task wakes the parent to start a newly-ready dependent", () =>
   assert.deepEqual(ready?.message.next, [{ tool: "subagent_start", args: { taskId: review.id } }]);
 });
 
+test("pollWakeups skips a ready wakeup when a dependency regressed before delivery", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const { tasks: created } = taskStore.createTasks(parentRunId, { parentRunId, tasks: [
+    { alias: "impl", title: "Implement", description: "Do it" },
+    { alias: "review", title: "Review", description: "Check it", dependsOn: ["impl"] },
+  ] });
+  const [impl, review] = created;
+  const token = newTaskToken();
+  taskStore.claimTask(parentRunId, impl.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.submitResult(parentRunId, impl.id, { runId: "task_run_1", taskToken: token, summary: "impl done" });
+  taskStore.acceptResult(parentRunId, impl.id, {}); // review becomes ready -> task.ready(review) emitted
+  // Reopen impl before the review ready wakeup is delivered; review is now blocked again.
+  taskStore.reopenTask(parentRunId, impl.id, { reason: "redo" });
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  // The stale ready nudge for the now-blocked dependent must not be delivered.
+  assert.equal(deliveries.some((d) => d.message.taskEvent?.taskId === review.id && d.message.state === "task.ready"), false);
+});
+
 test("pollWakeups ignores unsubscribed runs", () => {
   const { root, store } = workspace();
   const parentRunId = "root_test";
