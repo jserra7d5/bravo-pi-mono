@@ -45,7 +45,7 @@ Expected:
 
 - `T-0001` derived state is `ready`.
 - `T-0002` derived state is `blocked`.
-- `task_get` default view returns compact status/pointers only, not full bodies.
+- `task_get` default view returns compact status/pointers for tasks without submitted results.
 
 ### 2. Canonical task-owned launch
 
@@ -87,8 +87,8 @@ Expected:
 
 - Parent receives `[TASK RESULT READY — NOT USER INPUT]` wakeup.
 - Task status is `result_ready`.
-- Default `task_get` shows summary and receipt/artifact pointers only.
-- `receipt` view shows bounded receipt details.
+- Default `task_get` shows summary plus dereferenced receipt details (or explicit receipt diagnostics) for result-ready tasks.
+- Explicit `view: "status"` opts down to summary and receipt/artifact pointers only; `receipt` view shows bounded receipt details.
 - Child final answer is brief and does not duplicate the full receipt.
 
 ### 5. Parent acceptance unlocks dependents

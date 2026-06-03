@@ -243,19 +243,18 @@ function taskWakeupTitle(eventType: TaskEvent["type"]): string {
   }
 }
 
-// Drive the parent toward the next concrete action for each task event instead
-// of always pointing back at task_get (a passive read). A ready task should be
-// started; a submitted result should be accepted (so dependents unblock); a
-// failure/blocker should be inspected.
+// Drive the parent toward the next concrete action for each task event. A ready
+// task should be started; a submitted result should be read/reviewed before any
+// accept/reopen decision; a failure/blocker should be inspected.
 function taskWakeupNext(event: TaskEvent): Array<{ tool: string; args: Record<string, unknown> }> {
   switch (event.type) {
     case "task.ready": return [{ tool: "subagent_start", args: { taskId: event.taskId } }];
-    case "task.result_submitted": return [{ tool: "task_accept_result", args: { taskId: event.taskId } }, { tool: "task_get", args: { taskId: event.taskId } }];
+    case "task.result_submitted": return [{ tool: "task_get", args: { taskId: event.taskId, view: "receipt" } }];
     default: return [{ tool: "task_get", args: { taskId: event.taskId } }];
   }
 }
 
-function taskDelivery(event: TaskEvent, task?: ReturnType<TaskStore["readTask"]>): WakeupDelivery {
+function taskDelivery(event: TaskEvent, task?: ReturnType<TaskStore["readTask"]>, terminal?: WakeupDelivery): WakeupDelivery {
   return {
     deliveryKey: taskEventDeliveryKey(event),
     runId: event.runId ?? task?.owner?.runId ?? event.taskId,
@@ -265,8 +264,13 @@ function taskDelivery(event: TaskEvent, task?: ReturnType<TaskStore["readTask"]>
       runId: event.runId ?? task?.owner?.runId ?? "",
       state: event.type,
       summary: event.summary,
+      body: terminal?.message.body,
+      bodyAvailable: terminal?.message.bodyAvailable,
+      bodyTruncation: terminal?.message.bodyTruncation,
       taskEvent: event,
       task: { taskId: event.taskId, title: task?.title, status: task?.status, owner: task?.owner ? { runId: task.owner.runId, displayName: task.owner.displayName, agent: task.owner.agent } : undefined, receiptPath: task?.result?.receiptPath },
+      result: terminal?.message.result,
+      status: terminal?.message.status,
       next: taskWakeupNext(event),
     },
   };
@@ -314,6 +318,7 @@ function pendingForRun(store: RunStore, parentRunId: string, runId: string, noti
   return deliveries;
 }
 
+const TASK_TERMINAL_WAKEUP_COALESCE_MS = 2_000;
 const DELIVERY_CLAIM_TTL_MS = 60_000;
 
 function claimDelivery(store: RunStore, deliveryKey: string, ownerId: string, nowMs?: number): boolean {
@@ -448,6 +453,33 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
       if (!readyCheckTasks) readyCheckTasks = taskStore.listTasks(input.rootSessionId, { reconcile: false });
       if (!isReadyWakeupStillActionable(task, readyCheckTasks)) continue;
     }
+    if (event.type === "task.result_submitted" && event.runId) {
+      const subscription = subscriptions.get(event.runId);
+      const terminalNotifyEnabled = Boolean(subscription && subscription.notifyOn.some((type) => ["result", "completed", "failed", "cancelled", "expired"].includes(type)));
+      let terminal: WakeupDelivery | undefined;
+      if (terminalNotifyEnabled) {
+        try { terminal = pendingForRun(input.store, input.parentRunId, event.runId, subscription?.notifyOn).find((item) => item.message.result); } catch { terminal = undefined; }
+      }
+      if (terminal) {
+        const delivery = taskDelivery(event, task, terminal);
+        if (input.modelFollowUpOnly && !isActionableModelWakeup(delivery)) continue;
+        if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) { taskCursorBlocked = true; break; }
+        if (isWakeupKeyHandled(input.store, input.parentRunId, delivery.deliveryKey)) { releaseDeliveryClaim(input.store, delivery.deliveryKey); continue; }
+        deliveries.push(delivery);
+        const deliveredAt = new Date(input.nowMs ?? Date.now()).toISOString();
+        state.delivered[delivery.deliveryKey] = deliveredAt;
+        // The task-owned result wakeup is the canonical notification for this
+        // completion. Mark the run terminal key handled too so the duplicate
+        // plain subagent result cannot surface on a later subscription scan.
+        state.handled[terminal.deliveryKey] = deliveredAt;
+        stateChanged = true;
+        deliveredKeys.push(delivery.deliveryKey);
+        if (deliveries.length >= (input.limit ?? 5)) { taskCursorBlocked = true; break; }
+        continue;
+      }
+      const eventMs = Date.parse(event.createdAt);
+      if (terminalNotifyEnabled && Number.isFinite(eventMs) && (input.nowMs ?? Date.now()) - eventMs < TASK_TERMINAL_WAKEUP_COALESCE_MS) { taskCursorBlocked = true; break; }
+    }
     const delivery = taskDelivery(event, task);
     if (input.modelFollowUpOnly && !isActionableModelWakeup(delivery)) continue;
     if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) { taskCursorBlocked = true; break; }
@@ -463,8 +495,9 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
     state.taskEventCursors = { ...(state.taskEventCursors ?? {}), [input.rootSessionId]: taskEventRead.cursor };
     stateChanged = true;
   }
+  const suppressedRunIds = new Set(deliveries.filter((delivery) => delivery.message.result).map((delivery) => delivery.runId));
   const records = deliveries.length >= (input.limit ?? 5) ? [] : subscriptions.size
-    ? (input.records ?? input.store.listDirectChildren(input.parentRunId)).filter((record) => subscriptions.has(record.runId))
+    ? (input.records ?? input.store.listDirectChildren(input.parentRunId)).filter((record) => subscriptions.has(record.runId) && !suppressedRunIds.has(record.runId))
     : [];
   for (const record of records) {
     const subscription = subscriptions.get(record.runId);

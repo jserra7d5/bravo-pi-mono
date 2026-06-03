@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createRunEvent } from "../../src/events.js";
@@ -109,7 +109,77 @@ function taskStoreFor(cwd: string): TaskStore {
 }
 
 function compactTaskRows(tasks: ReturnType<TaskStore["listTasks"]>) {
-  return tasks.map((task) => ({ taskId: task.id, title: task.title, status: task.status, state: deriveTaskState(task, tasks), dependsOn: task.dependsOn, owner: task.owner ? { runId: task.owner.runId, displayName: task.owner.displayName, agent: task.owner.agent } : undefined, updatedAt: task.updatedAt }));
+  return tasks.map((task) => ({
+    taskId: task.id,
+    title: task.title,
+    status: task.status,
+    state: deriveTaskState(task, tasks),
+    dependsOn: task.dependsOn,
+    owner: task.owner ? { runId: task.owner.runId, displayName: task.owner.displayName, agent: task.owner.agent } : undefined,
+    resultReady: task.status === "result_ready",
+    resultSummary: task.result?.summary,
+    receiptPath: task.result?.receiptPath,
+    artifactPaths: task.result?.artifactPaths,
+    updatedAt: task.updatedAt,
+  }));
+}
+
+interface ReceiptReadResult { receipt?: unknown; diagnostic?: { state: "missing" | "unreadable" | "invalid"; message: string; receiptPath?: string } }
+
+function readReceipt(result: { receiptPath?: string } | undefined): ReceiptReadResult {
+  const receiptPath = result?.receiptPath;
+  if (!receiptPath) return { diagnostic: { state: "missing", message: "task result has no receiptPath" } };
+  if (!existsSync(receiptPath)) return { diagnostic: { state: "missing", message: "receipt file is missing", receiptPath } };
+  let rawText: string;
+  try {
+    rawText = readFileSync(receiptPath, "utf8");
+  } catch (error) {
+    return { diagnostic: { state: "unreadable", message: error instanceof Error ? error.message : String(error), receiptPath } };
+  }
+  try {
+    const raw = JSON.parse(rawText) as { receipt?: unknown } | undefined;
+    if (!raw || typeof raw !== "object") return { diagnostic: { state: "invalid", message: "receipt file did not contain a JSON object", receiptPath } };
+    return { receipt: Object.hasOwn(raw, "receipt") ? raw.receipt : raw };
+  } catch (error) {
+    return { diagnostic: { state: "invalid", message: error instanceof Error ? error.message : String(error), receiptPath } };
+  }
+}
+
+function resultWithReceipt<T extends { receiptPath?: string }>(result: T): T & { receipt?: unknown; receiptDiagnostic?: ReceiptReadResult["diagnostic"] } {
+  const receipt = readReceipt(result);
+  return { ...result, receipt: receipt.receipt, receiptDiagnostic: receipt.diagnostic };
+}
+
+function formatTaskListContent(summary: string, rows: ReturnType<typeof compactTaskRows>): string {
+  if (!rows.length) return summary;
+  return [summary, ...rows.map((row) => {
+    const owner = row.owner ? ` owner=${row.owner.runId}` : "";
+    const result = row.resultReady ? ` result_ready=${row.resultSummary ?? "yes"}` : "";
+    return `- ${row.taskId} [${row.state}/${row.status}] ${row.title}${owner}${result}`;
+  })].join("\n");
+}
+
+function formatTaskGetContent(summary: string, details: Record<string, unknown>, view: "status" | "receipt" | "full"): string {
+  const lines = [summary, `Status: ${details.state}/${details.status}`];
+  const owner = details.owner as { runId?: string; displayName?: string; agent?: string } | undefined;
+  if (owner?.runId) lines.push(`Owner: ${owner.runId}${owner.displayName ? ` (${owner.displayName})` : ""}${owner.agent ? ` agent=${owner.agent}` : ""}`);
+  const result = details.result as { summary?: string; receiptPath?: string; artifactPaths?: string[]; receipt?: unknown; receiptDiagnostic?: { state?: string; message?: string } } | undefined;
+  if (result) {
+    lines.push(`Result: ${result.summary ?? "submitted"}`);
+    if (result.receiptPath) lines.push(`Receipt path: ${result.receiptPath}`);
+    if (result.artifactPaths?.length) lines.push(`Artifacts: ${result.artifactPaths.join(", ")}`);
+    if (view !== "status" && result.receipt !== undefined) lines.push("Receipt:", JSON.stringify(result.receipt, null, 2));
+    if (result.receiptDiagnostic) lines.push(`Receipt diagnostic: ${result.receiptDiagnostic.state} - ${result.receiptDiagnostic.message}`);
+  }
+  return lines.join("\n");
+}
+
+function taskReceiptForRun(cwd: string, root: RootSessionIdentity, runId: string): Record<string, unknown> | undefined {
+  try {
+    const task = taskStoreFor(cwd).listTasks(root.rootSessionId).find((item) => item.owner?.runId === runId || item.attempts.some((attempt) => attempt.runId === runId));
+    if (!task) return undefined;
+    return { taskId: task.id, result: task.result ? resultWithReceipt(task.result) : undefined, receiptDiagnostic: task.result ? undefined : { state: "missing", message: "task has no submitted result receipt" } };
+  } catch { return undefined; }
 }
 
 const SKILL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/;
@@ -628,7 +698,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const states = Array.isArray(params.states) ? new Set(params.states.filter((s): s is string => typeof s === "string")) : undefined;
         const includeCompleted = params.includeCompleted === true; const limit = typeof params.limit === "number" ? params.limit : 50;
         const rows = compactTaskRows(all).filter((row) => (includeCompleted || (row.status !== "completed" && row.status !== "cancelled")) && (!states || states.has(row.status) || states.has(String(row.state)))).slice(0, limit);
-        return response(`${rows.length} task(s)`, { rows, counts: { total: all.length, result_ready: all.filter((t) => t.status === "result_ready").length, running: all.filter((t) => t.status === "running").length, ready: all.filter((t) => deriveTaskState(t, all) === "ready").length, blocked: all.filter((t) => deriveTaskState(t, all) === "blocked").length, completed: all.filter((t) => t.status === "completed").length, cancelled: all.filter((t) => t.status === "cancelled").length } });
+        const summary = `${rows.length} task(s)`;
+        return response(summary, { rows, counts: { total: all.length, result_ready: all.filter((t) => t.status === "result_ready").length, running: all.filter((t) => t.status === "running").length, ready: all.filter((t) => deriveTaskState(t, all) === "ready").length, blocked: all.filter((t) => deriveTaskState(t, all) === "blocked").length, completed: all.filter((t) => t.status === "completed").length, cancelled: all.filter((t) => t.status === "cancelled").length } }, false, formatTaskListContent(summary, rows));
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "task_list"),
       renderResult: renderSubagentToolResultComponent,
@@ -637,16 +708,21 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     {
       name: "task_get",
       label: "Task Get",
-      description: "Read one task in detail with progressive disclosure: default view returns status and pointers; view=receipt adds the submitted result receipt; view=full adds description, attempts, and recent events. Use after a task wakeup when the wakeup summary is not enough to decide whether to accept, reopen, or unblock.",
+      description: "Read one task in detail with progressive disclosure: default view is smart and includes the submitted result receipt/diagnostic when a task is result_ready/completed; explicit view=status returns compact status and pointers only; view=receipt adds the submitted result receipt; view=full adds description, attempts, and recent events. Use after a task wakeup when the wakeup summary is not enough to decide whether to accept, reopen, or unblock.",
       parameters: taskGetSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const taskId = String(params.taskId); const store = taskStoreFor(cwd); const all = store.listTasks(root.rootSessionId); const task = store.readTask(root.rootSessionId, taskId); const deps = unresolvedDependencies(task, all);
+        const explicitView = typeof params.view === "string";
         const view = params.view === "receipt" || params.view === "full" ? params.view : "status";
         markTaskWakeupHandled(storeFor(cwd), root.parentRunId, task.id);
-        const base: Record<string, unknown> = { taskId: task.id, title: task.title, status: task.status, state: deriveTaskState(task, all), dependsOn: task.dependsOn, unresolvedDependencies: deps.map((d) => ({ taskId: d.id, title: d.title, status: d.status })), owner: task.owner ? { runId: task.owner.runId, displayName: task.owner.displayName, agent: task.owner.agent } : undefined, result: task.result ? { state: task.result.state, summary: task.result.summary, receiptPath: task.result.receiptPath, artifactPaths: task.result.artifactPaths, submittedAt: task.result.submittedAt } : undefined, next: task.status === "result_ready" ? [{ tool: "task_accept_result", args: { taskId: task.id } }] : [] };
-        if (view !== "status") base.result = task.result;
+        const compactResult = task.result ? { state: task.result.state, summary: task.result.summary, receiptPath: task.result.receiptPath, artifactPaths: task.result.artifactPaths, submittedAt: task.result.submittedAt } : undefined;
+        const fullResult = task.result ? resultWithReceipt(task.result) : undefined;
+        const includeReceiptByDefault = !explicitView && Boolean(task.result) && ["result_ready", "completed"].includes(task.status);
+        const base: Record<string, unknown> = { taskId: task.id, title: task.title, status: task.status, state: deriveTaskState(task, all), dependsOn: task.dependsOn, unresolvedDependencies: deps.map((d) => ({ taskId: d.id, title: d.title, status: d.status })), owner: task.owner ? { runId: task.owner.runId, displayName: task.owner.displayName, agent: task.owner.agent } : undefined, result: view === "status" && !includeReceiptByDefault ? compactResult : fullResult, next: task.status === "result_ready" ? [{ tool: "task_get", args: { taskId: task.id, view: "receipt" } }, { tool: "task_accept_result", args: { taskId: task.id } }] : [] };
         if (view === "full") Object.assign(base, { description: task.description, activeForm: task.activeForm, attempts: task.attempts, events: store.readEvents(root.rootSessionId).filter((e) => e.taskId === task.id).slice(-20) });
-        return response(`Task ${task.id}: ${task.title}`, base);
+        const summary = `Task ${task.id}: ${task.title}`;
+        const contentView = includeReceiptByDefault && view === "status" ? "receipt" : view;
+        return response(summary, base, false, formatTaskGetContent(summary, base, contentView));
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "task_get"),
       renderResult: renderSubagentToolResultComponent,
@@ -737,7 +813,12 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           const tasks = taskStoreFor(sessionCwd);
           const all = tasks.listTasks(root.rootSessionId);
           const task = tasks.readTask(root.rootSessionId, taskId);
-          if (deriveTaskState(task, all) !== "ready") return response(`Task ${taskId} is not ready`, { code: "TASK_NOT_READY", taskId, state: deriveTaskState(task, all) }, true);
+          const state = deriveTaskState(task, all);
+          if (task.owner || ["running", "result_ready", "completed"].includes(task.status)) {
+            const existingRunId = task.owner?.runId ?? task.attempts.at(-1)?.runId;
+            return response(`Task ${taskId} is already ${task.status}; no new subagent launched`, { code: "TASK_START_IDEMPOTENT", idempotent: true, started: false, taskId, state, status: task.status, runId: existingRunId, owner: task.owner ? { runId: task.owner.runId, displayName: task.owner.displayName, agent: task.owner.agent } : undefined, result: task.result, rootSessionId: root.rootSessionId });
+          }
+          if (state !== "ready") return response(`Task ${taskId} is not ready`, { code: "TASK_NOT_READY", taskId, state }, true);
           taskRunId = newRunId();
           const token = newTaskToken();
           const displayName = String(params.agent);
@@ -920,22 +1001,26 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const includeArtifacts = params.includeArtifacts !== false;
         const maxBytes = typeof params.maxBytes === "number" ? params.maxBytes : 64_000;
         const body = shapeResultBody(result.body, maxBytes, includeBody);
+        const taskReceipt = taskReceiptForRun(cwd, root, runId);
         const details = {
           ...result,
           body: body.body,
           bodyTruncation: body.bodyTruncation,
           artifacts: includeArtifacts ? result.artifacts : undefined,
+          taskReceipt,
           runDir,
           piSessionPath: result.piSessionPath,
           requestedPiSessionPath: result.requestedPiSessionPath,
           launchLogPath: join(runDir, "logs", "launch.json"),
           logsDir: join(runDir, "logs"),
           artifactsDir: join(runDir, "artifacts"),
-          next: [],
+          next: taskReceipt?.taskId ? [{ tool: "task_get", args: { taskId: taskReceipt.taskId, view: "receipt" } }] : [],
         };
         const summary = summarizeRunResult(result, runId);
+        let content = resultBodyContent(summary, result, body);
+        if (taskReceipt) content += `\n\nTask receipt (${taskReceipt.taskId}):\n${JSON.stringify(taskReceipt.result, null, 2)}`;
         await runtime.afterMutation?.(ctx, cwd, root);
-        return response(summary, details as Record<string, unknown>, false, resultBodyContent(summary, result, body));
+        return response(summary, details as Record<string, unknown>, false, content);
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_result"),
       renderResult: renderSubagentToolResultComponent,

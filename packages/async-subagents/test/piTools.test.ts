@@ -9,6 +9,7 @@ import { acquireRootSessionLease } from "../src/leases.js";
 import { createRunResult } from "../src/result.js";
 import { createRootSession } from "../src/rootSession.js";
 import { RunStore } from "../src/runStore.js";
+import { TaskStore, hashTaskToken, newTaskToken } from "../src/taskStore.js";
 import { startSubagent } from "../src/start.js";
 import { createInitialStatus } from "../src/status.js";
 import { NAME_PACKS } from "../src/namePacks.js";
@@ -90,6 +91,54 @@ test("task_list defaults to active queue after task_clear while includeCompleted
     if (previousSingularRunId === undefined) delete process.env.ASYNC_SUBAGENT_RUN_ID;
     else process.env.ASYNC_SUBAGENT_RUN_ID = previousSingularRunId;
   }
+});
+
+test("task_get default and receipt view surface receipt body and model-facing content", async () => {
+  const w = workspace();
+  const built = tools(w.identity);
+  const taskStore = new TaskStore(new RunStore({ cwd: w.root }));
+  const [task] = taskStore.createTasks(w.identity.rootSessionId, { parentRunId: w.identity.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const token = newTaskToken();
+  taskStore.claimTask(w.identity.rootSessionId, task.id, { runId: "run_task_1", agent: "worker", displayName: "Worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.submitResult(w.identity.rootSessionId, task.id, { runId: "run_task_1", taskToken: token, summary: "changed files", receipt: { changedFiles: ["src/a.ts"], testsRun: ["npm test"] }, artifactPaths: [join(w.root, "artifact.md")] });
+
+  const defaultResult = await built.task_get.execute("get-default", { taskId: task.id }, undefined, undefined, { cwd: w.root });
+  const statusResult = await built.task_get.execute("get-status", { taskId: task.id, view: "status" }, undefined, undefined, { cwd: w.root });
+  const result = await built.task_get.execute("get", { taskId: task.id, view: "receipt" }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(defaultResult.isError, undefined);
+  assert.deepEqual(((defaultResult.details.result as { receipt?: unknown }).receipt as { changedFiles?: string[] }).changedFiles, ["src/a.ts"]);
+  assert.match(defaultResult.content[0]?.text ?? "", /Receipt:/);
+  assert.match(defaultResult.content[0]?.text ?? "", /src\/a\.ts/);
+  assert.equal((statusResult.details.result as { receipt?: unknown }).receipt, undefined);
+  assert.doesNotMatch(statusResult.content[0]?.text ?? "", /Receipt:/);
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(((result.details.result as { receipt?: unknown }).receipt as { changedFiles?: string[] }).changedFiles, ["src/a.ts"]);
+  assert.match(result.content[0]?.text ?? "", /Receipt:/);
+  assert.match(result.content[0]?.text ?? "", /src\/a\.ts/);
+  assert.match(result.content[0]?.text ?? "", /artifact\.md/);
+});
+
+test("subagent_result for task-owned runs includes the durable task receipt", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const built = tools(w.identity);
+  const runId = "run_task_2";
+  store.createRunDirectory({ runId, cwd: w.root, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId });
+  const taskStore = new TaskStore(store);
+  const [task] = taskStore.createTasks(w.identity.rootSessionId, { parentRunId: w.identity.parentRunId, tasks: [{ title: "Assess", description: "Assess it" }] }).tasks;
+  const token = newTaskToken();
+  taskStore.claimTask(w.identity.rootSessionId, task.id, { runId, agent: "scout", displayName: "Scout", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.submitResult(w.identity.rootSessionId, task.id, { runId, taskToken: token, summary: "findings ready", receipt: { findings: ["one", "two"] } });
+  store.writeResult(createRunResult({ runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", body: `Submitted result for ${task.id}` }));
+
+  const result = await built.subagent_result.execute("result", { runId }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, undefined);
+  assert.equal((result.details.taskReceipt as { taskId?: string }).taskId, task.id);
+  assert.deepEqual((((result.details.taskReceipt as { result?: { receipt?: unknown } }).result?.receipt as { findings?: string[] }).findings), ["one", "two"]);
+  assert.match(result.content[0]?.text ?? "", /Task receipt/);
+  assert.match(result.content[0]?.text ?? "", /findings/);
 });
 
 test("model-facing tool catalog does not expose subagent_wait", () => {
@@ -483,4 +532,62 @@ test("subagent_result returns body with truncation metadata", async () => {
   assert.deepEqual((result.details.bodyTruncation as { truncated?: boolean; returnedBytes?: number; maxBytes?: number }).truncated, true);
   assert.equal((result.details.bodyTruncation as { returnedBytes?: number }).returnedBytes, 8);
   assert.equal(store.readStatus(w.runId).resultReady, false);
+});
+
+test("task_get and subagent_result surface missing receipt diagnostics", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const built = tools(w.identity);
+  const runId = "run_task_missing_receipt";
+  store.createRunDirectory({ runId, cwd: w.root, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId });
+  const taskStore = new TaskStore(store);
+  const [task] = taskStore.createTasks(w.identity.rootSessionId, { parentRunId: w.identity.parentRunId, tasks: [{ title: "Assess", description: "Assess it" }] }).tasks;
+  const token = newTaskToken();
+  taskStore.claimTask(w.identity.rootSessionId, task.id, { runId, agent: "scout", displayName: "Scout", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.submitResult(w.identity.rootSessionId, task.id, { runId, taskToken: token, summary: "findings ready" });
+  store.writeResult(createRunResult({ runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", body: `Submitted result for ${task.id}` }));
+
+  const taskGet = await built.task_get.execute("get", { taskId: task.id }, undefined, undefined, { cwd: w.root });
+  assert.equal(((taskGet.details.result as { receiptDiagnostic?: { state?: string } }).receiptDiagnostic?.state), "missing");
+  assert.match(taskGet.content[0]?.text ?? "", /Receipt diagnostic: missing/);
+
+  const subagentResult = await built.subagent_result.execute("result", { runId }, undefined, undefined, { cwd: w.root });
+  assert.equal((((subagentResult.details.taskReceipt as { result?: { receiptDiagnostic?: { state?: string } } }).result?.receiptDiagnostic?.state)), "missing");
+  assert.match(subagentResult.content[0]?.text ?? "", /receiptDiagnostic/);
+});
+
+test("duplicate subagent_start for an already owned task is idempotent and does not launch", async () => {
+  const previousRunId = process.env.ASYNC_SUBAGENTS_RUN_ID;
+  const previousSingularRunId = process.env.ASYNC_SUBAGENT_RUN_ID;
+  delete process.env.ASYNC_SUBAGENTS_RUN_ID;
+  delete process.env.ASYNC_SUBAGENT_RUN_ID;
+  try {
+    const w = workspace();
+    const store = new RunStore({ cwd: w.root });
+    const taskStore = new TaskStore(store);
+    const [task] = taskStore.createTasks(w.identity.rootSessionId, { parentRunId: w.identity.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+    const token = newTaskToken();
+    taskStore.claimTask(w.identity.rootSessionId, task.id, { runId: "run_existing", agent: "worker", displayName: "Worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+    let launchCount = 0;
+    const built = buildSubagentTools({
+      getRootIdentity() { return w.identity; },
+      startSubagent(input) {
+        launchCount += 1;
+        return startSubagent({ ...input, fake: { mode: "immediate", body: "should not launch" } });
+      },
+    });
+    const byName = Object.fromEntries(built.map((tool) => [tool.name, tool]));
+
+    const result = await byName.subagent_start.execute("start", { taskId: task.id, agent: "worker", task: "Do it" }, undefined, undefined, { cwd: w.root });
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.details.idempotent, true);
+    assert.equal(result.details.runId, "run_existing");
+    assert.equal(launchCount, 0);
+  } finally {
+    if (previousRunId === undefined) delete process.env.ASYNC_SUBAGENTS_RUN_ID;
+    else process.env.ASYNC_SUBAGENTS_RUN_ID = previousRunId;
+    if (previousSingularRunId === undefined) delete process.env.ASYNC_SUBAGENT_RUN_ID;
+    else process.env.ASYNC_SUBAGENT_RUN_ID = previousSingularRunId;
+  }
 });

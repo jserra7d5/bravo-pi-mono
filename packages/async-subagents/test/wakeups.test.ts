@@ -176,6 +176,45 @@ test("pollWakeups caps terminal result body by code point with recovery marker",
   assert.equal(store.readStatus(runId).resultReady, true);
 });
 
+test("pollWakeups coalesces task-owned terminal results into a task result wakeup", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const runId = "task_run_coalesce";
+  store.createRunDirectory({ runId, cwd: root, parentRunId, rootSessionId: parentRunId });
+  const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const token = newTaskToken();
+  taskStore.claimTask(parentRunId, task.id, { runId, agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.submitResult(parentRunId, task.id, { runId, taskToken: token, summary: "task done" });
+  store.writeStatus({ ...createInitialStatus({
+    runId,
+    parentRunId,
+    rootSessionId: parentRunId,
+    agentName: "worker",
+    agentSource: "builtin",
+    definitionPath: "/builtin/worker.md",
+    mode: "oneshot",
+    cwd: root,
+    state: "completed",
+  }), resultReady: true });
+  store.writeResult(createRunResult({ runId, parentRunId, agentName: "worker", state: "completed", summary: "terminal done", body: "terminal body" }));
+  writeDeliverySubscription(store, { schemaVersion: SCHEMA_VERSION, parentRunId, runId, notifyOn: ["result", "completed"], createdAt: new Date().toISOString() });
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const first = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(first.length, 1);
+  assert.equal(first[0]?.deliveryKey, `task:${parentRunId}:${task.id}:${first[0]?.message.taskEvent?.eventId}`);
+  assert.equal(first[0]?.message.kind, "task_wakeup");
+  assert.equal(first[0]?.message.state, "task.result_submitted");
+  assert.equal(first[0]?.message.taskEvent?.taskId, task.id);
+  assert.equal(first[0]?.message.result?.runId, runId);
+  assert.equal(first[0]?.message.body, "terminal body");
+  assert.deepEqual(first[0]?.message.next, [{ tool: "task_get", args: { taskId: task.id, view: "receipt" } }]);
+
+  const second = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(second.length, 0, "plain terminal duplicate is suppressed after task-owned coalescing");
+});
+
 test("pollWakeups task cursor catch-up does not full-read unchanged task events", () => {
   const { root, store } = workspace();
   const parentRunId = "root_test";

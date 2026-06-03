@@ -100,7 +100,7 @@ function wakeupEnvelope(wakeup: WakeupMessage): string {
     if (wakeup.state === "task.ready") {
       lines.push(`This task's dependencies are satisfied and it has no owner. Start it now: subagent_start({ taskId: "${taskId}", agent: "<agent>" }). Choose the agent from the catalog by role fit. Do not wait for a further wakeup to begin a ready task.`);
     } else if (wakeup.state === "task.result_submitted") {
-      lines.push(`The owner submitted a result. Review it, then accept to mark the task complete and unblock dependents: task_accept_result({ taskId: "${taskId}" }). Use task_get({ taskId: "${taskId}", view: "receipt" }) first if you need the receipt detail, or task_reopen if the work is insufficient.`);
+      lines.push(`The owner submitted a result. Review the receipt first: task_get({ taskId: "${taskId}", view: "receipt" }). Then call task_accept_result({ taskId: "${taskId}" }) to mark the task complete and unblock dependents, or task_reopen if the work is insufficient.`);
     } else {
       lines.push(`Next: task_get({ taskId: "${taskId}" })`);
     }

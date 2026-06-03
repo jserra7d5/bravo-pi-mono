@@ -292,3 +292,54 @@ for (const eventType of ["question", "blocked"] as const) {
     }
   });
 }
+
+test("task-owned terminal result coalesces task and run result wakeups", async () => {
+  const session = await withStartedExtension();
+  try {
+    const taskStore = new TaskStore(session.store);
+    const runId = "task_run_coalesce";
+    session.store.createRunDirectory({ runId, cwd: session.cwd, parentRunId: session.identity.parentRunId, rootSessionId: session.identity.rootSessionId });
+    const [task] = taskStore.createTasks(session.identity.rootSessionId, { parentRunId: session.identity.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+    const token = newTaskToken();
+    taskStore.claimTask(session.identity.rootSessionId, task.id, { runId, agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+    taskStore.submitResult(session.identity.rootSessionId, task.id, { runId, taskToken: token, summary: "task done" });
+    session.store.writeStatus({ ...createInitialStatus({
+      runId,
+      parentRunId: session.identity.parentRunId,
+      rootSessionId: session.identity.rootSessionId,
+      agentName: "worker",
+      agentSource: "builtin",
+      definitionPath: "/builtin/worker.md",
+      mode: "oneshot",
+      cwd: session.cwd,
+      state: "completed",
+    }), resultReady: true });
+    session.store.writeResult(createRunResult({ runId, parentRunId: session.identity.parentRunId, agentName: "worker", state: "completed", body: "terminal body" }));
+    writeDeliverySubscription(session.store, {
+      schemaVersion: SCHEMA_VERSION,
+      parentRunId: session.identity.parentRunId,
+      runId,
+      notifyOn: ["result", "completed"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await session.poll();
+
+    const wakeups = session.sent.filter((item) => item.message?.customType === "async-subagent-message");
+    assert.equal(wakeups.length, 1);
+    assert.equal(wakeups[0]?.message.details?.kind, "task_wakeup");
+    assert.equal(wakeups[0]?.message.details?.taskEvent?.type, "task.result_submitted");
+    assert.equal(wakeups[0]?.message.details?.taskEvent?.taskId, task.id);
+    assert.equal(wakeups[0]?.message.details?.result?.runId, runId);
+    assert.deepEqual(wakeups[0]?.message.details?.next, [{ tool: "task_get", args: { taskId: task.id, view: "receipt" } }]);
+    assert.match(wakeups[0]?.message.content ?? "", /Review the receipt first: task_get/);
+    assert.match(wakeups[0]?.message.content ?? "", /task_accept_result/);
+    assert.match(wakeups[0]?.message.content ?? "", /task_reopen/);
+    assert.equal(session.store.readStatus(runId).resultReady, false);
+
+    await session.poll();
+    assert.equal(session.sent.filter((item) => item.message?.customType === "async-subagent-message").length, 1);
+  } finally {
+    await session.shutdown();
+  }
+});

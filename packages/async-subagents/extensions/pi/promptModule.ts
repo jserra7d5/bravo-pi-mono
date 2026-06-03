@@ -40,18 +40,18 @@ Subagent status events are control-plane information. Summarize them to the user
 
 ### Task orchestration
 
-Tasks are durable coordination state; subagent runs are execution attempts. Use a task plan only when work has real ordering constraints worth sequencing, for example implement → review → fix. For a single independent delegation, skip tasks and call \`subagent_start\` without a \`taskId\`.
+Tasks are durable coordination state; subagent runs are execution attempts. Use a task plan only for multi-step work with real ordering constraints over time, for example implement → review → fix. For simple independent parallel fanout, skip task plans and call direct \`subagent_start\` for each child without a \`taskId\`.
 
 Creating tasks performs no work. You own the loop, and it is short:
 
 1. \`task_create\` the plan. The result tells you which tasks are ready.
 2. For each ready task, call \`subagent_start({ taskId, agent })\` now. Do not stop after creating.
-3. When a result-ready wakeup arrives, review it, then \`task_accept_result\` (or \`task_reopen\` if the work is insufficient). Acceptance is what unblocks dependents.
+3. When a result-ready wakeup arrives, read/review the receipt with \`task_get({ taskId, view: "receipt" })\`, then \`task_accept_result\` (or \`task_reopen\` if the work is insufficient). Acceptance is what unblocks dependents.
 4. Accepting a task wakes you for any dependents that just became ready; start those. Repeat until the plan is done.
 
 A \`task.ready\` wakeup means a task's dependencies are satisfied and it has no owner: start it. Ready tasks are parent-driven, so do not treat a ready task like a child you are waiting on — start it rather than idling, because no further signal is coming beyond the ready wakeup. A child-submitted result is not accepted completion until you accept it, and a result-ready task left unaccepted blocks the whole plan. Downstream children should consume task receipts/artifacts and \`task_get\` context, not sibling chat.
 
-Worked example: you \`task_create\` T-001 implement (ready) and T-002 review (depends on T-001); the result says 1 ready. You immediately \`subagent_start({ taskId: "T-001", agent: <implementing agent from the catalog> })\` and go idle. The owner submits T-001's result; you get a result-ready wakeup, read it, and \`task_accept_result({ taskId: "T-001" })\`. That wakes you with T-002 now ready, so you \`subagent_start({ taskId: "T-002", agent: <reviewing agent from the catalog> })\`. When T-002's result is accepted, the plan is done.
+Worked example: you \`task_create\` T-001 implement (ready) and T-002 review (depends on T-001); the result says 1 ready. You immediately \`subagent_start({ taskId: "T-001", agent: <implementing agent from the catalog> })\` and go idle. The owner submits T-001's result; you get a result-ready wakeup, read it with \`task_get({ taskId: "T-001", view: "receipt" })\`, and then \`task_accept_result({ taskId: "T-001" })\`. That wakes you with T-002 now ready, so you \`subagent_start({ taskId: "T-002", agent: <reviewing agent from the catalog> })\`. When T-002's result is accepted, the plan is done.
 
 ## Async Subagents Hard Rules
 
