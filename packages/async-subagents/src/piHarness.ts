@@ -47,6 +47,7 @@ export interface PiCommand {
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const childControlEventTool = "subagent_event";
+export const childControlTaskTools = ["task_submit_result", "task_update_progress", "task_report_blocked"];
 
 function findPackageRoot(start: string): string {
   let current = resolve(start);

@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyAgentVariant, resolveAgentDefinition } from "./agentDefinitions.js";
 import { loadAsyncSubagentsConfig, type CodexAuthBalancerConfig } from "./config.js";
-import { buildPiCommand, childControlEventTool, childControlExtensionPath, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
+import { buildPiCommand, childControlEventTool, childControlExtensionPath, childControlTaskTools, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
 import { assemblePrompt } from "./promptAssembly.js";
 import { SubagentError } from "./errors.js";
 import { finalizeTerminalRun } from "./lifecycle.js";
@@ -348,7 +348,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   let forkSourceLeafId: string | undefined;
   let forkFallback: { allowed: boolean; used: boolean; reason?: string } | null = null;
 
-  const runtimeBuiltinTools = [childControlEventTool];
+  const runtimeBuiltinTools = input.taskAssignment ? [childControlEventTool, ...childControlTaskTools] : [childControlEventTool];
   const runtimeExtensionPaths = [childControlExtensionPath];
   const launchLogPath = join(paths.logsDir, "launch.json");
   const asyncSubagentsConfig = loadAsyncSubagentsConfig({ cwd, env: { ...process.env, ...(input.env ?? {}) } });
