@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import pkg from "../package.json" with { type: "json" };
-import extension, { BackgroundRunner, buildBackgroundBashTools, TaskRegistry } from "../src/index.js";
+import extension, { BackgroundRunner, buildBackgroundBashTools, clearBackgroundBashWidget, TaskRegistry, updateBackgroundBashWidget } from "../src/index.js";
 import { readConfig } from "../src/config.js";
 import { visWidth } from "../src/ui.js";
 import type { BackgroundTaskRecord } from "../src/task-types.js";
@@ -178,6 +178,127 @@ test("registered renderers normalize embedded newlines before chrome rendering",
     assert.ok(!/[\r\n]/.test(line), `line contains embedded newline: ${JSON.stringify(line.replace(/\x1b\[[0-9;]*m/g, ""))}`);
     assert.equal(visWidth(line), 56);
   }
+});
+
+test("background bash widget suppresses render requests for unchanged polling counts", async () => {
+  clearBackgroundBashWidget({ ui: { setWidget() {} } });
+  const root = await tmp();
+  try {
+    const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data") }, root);
+    const registry = new TaskRegistry(cfg.dataDir);
+    const now = new Date().toISOString();
+    registry.upsert({ schemaVersion: 1, taskId: "bg_one", command: "sleep 10", cwd: root, status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(root, "out.log"), metadataPath: path.join(root, "meta.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+
+    type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void; update?: (counts: unknown) => void };
+    let captured: WidgetFactory | undefined;
+    let setWidgetCalls = 0;
+    const ctx = {
+      cwd: root,
+      config: { backgroundBash: { enabled: true, dataDir: cfg.dataDir } },
+      ui: { setWidget(_key: string, value: unknown) { setWidgetCalls += 1; if (typeof value === "function") captured = value as WidgetFactory; } },
+    };
+
+    updateBackgroundBashWidget(ctx);
+    assert.equal(setWidgetCalls, 1);
+    assert.ok(captured, "expected widget factory to be mounted");
+
+    let renderRequests = 0;
+    const component = captured!({ requestRender() { renderRequests += 1; } }, undefined);
+    updateBackgroundBashWidget(ctx);
+
+    assert.equal(setWidgetCalls, 1, "unchanged polling must not remount widget");
+    assert.equal(renderRequests, 0, "unchanged polling must not request render");
+    assert.match(component.render(40).join("\n"), /1 running/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("background bash widget does not remount while setWidget factory is still pending", async () => {
+  const root = await tmp();
+  try {
+    const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data") }, root);
+    const registry = new TaskRegistry(cfg.dataDir);
+    const now = new Date().toISOString();
+    registry.upsert({ schemaVersion: 1, taskId: "bg_one", command: "sleep 10", cwd: root, status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(root, "out.log"), metadataPath: path.join(root, "meta.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+
+    let setWidgetCalls = 0;
+    const ctx = {
+      cwd: root,
+      config: { backgroundBash: { enabled: true, dataDir: cfg.dataDir } },
+      ui: { setWidget() { setWidgetCalls += 1; } },
+    };
+
+    updateBackgroundBashWidget(ctx);
+    updateBackgroundBashWidget(ctx);
+
+    assert.equal(setWidgetCalls, 1, "unchanged polling before factory invocation must not remount widget");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("background bash widget state is isolated by ui object", async () => {
+  const rootA = await tmp();
+  const rootB = await tmp();
+  try {
+    const cfgA = readConfig({ enabled: true, dataDir: path.join(rootA, "data") }, rootA);
+    const cfgB = readConfig({ enabled: true, dataDir: path.join(rootB, "data") }, rootB);
+    const now = new Date().toISOString();
+    new TaskRegistry(cfgA.dataDir).upsert({ schemaVersion: 1, taskId: "bg_a", command: "sleep 10", cwd: rootA, status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(rootA, "out.log"), metadataPath: path.join(rootA, "meta.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+    new TaskRegistry(cfgB.dataDir).upsert({ schemaVersion: 1, taskId: "bg_b", command: "sleep 20", cwd: rootB, status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(rootB, "out.log"), metadataPath: path.join(rootB, "meta.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+
+    const callsA: unknown[] = [];
+    const callsB: unknown[] = [];
+    const ctxA = { cwd: rootA, config: { backgroundBash: { enabled: true, dataDir: cfgA.dataDir } }, ui: { setWidget(_key: string, value: unknown) { callsA.push(value); } } };
+    const ctxB = { cwd: rootB, config: { backgroundBash: { enabled: true, dataDir: cfgB.dataDir } }, ui: { setWidget(_key: string, value: unknown) { callsB.push(value); } } };
+
+    updateBackgroundBashWidget(ctxA);
+    updateBackgroundBashWidget(ctxB);
+    assert.equal(callsA.length, 1, "session A should mount its own widget");
+    assert.equal(callsB.length, 1, "session B should mount its own widget");
+
+    new TaskRegistry(cfgB.dataDir).upsert({ ...new TaskRegistry(cfgB.dataDir).get("bg_b")!, status: "exited", endedAt: now });
+    updateBackgroundBashWidget(ctxB);
+    assert.equal(callsA.length, 1, "clearing B must not touch A's ui");
+    assert.equal(callsB.length, 2, "B should clear its own widget");
+    assert.equal(callsB[1], undefined);
+  } finally {
+    await rm(rootA, { recursive: true, force: true });
+    await rm(rootB, { recursive: true, force: true });
+  }
+});
+
+test("background bash widget requests render when counts change and clears when empty", async () => {
+  clearBackgroundBashWidget({ ui: { setWidget() {} } });
+  const root = await tmp();
+  try {
+    const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data") }, root);
+    const registry = new TaskRegistry(cfg.dataDir);
+    const now = new Date().toISOString();
+    registry.upsert({ schemaVersion: 1, taskId: "bg_one", command: "sleep 10", cwd: root, status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(root, "out.log"), metadataPath: path.join(root, "meta.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+
+    type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void; update?: (counts: unknown) => void };
+    let captured: WidgetFactory | undefined;
+    const calls: unknown[] = [];
+    const ctx = {
+      cwd: root,
+      config: { backgroundBash: { enabled: true, dataDir: cfg.dataDir } },
+      ui: { setWidget(_key: string, value: unknown) { calls.push(value); if (typeof value === "function") captured = value as WidgetFactory; } },
+    };
+
+    updateBackgroundBashWidget(ctx);
+    assert.ok(captured, "expected widget factory to be mounted");
+    let renderRequests = 0;
+    captured!({ requestRender() { renderRequests += 1; } }, undefined);
+
+    registry.upsert({ schemaVersion: 1, taskId: "bg_two", command: "sleep 20", cwd: root, status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(root, "out2.log"), metadataPath: path.join(root, "meta2.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+    updateBackgroundBashWidget(ctx);
+    assert.equal(calls.length, 1, "count changes update mounted component instead of remounting");
+    assert.equal(renderRequests, 1, "count changes request one render");
+
+    registry.upsert({ ...registry.get("bg_one")!, status: "exited", endedAt: now });
+    registry.upsert({ ...registry.get("bg_two")!, status: "exited", endedAt: now });
+    updateBackgroundBashWidget(ctx);
+    assert.equal(calls.length, 2, "empty counts clear the mounted widget");
+    assert.equal(calls[1], undefined);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("bash timeout is seconds and background converts to milliseconds", async () => {

@@ -9,14 +9,90 @@ import { renderFooter } from "./ui.js";
 function cwdOf(ctx: unknown): string { return typeof (ctx as { cwd?: unknown } | undefined)?.cwd === "string" ? (ctx as { cwd: string }).cwd : process.cwd(); }
 function sessionIdOf(ctx: unknown): string | undefined { const v = (ctx as { sessionManager?: { getSessionId?: () => unknown } } | undefined)?.sessionManager?.getSessionId?.(); return typeof v === "string" ? v : undefined; }
 function runnerFor(ctx: unknown) { const cfg = configFromContext(ctx, cwdOf(ctx)); return new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg); }
-function updateFooter(ctx: unknown) {
-  const ui = (ctx as { ui?: { setWidget?: (key: string, value: unknown, options?: Record<string, unknown>) => void } } | undefined)?.ui;
-  if (!ui?.setWidget) return;
+
+type BackgroundCounts = { running: number; blocked: number; failed: number; };
+type BackgroundWidgetComponent = { invalidate(): void; render(width: number): string[]; dispose?(): void; update?(counts: BackgroundCounts): void; };
+type UiSetWidget = { setWidget?: (key: string, value: unknown, options?: Record<string, unknown>) => void };
+type RenderRequester = { requestRender?: () => void };
+type BackgroundWidgetMount = { counts: BackgroundCounts; signature: string; component?: BackgroundWidgetComponent };
+
+const backgroundWidgetMounts = new WeakMap<UiSetWidget, BackgroundWidgetMount>();
+
+function backgroundCounts(ctx: unknown): BackgroundCounts {
   const cfg = configFromContext(ctx, cwdOf(ctx));
   const tasks = new TaskRegistry(cfg.dataDir).list(false);
-  const counts = { running: tasks.filter(t => t.status === "running" || t.status === "starting").length, blocked: tasks.filter(t => t.status === "blocked").length, failed: tasks.filter(t => t.status === "failed" || t.status === "timed_out" || t.status === "orphaned").length };
-  if (!counts.running && !counts.blocked && !counts.failed) { ui.setWidget("background-bash", undefined, { placement: "belowEditor" }); return; }
-  ui.setWidget("background-bash", () => renderFooter(counts), { placement: "belowEditor" });
+  return {
+    running: tasks.filter(t => t.status === "running" || t.status === "starting").length,
+    blocked: tasks.filter(t => t.status === "blocked").length,
+    failed: tasks.filter(t => t.status === "failed" || t.status === "timed_out" || t.status === "orphaned").length,
+  };
+}
+
+function countsSignature(counts: BackgroundCounts): string {
+  return `${counts.running}/${counts.blocked}/${counts.failed}`;
+}
+
+function hasVisibleCounts(counts: BackgroundCounts): boolean {
+  return counts.running > 0 || counts.blocked > 0 || counts.failed > 0;
+}
+
+function createBackgroundWidget(ui: UiSetWidget, mount: BackgroundWidgetMount, tui: unknown): BackgroundWidgetComponent {
+  const renderHost = tui as RenderRequester | undefined;
+  const component: BackgroundWidgetComponent = {
+    update(nextCounts: BackgroundCounts) {
+      const nextSignature = countsSignature(nextCounts);
+      mount.counts = nextCounts;
+      if (nextSignature !== mount.signature) {
+        mount.signature = nextSignature;
+        renderHost?.requestRender?.();
+      }
+    },
+    render(width: number) {
+      return renderFooter(mount.counts).render(width);
+    },
+    invalidate() {},
+    dispose() {
+      if (backgroundWidgetMounts.get(ui)?.component === component) backgroundWidgetMounts.delete(ui);
+    },
+  };
+  mount.component = component;
+  return component;
+}
+
+export function clearBackgroundBashWidget(ctx: unknown): void {
+  const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
+  if (!ui?.setWidget) return;
+  if (!backgroundWidgetMounts.has(ui)) return;
+  backgroundWidgetMounts.delete(ui);
+  ui.setWidget("background-bash", undefined, { placement: "belowEditor" });
+}
+
+export function updateBackgroundBashWidget(ctx: unknown): void {
+  const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
+  if (!ui?.setWidget) return;
+  const counts = backgroundCounts(ctx);
+  if (!hasVisibleCounts(counts)) {
+    clearBackgroundBashWidget(ctx);
+    return;
+  }
+  const signature = countsSignature(counts);
+  const existing = backgroundWidgetMounts.get(ui);
+  if (existing) {
+    if (existing.component) {
+      existing.component.update?.(counts);
+    } else {
+      existing.counts = counts;
+      existing.signature = signature;
+    }
+    return;
+  }
+  const mount: BackgroundWidgetMount = { counts, signature };
+  backgroundWidgetMounts.set(ui, mount);
+  ui.setWidget(
+    "background-bash",
+    (tui: unknown) => createBackgroundWidget(ui, mount, tui),
+    { placement: "belowEditor" },
+  );
 }
 
 type ToolLike = { name?: unknown; extensionId?: unknown; source?: unknown; sourceInfo?: { packageId?: unknown; extensionId?: unknown; source?: unknown; path?: unknown } } | string;
@@ -62,8 +138,8 @@ export default async function backgroundBashExtension(pi: ExtensionAPI): Promise
   });
 
   const onAny = pi.on as unknown as ((name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => unknown) | undefined;
-  onAny?.("session_start", async (_event: unknown, ctx: ExtensionContext) => { if (registered) { runnerFor(ctx).reconcile(sessionIdOf(ctx)); updateFooter(ctx); } });
-  onAny?.("reload", async (_event: unknown, ctx: ExtensionContext) => { if (registered) { runnerFor(ctx).reconcile(sessionIdOf(ctx)); updateFooter(ctx); } });
+  onAny?.("session_start", async (_event: unknown, ctx: ExtensionContext) => { if (registered) { runnerFor(ctx).reconcile(sessionIdOf(ctx)); updateBackgroundBashWidget(ctx); } });
+  onAny?.("reload", async (_event: unknown, ctx: ExtensionContext) => { if (registered) { runnerFor(ctx).reconcile(sessionIdOf(ctx)); updateBackgroundBashWidget(ctx); } });
   onAny?.("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => { if (registered) await runnerFor(ctx).shutdown(sessionIdOf(ctx)); });
 }
 
