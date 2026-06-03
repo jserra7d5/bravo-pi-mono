@@ -757,6 +757,101 @@ function liveAgentCard(item: any, theme: any): string[] {
   return [`${theme.fg(color, icon)} ${theme.fg("toolTitle", item.name ?? "agent")} ${theme.fg(color, status)} ${theme.fg("dim", `· ${meta}`)}${summary ? theme.fg("muted", ` — ${preview(summary, 64)}`) : ""}`];
 }
 
+type LiveWidgetState = {
+  active: number;
+  blocked: number;
+  results: number;
+  items: any[];
+};
+type LiveWidgetComponent = { invalidate(): void; render(width: number): string[]; dispose?(): void; update?(state: LiveWidgetState): void };
+type LiveWidgetMount = { state: LiveWidgetState; signature: string; component?: LiveWidgetComponent };
+type RenderRequester = { requestRender?: () => void };
+
+const liveWidgetMounts = new WeakMap<object, LiveWidgetMount>();
+
+function liveActivitySignature(activity: unknown): string | undefined {
+  if (typeof activity !== "string" || !activity) return undefined;
+  return activity.replace(/\s+(?:unknown|\d+[smh])\s+ago$/, "");
+}
+
+function liveItemSignature(item: any): Record<string, unknown> {
+  return {
+    id: item.runId ?? item.runDir ?? item.name,
+    name: item.name,
+    status: hasUnreadResult(item) ? "result" : item.status,
+    role: item.role,
+    marker: item.modeMarker ?? (item.mode === "interactive" ? "↔" : "→"),
+    activity: liveActivitySignature(item.activity),
+    summary: item.needs ?? item.summary ?? "",
+  };
+}
+
+function liveWidgetSignature(state: LiveWidgetState): string {
+  return JSON.stringify({
+    active: state.active,
+    blocked: state.blocked,
+    results: state.results,
+    total: state.items.length,
+    items: state.items.slice(0, 4).map(liveItemSignature),
+  });
+}
+
+function renderLiveWidgetState(state: LiveWidgetState, theme: any, width: number): string[] {
+  const header = `${theme.fg("accent", "◆ Tango")} ${theme.fg("muted", `${state.active} active · ${state.blocked} blocked · ${state.results} result`)}`;
+  const lines = [header];
+  for (const item of state.items.slice(0, 4)) lines.push(...liveAgentCard(item, theme));
+  if (state.items.length > 4) lines.push(theme.fg("dim", `+${state.items.length - 4} more`));
+  return lines.map((line) => trunc(line, width));
+}
+
+function createLiveWidget(ui: object, mount: LiveWidgetMount, tui: unknown, theme: any): LiveWidgetComponent {
+  const renderHost = tui as RenderRequester | undefined;
+  const component: LiveWidgetComponent = {
+    update(nextState: LiveWidgetState) {
+      const nextSignature = liveWidgetSignature(nextState);
+      mount.state = nextState;
+      if (nextSignature !== mount.signature) {
+        mount.signature = nextSignature;
+        renderHost?.requestRender?.();
+      }
+    },
+    render(width: number) {
+      return renderLiveWidgetState(mount.state, theme, width);
+    },
+    invalidate() {},
+    dispose() {
+      if (liveWidgetMounts.get(ui)?.component === component) liveWidgetMounts.delete(ui);
+    },
+  };
+  mount.component = component;
+  return component;
+}
+
+function clearLiveWidget(ctx: any) {
+  const ui = ctx?.ui;
+  if (!ui?.setWidget || !liveWidgetMounts.has(ui)) return;
+  liveWidgetMounts.delete(ui);
+  ui.setWidget("tango-live", undefined, { placement: "belowEditor" });
+}
+
+function updateLiveWidget(ctx: any, state: LiveWidgetState) {
+  const ui = ctx?.ui;
+  if (!ui?.setWidget) return;
+  const signature = liveWidgetSignature(state);
+  const existing = liveWidgetMounts.get(ui);
+  if (existing) {
+    if (existing.component) existing.component.update?.(state);
+    else {
+      existing.state = state;
+      existing.signature = signature;
+    }
+    return;
+  }
+  const mount: LiveWidgetMount = { state, signature };
+  liveWidgetMounts.set(ui, mount);
+  ui.setWidget("tango-live", (tui: unknown, theme: any) => createLiveWidget(ui, mount, tui, theme), { placement: "belowEditor" });
+}
+
 async function refreshLiveWidget(ctx: any, signal?: AbortSignal) {
   if (!ctx?.hasUI || !ctx.ui?.setWidget) return;
   if (liveWidgetInFlight || Date.now() < liveWidgetSkipUntil) return;
@@ -776,22 +871,13 @@ async function refreshLiveWidget(ctx: any, signal?: AbortSignal) {
       .filter((item: any) => isLiveVisible(item, now))
       .sort((a: any, b: any) => livePriority(a) - livePriority(b) || Date.parse(b.updatedAt ?? "") - Date.parse(a.updatedAt ?? ""));
     if (!local.length) {
-      ctx.ui.setWidget("tango-live", undefined);
+      clearLiveWidget(ctx);
       return;
     }
     const active = local.filter((item: any) => item.status === "running" || item.status === "created").length;
     const blocked = local.filter((item: any) => item.status === "blocked").length;
     const results = local.filter((item: any) => hasUnreadResult(item)).length;
-    ctx.ui.setWidget("tango-live", (_tui: any, theme: any) => ({
-      invalidate() {},
-      render(width: number) {
-        const header = `${theme.fg("accent", "◆ Tango")} ${theme.fg("muted", `${active} active · ${blocked} blocked · ${results} result`)}`;
-        const lines = [header];
-        for (const item of local.slice(0, 4)) lines.push(...liveAgentCard(item, theme));
-        if (local.length > 4) lines.push(theme.fg("dim", `+${local.length - 4} more`));
-        return lines.map((line) => trunc(line, width));
-      },
-    }), { placement: "belowEditor" });
+    updateLiveWidget(ctx, { active, blocked, results, items: local });
   } catch {
     liveWidgetFailures += 1;
     liveWidgetSkipUntil = Date.now() + passiveDelayMs(liveWidgetFailures);
@@ -1065,7 +1151,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "tango_message",
     label: "Tango Message",
-    description: "Send a follow-up message to a non-terminal interactive Tango agent. Terminal done/error/stopped runs reject messages by default; use a new reusable idle session/task instead."
+    description: "Send a follow-up message to a non-terminal interactive Tango agent. Terminal done/error/stopped runs reject messages by default; use a new reusable idle session/task instead.",
     parameters: Type.Object({
       name: Type.Optional(Type.String()),
       runId: Type.Optional(Type.String({ description: "Stable Tango run ID. Preferred when known." })),

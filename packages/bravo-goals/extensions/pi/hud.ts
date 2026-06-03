@@ -597,26 +597,79 @@ interface RenderRequester {
 	requestRender?: () => void;
 }
 
-let mountedHudWidget: HudWidgetComponent | undefined;
+interface HudWidgetMount {
+	snapshot: HudSnapshot | undefined;
+	frameIndex: number;
+	signature: string;
+	component?: HudWidgetComponent;
+}
 
-function createHudWidget(snapshot: HudSnapshot | undefined, frameIndex: number, tui: unknown): HudWidgetComponent {
-	let currentSnapshot = snapshot;
-	let currentFrameIndex = frameIndex;
+const hudWidgetMounts = new WeakMap<UiLike, HudWidgetMount>();
+const hudStatuses = new WeakMap<UiLike, { value: string | undefined }>();
+
+function hudRenderSignature(snapshot: HudSnapshot | undefined, frameIndex: number): string {
+	if (!snapshot) return "";
+	const { state, indexEntry } = snapshot;
+	const gateStates = deriveActiveGate(state);
+	const judgeChip = deriveJudgeChip(state, frameIndex);
+	return JSON.stringify({
+		goalPath: snapshot.goalPath,
+		indexEntry: indexEntry
+			? {
+					goal_id: indexEntry.goal_id,
+					path: indexEntry.path,
+					status: indexEntry.status,
+					active_task: indexEntry.active_task,
+				}
+			: undefined,
+		goal: state.goal,
+		active_task: state.active_task,
+		tasks: state.tasks.map((task) => ({
+			id: task.id,
+			title: task.title,
+			status: task.status,
+			receipt: task.receipt,
+		})),
+		judge: state.judge,
+		progress: state.progress,
+		final_audit: state.final_audit,
+		user_verification: state.user_verification,
+		gateStates,
+		caption: deriveCaption(state, gateStates),
+		judgeChip,
+	});
+}
+
+function setHudStatus(ui: UiLike, value: string | undefined): void {
+	const existing = hudStatuses.get(ui);
+	if (value === existing?.value) return;
+	if (value === undefined && !existing) return;
+	if (value === undefined) hudStatuses.delete(ui);
+	else hudStatuses.set(ui, { value });
+	ui.setStatus?.(HUD_STATUS_KEY, value);
+}
+
+function createHudWidget(ui: UiLike, mount: HudWidgetMount, tui: unknown): HudWidgetComponent {
 	const requestRender = (tui as RenderRequester | undefined)?.requestRender;
 	const component: HudWidgetComponent = {
 		update(nextSnapshot: HudSnapshot | undefined, nextFrameIndex: number) {
-			currentSnapshot = nextSnapshot;
-			currentFrameIndex = nextFrameIndex;
-			requestRender?.();
+			const nextSignature = hudRenderSignature(nextSnapshot, nextFrameIndex);
+			mount.snapshot = nextSnapshot;
+			mount.frameIndex = nextFrameIndex;
+			if (nextSignature !== mount.signature) {
+				mount.signature = nextSignature;
+				requestRender?.();
+			}
 		},
 		render(width: number) {
-			return renderHudAtWidth(currentSnapshot, width, currentFrameIndex);
+			return renderHudAtWidth(mount.snapshot, width, mount.frameIndex);
 		},
 		invalidate() {},
 		dispose() {
-			if (mountedHudWidget === component) mountedHudWidget = undefined;
+			if (hudWidgetMounts.get(ui)?.component === component) hudWidgetMounts.delete(ui);
 		},
 	};
+	mount.component = component;
 	return component;
 }
 
@@ -625,27 +678,37 @@ export async function updateHud(ctx: ContextLike): Promise<void> {
 	if (!ui) return;
 	const snapshot = await snapshotForSession(ctx);
 	const frameIndex = nextJudgeFrame();
-	ui.setStatus?.(HUD_STATUS_KEY, renderStatusLine(snapshot, frameIndex));
 	if (!snapshot) {
 		clearHud(ctx);
 		return;
 	}
-	if (mountedHudWidget) {
-		mountedHudWidget.update?.(snapshot, frameIndex);
+	setHudStatus(ui, renderStatusLine(snapshot, frameIndex));
+	const signature = hudRenderSignature(snapshot, frameIndex);
+	const existing = hudWidgetMounts.get(ui);
+	if (existing) {
+		if (existing.component) {
+			existing.component.update?.(snapshot, frameIndex);
+		} else {
+			existing.snapshot = snapshot;
+			existing.frameIndex = frameIndex;
+			existing.signature = signature;
+		}
 		return;
 	}
+	const mount: HudWidgetMount = { snapshot, frameIndex, signature };
+	hudWidgetMounts.set(ui, mount);
 	ui.setWidget?.(
 		HUD_WIDGET_KEY,
-		(tui) => {
-			mountedHudWidget = createHudWidget(snapshot, frameIndex, tui);
-			return mountedHudWidget;
-		},
+		(tui) => createHudWidget(ui, mount, tui),
 		{ placement: "belowEditor" },
 	);
 }
 
 export function clearHud(ctx: ContextLike): void {
-	mountedHudWidget = undefined;
-	ctx.ui?.setStatus?.(HUD_STATUS_KEY, undefined);
-	ctx.ui?.setWidget?.(HUD_WIDGET_KEY, undefined, { placement: "belowEditor" });
+	const ui = ctx.ui;
+	if (!ui) return;
+	setHudStatus(ui, undefined);
+	if (!hudWidgetMounts.has(ui)) return;
+	hudWidgetMounts.delete(ui);
+	ui.setWidget?.(HUD_WIDGET_KEY, undefined, { placement: "belowEditor" });
 }

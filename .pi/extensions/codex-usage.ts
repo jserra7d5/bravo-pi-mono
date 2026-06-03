@@ -592,6 +592,37 @@ function buildCodexState(
 	return { accounts, stale: usage.error === "stale" };
 }
 
+function codexWindowSemanticKey(window: UsageWindow | undefined): unknown {
+	if (!window) return null;
+	return {
+		label: window.label,
+		remainingPercent: window.remainingPercent,
+		resetAt: window.resetAt ?? null,
+		resetInSeconds: window.resetInSeconds ?? null,
+		stale: window.stale === true,
+	};
+}
+
+function codexUsageSemanticKey(usage: CodexUsage | undefined, balancedAffinitySlot: string | undefined): string {
+	if (!usage) return "null";
+	if (usage.unavailable) return JSON.stringify({ unavailable: true, error: usage.error ?? null });
+	return JSON.stringify({
+		unavailable: false,
+		error: usage.error ?? null,
+		balancedAffinitySlot: balancedAffinitySlot ?? null,
+		accounts: usage.accounts.map((account) => ({
+			slot: account.slot,
+			label: redactCodexAccountLabel(account),
+			activePi: account.activePi,
+			activeCodex: account.activeCodex,
+			status: account.status,
+			problemCode: account.problem?.code ?? null,
+			primary: codexWindowSemanticKey(account.usage?.primary),
+			secondary: codexWindowSemanticKey(account.usage?.secondary),
+		})),
+	});
+}
+
 function collectState(
 	ctx: ExtensionContext,
 	footerData: ReadonlyFooterDataProvider,
@@ -675,13 +706,15 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 		inFlight = true;
 		void readCodexUsageCache()
 			.then((usage) => {
+				const previousSemanticKey = codexUsageSemanticKey(codexUsage, balancedAffinitySlot);
 				if (isCodexModel(ctx.model)) {
 					codexUsage = usage;
 				} else {
 					codexUsage = undefined;
 				}
 				refreshBalancedAffinity(ctx);
-				requestRender();
+				const nextSemanticKey = codexUsageSemanticKey(codexUsage, balancedAffinitySlot);
+				if (force || nextSemanticKey !== previousSemanticKey) requestRender();
 			})
 			.catch(() => {
 				// Silent: best-effort indicator, must not leak auth details.
