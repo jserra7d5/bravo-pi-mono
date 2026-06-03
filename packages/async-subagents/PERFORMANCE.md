@@ -93,6 +93,18 @@ lock skips without sleeping; self-contained render after task/run files removed;
 derivation per snapshot) and `test/performanceReadModels.test.ts` (unchanged summaries are
 not re-read from disk via a cache disk-read counter; active mutation and new runs reflected).
 
+**Follow-up (2026-06-02): reconcile every tick, not only on the UI path.** The non-blocking
+reconcile above used to run only inside `updateLiveWidget`, which `tickPi` skips when
+`ctx.hasUI` is false. That left two gaps: headless lead sessions never reconciled dead task
+owners, and on the UI path the reconcile ran *after* `pollAndSendWakeups`, so a
+reconcile-generated wake event was delivered a tick late. `tickPi` now calls a dedicated
+`reconcileTaskOwnedRuns` (same `reconcile: "nonblocking"` `tryWithLock` path) **before** the
+poll, unconditionally, so dead owners surface same-tick in both UI and headless. Cost is one
+extra `listTasks` pass per tick — the stat-validated cache from this fix makes it O(total)
+cheap `stat`s with O(changed) parses, and the reconcile mutation itself is idempotent (a
+reconciled attempt has `endedAt`, so the widget's own later `listTasks` does no second
+mutation).
+
 > Implemented by a GPT-5.5 (`pi`) agent under adversarial GPT-5.5 review + a confirmation
 > review; approved after independent verification (88/88 targeted tests). One reviewer
 > finding (`deriveTaskStates` "divergence") was rejected as a false positive after checking

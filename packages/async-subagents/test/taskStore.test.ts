@@ -25,8 +25,12 @@ test("TaskStore creates batch tasks with alias dependencies and derived states",
   assert.equal(created.aliasToId.review, "T-0002");
   assert.ok(existsSync(s.tasks.pathsFor(s.rootSessionId).tasksDir));
   const events = s.tasks.readEvents(s.rootSessionId);
-  assert.deepEqual(events.map((event) => [event.sequence, event.eventId]), [[1, "evt_000001"], [2, "evt_000002"]]);
-  assert.equal(Number(readFileSync(s.tasks.pathsFor(s.rootSessionId).eventHighwatermarkPath, "utf8")), 2);
+  // T-0001 (ready) also emits a task.ready forward-progress wakeup; T-0002 is blocked and stays silent.
+  assert.deepEqual(events.map((event) => [event.sequence, event.eventId]), [[1, "evt_000001"], [2, "evt_000002"], [3, "evt_000003"]]);
+  const readyEvent = events.find((event) => event.type === "task.ready");
+  assert.equal(readyEvent?.taskId, "T-0001");
+  assert.equal(readyEvent?.wake, true);
+  assert.equal(Number(readFileSync(s.tasks.pathsFor(s.rootSessionId).eventHighwatermarkPath, "utf8")), 3);
   const all = s.tasks.listTasks(s.rootSessionId);
   assert.equal(deriveTaskState(all[0], all), "ready");
   assert.equal(deriveTaskState(all[1], all), "blocked");
@@ -74,12 +78,28 @@ test("TaskStore force reopen invalidates transitive completed dependents", () =>
   assert.equal(reopened[2].result?.state, "superseded");
 });
 
+test("TaskStore reopen re-emits a ready wakeup so the task can be restarted", () => {
+  const s = store();
+  const [task] = s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const token = newTaskToken();
+  s.tasks.claimTask(s.rootSessionId, task.id, { runId: "run_1", agent: "worker", displayName: "Rex", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  s.tasks.submitResult(s.rootSessionId, task.id, { runId: "run_1", taskToken: token, summary: "done" });
+  s.tasks.acceptResult(s.rootSessionId, task.id, {});
+  const readyBefore = s.tasks.readEvents(s.rootSessionId).filter((event) => event.type === "task.ready" && event.taskId === task.id && event.wake === true).length;
+  s.tasks.reopenTask(s.rootSessionId, task.id, { reason: "redo it" });
+  const readyAfter = s.tasks.readEvents(s.rootSessionId).filter((event) => event.type === "task.ready" && event.taskId === task.id && event.wake === true).length;
+  assert.equal(readyAfter, readyBefore + 1);
+  assert.equal(s.tasks.readTask(s.rootSessionId, task.id).status, "pending");
+});
+
 test("TaskStore readEvents supports incremental cursors", () => {
   const s = store();
   const [task] = s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
   const first = s.tasks.readEvents(s.rootSessionId, { eventOffset: 0 });
-  assert.equal(first.records.length, 1);
+  // A ready task emits task.created then a task.ready forward-progress wakeup.
+  assert.equal(first.records.length, 2);
   assert.equal(first.records[0]?.type, "task.created");
+  assert.equal(first.records[1]?.type, "task.ready");
 
   const token = newTaskToken();
   s.tasks.claimTask(s.rootSessionId, task.id, { runId: "run_1", agent: "worker", displayName: "Rex", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
@@ -111,8 +131,9 @@ test("TaskStore initializes migrated task-event sequence from existing event cou
   s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Migrated next", description: "Do it" }] });
 
   const events = s.tasks.readEvents(s.rootSessionId);
-  assert.deepEqual(events.map((event) => [event.sequence, event.eventId]), [[1, "evt_000001"], [2, "evt_000002"], [3, "evt_000003"]]);
-  assert.equal(Number(readFileSync(paths.eventHighwatermarkPath, "utf8")), 3);
+  // The new ready task emits task.created (seq 3) then task.ready (seq 4).
+  assert.deepEqual(events.map((event) => [event.sequence, event.eventId]), [[1, "evt_000001"], [2, "evt_000002"], [3, "evt_000003"], [4, "evt_000004"]]);
+  assert.equal(Number(readFileSync(paths.eventHighwatermarkPath, "utf8")), 4);
 });
 
 test("TaskStore recovers invalid task-event highwatermark from max existing sequence", () => {
@@ -137,8 +158,9 @@ test("TaskStore recovers invalid task-event highwatermark from max existing sequ
     s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Recovered next", description: "Do it" }] });
 
     const events = s.tasks.readEvents(s.rootSessionId);
-    assert.deepEqual(events.map((event) => [event.sequence, event.eventId]), [[1, "evt_000001"], [3, "evt_000003"], [4, "evt_000004"]]);
-    assert.equal(Number(readFileSync(paths.eventHighwatermarkPath, "utf8")), 4);
+    // The new ready task emits task.created (seq 4) then task.ready (seq 5).
+    assert.deepEqual(events.map((event) => [event.sequence, event.eventId]), [[1, "evt_000001"], [3, "evt_000003"], [4, "evt_000004"], [5, "evt_000005"]]);
+    assert.equal(Number(readFileSync(paths.eventHighwatermarkPath, "utf8")), 5);
   }
 });
 

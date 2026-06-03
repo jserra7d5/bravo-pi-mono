@@ -13,6 +13,15 @@ export function isTaskReady(task: TaskRecord, allTasks: TaskRecord[]): boolean {
   return task.status === "pending" && !task.owner && unresolvedDependencies(task, allTasks).length === 0;
 }
 
+// A delivered `task.ready` wakeup is a one-shot nudge to start a ready task. By
+// the time the parent polls, the task may already have been claimed/started (the
+// good path) or otherwise moved off `pending`. Treat anything that is no longer
+// an unowned pending task as a stale nudge so we do not re-surface work the
+// parent already picked up.
+export function isReadyWakeupStillActionable(task: TaskRecord | undefined): boolean {
+  return Boolean(task) && task!.status === "pending" && !task!.owner;
+}
+
 export function deriveTaskState(task: TaskRecord, allTasks: TaskRecord[]): DerivedTaskState {
   deriveTaskStateCallCountForTest += 1;
   if (task.status === "pending") return isTaskReady(task, allTasks) ? "ready" : "blocked";

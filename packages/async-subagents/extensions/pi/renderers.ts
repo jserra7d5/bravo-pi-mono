@@ -640,7 +640,8 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
   // Task section
   const allTasks = input.allTasks ?? [];
   const now = input.now ?? Date.now();
-  const graceMs = 5_000;
+  // Match liveWidget.visibleTasksFor: keep just-finished tasks on screen briefly.
+  const graceMs = 30_000;
   const taskStates = input.taskStates;
   const stateFor = (task: TaskRecord): DerivedTaskState => taskStates?.get(task.id) ?? deriveTaskState(task, allTasks);
   const visibleTasks = (input.tasks ?? []).filter(t => {

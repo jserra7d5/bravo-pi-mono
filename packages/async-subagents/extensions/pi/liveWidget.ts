@@ -168,7 +168,10 @@ function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVis
 }
 
 function visibleTasksFor(tasks: TaskRecord[], taskStates: Map<string, DerivedTaskState>, now: number): TaskRecord[] {
-  const graceMs = 5_000;
+  // Keep just-completed/failed/cancelled tasks visible briefly so a plan that
+  // finishes leaves on-screen evidence instead of vanishing the instant the last
+  // task lands. Kept in sync with the same grace in renderers.renderWidgetCard.
+  const graceMs = 30_000;
   return tasks.filter(t => {
     const state = taskStates.get(t.id) ?? t.status;
     if (state === "completed" || state === "failed" || state === "cancelled") {

@@ -197,6 +197,59 @@ test("pollWakeups task cursor catch-up does not full-read unchanged task events"
   assert.equal(jsonlReadStatsForTest().fullFileReads, 0);
 });
 
+test("pollWakeups delivers a ready task as a start-now nudge", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  const ready = deliveries.find((d) => d.message.taskEvent?.type === "task.ready");
+  assert.ok(ready, "expected a task.ready wakeup for the immediately-ready task");
+  assert.equal(ready?.message.kind, "task_wakeup");
+  assert.equal(ready?.message.state, "task.ready");
+  assert.deepEqual(ready?.message.next, [{ tool: "subagent_start", args: { taskId: task.id } }]);
+});
+
+test("pollWakeups skips a ready wakeup once the task is claimed", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const token = newTaskToken();
+  taskStore.claimTask(parentRunId, task.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(deliveries.some((d) => d.message.taskEvent?.type === "task.ready"), false);
+});
+
+test("accepting a task wakes the parent to start a newly-ready dependent", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const { tasks: created } = taskStore.createTasks(parentRunId, { parentRunId, tasks: [
+    { alias: "impl", title: "Implement", description: "Do it" },
+    { alias: "review", title: "Review", description: "Check it", dependsOn: ["impl"] },
+  ] });
+  const [impl, review] = created;
+  const token = newTaskToken();
+  taskStore.claimTask(parentRunId, impl.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.submitResult(parentRunId, impl.id, { runId: "task_run_1", taskToken: token, summary: "impl done" });
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  // Drain the result-ready wakeup; the dependent is still blocked at this point.
+  const before = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(before.some((d) => d.message.taskEvent?.taskId === review.id), false);
+
+  taskStore.acceptResult(parentRunId, impl.id, {});
+  const after = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  const ready = after.find((d) => d.message.taskEvent?.taskId === review.id && d.message.state === "task.ready");
+  assert.ok(ready, "expected a ready wakeup for the newly-unblocked dependent");
+  assert.deepEqual(ready?.message.next, [{ tool: "subagent_start", args: { taskId: review.id } }]);
+});
+
 test("pollWakeups ignores unsubscribed runs", () => {
   const { root, store } = workspace();
   const parentRunId = "root_test";

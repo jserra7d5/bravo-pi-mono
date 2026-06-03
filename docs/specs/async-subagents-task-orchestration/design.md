@@ -509,3 +509,22 @@ If a child submits `result_ready` but parent never handles it, the task remains 
 5. Extend the async-subagents widget to show task context per run and a compact task section.
 6. Add prompt module guidance for task orchestration semantics.
 7. Add validation for ownership-scoped child result submission.
+
+## Implementation Addendum (2026-06-02): closing the forward-progress loop
+
+An audit found the v1 task layer reliably stalled: the parent created tasks and then did nothing, leaving tasks at `ready` indefinitely. Root cause was structural rather than a prompt weakness — the two transitions that move a graph *forward* had no runtime signal:
+
+- `task.created` and `task.ready` were both emitted with `wake: false`, so the 2-second wakeup poller (which is the only thing that re-engages an idle parent) never fired for them. Only child-originated events (`result_submitted`, `failed`, `needs_input`) could wake the parent, and those require a child to already be running.
+- The design handed forward scheduling to "the parent/scheduler," but no scheduler component existed and the model was given no nudge to act as one. The prompt's "go idle and await wakeups" reflex actively reinforced the stall for the create→start edge.
+- `reconcileOwnedRun` existed but was only invoked lazily on `task_list`/`task_get`, so a child that died without submitting left its task stuck at `running`.
+
+Decisions taken (the minimum structural change, not auto-spawn):
+
+- **Forward-progress wakeups, not an auto-scheduler.** `task.ready` is now emitted with `wake: true` — at creation for immediately-ready tasks and at acceptance for newly-unblocked dependents. The parent still chooses *which agent* runs each task via `subagent_start({ taskId })`; the runtime only nudges. This resolves the open question "should `task.ready` wakeups be emitted" with: yes, scoped to readiness transitions, because there is no auto-scheduler to make them redundant.
+- **One-shot, staleness-checked ready nudges.** A `task.ready` wakeup is delivered at most once per readiness transition and is skipped at delivery time if the task is no longer an unowned `pending` task (i.e. the parent already started it in-turn). This keeps the good path silent and only re-engages a parent that actually went idle with ready work. Re-readiness after `task_reopen` generates a fresh event and nudges again.
+- **Type-appropriate next actions.** Task wakeups now suggest the concrete next action (`subagent_start` for ready, `task_accept_result` for a submitted result, `task_get` for failures/blockers) instead of always pointing at `task_get`. `task_create` likewise points its `next` at `subagent_start` for each ready task rather than back at `task_list`.
+- **Reconcile on every tick.** The parent extension reconciles task-owned runs on each poll tick (UI and headless), so a dead owner transitions off `running` and wakes the parent without waiting for a manual inspection. This is done in the parent extension, not the supervisor, because the supervisor process does not carry `rootSessionId`/`taskId`.
+- **Prompt teaches the loop, not just the concepts.** The prompt module now contains an explicit create→start→accept→start-next loop, a worked (agent-neutral) example, and a hard rule that ready tasks are parent-driven and must be started rather than idled on.
+- **Tool descriptions carry the decision boundary.** Parent task tools gained use-when/avoid-when guidance inline in their descriptions (e.g. `task_create` is for multi-step dependency plans; a single delegation should use `subagent_start` directly).
+
+Deliberately *not* changed: the task tool set was kept intact (no merging `task_clear` into `task_cancel`); child auto-spawn was rejected as out of scope and ill-defined (tasks do not carry an agent assignment); and `task.created` stays `wake: false` (creation needs no feedback).

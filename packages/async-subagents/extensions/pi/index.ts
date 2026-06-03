@@ -13,6 +13,7 @@ import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
 import { registerSubagentTools, type ToolRuntime } from "./tools.js";
 import { isWakeupKeyHandled, markDeliveredWakeupHandled, pollWakeups } from "./wakeups.js";
+import { TaskStore } from "../../src/taskStore.js";
 
 const OWNER_ID = `pi-${process.pid}-${Date.now().toString(36)}`;
 const roots = new Map<string, RootSessionIdentity>();
@@ -80,12 +81,29 @@ function refreshUi(ctx: ExtensionContext): void {
 function wakeupEnvelope(wakeup: WakeupMessage): string {
   if (wakeup.kind === "task_wakeup") {
     const task = wakeup.task;
-    const lines = [wakeup.state === "task.result_submitted" ? "[TASK RESULT READY — NOT USER INPUT]" : "[TASK ATTENTION — NOT USER INPUT]", ""];
+    const taskId = task?.taskId ?? wakeup.taskEvent?.taskId;
+    const header = wakeup.state === "task.ready"
+      ? "[TASK READY — NOT USER INPUT]"
+      : wakeup.state === "task.result_submitted"
+        ? "[TASK RESULT READY — NOT USER INPUT]"
+        : wakeup.state === "task.failed"
+          ? "[TASK FAILED — NOT USER INPUT]"
+          : wakeup.state === "task.needs_input"
+            ? "[TASK NEEDS INPUT — NOT USER INPUT]"
+            : "[TASK ATTENTION — NOT USER INPUT]";
+    const lines = [header, ""];
     if (task) lines.push(`Task: ${task.taskId}${task.title ? ` ${task.title}` : ""}`);
     if (task?.owner) lines.push(`Owner: ${task.owner.displayName ? `@${task.owner.displayName}` : task.owner.agent ?? "unknown"}${task.owner.runId ? ` / ${task.owner.runId}` : ""}`);
     if (wakeup.summary) lines.push(`Summary: ${wakeup.summary}`);
     if (task?.receiptPath) lines.push(`Receipt: ${task.receiptPath}`);
-    lines.push("", `Next: task_get({ taskId: "${task?.taskId ?? wakeup.taskEvent?.taskId}" })`);
+    lines.push("");
+    if (wakeup.state === "task.ready") {
+      lines.push(`This task's dependencies are satisfied and it has no owner. Start it now: subagent_start({ taskId: "${taskId}", agent: "<agent>" }). Choose the agent from the catalog by role fit. Do not wait for a further wakeup to begin a ready task.`);
+    } else if (wakeup.state === "task.result_submitted") {
+      lines.push(`The owner submitted a result. Review it, then accept to mark the task complete and unblock dependents: task_accept_result({ taskId: "${taskId}" }). Use task_get({ taskId: "${taskId}", view: "receipt" }) first if you need the receipt detail, or task_reopen if the work is insufficient.`);
+    } else {
+      lines.push(`Next: task_get({ taskId: "${taskId}" })`);
+    }
     return lines.join("\n");
   }
   const attention = wakeup.state === "paused" || wakeup.state === "blocked" || wakeup.state === "waiting_for_input" || wakeup.state === "failed";
@@ -142,11 +160,22 @@ function pollAndSendWakeups(pi: ExtensionAPI, store: RunStore, identity: RootSes
   }
 }
 
+function reconcileTaskOwnedRuns(store: RunStore, rootSessionId: string | undefined): void {
+  if (!rootSessionId) return;
+  // A task-owned child can die or exit without calling task_submit_result. The
+  // reconcile pass detects a terminal owner run and transitions the task off
+  // `running` (emitting a wake event). Run it every tick — including headless,
+  // where the widget update is skipped — so a dead owner does not strand a task
+  // in `running` until the parent happens to inspect the list.
+  try { new TaskStore(store).listTasks(rootSessionId, { reconcile: "nonblocking" }); } catch { /* best effort */ }
+}
+
 function tickPi(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const cwd = cwdOf(ctx);
   const identity = ensureRoot(cwd, piSessionIdOf(ctx));
   const store = new RunStore({ cwd });
   const records = store.listRecentRuns({ parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
+  reconcileTaskOwnedRuns(store, identity.rootSessionId);
   pollAndSendWakeups(pi, store, identity, records);
   if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, records });
 }

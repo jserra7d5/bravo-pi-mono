@@ -38,7 +38,20 @@ Use subagent display names in user-facing prose. Write names as \`@DisplayName\`
 
 Subagent status events are control-plane information. Summarize them to the user only when they affect the answer, mark a meaningful checkpoint, need input, or explain a blocker.
 
-Tasks are durable coordination state; subagent runs are execution attempts. Use task tools to plan and inspect dependency state, and use the canonical \`subagent_start({ taskId })\` path to launch a child only for a ready task. A child-submitted task result is not accepted completion until the parent accepts it. Downstream children should consume task receipts/artifacts and \`task_get\` context, not sibling chat. Use inline terminal wakeups or \`subagent_result\` for raw run diagnostics as needed, and \`task_list\`/\`task_get\` for durable task state.
+### Task orchestration
+
+Tasks are durable coordination state; subagent runs are execution attempts. Use a task plan only when work has real ordering constraints worth sequencing, for example implement → review → fix. For a single independent delegation, skip tasks and call \`subagent_start\` without a \`taskId\`.
+
+Creating tasks performs no work. You own the loop, and it is short:
+
+1. \`task_create\` the plan. The result tells you which tasks are ready.
+2. For each ready task, call \`subagent_start({ taskId, agent })\` now. Do not stop after creating.
+3. When a result-ready wakeup arrives, review it, then \`task_accept_result\` (or \`task_reopen\` if the work is insufficient). Acceptance is what unblocks dependents.
+4. Accepting a task wakes you for any dependents that just became ready; start those. Repeat until the plan is done.
+
+A \`task.ready\` wakeup means a task's dependencies are satisfied and it has no owner: start it. Ready tasks are parent-driven, so do not treat a ready task like a child you are waiting on — start it rather than idling, because no further signal is coming beyond the ready wakeup. A child-submitted result is not accepted completion until you accept it, and a result-ready task left unaccepted blocks the whole plan. Downstream children should consume task receipts/artifacts and \`task_get\` context, not sibling chat.
+
+Worked example: you \`task_create\` T-001 implement (ready) and T-002 review (depends on T-001); the result says 1 ready. You immediately \`subagent_start({ taskId: "T-001", agent: <implementing agent from the catalog> })\` and go idle. The owner submits T-001's result; you get a result-ready wakeup, read it, and \`task_accept_result({ taskId: "T-001" })\`. That wakes you with T-002 now ready, so you \`subagent_start({ taskId: "T-002", agent: <reviewing agent from the catalog> })\`. When T-002's result is accepted, the plan is done.
 
 ## Async Subagents Hard Rules
 
@@ -54,7 +67,8 @@ Tasks are durable coordination state; subagent runs are execution attempts. Use 
 10. Use \`@DisplayName\` for subagents in user-facing prose; use run IDs only for tool/internal references.
 11. Do not invent subagent names, variants, statuses, or results.
 12. Do not call \`subagent_status\` repeatedly to wait for completion; go idle and let async wakeups resume you.
-13. Do not use task tools to bypass ownership/dependency constraints; start task-owned children only with \`subagent_start({ taskId })\`.`;
+13. Do not use task tools to bypass ownership/dependency constraints; start task-owned children only with \`subagent_start({ taskId })\`.
+14. After \`task_create\`, start every ready task in the same turn; never create a task plan and then go idle. Drive the loop: start ready tasks, accept results, and start newly-ready tasks until the plan completes.`;
 
 export function appendAsyncSubagentsPrompt(systemPrompt: string, catalog?: string): string {
   if (systemPrompt.includes("## Async Subagents")) return systemPrompt;

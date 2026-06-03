@@ -6,6 +6,7 @@ import { isInterestingEvent } from "../../src/schemas.js";
 import { RunStore } from "../../src/runStore.js";
 import { updateRunStatus } from "../../src/status.js";
 import { TaskStore } from "../../src/taskStore.js";
+import { isReadyWakeupStillActionable } from "../../src/taskState.js";
 import type { DeliverySubscription, EventType, RunEvent, RunIndexRecord, RunResult, TaskEvent, WaitCursor } from "../../src/types.js";
 import { SCHEMA_VERSION } from "../../src/types.js";
 import type { WakeupMessage } from "./renderers.js";
@@ -232,19 +233,41 @@ function statusForRun(store: RunStore, runId: string): { agentName?: string; dis
   }
 }
 
+function taskWakeupTitle(eventType: TaskEvent["type"]): string {
+  switch (eventType) {
+    case "task.result_submitted": return "Task result ready";
+    case "task.ready": return "Task ready to start";
+    case "task.failed": return "Task failed";
+    case "task.needs_input": return "Task needs input";
+    default: return "Task attention";
+  }
+}
+
+// Drive the parent toward the next concrete action for each task event instead
+// of always pointing back at task_get (a passive read). A ready task should be
+// started; a submitted result should be accepted (so dependents unblock); a
+// failure/blocker should be inspected.
+function taskWakeupNext(event: TaskEvent): Array<{ tool: string; args: Record<string, unknown> }> {
+  switch (event.type) {
+    case "task.ready": return [{ tool: "subagent_start", args: { taskId: event.taskId } }];
+    case "task.result_submitted": return [{ tool: "task_accept_result", args: { taskId: event.taskId } }, { tool: "task_get", args: { taskId: event.taskId } }];
+    default: return [{ tool: "task_get", args: { taskId: event.taskId } }];
+  }
+}
+
 function taskDelivery(event: TaskEvent, task?: ReturnType<TaskStore["readTask"]>): WakeupDelivery {
   return {
     deliveryKey: taskEventDeliveryKey(event),
     runId: event.runId ?? task?.owner?.runId ?? event.taskId,
     message: {
       kind: "task_wakeup",
-      title: event.type === "task.result_submitted" ? "Task result ready" : "Task attention",
+      title: taskWakeupTitle(event.type),
       runId: event.runId ?? task?.owner?.runId ?? "",
       state: event.type,
       summary: event.summary,
       taskEvent: event,
       task: { taskId: event.taskId, title: task?.title, status: task?.status, owner: task?.owner ? { runId: task.owner.runId, displayName: task.owner.displayName, agent: task.owner.agent } : undefined, receiptPath: task?.result?.receiptPath },
-      next: [{ tool: "task_get", args: { taskId: event.taskId } }],
+      next: taskWakeupNext(event),
     },
   };
 }
@@ -413,6 +436,10 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
   for (const event of taskEventRead.records.filter((event) => event.parentRunId === input.parentRunId && event.wake === true && ["task.result_submitted", "task.failed", "task.needs_input", "task.ready"].includes(event.type))) {
     if (state.delivered[taskEventDeliveryKey(event)] || state.handled[taskEventDeliveryKey(event)]) continue;
     let task; try { task = taskStore.readTask(input.rootSessionId, event.taskId); } catch { /* event remains deliverable without task details */ }
+    // A `task.ready` nudge is only worth delivering if the task is still an
+    // unowned pending task. If the parent already claimed/started it (the good
+    // path) the nudge is stale; skip it but let the cursor advance past it.
+    if (event.type === "task.ready" && !isReadyWakeupStillActionable(task)) continue;
     const delivery = taskDelivery(event, task);
     if (input.modelFollowUpOnly && !isActionableModelWakeup(delivery)) continue;
     if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) { taskCursorBlocked = true; break; }
