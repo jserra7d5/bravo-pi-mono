@@ -865,6 +865,7 @@ export interface WakeCardInput {
   badge?: string;
   headline?: string;
   body?: string;
+  displayAsMention?: boolean;
 }
 
 export function renderWakeCard(input: WakeCardInput): string[] {
@@ -872,7 +873,10 @@ export function renderWakeCard(input: WakeCardInput): string[] {
   const ch = chrome(width);
   const gl = stateGlyph(input.kind);
   const isUrgent = input.kind === "waiting_for_input" || input.kind === "blocked" || input.kind === "failed";
-  const titleContent = `${idBar(input.displayName)} ${idMention(input.displayName, { bold: true })} ${ANSI.gray}·${ANSI.reset} ${ANSI.white}${input.role}${ANSI.reset}`;
+  const titleName = input.displayAsMention === false
+    ? `${ANSI.bold}${ANSI.white}${input.displayName}${ANSI.reset}`
+    : idMention(input.displayName, { bold: true });
+  const titleContent = `${idBar(input.displayName)} ${titleName} ${ANSI.gray}·${ANSI.reset} ${ANSI.white}${input.role}${ANSI.reset}`;
   const badgeText = input.badge ?? gl.label;
   const badge = `${gl.color}${isUrgent ? ANSI.bold : ""}${gl.g} ${badgeText}${ANSI.reset}`;
   const out: string[] = [ch.topTitled(titleContent, badge)];
@@ -1198,13 +1202,37 @@ export function renderSubagentToolResultComponent(result: unknown, options?: Ren
 // Wake messages
 // ----------------------------------------------------------------------------
 
+function taskDisplayNumber(taskId: string | undefined): string | undefined {
+  const match = /^T-(\d+)$/.exec(taskId ?? "");
+  return match?.[1] ?? taskId;
+}
+
+function taskWakeDisplayName(message: WakeupMessage): string {
+  const taskId = taskDisplayNumber(message.task?.taskId ?? message.taskEvent?.taskId);
+  const prefix = taskId ? `Task ${taskId}` : "Task";
+  switch (message.state) {
+    case "task.ready": return `${prefix} ready to start`;
+    case "task.result_submitted": return `${prefix} result ready`;
+    case "task.needs_input": return `${prefix} needs input`;
+    case "task.failed": return `${prefix} failed`;
+    default: return `${prefix} attention`;
+  }
+}
+
+function taskWakeKind(state: string | undefined): string {
+  switch (state) {
+    case "task.ready": return "ready";
+    case "task.result_submitted": return "result_ready";
+    case "task.needs_input": return "waiting_for_input";
+    case "task.failed": return "failed";
+    default: return "running";
+  }
+}
+
 function wakeCardInputFor(message: WakeupMessage, _options?: RenderOptions): WakeCardInput {
   const hasResult = Boolean(message.result);
-  const kind = deriveWakeKind(message.state, hasResult);
   const result = message.result;
   const status = message.status;
-  const agentName = result?.agentName ?? status?.agentName ?? message.title;
-  const displayName = result?.displayName ?? status?.displayName ?? agentName;
   const summaryText = message.summary ?? message.result?.summary ?? message.event?.summary;
   const headline = summaryText ? preview(summaryText, 96) : undefined;
   const body = (() => {
@@ -1212,6 +1240,20 @@ function wakeCardInputFor(message: WakeupMessage, _options?: RenderOptions): Wak
     if (message.bodyAvailable) return hasResult ? "Full child body available via subagent_result if you need recovery, artifacts, metadata, or a reread." : "Child event body available in wakeup details.";
     return undefined;
   })();
+  if (message.kind === "task_wakeup") {
+    return {
+      displayName: taskWakeDisplayName(message),
+      role: message.task?.title ?? message.title,
+      kind: taskWakeKind(message.state),
+      badge: message.state,
+      headline,
+      body,
+      displayAsMention: false,
+    };
+  }
+  const kind = deriveWakeKind(message.state, hasResult);
+  const agentName = result?.agentName ?? status?.agentName ?? message.title;
+  const displayName = result?.displayName ?? status?.displayName ?? agentName;
   return {
     displayName,
     role: agentName,

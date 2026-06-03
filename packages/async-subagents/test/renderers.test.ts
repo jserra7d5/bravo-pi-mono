@@ -512,6 +512,22 @@ test("renderSubagentWakeMessage renders a wake card with badge and no fake affor
   assert.doesNotMatch(stripped, /\[ reply \]|\[ view \]|\[ continue \]/);
 });
 
+test("renderSubagentWakeMessage renders task ready id in the header without an agent mention", () => {
+  const rendered = renderSubagentWakeMessage({
+    kind: "task_wakeup",
+    title: "Task ready to start",
+    runId: "",
+    state: "task.ready",
+    summary: "Task ready to start: T-0014 Demo task-owned blocked flow",
+    taskEvent: { type: "task.ready", taskId: "T-0014", parentRunId: "root", at: new Date().toISOString(), seq: 1, wake: true } as any,
+    task: { taskId: "T-0014", title: "Demo task-owned blocked flow", status: "pending" },
+  });
+  const stripped = stripAnsi(rendered);
+  assert.match(stripped.split("\n")[0] ?? "", /Task 0014 ready to start/);
+  assert.doesNotMatch(stripped, /@Task ready to start|@Task 0014 ready to start/);
+  assert.ok(stripped.includes("Demo task-owned blocked flow"));
+});
+
 test("renderSubagentWakeMessage preserves an explicitly empty inline body", () => {
   const rendered = renderSubagentWakeMessage({
     kind: "subagent_wakeup",
