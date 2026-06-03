@@ -1,4 +1,5 @@
 import { createReadStream } from "node:fs";
+import { open } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
@@ -99,6 +100,69 @@ function codeFenceLanguage(mode: RenderedMode, language: string | undefined): st
   if (mode === "json") return "json";
   if (mode === "diff") return "diff";
   return undefined;
+}
+
+const BINARY_EXTENSIONS = new Set([
+  ".avif", ".bmp", ".gif", ".heic", ".heif", ".ico", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp",
+  ".pdf", ".zip", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".tar", ".dmg", ".iso",
+  ".class", ".dll", ".dylib", ".exe", ".o", ".pyc", ".so", ".wasm",
+  ".mp3", ".mp4", ".mov", ".m4a", ".ogg", ".wav", ".webm",
+]);
+
+export function isKnownBinaryPath(filePath: string): boolean {
+  return BINARY_EXTENSIONS.has(extname(filePath).toLowerCase());
+}
+
+export function isBinaryBuffer(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) return false;
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true;
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true;
+  if (bytes.length >= 6) {
+    const sig = Buffer.from(bytes.subarray(0, 6)).toString("ascii");
+    if (sig === "GIF87a" || sig === "GIF89a") return true;
+  }
+  if (bytes.length >= 12) {
+    const riff = Buffer.from(bytes.subarray(0, 4)).toString("ascii");
+    const webp = Buffer.from(bytes.subarray(8, 12)).toString("ascii");
+    if (riff === "RIFF" && webp === "WEBP") return true;
+  }
+
+  let control = 0;
+  for (const byte of bytes) {
+    if (byte === 0) return true;
+    if (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13 && byte !== 27) control++;
+  }
+  return control / bytes.length > 0.05;
+}
+
+async function isProbablyBinaryFile(filePath: string): Promise<boolean> {
+  const handle = await open(filePath, "r");
+  try {
+    if (isKnownBinaryPath(filePath)) return true;
+    const buffer = Buffer.alloc(8192);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return isBinaryBuffer(buffer.subarray(0, bytesRead));
+  } finally {
+    await handle.close();
+  }
+}
+
+export function sanitizeDisplayText(value: string): string {
+  return value
+    .replace(/\r\n?/g, "\n")
+    .replace(/\t/g, "  ")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "�");
+}
+
+function sanitizeInlineText(value: string): string {
+  return sanitizeDisplayText(value).replace(/\n/g, " ");
+}
+
+export function sanitizeBadgeText(value: string): string {
+  const cleaned = sanitizeInlineText(value)
+    .toUpperCase()
+    .replace(/[^A-Z0-9+#._-]/g, "");
+  return cleaned.slice(0, 8);
 }
 
 async function readLineSlice(filePath: string, offset: number, limit: number): Promise<LineSlice> {
@@ -220,8 +284,8 @@ export function modeBadgeText(mode: RenderedMode | undefined, language?: string)
     case "plain": return "TXT";
     case "code": {
       if (!language) return "CODE";
-      const key = language.toLowerCase();
-      return CODE_LANG_BADGE[key] ?? language.toUpperCase().slice(0, 4);
+      const key = sanitizeInlineText(language).toLowerCase();
+      return CODE_LANG_BADGE[key] ?? (sanitizeBadgeText(language).slice(0, 4) || "CODE");
     }
     default: return "TXT";
   }
@@ -402,7 +466,7 @@ class ShowcaseCard implements Component {
 function codeBodyLines(details: ShowcaseDetails): string[] {
   const mode = details.mode ?? "plain";
   const language = details.language ?? getLanguageFromPath(details.path ?? "") ?? codeFenceLanguage(mode, undefined);
-  const body = details.body ?? "";
+  const body = sanitizeDisplayText(details.body ?? "");
   const rendered = mode === "plain" ? body.split("\n") : highlightCode(body, language);
   // Line-number gutter is opt-out: true/undefined = show, false = hide.
   if (details.lineNumbers === false) return rendered;
@@ -410,14 +474,14 @@ function codeBodyLines(details: ShowcaseDetails): string[] {
 }
 
 function diffBodyLines(details: ShowcaseDetails): string[] {
-  return renderDiff(details.body ?? "").split("\n");
+  return renderDiff(sanitizeDisplayText(details.body ?? "")).split("\n");
 }
 
 function markdownBodyLines(details: ShowcaseDetails, width: number): string[] {
   // Delegate to pi-tui Markdown with paddingless config so content flows
   // free between the rules. Construct fresh each render — the body is small
   // and width may change between calls.
-  const md = new Markdown(details.body ?? "", 0, 0, getMarkdownTheme());
+  const md = new Markdown(sanitizeDisplayText(details.body ?? ""), 0, 0, getMarkdownTheme());
   return md.render(width);
 }
 
@@ -446,8 +510,8 @@ function parentDirOf(path: string): string | undefined {
 
 export function cardSpecFromDetails(details: ShowcaseDetails): CardSpec {
   const path = details.path ?? "";
-  const filename = details.title && details.title.length > 0 ? details.title : filenameOf(path);
-  const parentDir = parentDirOf(path);
+  const filename = sanitizeInlineText(details.title && details.title.length > 0 ? details.title : filenameOf(path));
+  const parentDir = parentDirOf(path) ? sanitizeInlineText(parentDirOf(path) ?? "") : undefined;
   return {
     filename,
     mode: details.mode ?? "plain",
@@ -505,6 +569,13 @@ export default function showcaseExtension(pi: ExtensionAPI) {
         const limit = normalizeLimit(params.limit);
         try {
           if (signal?.aborted) throw new Error("Operation aborted");
+          if (await isProbablyBinaryFile(filePath)) {
+            const summary = `Could not showcase ${params.path}: binary files are not supported by showcase.`;
+            return {
+              content: [{ type: "text", text: summary }],
+              details: { summary, ok: false, path: params.path, offset, limit, error: "Binary files are not supported by showcase." },
+            };
+          }
           const slice = await readLineSlice(filePath, offset, limit);
           if (signal?.aborted) throw new Error("Operation aborted");
           if (slice.lineCount === 0) {
@@ -524,6 +595,7 @@ export default function showcaseExtension(pi: ExtensionAPI) {
               // Partial or invalid JSON is still useful to render with JSON highlighting.
             }
           }
+          body = sanitizeDisplayText(body);
           const language = params.language ?? codeFenceLanguage(mode, getLanguageFromPath(filePath));
           const title = params.title;
           const lineNumbers = params.lineNumbers;

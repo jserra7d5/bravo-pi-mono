@@ -7,10 +7,14 @@ import {
   cardSpecFromDetails,
   identityColor,
   identitySlot,
+  isBinaryBuffer,
+  isKnownBinaryPath,
   modeBadgeText,
   modeColor,
   renderCardForTest,
   renderShowcaseResult,
+  sanitizeBadgeText,
+  sanitizeDisplayText,
   topRule,
   visWidth,
 } from "../extensions/pi/index.js";
@@ -388,6 +392,45 @@ test("renderShowcaseResult on a failed result returns a Text component with the 
   // The Component must implement render(width). Probe at a sane width.
   const lines = c.render(80);
   assert.ok(lines.join("\n").includes("Could not showcase"), "error text missing");
+});
+
+test("sanitizes tabs and control bytes before width fitting", () => {
+  const details = {
+    summary: "ok",
+    ok: true as const,
+    path: "logs/raw.log",
+    offset: 1,
+    endLine: 1,
+    lineCount: 1,
+    mode: "plain" as const,
+    body: `prefix\t${"x".repeat(200)}\u0000\u001b[31m`,
+  };
+  assert.equal(sanitizeDisplayText("a\tb\u0000c\u001bd"), "a  b�c�d");
+  const lines = renderCardForTest(details, 93);
+  for (const [index, line] of lines.entries()) {
+    assert.ok(visWidth(line) <= 93, `line ${index} exceeds width: ${visWidth(line)} > 93`);
+  }
+});
+
+test("detects known image/binary files before attempting text rendering", () => {
+  assert.equal(isKnownBinaryPath("screenshots/output.PNG"), true);
+  assert.equal(isKnownBinaryPath("src/index.ts"), false);
+  assert.equal(isBinaryBuffer(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), true);
+  assert.equal(isBinaryBuffer(Buffer.from("hello\nworld\n", "utf8")), false);
+  assert.equal(isBinaryBuffer(Buffer.from([0x68, 0x00, 0x69])), true);
+  assert.equal(isBinaryBuffer(Buffer.from("\x1b[31mred\x1b[0m\n".repeat(80), "utf8")), false);
+});
+
+test("sanitizes language-derived badge metadata before rendering", () => {
+  assert.equal(sanitizeBadgeText("py\x1b[2J!*"), "PY2J");
+  const lines = renderCardForTest({
+    ...codeDetails,
+    language: "\x1b[2J",
+  }, 96);
+  const top = lines[0];
+  assert.ok(!top.includes("\x1b[2J"), "raw clear-screen escape reached header");
+  assert.ok(stripAnsi(top).includes("2J"), "sanitized badge should retain printable metadata");
+  assert.equal(visWidth(top), 96);
 });
 
 test("renderShowcaseResult on success returns a ShowcaseCard component that adapts to width", () => {
