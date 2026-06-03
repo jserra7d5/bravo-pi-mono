@@ -18,6 +18,16 @@ function isoAgo(ms: number): string {
   return new Date(Date.now() - ms).toISOString();
 }
 
+function withFakeNow<T>(nowMs: number, fn: () => T): T {
+  const originalNow = Date.now;
+  Date.now = () => nowMs;
+  try {
+    return fn();
+  } finally {
+    Date.now = originalNow;
+  }
+}
+
 function stripAnsi(value: string): string {
   return value.replace(/\x1b\[[0-9;]*m/g, "");
 }
@@ -488,11 +498,68 @@ test("updateLiveWidget keeps pi TUI as this when requesting render after an upda
     },
   };
   const component = captured!(tui, undefined);
+  const [run] = w.store.readRunSummaries({ parentRunId: w.parentRunId });
+  w.store.writeStatus({ ...w.store.readStatus(run.runId), summary: "changed work", updatedAt: new Date().toISOString(), lastActivityAt: new Date().toISOString() });
   component.update?.({ store: w.store, parentRunId: w.parentRunId });
 
   assert.equal(renders, 1);
   assert.equal(tui.renderRequested, true);
 });
+
+test("updateLiveWidget suppresses render requests for age-only polling changes", () => {
+  const empty = workspace();
+  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
+
+  const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
+  const w = workspace();
+  addRun({ ...w, displayName: "Rex", state: "running", summary: "working", updatedAt: new Date(baseNow - 10_000).toISOString() });
+
+  type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void; update?(input: Parameters<typeof updateLiveWidget>[1]): void };
+  let captured: WidgetFactory | undefined;
+  const ctx = { ui: { setWidget(_key: string, value: unknown) { if (typeof value === "function") captured = value as WidgetFactory; } } };
+
+  withFakeNow(baseNow, () => {
+    updateLiveWidget(ctx, { store: w.store, parentRunId: w.parentRunId });
+  });
+  assert.ok(captured, "expected setWidget to receive a factory function");
+
+  let renders = 0;
+  const component = captured!({ requestRender() { renders += 1; } }, undefined);
+  withFakeNow(baseNow + 2_000, () => {
+    component.update?.({ store: w.store, parentRunId: w.parentRunId });
+  });
+
+  assert.equal(renders, 0);
+});
+
+function terminalRunExpiryRenderTest(): void {
+  const empty = workspace();
+  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
+
+  const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
+  const w = workspace();
+  addRun({ ...w, displayName: "Done", state: "completed", summary: "done", updatedAt: new Date(baseNow - 59_000).toISOString() });
+  addRun({ ...w, displayName: "Rex", state: "running", summary: "working", updatedAt: new Date(baseNow - 10_000).toISOString() });
+
+  type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void; update?(input: Parameters<typeof updateLiveWidget>[1]): void };
+  let captured: WidgetFactory | undefined;
+  const ctx = { ui: { setWidget(_key: string, value: unknown) { if (typeof value === "function") captured = value as WidgetFactory; } } };
+
+  withFakeNow(baseNow, () => {
+    updateLiveWidget(ctx, { store: w.store, parentRunId: w.parentRunId });
+  });
+  assert.ok(captured, "expected setWidget to receive a factory function");
+
+  let renders = 0;
+  const component = captured!({ requestRender() { renders += 1; } }, undefined);
+  withFakeNow(baseNow + 2_000, () => {
+    component.update?.({ store: w.store, parentRunId: w.parentRunId });
+  });
+
+  assert.equal(renders, 1);
+}
+
+test("updateLiveWidget requests render when terminal row expires while other rows remain", terminalRunExpiryRenderTest);
 
 test("updateLiveWidget clears the widget when there are no visible rows", () => {
   const w = workspace();

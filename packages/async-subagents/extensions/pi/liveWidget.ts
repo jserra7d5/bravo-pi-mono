@@ -263,6 +263,50 @@ function hasVisibleRows(snapshot: LiveWidgetSnapshot): boolean {
   return snapshot.rows.length > 0 || snapshot.visibleTasks.length > 0;
 }
 
+function liveWidgetRenderSignature(input: LiveWidgetInput, snapshot: LiveWidgetSnapshot): string {
+  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
+  const rows = snapshot.rows.map((row) => {
+    const task = snapshot.runIdToTask.get(row.runId);
+    return {
+      runId: row.runId,
+      displayName: row.displayName,
+      agentName: row.agentName,
+      state: row.state,
+      summary: row.summary,
+      needs: row.needs,
+      resultReady: row.resultReady,
+      resultSummary: row.result?.summary,
+      resultDurationMs: row.result?.durationMs,
+      cost: row.metrics?.cost?.total,
+      task: task ? {
+        id: task.id,
+        title: task.title,
+        status: snapshot.taskStates.get(task.id) ?? task.status,
+        activeForm: task.activeForm,
+      } : undefined,
+    };
+  });
+  const tasks = snapshot.visibleTasks.map((task) => ({
+    id: task.id,
+    title: task.title,
+    status: snapshot.taskStates.get(task.id) ?? task.status,
+    activeForm: task.activeForm,
+    ownerRunId: task.owner?.runId,
+    ownerDisplayName: task.owner?.displayName,
+    ownerAgent: task.owner?.agent,
+    unresolvedDependencyIds: snapshot.taskUnresolvedDependencyIds.get(task.id) ?? [],
+  }));
+  const taskCounts = snapshot.tasks.map((task) => [task.id, snapshot.taskStates.get(task.id) ?? task.status]);
+  return JSON.stringify({
+    maxRows: input.maxRows ?? 5,
+    terminalCompletedVisibleMs,
+    rows,
+    totalCost: snapshot.totalCost,
+    tasks,
+    taskCounts,
+  });
+}
+
 // Exposed for tests and the few callers that want a one-shot static render
 // (e.g. plain-text transcripts). The production code path goes through the
 // factory below so pi can pass its real container width on every redraw.
@@ -292,11 +336,17 @@ let mountedWidget: LiveWidgetComponent | undefined;
 
 function createLiveWidgetComponent(input: LiveWidgetInput, tui: unknown): LiveWidgetComponent {
   let currentInput = input;
+  let currentSignature = liveWidgetRenderSignature(input, input.snapshot ?? prepareLiveWidgetSnapshot(input, Date.now()));
   const renderHost = tui as RenderRequester | undefined;
   const component: LiveWidgetComponent = {
     update(nextInput: LiveWidgetInput) {
-      currentInput = nextInput;
-      renderHost?.requestRender?.();
+      const nextSnapshot = nextInput.snapshot ?? prepareLiveWidgetSnapshot(nextInput, Date.now());
+      const nextSignature = liveWidgetRenderSignature(nextInput, nextSnapshot);
+      currentInput = { ...nextInput, snapshot: nextSnapshot };
+      if (nextSignature !== currentSignature) {
+        currentSignature = nextSignature;
+        renderHost?.requestRender?.();
+      }
     },
     render(width: number) {
       return renderAt(currentInput, width, Date.now());
