@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { atomicWriteJson } from "./jsonl.js";
 import type { ContextPolicy, SessionPolicy, ThinkingLevel } from "./types.js";
@@ -19,6 +19,7 @@ export interface BuildPiCommandInput {
   skills: string[];
   defaultExtensionPaths?: string[];
   defaultExtensionTools?: string[];
+  inheritedExtensionPaths?: string[];
   extensions: string[];
   model?: string;
   thinkingLevel?: ThinkingLevel;
@@ -60,6 +61,22 @@ function findPackageRoot(start: string): string {
 }
 
 export const childControlExtensionPath = join(findPackageRoot(here), "extensions", "child-control");
+export const inheritedExtensionsEnv = "ASYNC_SUBAGENTS_INHERITED_EXTENSIONS";
+
+function parseInheritedExtensionPaths(value: string | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = value.trim().startsWith("[") ? JSON.parse(value) : value.split(delimiter);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === "string" && item.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+export function inheritedExtensionPathsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return parseInheritedExtensionPaths(env[inheritedExtensionsEnv]);
+}
 
 function dedupeExtensionsByRealpath(extensions: string[]): string[] {
   const seen = new Set<string>();
@@ -77,7 +94,7 @@ export function buildPiCommand(input: BuildPiCommandInput): PiCommand {
   const runtimeBuiltinTools = input.runtimeBuiltinTools ?? [childControlEventTool];
   const runtimeExtensionPaths = input.runtimeExtensionPaths ?? [childControlExtensionPath];
   const toolAllowlist = [...new Set([...input.userBuiltinTools, ...(input.defaultExtensionTools ?? []), ...runtimeBuiltinTools])];
-  const extensionPaths = dedupeExtensionsByRealpath([...(input.defaultExtensionPaths ?? []), ...input.extensions, ...runtimeExtensionPaths]);
+  const extensionPaths = dedupeExtensionsByRealpath([...(input.defaultExtensionPaths ?? []), ...(input.inheritedExtensionPaths ?? []), ...input.extensions, ...runtimeExtensionPaths]);
   const args = [
     ...(input.sessionPolicy === "record" ? ["--session", input.piSessionPath ?? input.requestedPiSessionPath ?? join(input.runDir, "pi-session", "session.jsonl")] : ["--no-session"]),
     "--no-context-files",

@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyAgentVariant, resolveAgentDefinition } from "./agentDefinitions.js";
 import { loadAsyncSubagentsConfig, type CodexAuthBalancerConfig } from "./config.js";
-import { buildPiCommand, childControlEventTool, childControlExtensionPath, childControlTaskTools, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
+import { buildPiCommand, childControlEventTool, childControlExtensionPath, childControlTaskTools, inheritedExtensionPathsFromEnv, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
 import { assemblePrompt } from "./promptAssembly.js";
 import { SubagentError } from "./errors.js";
 import { finalizeTerminalRun } from "./lifecycle.js";
@@ -518,6 +518,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     ? { CODEX_AUTH_BALANCER_HOME: asyncSubagentsConfig.codexAuthBalancer.stateDir }
     : {};
   const effectiveExtraEnv = codexAuthBalancer ? { ...(input.env ?? {}), ...taskEnv, ...codexAuthBalancer.env } : { ...(input.env ?? {}), ...taskEnv, ...balancedProviderEnv };
+  const inheritedExtensionPaths = inheritedExtensionPathsFromEnv({ ...process.env, ...effectiveExtraEnv });
 
   const piCommand = buildPiCommand({
     piBin: input.piBin,
@@ -534,6 +535,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     skills: prompt.skills,
     defaultExtensionPaths: asyncSubagentsConfig.defaultExtensions.map((extension) => extension.realPath),
     defaultExtensionTools: asyncSubagentsConfig.defaultExtensions.flatMap((extension) => extension.tools),
+    inheritedExtensionPaths,
     extensions: prompt.extensions,
     model: prompt.model,
     thinkingLevel: selectedThinkingLevel,
@@ -558,6 +560,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     defaultExtensionsConfigPath: asyncSubagentsConfig.configPath,
     defaultExtensions: asyncSubagentsConfig.defaultExtensions,
     defaultExtensionTools: asyncSubagentsConfig.defaultExtensions.flatMap((extension) => extension.tools),
+    inheritedExtensions: inheritedExtensionPaths,
     extensions: prompt.extensions,
     contextPolicy,
     sessionPolicy,

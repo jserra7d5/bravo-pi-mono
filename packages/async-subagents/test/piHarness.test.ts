@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildPiCommand, childControlEventTool, childControlExtensionPath, writeLaunchLog } from "../src/piHarness.js";
+import { buildPiCommand, childControlEventTool, childControlExtensionPath, inheritedExtensionPathsFromEnv, inheritedExtensionsEnv, writeLaunchLog } from "../src/piHarness.js";
 
 test("buildPiCommand disables ambient context and allows only the control tool when no user tools are declared", () => {
   const command = buildPiCommand({
@@ -71,6 +71,27 @@ test("buildPiCommand passes declared tools, skills, extensions, model, and think
   assert.ok(command.args.includes("--model"));
   assert.ok(command.args.includes("gpt-5.5"));
   assert.deepEqual(command.args.slice(command.args.indexOf("--thinking"), command.args.indexOf("--thinking") + 2), ["--thinking", "high"]);
+});
+
+test("buildPiCommand loads inherited extensions before agent extensions", () => {
+  const command = buildPiCommand({
+    systemPath: "/run/artifacts/system.md",
+    taskPath: "/run/artifacts/task.md",
+    runDir: "/run",
+    cwd: "/repo",
+    sessionPolicy: "record",
+    piSessionPath: "/run/pi-session/session.jsonl",
+    userBuiltinTools: [],
+    skills: [],
+    inheritedExtensionPaths: ["/active/caveman/index.ts"],
+    extensions: ["audit-extension"],
+  });
+  const extensions = command.args.flatMap((arg, index, args) => (arg === "-e" ? [args[index + 1]] : [])).filter((value): value is string => Boolean(value));
+  assert.deepEqual(extensions, ["/active/caveman/index.ts", "audit-extension", childControlExtensionPath]);
+});
+
+test("inheritedExtensionPathsFromEnv parses path-delimited inherited extension env", () => {
+  assert.deepEqual(inheritedExtensionPathsFromEnv({ [inheritedExtensionsEnv]: ["/a.ts", "/b.ts"].join(delimiter) } as NodeJS.ProcessEnv), ["/a.ts", "/b.ts"]);
 });
 
 test("writeLaunchLog redacts secret-like environment values", () => {

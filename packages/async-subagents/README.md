@@ -66,6 +66,8 @@ Use the default by omitting `variant`; use a variant with `subagent_start({ agen
 
 Provider-backed variants must include the provider extension that registers the model because child Pi launches are intentionally isolated with `--no-extensions`. Point `extensions` at a loadable Pi extension module file, such as `extensions/pi/index.ts` or `dist/extensions/pi/index.js`; a package extension directory may not be enough when async-subagents passes it through Pi's `-e` CLI flag.
 
+Trusted parent extensions can request child loading by setting `ASYNC_SUBAGENTS_INHERITED_EXTENSIONS` to a path-delimited or JSON string-array list of extension module paths before launch. These inherited extensions are loaded after configured defaults and before agent-declared extensions, and are intended for session-scoped behavior propagation such as caveman response mode.
+
 ## Codex auth balancer
 
 Async subagents can optionally launch Codex-backed children through `@bravo/codex-auth-balancer`. The balancer does not expose arbitrary child env to agents; it internally prepares isolated auth homes and injects only:

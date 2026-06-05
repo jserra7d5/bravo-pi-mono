@@ -12,6 +12,8 @@ Pi extension for session-scoped caveman response mode.
 
 Mode is persisted in the current Pi session and restored on reload/resume. It is not global across unrelated sessions.
 
+When enabled, the active mode is inherited by async subagents launched from that Pi process. `/normal` clears the inherited mode for future child launches.
+
 ## Behavior
 
 When enabled, the extension appends turn-level system instructions that ask the agent to remove filler while preserving technical substance, code, file paths, commands, and error text. It temporarily relaxes caveman style for safety-critical or ambiguous explanations.
