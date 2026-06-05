@@ -95,13 +95,13 @@ test("renders failed search warnings instead of hiding details behind unknown er
   assert.match(text, /switchyard: git unavailable/);
 });
 
-test("renders no-match warnings for partial workspace failures", () => {
+test("renders no-match warnings", () => {
   const text = renderQueryResult({ protocolVersion: 1, ok: true, query: "missing", hits: [], count: 0, warnings: ["lib: git unavailable"] });
   assert.match(text, /No ranked_search matches/);
   assert.match(text, /lib: git unavailable/);
 });
 
-test("renders repo discovery prompt", () => {
+test("renders git checkout discovery prompt", () => {
   const text = renderDiscoveryPrompt({ kind: "repo", cwd: "/tmp/repo", repoRoot: "/tmp/repo" });
   assert.match(text, /ranked_search is available/);
 });

@@ -103,8 +103,7 @@ async function readIgnorePatterns(root: string): Promise<string[]> {
   }
   try {
     const raw = await readFile(resolve(root, ".bravo", "source-search.json"), "utf8");
-    const parsed = JSON.parse(raw) as { exclude?: unknown; enabled?: unknown };
-    if (parsed.enabled === false) patterns.push("**");
+    const parsed = JSON.parse(raw) as { exclude?: unknown };
     if (Array.isArray(parsed.exclude)) patterns.push(...parsed.exclude.filter((value): value is string => typeof value === "string"));
   } catch {
     // Missing or invalid config is ignored by live search.

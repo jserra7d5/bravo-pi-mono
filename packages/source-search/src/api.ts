@@ -1,7 +1,7 @@
 import { readFile, realpath, stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { queryRepo } from "./live.js";
-import { resolveRepoPath, resolveWorkspaceSearch } from "./workspace.js";
+import { resolveRepoPath } from "./workspace.js";
 import type { QueryResponse, TermBoost } from "./types.js";
 
 export type { QueryResponse, SearchHit, SearchSnippetWindow, TermBoost } from "./types.js";
@@ -84,29 +84,12 @@ export async function rankedSearch(options: SourceSearchQueryOptions): Promise<Q
   const scope = await resolveRepoPath(options.cwd, options.path);
   if (scope) return queryRepo(scope.repoRoot, options.query, limit, scope.pathPrefix, options.boosts, options.excludeTerms);
 
-  const workspace = await resolveWorkspaceSearch(options.cwd, options.path);
-  if (!workspace) {
-    const root = resolve(options.cwd, options.path ?? ".");
-    const exists = await stat(root).catch(() => null);
-    if (exists?.isDirectory()) return queryRepo(root, options.query, limit, undefined, options.boosts, options.excludeTerms);
-    return { protocolVersion: 1, ok: false, hits: [], count: 0, error: "No searchable directory found for ranked_search." };
-  }
-  if (!workspace.repos.length) {
-    return { protocolVersion: 1, ok: false, hits: [], count: 0, error: "No configured workspace repo matched the requested ranked_search path." };
-  }
-
-  const perRepoLimit = Math.min(50, Math.max(limit, limit * 2));
-  const responses = await Promise.all(workspace.repos.map(async (repo) => {
-    try { return { repo, result: await queryRepo(repo.repoRoot, options.query, perRepoLimit, repo.pathPrefix, options.boosts, options.excludeTerms) }; }
-    catch (error) { return { repo, result: { protocolVersion: 1, ok: false, hits: [], count: 0, error: error instanceof Error ? error.message : String(error) } satisfies QueryResponse }; }
-  }));
-  const hits = responses.flatMap(({ repo, result }) => result.hits.map((hit) => ({ ...hit, repo: repo.name, path: `${repo.name}/${hit.path}` }))).sort((a, b) => b.score - a.score).slice(0, limit);
-  const warnings = responses.flatMap(({ repo, result }) => [
-    ...(result.warnings ?? []).map((w) => `${repo.name}: ${w}`),
-    ...(result.ok ? [] : [`${repo.name}: ${result.error ?? "search failed"}`]),
-  ]);
-  const allReposFailed = hits.length === 0 && responses.every(({ result }) => !result.ok);
-  return { protocolVersion: 1, ok: !allReposFailed, repoRoot: workspace.workspaceRoot, query: options.query, boosts: options.boosts, excludeTerms: options.excludeTerms, hits, count: hits.length, indexFreshness: responses.some(({ result }) => !result.ok) ? "partial" : "live", warnings, error: allReposFailed ? "Workspace ranked_search failed for all configured repos." : undefined };
+  const root = resolve(options.cwd, options.path ?? ".");
+  const exists = await stat(root).catch(() => null);
+  if (!exists || (!exists.isDirectory() && !exists.isFile())) return { protocolVersion: 1, ok: false, hits: [], count: 0, error: "No searchable directory found for ranked_search." };
+  const searchRoot = exists.isFile() ? dirname(root) : root;
+  const pathPrefix = exists.isFile() ? basename(root) : undefined;
+  return queryRepo(searchRoot, options.query, limit, pathPrefix, options.boosts, options.excludeTerms);
 }
 
 /** Conservative TypeScript-side guard for paths read outside live search. */
@@ -117,7 +100,7 @@ export async function sourceSearchPolicy(cwd: string, candidatePath: string): Pr
   const root = await realpath(cwd).catch(() => cwd);
   const abs = resolve(root, normalized);
   const real = await realpath(abs).catch(() => abs);
-  if (real !== root && !real.startsWith(`${root}/`)) return { allowed: false, reason: "path escapes workspace" };
+  if (real !== root && !real.startsWith(`${root}/`)) return { allowed: false, reason: "path escapes search root" };
   const patterns = await readIgnorePatterns(root);
   const ignored = patterns.find((pattern) => simpleMatch(pattern, normalized));
   if (ignored) return { allowed: false, reason: `path is ignored by Source Search policy: ${ignored}` };

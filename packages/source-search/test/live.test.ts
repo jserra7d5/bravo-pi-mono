@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import sourceSearchExtension from "../extensions/pi/index.js";
 import { rankedSearch } from "../src/api.js";
-import { resolveWorkspaceSearch } from "../src/workspace.js";
 
 function run(command: string, args: string[], cwd?: string) {
   const result = spawnSync(command, args, { cwd, encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
@@ -57,6 +56,28 @@ test("live query honors directory pi ignores and config excludes", async () => {
   assert.equal(hidden.hits.some((hit) => hit.path.startsWith("dist/")), false);
 });
 
+test("source-search config cannot disable live search", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "source-search-enabled-false-"));
+  run("git", ["init"], repo);
+  await mkdir(join(repo, ".bravo"), { recursive: true });
+  await writeFile(join(repo, ".bravo", "source-search.json"), JSON.stringify({ enabled: false }));
+  await writeFile(join(repo, "visible.txt"), "enabled false should not hide this needle\n");
+
+  const result = await rankedSearch({ cwd: repo, query: "needle", limit: 5 });
+  assert.equal(result.ok, true);
+  assert.equal(result.hits.some((hit) => hit.path === "visible.txt"), true);
+});
+
+test("missing path does not broaden to parent git checkout", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "source-search-missing-path-"));
+  run("git", ["init"], repo);
+  await writeFile(join(repo, "visible.txt"), "missing path should not find this needle\n");
+
+  const result = await rankedSearch({ cwd: repo, path: "missing", query: "needle", limit: 5 });
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /No searchable directory/);
+});
+
 test("live query searches non-git directories", async () => {
   const dir = await mkdtemp(join(tmpdir(), "source-search-plain-dir-"));
   await mkdir(join(dir, "notes"), { recursive: true });
@@ -67,19 +88,18 @@ test("live query searches non-git directories", async () => {
   assert.equal(result.hits.some((hit) => hit.path === "notes/plain.txt"), true);
 });
 
-test("workspace search can resolve opportunistic immediate child git repos without config", async () => {
+test("path can search an arbitrary child checkout without workspace configuration", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "source-search-workspace-"));
+  await mkdir(join(workspace, ".bravo"), { recursive: true });
+  await writeFile(join(workspace, ".bravo", "source-search.json"), JSON.stringify({ workspace: { repos: [{ name: "other", path: "other" }] } }));
   const child = join(workspace, "child-repo");
   await mkdir(child, { recursive: true });
   run("git", ["init"], child);
   await writeFile(join(child, "needle.txt"), "workspace needle\n");
 
-  const resolved = await resolveWorkspaceSearch(workspace);
-  assert.equal(resolved?.opportunistic, true);
-  assert.equal(resolved?.repos.length, 1);
-  const result = await rankedSearch({ cwd: workspace, query: "workspace needle", limit: 5 });
+  const result = await rankedSearch({ cwd: workspace, path: "child-repo", query: "workspace needle", limit: 5 });
   assert.equal(result.ok, true);
-  assert.equal(result.hits[0]?.path, "child-repo/needle.txt");
+  assert.equal(result.hits[0]?.path, "needle.txt");
 });
 
 test("query emits structured snippets and matched fields", async () => {
