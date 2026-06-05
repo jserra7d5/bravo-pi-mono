@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { buildSubagentTools } from "../extensions/pi/tools.js";
+import { writeFastTrackState } from "../src/fastTrack.js";
 import { pollWakeups } from "../extensions/pi/wakeups.js";
 import { acquireRootSessionLease } from "../src/leases.js";
 import { createRunResult } from "../src/result.js";
@@ -409,6 +410,38 @@ test("Pi tool schemas expose thinking level controls and skill forwarding", () =
   assert.ok(startSchema.includes("skills"));
   assert.ok(startSchema.includes("Children do not inherit parent-session skills automatically"));
   assert.ok(JSON.stringify(built.find((tool) => tool.name === "subagent_continue")?.parameters).includes("thinkingLevel"));
+});
+
+test("subagent_start returns a tool error when fastTrack is requested while disabled", async () => {
+  const w = workspace();
+  const built = tools(w.identity);
+  const result = await built.subagent_start.execute("call", { agent: "worker", task: "Critical path", fastTrack: true }, undefined, undefined, { cwd: w.root });
+  assert.equal(result.isError, true);
+  assert.equal(result.details.state, "failed");
+  assert.equal(result.details.started, false);
+  assert.equal((result.details.fastTrack as { reason?: string }).reason, "disabled");
+  assert.match(result.content[0]?.text ?? "", /failed to start/);
+});
+
+test("subagent_start injects fast-track extension and launch metadata when applied", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  writeFastTrackState(store.runRoot, w.identity.rootSessionId, true);
+  const started = await startSubagent({
+    agent: "worker",
+    task: "Critical path",
+    cwd: w.root,
+    runRoot: store.runRoot,
+    parentRunId: w.identity.parentRunId,
+    rootSessionId: w.identity.rootSessionId,
+    fastTrack: true,
+    fake: { mode: "immediate", body: "Done" },
+  });
+  assert.equal(started.fastTrack?.applied, true);
+  const launch = JSON.parse(readFileSync(join(started.runDir, "logs", "launch.json"), "utf8")) as { extensions?: string[]; fastTrack?: { applied?: boolean; serviceTier?: string } };
+  assert.equal(launch.fastTrack?.applied, true);
+  assert.equal(launch.fastTrack?.serviceTier, "priority");
+  assert.ok(launch.extensions?.some((entry) => entry.endsWith("extensions/child-fast-track/index.ts")));
 });
 
 test("subagent_start rejects path-like forwarded skills", async () => {

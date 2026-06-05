@@ -23,6 +23,7 @@ export function createRunResult(input: {
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
   forkFallback?: RunResult["forkFallback"];
+  fastTrack?: RunResult["fastTrack"];
   state: TerminalRunState;
   startedAt?: string;
   summary?: string;
@@ -55,6 +56,7 @@ export function createRunResult(input: {
     forkSourceSessionFile: input.forkSourceSessionFile,
     forkSourceLeafId: input.forkSourceLeafId,
     forkFallback: input.forkFallback ?? null,
+    fastTrack: input.fastTrack,
     state: input.state,
     success: input.state === "completed",
     createdAt,

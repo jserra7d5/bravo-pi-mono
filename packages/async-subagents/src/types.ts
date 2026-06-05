@@ -76,6 +76,14 @@ export interface RunMetrics {
   toolCalls?: number;
 }
 
+export interface FastTrackLaunch {
+  requested: boolean;
+  enabled: boolean;
+  applied: boolean;
+  reason?: "not_requested" | "disabled" | "scout" | "ineligible_model";
+  serviceTier?: "priority";
+}
+
 export interface RunStatus {
   schemaVersion: SchemaVersion;
   runId: string;
@@ -105,6 +113,7 @@ export interface RunStatus {
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
   forkFallback?: { allowed: boolean; used: boolean; reason?: string } | null;
+  fastTrack?: FastTrackLaunch;
   userBuiltinTools: string[];
   runtimeBuiltinTools: string[];
   runtimeExtensionPaths: string[];
@@ -178,6 +187,7 @@ export interface RunResult {
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
   forkFallback?: { allowed: boolean; used: boolean; reason?: string } | null;
+  fastTrack?: FastTrackLaunch;
   state: TerminalRunState;
   success: boolean;
   createdAt: string;
@@ -373,6 +383,7 @@ export interface SubagentStartResult {
   maxRunSeconds?: number;
   effectiveMaxRunMs?: number;
   maxSubagentDepth?: number;
+  fastTrack?: FastTrackLaunch;
   task?: { taskId: string; title: string };
   next: Array<{ tool: string; args: Record<string, unknown> }>;
 }

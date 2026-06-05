@@ -68,6 +68,41 @@ Provider-backed variants must include the provider extension that registers the 
 
 Trusted parent extensions can request child loading by setting `ASYNC_SUBAGENTS_INHERITED_EXTENSIONS` to a path-delimited or JSON string-array list of extension module paths before launch. These inherited extensions are loaded after configured defaults and before agent-declared extensions, and are intended for session-scoped behavior propagation such as caveman response mode.
 
+## Fast track
+
+`/fast-track` is a lead-session speed policy for critical-path async children. It is intentionally separate from project-local `/fast`: `/fast` affects only the interactive UI session, while fast track authorizes selected noninteractive child launches.
+
+Commands:
+
+```text
+/fast-track            # status
+/fast-track status     # status
+/fast-track on         # arm for this async root session
+/fast-track off        # disarm
+```
+
+When armed, a lead agent can request priority service tier for one child launch:
+
+```ts
+subagent_start({
+  agent: "worker",
+  task: "Implement the critical-path slice...",
+  fastTrack: true
+})
+```
+
+Fast track is a scarce critical-path lever, not a blanket mode. Use it for implementation, planning, or gating-review children whose heavy output-token work bottlenecks the pipeline. Keep scouts, broad fanout, routine non-gating reviews, status checks, low-risk mechanical work, Gemini variants, and non-Codex providers on the normal lane.
+
+Eligibility is fail-safe:
+
+- `fastTrack: true` while `/fast-track` is off fails closed at the tool boundary.
+- `scout` is never fast-tracked.
+- `bravo-codex-balanced/*` is eligible because that provider family is the normal Bravo subagent path.
+- `openai-codex/gpt-5.5` is eligible.
+- Unknown `codex-*`, Gemini, and other non-allowlisted providers are not eligible and launch normally with fast-track metadata explaining why it was not applied.
+
+Applied launches inject the package-owned `extensions/child-fast-track` child extension, which sets `service_tier: "priority"` in `before_provider_request`. Status/result metadata, launch logs, launch/result cards, and the live widget expose fast-track state for auditability.
+
 ## Codex auth balancer
 
 Async subagents can optionally launch Codex-backed children through `@bravo/codex-auth-balancer`. The balancer does not expose arbitrary child env to agents; it internally prepares isolated auth homes and injects only:
@@ -177,7 +212,7 @@ Choose the smallest reasonable `additionalRunSeconds` for the remaining work. If
 
 ## Parent Tools
 
-- `subagent_start`: start a durable async child run and return immediately.
+- `subagent_start`: start a durable async child run and return immediately; accepts `fastTrack: true` for armed, allowlisted critical-path launches.
 - `subagent_status`: inspect current and recent child state.
 - `subagent_result`: canonical backup/recovery read of terminal `result.json`; use for truncated wakeups, artifacts, metadata, or reread, and to mark terminal delivery handled.
 - `subagent_message`: send normal parent input only (`instruction`, `answer`, `context`).

@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type Component } from "@earendil-works/pi-tui";
+import { readFastTrackState, writeFastTrackState } from "../../src/fastTrack.js";
 import { acquireRootSessionLease } from "../../src/leases.js";
 import { NAME_PACKS, readNamePackSelection, writeNamePackSelection, type NamePackId } from "../../src/namePacks.js";
 import { createRootSession, readRootSession } from "../../src/rootSession.js";
@@ -191,6 +192,33 @@ function namePackSummary(cwd: string): string {
   return `Current subagent name pack: ${selection.activePack}\nAvailable: ${packs}`;
 }
 
+function fastTrackSummary(cwd: string, rootSessionId: string): string {
+  const state = readFastTrackState(new RunStore({ cwd }).runRoot, rootSessionId);
+  return `async-subagents fast-track is ${state.enabled ? "on" : "off"}`;
+}
+
+function registerFastTrackCommand(pi: ExtensionAPI): void {
+  pi.registerCommand("fast-track", {
+    description: "Inspect or change async subagent fast-track policy for this root session.",
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const cwd = cwdOf(ctx);
+      const identity = ensureRoot(cwd, piSessionIdOf(ctx));
+      const arg = args.trim();
+      if (!arg || arg === "status") {
+        ctx.ui.notify(fastTrackSummary(cwd, identity.rootSessionId), "info");
+        return;
+      }
+      if (arg !== "on" && arg !== "off") {
+        ctx.ui.notify("Usage: /fast-track [on|off|status]", "error");
+        return;
+      }
+      writeFastTrackState(new RunStore({ cwd }).runRoot, identity.rootSessionId, arg === "on");
+      ctx.ui.notify(`async-subagents fast-track ${arg}`, "info");
+      if (currentCtx) refreshUi(currentCtx);
+    },
+  });
+}
+
 function registerNamePackCommand(pi: ExtensionAPI): void {
   pi.registerCommand("subagent-names", {
     description: "Inspect or change the display-name pack used for future async subagents.",
@@ -296,5 +324,6 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   });
 
   registerSubagentTools(pi, runtime);
+  registerFastTrackCommand(pi);
   registerNamePackCommand(pi);
 }

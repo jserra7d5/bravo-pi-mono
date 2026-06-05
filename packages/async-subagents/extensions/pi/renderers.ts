@@ -519,6 +519,7 @@ export interface WidgetCardInput {
   // terminal). When set and >= the display threshold, surfaces as the
   // right-most header segment; dropped first on width overflow.
   totalCost?: number;
+  fastTrackArmed?: boolean;
   tasks?: TaskRecord[];
   allTasks?: TaskRecord[];
   taskStates?: Map<string, DerivedTaskState>;
@@ -616,6 +617,7 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
     activeCount ? `${ANSI.cyan}${activeCount} active${ANSI.reset}` : "",
     urgentCount ? `${ANSI.amber}${urgentCount} need you${ANSI.reset}` : "",
     readyCount ? `${ANSI.gold}${readyCount} ready${ANSI.reset}` : "",
+    input.fastTrackArmed ? `${ANSI.gold}⚡ fast-track${ANSI.reset}` : "",
   ].filter(Boolean);
   const costSegment = costHeaderSegment(input.totalCost);
   const sep = `${ANSI.gray} · ${ANSI.reset}`;
@@ -786,6 +788,7 @@ export interface LaunchCardInput {
   task?: string;
   model?: string;
   thinking?: string;
+  fastTrack?: { applied?: boolean };
   skills?: string[];
   tools?: string[];
   budget?: string;
@@ -803,8 +806,11 @@ export function renderLaunchCard(input: LaunchCardInput): string[] {
   if (input.task) out.push(ch.row(label("task") + ANSI.white + input.task + ANSI.reset));
   if (input.model) {
     const modelLine = ANSI.white + input.model + ANSI.reset
-      + (input.thinking ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}thinking${ANSI.reset} ${ANSI.cyan}${input.thinking}${ANSI.reset}` : "");
-    out.push(ch.row(label("model") + modelLine));
+      + (input.thinking ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}thinking${ANSI.reset} ${ANSI.cyan}${input.thinking}${ANSI.reset}` : "")
+      + (input.fastTrack?.applied ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}speed${ANSI.reset} ${ANSI.gold}fast${ANSI.reset}` : "");
+    const modelContent = label("model") + modelLine;
+    out.push(ch.row(modelContent));
+    if (input.fastTrack?.applied && visWidth(modelContent) > width - 4) out.push(ch.row(label("speed") + ANSI.gold + "fast" + ANSI.reset));
   }
   if (input.skills?.length) {
     out.push(ch.row(label("skills") + input.skills.map((s) => ANSI.cyan + s + ANSI.reset).join(ANSI.gray + " · " + ANSI.reset)));
@@ -828,6 +834,9 @@ export interface ResultCardInput {
   body?: string;
   metrics?: string;
   artifacts?: string[];
+  model?: string;
+  thinking?: string;
+  fastTrack?: { applied?: boolean };
 }
 
 export function renderResultCard(input: ResultCardInput): string[] {
@@ -838,6 +847,14 @@ export function renderResultCard(input: ResultCardInput): string[] {
   const titleContent = `${idBar(input.displayName)} ${idMention(input.displayName)} ${ANSI.gray}·${ANSI.reset} ${ANSI.white}${input.role}${ANSI.reset}`;
   const badge = `${gl.color}${gl.g} ${isDone ? "done" : gl.label}${ANSI.reset}${input.duration ? ANSI.gray + " · " + ANSI.reset + ANSI.dim + input.duration + ANSI.reset : ""}`;
   const out: string[] = [ch.topTitled(titleContent, badge)];
+  if (input.model) {
+    const modelLine = ANSI.white + input.model + ANSI.reset
+      + (input.thinking ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}thinking${ANSI.reset} ${ANSI.cyan}${input.thinking}${ANSI.reset}` : "")
+      + (input.fastTrack?.applied ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}speed${ANSI.reset} ${ANSI.gold}fast${ANSI.reset}` : "");
+    const modelContent = ANSI.dim + "model     " + ANSI.reset + modelLine;
+    out.push(ch.row(modelContent));
+    if (input.fastTrack?.applied && visWidth(modelContent) > width - 4) out.push(ch.row(ANSI.dim + "speed     " + ANSI.reset + ANSI.gold + "fast" + ANSI.reset));
+  }
   if (input.summary) {
     out.push(ch.row(ANSI.dim + "summary" + ANSI.reset));
     for (const line of input.summary.split("\n")) out.push(ch.row(ANSI.white + line + ANSI.reset));
@@ -1081,6 +1098,7 @@ function renderStartResultCard(details: Record<string, unknown>, width?: number)
   const variant = typeof details.variant === "string" ? details.variant : undefined;
   const model = typeof details.model === "string" ? details.model : undefined;
   const thinking = typeof details.thinkingLevel === "string" ? details.thinkingLevel : undefined;
+  const fastTrack = typeof details.fastTrack === "object" && details.fastTrack ? details.fastTrack as { applied?: boolean } : undefined;
   const contextPolicy = typeof details.contextPolicy === "string" ? details.contextPolicy : undefined;
   const state = typeof details.state === "string" ? details.state : "queued";
   const skills = Array.isArray(details.skills) ? details.skills.filter((s): s is string => typeof s === "string") : undefined;
@@ -1098,6 +1116,7 @@ function renderStartResultCard(details: Record<string, unknown>, width?: number)
     state,
     model,
     thinking,
+    fastTrack,
     skills: skills?.length ? skills : undefined,
     tools: tools?.length ? tools : undefined,
     budget,
@@ -1113,6 +1132,9 @@ function renderTerminalResultCardFromDetails(result: Record<string, unknown>, wi
   const state = typeof result.state === "string" ? result.state : "completed";
   const durationMs = typeof result.durationMs === "number" ? result.durationMs : undefined;
   const summary = typeof result.summary === "string" ? result.summary : undefined;
+  const model = typeof result.model === "string" ? result.model : undefined;
+  const thinking = typeof result.thinkingLevel === "string" ? result.thinkingLevel : undefined;
+  const fastTrack = typeof result.fastTrack === "object" && result.fastTrack ? result.fastTrack as { applied?: boolean } : undefined;
   const body = typeof result.body === "string" && result.body.trim() ? result.body : undefined;
   const metrics = (() => {
     const m = isRecord(result.metrics) ? result.metrics : undefined;
@@ -1135,6 +1157,9 @@ function renderTerminalResultCardFromDetails(result: Record<string, unknown>, wi
     duration: durationMs !== undefined ? compactDuration(durationMs) : undefined,
     summary,
     body,
+    model,
+    thinking,
+    fastTrack,
     metrics,
     artifacts,
   });
@@ -1278,10 +1303,11 @@ export function renderSubagentWakeMessageComponent(message: WakeupMessage, optio
 // ----------------------------------------------------------------------------
 
 export function summarizeStartResult(result: SubagentStartResult): string {
-  const action = result.waited ? "started and waited" : "started";
+  const action = result.started === false || result.state === "failed" ? "failed to start" : result.waited ? "started and waited" : "started";
   const agent = result.variant ? `${result.agentName}/${result.variant}` : result.agentName;
   const label = result.displayName ? `@${result.displayName} (${agent})` : agent;
-  return `Subagent ${result.runId} ${action}: ${label} (${result.state}); async wakeups will report attention or results`;
+  const suffix = result.started === false || result.state === "failed" ? "" : "; async wakeups will report attention or results";
+  return `Subagent ${result.runId} ${action}: ${label} (${result.state})${suffix}`;
 }
 
 function formatResultSummary(result: RunResult, options?: { includeSummary?: boolean; useLiteralState?: boolean }): string {

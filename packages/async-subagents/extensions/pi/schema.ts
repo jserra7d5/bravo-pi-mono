@@ -26,6 +26,7 @@ export const subagentStartSchema = Type.Object({
   session: Type.Optional(StringEnum(["record", "none"] as const, { default: "record" })),
   allowFreshFallback: Type.Optional(Type.Boolean({ default: false })),
   thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS, { description: "Override the agent definition default Pi thinking level for this child run." })),
+  fastTrack: Type.Optional(Type.Boolean({ description: "Request priority service tier for an absolute critical-path allowlisted Codex implementation/planning/review child. Includes bravo-codex-balanced/*; requires /fast-track on or launch fails closed." })),
 });
 
 export const subagentMessageSchema = Type.Object({

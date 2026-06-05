@@ -1,3 +1,4 @@
+import { readFastTrackState } from "../../src/fastTrack.js";
 import { RunStore } from "../../src/runStore.js";
 import type { DerivedTaskState, RunIndexRecord, TaskRecord } from "../../src/types.js";
 import { readWatcherSnapshot, type RunSummaryRow } from "../../src/watcher.js";
@@ -25,6 +26,7 @@ export interface LiveWidgetInput {
   terminalCompletedVisibleMs?: number;
   records?: RunIndexRecord[];
   snapshot?: LiveWidgetSnapshot;
+  fastTrackArmed?: boolean;
   // Optional explicit width — when omitted (the production path), pi tells the
   // widget its real container width via the Component.render(width) callback.
   // This is required: pi's widget container is narrower than the full terminal,
@@ -232,8 +234,9 @@ function renderAt(input: LiveWidgetInput, width: number, now: number): string[] 
   const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
   const visibleRows = rows.filter((row) => visible(row, now, terminalCompletedVisibleMs));
   const visibleTasks = visibleTasksFor(tasks, taskStates, now);
+  const fastTrackArmed = input.fastTrackArmed ?? false;
 
-  if (!visibleRows.length && !visibleTasks.length) return [];
+  if (!visibleRows.length && !visibleTasks.length && !fastTrackArmed) return [];
 
   const widgetRows: WidgetRowInput[] = visibleRows.map((row) => {
     const task = runIdToTask.get(row.runId);
@@ -254,6 +257,7 @@ function renderAt(input: LiveWidgetInput, width: number, now: number): string[] 
     rows: widgetRows,
     maxRows,
     totalCost: totalCostForRows(visibleRows),
+    fastTrackArmed,
     tasks: visibleTasks,
     allTasks: tasks,
     taskStates,
@@ -262,8 +266,8 @@ function renderAt(input: LiveWidgetInput, width: number, now: number): string[] 
   });
 }
 
-function hasVisibleRows(snapshot: LiveWidgetSnapshot): boolean {
-  return snapshot.rows.length > 0 || snapshot.visibleTasks.length > 0;
+function hasVisibleRows(snapshot: LiveWidgetSnapshot, fastTrackArmed = false): boolean {
+  return fastTrackArmed || snapshot.rows.length > 0 || snapshot.visibleTasks.length > 0;
 }
 
 function liveWidgetRenderSignature(input: LiveWidgetInput, snapshot: LiveWidgetSnapshot): string {
@@ -305,6 +309,7 @@ function liveWidgetRenderSignature(input: LiveWidgetInput, snapshot: LiveWidgetS
     terminalCompletedVisibleMs,
     rows,
     totalCost: snapshot.totalCost,
+    fastTrackArmed: input.fastTrackArmed ?? false,
     tasks,
     taskCounts,
   });
@@ -381,10 +386,11 @@ export function updateLiveWidget(ctx: unknown, input: LiveWidgetInput): void {
   const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
   if (!ui?.setWidget) return;
   const snapshot = input.snapshot ?? prepareLiveWidgetSnapshot(input, Date.now());
-  const snapshotInput = { ...input, snapshot };
+  const fastTrackArmed = input.fastTrackArmed ?? (input.rootSessionId ? readFastTrackState(input.store.runRoot, input.rootSessionId).enabled : false);
+  const snapshotInput = { ...input, snapshot, fastTrackArmed };
   // Use the precomputed snapshot so the visibility probe stays on the tick/update
   // path and the pi Component.render(width) callback performs no filesystem I/O.
-  if (!hasVisibleRows(snapshot)) {
+  if (!hasVisibleRows(snapshot, fastTrackArmed)) {
     clearLiveWidget(ctx);
     return;
   }

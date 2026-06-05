@@ -141,6 +141,13 @@ test("live widget returns no lines when no rows are visible", () => {
   assert.deepEqual(lines, []);
 });
 
+test("live widget shows fast-track badge even without visible runs", () => {
+  const w = workspace();
+  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72, fastTrackArmed: true });
+  assert.ok(stripAnsi(lines[0]).includes("fast-track"));
+  for (const line of lines) assert.equal(visWidth(line), 72);
+});
+
 test("live widget hides terminal runs older than the default one minute horizon", () => {
   for (const state of ["completed", "failed", "cancelled", "expired"] as const) {
     const w = workspace();

@@ -78,6 +78,7 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
     forkSourceSessionFile: status.forkSourceSessionFile,
     forkSourceLeafId: status.forkSourceLeafId,
     forkFallback: status.forkFallback,
+    fastTrack: status.fastTrack,
     state: input.state,
     startedAt: input.startedAt ?? status.startedAt,
     summary: input.summary,

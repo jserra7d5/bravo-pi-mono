@@ -8,6 +8,7 @@ import { loadAsyncSubagentsConfig, type CodexAuthBalancerConfig } from "./config
 import { buildPiCommand, childControlEventTool, childControlExtensionPath, childControlTaskTools, inheritedExtensionPathsFromEnv, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
 import { assemblePrompt } from "./promptAssembly.js";
 import { SubagentError } from "./errors.js";
+import { evaluateFastTrack, readFastTrackState } from "./fastTrack.js";
 import { finalizeTerminalRun } from "./lifecycle.js";
 import { assignDisplayName } from "./namePacks.js";
 import { branchPiSession, type BranchPiSession, type ParentPiSessionRef } from "./piSession.js";
@@ -62,6 +63,7 @@ export interface StartSubagentInput {
   env?: Record<string, string>;
   fake?: StartFakeImmediateInput | StartFakeChildInput;
   taskAssignment?: { task: TaskRecord; token: string; dependencies?: TaskRecord[] };
+  fastTrack?: boolean;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -79,6 +81,8 @@ function findPackageRoot(start: string): string {
     current = parent;
   }
 }
+
+const childFastTrackExtensionPath = join(findPackageRoot(here), "extensions", "child-fast-track", "index.ts");
 
 function resolveRootIdentity(input: StartSubagentInput, cwd: string): { parentRunId: string; rootRunId: string; rootSessionId: string } {
   if (input.parentRunId) {
@@ -355,6 +359,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   const maxRunSeconds = definition.maxRunSeconds ?? asyncSubagentsConfig.defaultMaxRunSeconds;
   if (!Number.isFinite(maxRunSeconds) || maxRunSeconds <= 0) throw new SubagentError("INVALID_AGENT_DEFINITION", "maxRunSeconds must be a positive finite number");
   const effectiveMaxRunMs = Math.ceil(maxRunSeconds * 1000);
+  const fastTrack = evaluateFastTrack({ requested: input.fastTrack, enabled: readFastTrackState(store.runRoot, root.rootSessionId).enabled, agentName: definition.name, model: definition.model });
+  if (fastTrack.applied && !existsSync(childFastTrackExtensionPath)) throw new SubagentError("FAST_TRACK_EXTENSION_MISSING", `fast-track child extension is missing: ${childFastTrackExtensionPath}`);
 
   const initialStatus = createInitialStatus({
     runId,
@@ -379,6 +385,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     continuationSequence: input.continuation?.continuationSequence,
     continuationOfPiSessionPath: input.continuation?.continuationOfPiSessionPath,
     forkFallback,
+    fastTrack,
     userBuiltinTools: definition.tools,
     runtimeBuiltinTools,
     runtimeExtensionPaths,
@@ -426,10 +433,15 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       maxRunSeconds,
       effectiveMaxRunMs,
       maxSubagentDepth: definition.maxSubagentDepth,
+      fastTrack,
       task: input.taskAssignment ? { taskId: input.taskAssignment.task.id, title: input.taskAssignment.task.title } : undefined,
       next: [{ tool: "subagent_result", args: { runId } }],
     };
   };
+
+  if (fastTrack.requested && !fastTrack.enabled) {
+    return failBeforeLaunch("FAST_TRACK_DISABLED", "fastTrack requested but /fast-track is off; run /fast-track on first or remove fastTrack", fastTrack);
+  }
 
   if (requestedContextPolicy === "fork" && sessionPolicy !== "record") {
     return failBeforeLaunch("INVALID_SESSION_POLICY", "context: fork requires session: record", { context: requestedContextPolicy, session: sessionPolicy });
@@ -519,6 +531,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     : {};
   const effectiveExtraEnv = codexAuthBalancer ? { ...(input.env ?? {}), ...taskEnv, ...codexAuthBalancer.env } : { ...(input.env ?? {}), ...taskEnv, ...balancedProviderEnv };
   const inheritedExtensionPaths = inheritedExtensionPathsFromEnv({ ...process.env, ...effectiveExtraEnv });
+  const fastTrackExtensions = fastTrack.applied ? [childFastTrackExtensionPath] : [];
 
   const piCommand = buildPiCommand({
     piBin: input.piBin,
@@ -536,7 +549,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     defaultExtensionPaths: asyncSubagentsConfig.defaultExtensions.map((extension) => extension.realPath),
     defaultExtensionTools: asyncSubagentsConfig.defaultExtensions.flatMap((extension) => extension.tools),
     inheritedExtensionPaths,
-    extensions: prompt.extensions,
+    extensions: [...prompt.extensions, ...fastTrackExtensions],
     model: prompt.model,
     thinkingLevel: selectedThinkingLevel,
     contextPolicy,
@@ -561,7 +574,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     defaultExtensions: asyncSubagentsConfig.defaultExtensions,
     defaultExtensionTools: asyncSubagentsConfig.defaultExtensions.flatMap((extension) => extension.tools),
     inheritedExtensions: inheritedExtensionPaths,
-    extensions: prompt.extensions,
+    extensions: [...prompt.extensions, ...fastTrackExtensions],
+    fastTrack,
     contextPolicy,
     sessionPolicy,
     requestedPiSessionPath,
@@ -632,6 +646,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     maxRunSeconds,
     effectiveMaxRunMs,
     maxSubagentDepth: definition.maxSubagentDepth,
+    fastTrack,
     task: input.taskAssignment ? { taskId: input.taskAssignment.task.id, title: input.taskAssignment.task.title } : undefined,
     next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [],
   };

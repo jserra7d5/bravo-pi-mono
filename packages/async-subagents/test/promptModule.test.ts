@@ -17,7 +17,8 @@ test("async subagents prompt module establishes neutral lifecycle rules", () => 
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /@DisplayName/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /Do not hard-code or assume particular subagent types/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /Async Subagent Catalog/);
-  assert.doesNotMatch(ASYNC_SUBAGENTS_PROMPT_MODULE, /\b(worker|reviewer|scout|fast-worker)\b/);
+  assert.doesNotMatch(ASYNC_SUBAGENTS_PROMPT_MODULE, /\b(worker|reviewer|fast-worker)\b/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /critical-path implementation\/planning\/review/);
 });
 
 test("appendAsyncSubagentsPrompt appends once", () => {

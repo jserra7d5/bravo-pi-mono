@@ -852,6 +852,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
             ASYNC_SUBAGENTS_PARENT_RUN_ID: root.parentRunId,
           },
           thinkingLevel: isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined,
+          fastTrack: params.fastTrack === true,
           taskAssignment,
         });
         } catch (error) {
@@ -874,7 +875,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           createdAt: new Date().toISOString(),
         });
         await runtime.afterMutation?.(ctx, sessionCwd, root);
-        return response(summarizeStartResult(result), { ...result, taskId, rootSessionId: root.rootSessionId });
+        const isStartFailure = result.started === false || result.state === "failed";
+        return response(summarizeStartResult(result), { ...result, taskId, rootSessionId: root.rootSessionId }, isStartFailure);
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_start"),
       renderResult: renderSubagentToolResultComponent,

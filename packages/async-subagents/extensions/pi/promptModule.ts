@@ -12,6 +12,8 @@ Agent definitions encode their normal thinking level. Do not override thinking r
 
 Some agent definitions expose variants. A variant keeps the same agent prompt and role but overlays launch config such as model or thinking level. Use \`variant\` only when the task calls for that configured execution lane, for example \`{ agent: "agent-name", variant: "gemini", task: "..." }\`; omit it for the default agent config. Provider-backed variants must also declare the Pi provider extension that registers their model; otherwise the isolated child launch preflight will fail before spawn.
 
+\`/fast-track on\` is an operator greenlight, not a blanket instruction. When it is armed, weight \`subagent_start.fastTrack: true\` toward the critical-path implementation/planning/review child whose heavy output-token work is the latency bottleneck, including a review that gates further remediation. Leave ordinary launches normal: scouts, default fanout, routine non-gating reviews, status checks, Gemini/non-Codex variants, and low-risk mechanical work. If fast-track is requested while policy is off, the launch fails closed; ineligible models launch normally and report that fast-track was not applied.
+
 Read source-of-truth artifacts yourself before delegating interpretation of them. Use subagents for reconnaissance, independent checks, implementation slices, or review around that source, not as a replacement for owning the spec.
 
 After delegating broad work, do not duplicate the same broad exploration yourself. Continue with non-overlapping work if useful; otherwise end your turn and go idle. Async wakeups, not polling, are the normal signal for questions, blockers, timeout pauses, and terminal results.
@@ -68,7 +70,8 @@ Worked example: you \`task_create\` T-001 implement (ready) and T-002 review (de
 11. Do not invent subagent names, variants, statuses, or results.
 12. Do not call \`subagent_status\` repeatedly to wait for completion; go idle and let async wakeups resume you.
 13. Do not use task tools to bypass ownership/dependency constraints; start task-owned children only with \`subagent_start({ taskId })\`.
-14. After \`task_create\`, start every ready task in the same turn; never create a task plan and then go idle. Drive the loop: start ready tasks, accept results, and start newly-ready tasks until the plan completes.`;
+14. After \`task_create\`, start every ready task in the same turn; never create a task plan and then go idle. Drive the loop: start ready tasks, accept results, and start newly-ready tasks until the plan completes.
+15. Treat \`fastTrack: true\` as a scarce speed lever for an armed critical-path implementation/planning/review child whose output-token latency bottlenecks the plan, including gating review; keep scouts, broad fanout, routine non-gating reviews, status checks, and Gemini/non-Codex variants on the normal lane by default.`;
 
 export function appendAsyncSubagentsPrompt(systemPrompt: string, catalog?: string): string {
   if (systemPrompt.includes("## Async Subagents")) return systemPrompt;

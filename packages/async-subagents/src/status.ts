@@ -29,6 +29,7 @@ export function createInitialStatus(input: {
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
   forkFallback?: RunStatus["forkFallback"];
+  fastTrack?: RunStatus["fastTrack"];
   userBuiltinTools?: string[];
   runtimeBuiltinTools?: string[];
   runtimeExtensionPaths?: string[];
@@ -68,6 +69,7 @@ export function createInitialStatus(input: {
     forkSourceSessionFile: input.forkSourceSessionFile,
     forkSourceLeafId: input.forkSourceLeafId,
     forkFallback: input.forkFallback ?? null,
+    fastTrack: input.fastTrack,
     userBuiltinTools: input.userBuiltinTools ?? [],
     runtimeBuiltinTools: input.runtimeBuiltinTools ?? [],
     runtimeExtensionPaths: input.runtimeExtensionPaths ?? [],

@@ -222,6 +222,38 @@ test("launch card surfaces task, model, thinking, skills, tools, budget, and con
   assert.ok(text.includes("fresh session"));
 });
 
+test("launch card surfaces fast-track speed marker at narrow width", () => {
+  const card = renderLaunchCard({
+    width: 32,
+    displayName: "taro",
+    role: "worker",
+    state: "queued",
+    model: "codex/gpt-5.5",
+    thinking: "low",
+    fastTrack: { applied: true },
+  });
+  const text = card.map(stripAnsi).join("\n");
+  assert.match(text, /speed\s+fast/);
+  for (const line of card) assert.equal(visWidth(line), 32);
+});
+
+test("result card surfaces fast-track model metadata at narrow width", () => {
+  const card = renderResultCard({
+    width: 32,
+    displayName: "taro",
+    role: "worker",
+    state: "completed",
+    model: "codex/gpt-5.5",
+    thinking: "low",
+    fastTrack: { applied: true },
+    summary: "Done",
+  });
+  const text = card.map(stripAnsi).join("\n");
+  assert.ok(text.includes("codex/gpt-5.5"));
+  assert.match(text, /speed\s+fast/);
+  for (const line of card) assert.equal(visWidth(line), 32);
+});
+
 test("result card shows summary, metrics, artifacts, and duration in the badge", () => {
   const card = renderResultCard({
     width: 72,
