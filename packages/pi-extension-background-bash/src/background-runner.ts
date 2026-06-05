@@ -1,3 +1,4 @@
+import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { ChildProcess, spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -41,7 +42,8 @@ export class BackgroundRunner {
     this.registry.upsert(record);
     let child: ChildProcess;
     try {
-      child = spawn(input.command, { cwd: input.cwd, shell: true, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+      const { shell, args } = getShellConfig();
+      child = spawn(shell, [...args, input.command], { cwd: input.cwd, shell: false, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"], env: process.env, windowsHide: true });
     } catch (err) {
       record = { ...record, status: "failed", endedAt: nowIso() };
       safeAppendLog(outputPath, sentinel(`spawn error: ${err instanceof Error ? err.message : String(err)}`));

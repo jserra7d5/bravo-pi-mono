@@ -112,7 +112,7 @@ export function buildStartTool(_pi: ExtensionAPI, store: JsonlMonitorStore, stat
       monitor_lifespan_s: Type.Optional(Type.Number({ description: "Optional total monitor lifespan in seconds." })),
       command: Type.Optional(Type.String({ description: "Observer command for kind='stream' or kind='poll'; not for running workloads." })),
       cwd: Type.Optional(Type.String()),
-      shell: Type.Optional(Type.Boolean({ description: "shell:false is rejected for poll command strings." })),
+      shell: Type.Optional(Type.Boolean({ description: "Command strings default to Pi's Bash shell resolution; shell:false is rejected for poll command strings." })),
       emit: Type.Optional(StringEnum(["line", "state_change", "terminal"] as const)),
       projection: Type.Optional(Type.Unknown()),
       command_timeout_s: Type.Optional(Type.Number()),

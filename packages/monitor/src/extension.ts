@@ -49,6 +49,7 @@ Do not use Monitor to run workloads (tests, builds, installs, dev servers, migra
 
 Operational rules:
 - Prefer the v2 \`monitor_start\` shape: \`kind: "stream" | "poll" | "file"\` with seconds fields such as \`interval_s\`, \`throttle_s\`, and \`command_timeout_s\`.
+- Command monitors run command strings through Pi's normal Bash shell resolution; if you need explicit shell behavior, wrap the observer command yourself, e.g. \`bash -lc '...'\`.
 - \`monitor_start\` returns a generated \`output_path\`; inspect details with the normal read tool.
 - Default wake mode is quiet except failures. Use \`wake\` only for actionable or terminal events; avoid waking on routine progress.
 - Use \`monitor_list\` to recover active monitors and \`monitor_stop\` to stop them.

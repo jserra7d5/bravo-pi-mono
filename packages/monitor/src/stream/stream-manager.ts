@@ -1,3 +1,4 @@
+import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync } from "node:fs";
@@ -162,9 +163,10 @@ export class StreamMonitorManager {
   start(params: StreamStartParams, ctx?: any): StreamMonitorState {
     const streamId = params.stream_id ?? makeStreamId();
     const outputFile = params.output_file ?? monitorOutputFile(streamId, this.root);
+    const shell = params.shell === false ? false : getShellConfig().shell;
     const child = spawn(params.command, {
       cwd: params.cwd || process.cwd(),
-      shell: params.shell ?? true,
+      shell,
       stdio: ["ignore", "pipe", "pipe"],
       env: process.env,
       detached: process.platform !== "win32",

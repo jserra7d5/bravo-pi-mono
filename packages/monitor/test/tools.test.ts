@@ -151,6 +151,44 @@ test('v2 poll uses seconds and suppresses unchanged state', async () => {
   }
 });
 
+test('v2 poll command strings use Pi bash shell resolution', async () => {
+  const { dir, store } = tmpStore();
+  try {
+    process.env.PI_MONITOR_HOME = dir;
+    const envFile = join(dir, 'env.sh');
+    writeFileSync(envFile, 'export MONITOR_BASH_OK=bash-ok\n');
+    const started = await (buildStartTool({} as any, store) as any).execute('tc-poll-bash', { kind: 'poll', name: 'poll-bash', command: `source ${JSON.stringify(envFile)} && printf "$MONITOR_BASH_OK\\n"`, interval_s: 5, wake: 'never' }, undefined, undefined, fakeCtx());
+    const got = await store.get(started.details.monitor_id);
+    const { runCommandPollCheck } = await import('../src/checks/command.js');
+    const result = await runCommandPollCheck(got!, store);
+    assert.equal(result.status, 'matched');
+    assert.equal((result.observation as any).projected, 'bash-ok');
+  } finally {
+    delete process.env.PI_MONITOR_HOME;
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test('v2 stream command strings use Pi bash shell resolution', async () => {
+  const { dir, store } = tmpStore();
+  try {
+    process.env.PI_MONITOR_HOME = dir;
+    const envFile = join(dir, 'env.sh');
+    writeFileSync(envFile, 'export MONITOR_STREAM_BASH_OK=stream-bash-ok\n');
+    const streams = new StreamMonitorManager({ sendMessage: () => undefined } as any, dir);
+    const started = await (buildStartTool({} as any, store, undefined, streams) as any).execute('tc-stream-bash', {
+      kind: 'stream',
+      name: 'stream-bash',
+      command: `source ${JSON.stringify(envFile)} && printf "$MONITOR_STREAM_BASH_OK\\n"`,
+      wake: 'never',
+    }, undefined, undefined, fakeCtx());
+    await waitFor(() => existsSync(started.details.output_path) && readFileSync(started.details.output_path, 'utf8').includes('stream-bash-ok'));
+  } finally {
+    delete process.env.PI_MONITOR_HOME;
+    rmSync(dir, { recursive: true });
+  }
+});
+
 test('v2 poll emits standardized wake envelope on state change', async () => {
   const { dir, store } = tmpStore();
   const sent: any[] = [];

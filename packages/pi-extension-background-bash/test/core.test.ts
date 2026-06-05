@@ -58,6 +58,19 @@ test("output cap limits persisted bytes and stops appending", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("background runner uses Pi bash shell resolution", async () => {
+  const root = await tmp();
+  try {
+    const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data"), defaultMaxRuntimeMs: 10_000 }, root);
+    const runner = new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg);
+    const task = await runner.start({ command: "[[ ${BASH_VERSION:-} ]] && echo bash-ok", cwd: root });
+    await new Promise(r => setTimeout(r, 300));
+    const rec = new TaskRegistry(cfg.dataDir).get(task.taskId)!;
+    assert.equal(rec.status, "exited");
+    assert.match(readFileSync(rec.outputPath, "utf8"), /bash-ok/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("stop refuses unverified persisted pid", async () => {
   const root = await tmp();
   try {
@@ -167,6 +180,15 @@ test("registered renderers produce bounded background task cards", () => {
   assert.match(list, /tasks/);
   assert.match(list, /running/);
   for (const line of lines) assert.equal(visWidth(line), 56);
+});
+
+test("self-shell background task renderers return fallback components on error details", () => {
+  const tools = buildBackgroundBashTools() as Array<{ name: string; renderResult?: Function }>;
+  for (const tool of tools.filter(t => t.name.startsWith("background_task_"))) {
+    const component = tool.renderResult?.({ content: [{ type: "text", text: "Task not found" }], details: { code: "TASK_NOT_FOUND" }, isError: true });
+    assert.ok(component, `${tool.name} should not return undefined`);
+    assert.deepEqual(component.render(56), ["Task not found"]);
+  }
 });
 
 test("registered renderers normalize embedded newlines before chrome rendering", () => {
@@ -301,16 +323,19 @@ test("background bash widget requests render when counts change and clears when 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("bash timeout is seconds and background converts to milliseconds", async () => {
+test("bash background timeout is validated as process max runtime seconds", async () => {
   const root = await tmp();
   try {
     const tools = buildBackgroundBashTools();
     const bash = tools[0];
-    const response = await bash.execute("id", { command: "node -e \"setTimeout(()=>{}, 5000)\"", run_in_background: true, timeout: 1 }, undefined, undefined, { cwd: root, config: { backgroundBash: { enabled: true, dataDir: path.join(root, "data") } } });
+    const tiny = await bash.execute("id", { command: "echo x", run_in_background: true, timeout: 1 }, undefined, undefined, { cwd: root });
+    assert.equal((tiny as { isError?: boolean }).isError, true);
+    assert.match(String((tiny.content[0] as { text?: string }).text), /maximum runtime/);
+    const response = await bash.execute("id", { command: "echo ok", run_in_background: true, timeout: 30 }, undefined, undefined, { cwd: root, config: { backgroundBash: { enabled: true, dataDir: path.join(root, "data") } } });
     const task = (response.details as { task: BackgroundTaskRecord }).task;
-    assert.equal(task.maxRuntimeMs, 1000);
-    await new Promise(r => setTimeout(r, 1300));
-    assert.equal(new TaskRegistry(path.join(root, "data")).get(task.taskId)?.status, "timed_out");
+    assert.equal(task.maxRuntimeMs, 30_000);
+    await new Promise(r => setTimeout(r, 300));
+    assert.equal(new TaskRegistry(path.join(root, "data")).get(task.taskId)?.status, "exited");
     const bad = await bash.execute("id", { command: "echo x", run_in_background: true, timeout: 24 * 60 * 60 + 1 }, undefined, undefined, { cwd: root });
     assert.equal((bad as { isError?: boolean }).isError, true);
   } finally { await rm(root, { recursive: true, force: true }); }

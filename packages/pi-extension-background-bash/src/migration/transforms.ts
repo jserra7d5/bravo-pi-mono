@@ -1,6 +1,6 @@
 import type { ScannedFile, TransformChange } from "./types.js";
 
-const GUIDANCE = "Use bash with run_in_background: true for long-running commands; do not append shell &; monitor via returned output paths or background_task_list/status/stop.";
+const GUIDANCE = "Use bash with run_in_background: true for long-running work whose process you own; do not append shell &. For background calls, timeout is the process max runtime, not a client wait timeout. Monitor via returned output paths or background_task_list/status/stop.";
 
 export function proposeTransforms(file: ScannedFile): TransformChange[] {
   if (file.kind === "run-artifact" || file.kind === "cache") return [];

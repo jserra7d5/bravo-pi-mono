@@ -1,3 +1,4 @@
+import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { exec } from "node:child_process";
 import { appendFileSync, mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -13,7 +14,7 @@ function run(command: string, opts: { cwd?: string; shell?: boolean; timeout?: n
       reject(new Error("poll monitor shell:false is not supported for command strings; omit shell or set shell:true"));
       return;
     }
-    const execOptions: any = { cwd: opts.cwd || process.cwd(), timeout: opts.timeout, maxBuffer: 5_000_000 };
+    const execOptions: any = { cwd: opts.cwd || process.cwd(), timeout: opts.timeout, maxBuffer: 5_000_000, shell: getShellConfig().shell };
     exec(command, execOptions, (error: any, stdout: string | Buffer, stderr: string | Buffer) => {
       resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), exitCode: typeof error?.code === "number" ? error.code : 0 });
     });
