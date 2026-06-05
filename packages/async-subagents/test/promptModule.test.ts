@@ -28,3 +28,15 @@ test("appendAsyncSubagentsPrompt appends once", () => {
   assert.match(prompt, /`scout`/);
   assert.equal(appendAsyncSubagentsPrompt(prompt, "- `worker` — Implements"), prompt);
 });
+
+test("appendAsyncSubagentsPrompt overlays current fast-track session state", () => {
+  const prompt = appendAsyncSubagentsPrompt("Base prompt", "- `worker` — Implements", { fastTrackArmed: true });
+  assert.match(prompt, /## Async Subagents Session State/);
+  assert.match(prompt, /Fast-track policy is currently \*\*armed\/on\*\*/);
+  assert.match(prompt, /`fastTrack: true`/);
+
+  const updated = appendAsyncSubagentsPrompt(prompt, "- `worker` — Implements", { fastTrackArmed: false });
+  assert.match(updated, /Fast-track policy is currently \*\*off\*\*/);
+  assert.doesNotMatch(updated, /armed\/on/);
+  assert.equal((updated.match(/## Async Subagents Session State/g) ?? []).length, 1);
+});

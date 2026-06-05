@@ -319,8 +319,11 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
-    const catalog = renderDiscoveredAgentCatalog({ cwd: cwdOf(ctx), env: process.env });
-    return { systemPrompt: appendAsyncSubagentsPrompt(event.systemPrompt, catalog) };
+    const cwd = cwdOf(ctx);
+    const identity = ensureRoot(cwd, piSessionIdOf(ctx));
+    const fastTrackArmed = readFastTrackState(new RunStore({ cwd }).runRoot, identity.rootSessionId).enabled;
+    const catalog = renderDiscoveredAgentCatalog({ cwd, env: process.env });
+    return { systemPrompt: appendAsyncSubagentsPrompt(event.systemPrompt, catalog, { fastTrackArmed }) };
   });
 
   registerSubagentTools(pi, runtime);
