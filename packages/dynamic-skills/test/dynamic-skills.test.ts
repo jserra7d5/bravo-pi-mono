@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, symlink, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import extension from "../extensions/pi/index.js";
@@ -9,8 +9,8 @@ import { appendDynamicSkillPrompt, renderCatalog } from "../src/render.js";
 import { DynamicSkillState, latestSnapshotFromBranch } from "../src/state.js";
 
 async function repo() { return mkdtemp(join(tmpdir(), "dyn-skills-")); }
-async function skill(root: string, name: string, desc = "desc", extra = "", body = "BODY") {
-  const dir = join(root, ".agents", "skills", name); await mkdir(dir, { recursive: true });
+async function skill(root: string, name: string, desc = "desc", extra = "", body = "BODY", sourceRoot: ".agents" | ".claude" = ".agents") {
+  const dir = join(root, sourceRoot, "skills", name); await mkdir(dir, { recursive: true });
   await writeFile(join(dir, "SKILL.md"), `---\nname: ${name}\ndescription: ${desc}\n${extra}---\n${body}\n`);
   return join(dir, "SKILL.md");
 }
@@ -31,6 +31,57 @@ test("scanner discovers upward eligible skills and excludes disabled/missing des
   const { candidates } = await discoverDynamicSkillCandidates(cwd, "sub/deep/file.txt");
   assert.deepEqual(candidates.map((s) => s.name).sort(), ["good"]);
   assert.equal(candidates[0].location, loc);
+});
+
+test("scanner discovers skills from both .agents and .claude roots", async () => {
+  const cwd = await repo();
+  await mkdir(join(cwd, "sub"), { recursive: true }); await writeFile(join(cwd, "sub", "f"), "x");
+  await skill(cwd, "agents", "a");
+  await skill(cwd, "claude", "c", "", "BODY", ".claude");
+  const { candidates } = await discoverDynamicSkillCandidates(cwd, "sub/f");
+  assert.deepEqual(candidates.map((s) => `${s.name}:${s.sourceRoot}`).sort(), ["agents:.agents", "claude:.claude"]);
+});
+
+test("state dedupes same real SKILL path and prefers .agents display location", () => {
+  const st = new DynamicSkillState();
+  const realLocation = "/tmp/repo/.agents/skills/same/SKILL.md";
+  st.acceptCandidates([
+    { name: "same", description: "c", location: "/tmp/repo/.claude/skills/same/SKILL.md", baseDir: "/tmp/repo/.claude/skills/same", discoveredFrom: "/tmp/repo/f", discoveredAt: "t", realLocation, sourceRoot: ".claude" },
+    { name: "same", description: "a", location: "/tmp/repo/.agents/skills/same/SKILL.md", baseDir: "/tmp/repo/.agents/skills/same", discoveredFrom: "/tmp/repo/f", discoveredAt: "t", realLocation, sourceRoot: ".agents" },
+  ]);
+  assert.equal(st.skills().length, 1);
+  assert.match(st.skills()[0].location, /\.agents\/skills\/same\/SKILL\.md$/);
+});
+
+test("same dynamic skill name chooses newest SKILL mtime and exact tie prefers .agents", async () => {
+  const cwd = await repo();
+  const oldLoc = await skill(cwd, "dup", "old", "", "BODY", ".agents");
+  const newLoc = await skill(cwd, "dup", "new", "", "BODY", ".claude");
+  const oldDate = new Date("2024-01-01T00:00:00Z"); const newDate = new Date("2024-01-02T00:00:00Z");
+  await utimes(oldLoc, oldDate, oldDate); await utimes(newLoc, newDate, newDate);
+  await mkdir(join(cwd, "sub"), { recursive: true }); await writeFile(join(cwd, "sub", "f"), "x");
+  const st = new DynamicSkillState();
+  st.acceptCandidates((await discoverDynamicSkillCandidates(cwd, "sub/f")).candidates);
+  assert.equal(st.skills()[0].description, "new");
+
+  const tie = await repo();
+  const agentsTie = await skill(tie, "dup", "agents", "", "BODY", ".agents");
+  const claudeTie = await skill(tie, "dup", "claude", "", "BODY", ".claude");
+  const date = new Date("2024-01-03T00:00:00Z"); await utimes(agentsTie, date, date); await utimes(claudeTie, date, date);
+  await mkdir(join(tie, "sub"), { recursive: true }); await writeFile(join(tie, "sub", "f"), "x");
+  const st2 = new DynamicSkillState();
+  st2.acceptCandidates((await discoverDynamicSkillCandidates(tie, "sub/f")).candidates);
+  assert.equal(st2.skills()[0].description, "agents");
+});
+
+test("loaded legacy snapshot skill without mtime/sourceRoot is not displaced by newer duplicate name", () => {
+  const st = new DynamicSkillState();
+  st.load({ version: 1, skills: [{ name: "legacy", description: "kept", location: "/tmp/legacy/SKILL.md", baseDir: "/tmp/legacy", discoveredFrom: "/tmp/f", discoveredAt: "t" }] });
+  const accepted = st.acceptCandidates([{ name: "legacy", description: "candidate", location: "/tmp/new/SKILL.md", baseDir: "/tmp/new", discoveredFrom: "/tmp/f", discoveredAt: "t", realLocation: "/tmp/new/SKILL.md", skillMtimeMs: 999, sourceRoot: ".agents" }]);
+  assert.equal(accepted.length, 0);
+  assert.equal(st.skills().length, 1);
+  assert.equal(st.skills()[0].description, "kept");
+  assert.equal(st.diagnostics.at(-1)?.type, "dynamic-name-collision");
 });
 
 test("scanner rejects symlinked .agents directory", async () => {
@@ -65,7 +116,7 @@ test("scanner rejects symlinked SKILL.md", async () => {
   assert.equal(result.diagnostics.some((d) => d.type === "security-boundary"), true);
 });
 
-test("state collision policy keeps first dynamic and native wins", async () => {
+test("state collision policy rejects non-comparable duplicate and native wins", async () => {
   const st = new DynamicSkillState();
   const a = { name: "same", description: "a", location: "/tmp/a/SKILL.md", baseDir: "/tmp/a", discoveredFrom: "/tmp/f", discoveredAt: new Date().toISOString() };
   const b = { ...a, location: "/tmp/b/SKILL.md", baseDir: "/tmp/b" };

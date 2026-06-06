@@ -29,26 +29,29 @@ export async function discoverDynamicSkillCandidates(cwd: string, inputPath: str
   while (isContainedOrEqual(realCwd, dir)) { dirs.push(dir); if (dir === realCwd) break; dir = dirname(dir); }
   const discoveredFrom = target;
   for (const d of dirs) {
-    const agentsReal = await safePlainDir(join(d, ".agents"), realCwd, diagnostics, ".agents directory");
-    if (!agentsReal) continue;
-    const root = join(agentsReal, "skills");
-    const rootReal = await safePlainDir(root, realCwd, diagnostics, ".agents/skills root");
-    if (!rootReal) continue;
-    let children: string[] = [];
-    try { children = await readdir(rootReal); } catch { continue; }
-    for (const child of children.sort()) {
-      const skillDir = join(rootReal, child);
-      const safeDir = await safePlainDir(skillDir, realCwd, diagnostics, "skill directory");
-      if (!safeDir) continue;
-      const skillFile = join(safeDir, "SKILL.md");
-      const safeFile = await safePlainFile(skillFile, realCwd, diagnostics, "SKILL.md");
-      if (!safeFile) continue;
-      const loaded = loadSkillsFromDir({ dir: safeDir, source: "dynamic-subtree-read" });
-      for (const rd of loaded.diagnostics ?? []) diagnostics.push(diag("invalid-skill", String((rd as { message?: unknown }).message ?? "Invalid skill."), safeFile));
-      for (const s of loaded.skills) {
-        const loc = await realpath(s.filePath).catch(() => s.filePath);
-        if (s.disableModelInvocation || !s.name || !s.description || !contained(realCwd, loc, true)) continue;
-        candidates.push({ name: s.name, description: s.description, location: loc, baseDir: dirname(loc), discoveredFrom, discoveredAt: new Date().toISOString() });
+    for (const sourceRoot of [".agents", ".claude"] as const) {
+      const containerReal = await safePlainDir(join(d, sourceRoot), realCwd, diagnostics, `${sourceRoot} directory`);
+      if (!containerReal) continue;
+      const root = join(containerReal, "skills");
+      const rootReal = await safePlainDir(root, realCwd, diagnostics, `${sourceRoot}/skills root`);
+      if (!rootReal) continue;
+      let children: string[] = [];
+      try { children = await readdir(rootReal); } catch { continue; }
+      for (const child of children.sort()) {
+        const skillDir = join(rootReal, child);
+        const safeDir = await safePlainDir(skillDir, realCwd, diagnostics, "skill directory");
+        if (!safeDir) continue;
+        const skillFile = join(safeDir, "SKILL.md");
+        const safeFile = await safePlainFile(skillFile, realCwd, diagnostics, "SKILL.md");
+        if (!safeFile) continue;
+        const skillStat = await stat(safeFile).catch(() => undefined);
+        const loaded = loadSkillsFromDir({ dir: safeDir, source: "dynamic-subtree-read" });
+        for (const rd of loaded.diagnostics ?? []) diagnostics.push(diag("invalid-skill", String((rd as { message?: unknown }).message ?? "Invalid skill."), safeFile));
+        for (const s of loaded.skills) {
+          const loc = await realpath(s.filePath).catch(() => s.filePath);
+          if (s.disableModelInvocation || !s.name || !s.description || !contained(realCwd, loc, true)) continue;
+          candidates.push({ name: s.name, description: s.description, location: loc, baseDir: dirname(loc), discoveredFrom, discoveredAt: new Date().toISOString(), realLocation: loc, skillMtimeMs: skillStat?.mtimeMs, sourceRoot });
+        }
       }
     }
   }

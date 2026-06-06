@@ -44,8 +44,8 @@ For a successful deeper read:
 1. Resolve target path against `ctx.cwd`.
 2. If target is a file, start from its parent directory.
 3. Walk upward from target directory to `ctx.cwd`, inclusive.
-4. At each directory, check for `.agents/skills`.
-5. Load skill metadata from directories containing `SKILL.md` under each discovered `.agents/skills` root.
+4. At each directory, check for `.agents/skills` and `.claude/skills`.
+5. Load skill metadata from directories containing `SKILL.md` under each discovered `.agents/skills` and `.claude/skills` root.
 6. Respect `disable-model-invocation: true` by excluding that skill from injected model-visible catalogs.
 7. Do not scan above `ctx.cwd`.
 8. Do not follow symlink escapes outside `ctx.cwd`.
@@ -92,7 +92,9 @@ Native Pi skills win.
 
 - If a dynamic skill path is already present in `event.systemPromptOptions.skills`, skip it.
 - If a dynamic skill name matches a native skill name at a different path, skip the dynamic skill and record a collision diagnostic.
-- If two dynamic skills share a name, keep the first discovered path and record a collision diagnostic.
+- If two dynamic candidates refer to the same real `SKILL.md` path, keep one entry and prefer the `.agents` display path when available.
+- If two dynamic skills share a name at different real paths, choose the newest `SKILL.md` `mtimeMs`; if the mtimes are an exact tie, prefer `.agents`.
+- If a restored legacy snapshot skill or candidate lacks comparable `skillMtimeMs`/source-root data, do not replace the existing accepted skill; record the duplicate-name diagnostic deterministically.
 
 Do not invent renamed aliases in v1. Duplicate names are more dangerous than missing a convenience skill.
 
@@ -142,11 +144,11 @@ The authoritative model-facing signal is the compact XML catalog in the read res
 | Behavior (boundary) | Invariant (property) | Faithful seam | Injected fault |
 |---|---|---|---|
 | `read` tool-result event to dynamic discovery | A successful read of a deeper path under `cwd` records each newly discovered eligible `SKILL.md` exactly once; same-cwd reads and outside-cwd reads record nothing. | Extension event harness invoking the real exported extension handler with Pi-shaped `tool_result` events and real temp filesystem paths. | Malformed relative path, absolute path outside cwd, repeated read of same target. |
-| Skill metadata loading | Injected dynamic skill entries match Pi skill metadata semantics: name/description/location, missing description excluded, `disable-model-invocation` excluded. | Use Pi's exported `loadSkillsFromDir` against real temp `.agents/skills` directories instead of a fake parser. | Missing frontmatter/description, invalid YAML, disabled model invocation. |
+| Skill metadata loading | Injected dynamic skill entries match Pi skill metadata semantics: name/description/location, missing description excluded, `disable-model-invocation` excluded. | Use Pi's exported `loadSkillsFromDir` against real temp `.agents/skills` and `.claude/skills` directories instead of a fake parser. | Missing frontmatter/description, invalid YAML, disabled model invocation. |
 | Prompt injection | Every future turn includes discovered eligible skills once, excludes native skill duplicates, and never includes full skill body. | Extension harness calls `before_agent_start` with Pi-shaped `systemPromptOptions.skills` and inspects returned system prompt. | Name collision with native skill; path duplicate; long description. |
 | Tool-result preview | When new skills are discovered, the read tool result is patched with a compact catalog; when none are new, result content is unchanged. | Extension event harness around `tool_result` return patch, using real discovered state. | Empty discovery; duplicate discovery; collision-only discovery. |
 | Compaction/reload recovery | Dynamic skill state survives reload/compaction through custom branch entries and is reinjected on the next turn. | Session-manager-shaped branch fixture containing `custom` entries plus `session_start`/`session_compact` handler calls. | Multiple snapshots, stale branch snapshot, compact event with no in-memory state. |
-| Symlink/security boundary | Discovery never follows a `.agents/skills` symlink or `SKILL.md` symlink to a path outside `cwd`. | Real temp filesystem with symlinks; scanner canonicalizes and enforces cwd prefix. | Symlinked `.agents/skills` to `/tmp/outside`; symlinked `SKILL.md` outside cwd. |
+| Symlink/security boundary | Discovery never follows a `.agents/skills` and `.claude/skills` symlink or `SKILL.md` symlink to a path outside `cwd`. | Real temp filesystem with symlinks; scanner canonicalizes and enforces cwd prefix. | Symlinked `.agents/skills` and `.claude/skills` to `/tmp/outside`; symlinked `SKILL.md` outside cwd. |
 
 ## Definition of done
 
@@ -157,7 +159,7 @@ The real extension code path has executed green against the seams above. Mock-on
 1. Create `packages/dynamic-skills` package skeleton.
 2. Implement pure scanner module:
    - path resolution and cwd containment
-   - upward `.agents/skills` root discovery
+   - upward `.agents/skills` and `.claude/skills` root discovery
    - metadata loading via Pi `loadSkillsFromDir`
    - collision filtering
 3. Implement state module:

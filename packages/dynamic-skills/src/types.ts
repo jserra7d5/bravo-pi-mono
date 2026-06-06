@@ -5,6 +5,9 @@ export type DynamicSkill = {
   baseDir: string;
   discoveredFrom: string;
   discoveredAt: string;
+  realLocation?: string;
+  skillMtimeMs?: number;
+  sourceRoot?: ".agents" | ".claude";
 };
 
 export type Diagnostic = {

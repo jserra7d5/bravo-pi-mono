@@ -2,12 +2,12 @@
 
 Pi extension package for dynamic subtree skill discovery.
 
-When a Pi agent reads a file below the session `cwd`, this extension scans upward from that file toward `cwd` for `.agents/skills/*/SKILL.md` directories. Newly discovered skills are surfaced as a compact model-visible catalog containing only `name`, `description`, and absolute `location`; full skill bodies are never injected automatically.
+When a Pi agent reads a file below the session `cwd`, this extension scans upward from that file toward `cwd` for `.agents/skills/*/SKILL.md` and `.claude/skills/*/SKILL.md` directories. Newly discovered skills are surfaced as a compact model-visible catalog containing only `name`, `description`, and absolute `location`; full skill bodies are never injected automatically.
 
 ## Behavior
 
 - Trigger: successful `read` tool results whose target path is strictly below the session `cwd`.
-- Scope: `.agents/skills` roots on the path from the read target's directory up to `cwd`, inclusive.
+- Scope: `.agents/skills` and `.claude/skills` roots on the path from the read target's directory up to `cwd`, inclusive.
 - Model visibility:
   - If native skill metadata is available during `tool_result`, accepted discoveries are appended to the current read result.
   - If native skill metadata is not available, discoveries are stored as pending and filtered/rendered during the next `before_agent_start`.
@@ -19,8 +19,8 @@ When a Pi agent reads a file below the session `cwd`, this extension scans upwar
 
 - Discovery never scans above the real session `cwd`.
 - Path containment uses `path.relative` after `realpath`, avoiding sibling-prefix mistakes such as `/repo` vs `/repo-other`.
-- Scanner rejects symlinked `.agents`, `.agents/skills`, skill directories, and `SKILL.md` files before calling Pi's skill loader.
-- Native skills win on path/name collisions; duplicate dynamic names keep the first discovered path.
+- Scanner rejects symlinked `.agents`, `.claude`, their `skills` roots, skill directories, and `SKILL.md` files before calling Pi's skill loader.
+- Native skills win on path/name collisions. Dynamic dedupe keeps one entry for the same real `SKILL.md` path and prefers the `.agents` display location; duplicate dynamic names choose the newest `SKILL.md` mtime, with exact ties preferring `.agents`.
 - Rendering is bounded (`MAX_DESCRIPTION_CHARS = 500`, `MAX_RENDERED_SKILLS = 30`) and XML-escaped.
 
 ## Install

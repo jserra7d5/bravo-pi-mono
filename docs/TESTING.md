@@ -42,7 +42,7 @@ or string literals — see the categorization report.
 | Everything (build all, then run all) | `npm run build && for p in async-subagents bravo-goals codex-auth-balancer dynamic-skills gemini-code-assist loom monitor pi-extension-background-bash showcase source-search web-evidence-cache; do node --test packages/$p/dist/test/*.test.js; done; node --test packages/tango/dist/*.test.js` |
 | Slowest tier (subprocess-heavy; deselect from fast loop) | `loom`, `tango`, `pi-extension-background-bash`, `monitor` scheduler tests |
 
-Whole-suite wall time is ~**40s** serial on a linux-x86_64 dev box (~833 test
+Whole-suite wall time is ~**40s** serial on a linux-x86_64 dev box (~837 test
 cases across 13 packages). `loom` (~9s for 7 CLI-spawning tests) and `tango`
 (~12s) dominate; the pure-unit packages run in well under 1s combined.
 
