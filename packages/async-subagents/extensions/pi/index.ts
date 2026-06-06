@@ -22,6 +22,10 @@ const roots = new Map<string, RootSessionIdentity>();
 let piTimer: ReturnType<typeof setInterval> | undefined;
 let leaseTimer: ReturnType<typeof setInterval> | undefined;
 let currentCtx: ExtensionContext | undefined;
+let compactionInProgress = false;
+let manualCompactionWakeupCooldownUntil = 0;
+
+const MANUAL_COMPACTION_WAKEUP_COOLDOWN_MS = 5_000;
 
 function cwdOf(ctx: unknown): string {
   const cwd = (ctx as { cwd?: unknown } | undefined)?.cwd;
@@ -140,23 +144,24 @@ function wakeupEnvelope(wakeup: WakeupMessage): string {
   return lines.join("\n");
 }
 
-function sendWakeup(pi: ExtensionAPI, wakeup: WakeupMessage): void {
+function sendWakeup(pi: ExtensionAPI, wakeup: WakeupMessage, options: { triggerTurn?: boolean } = {}): void {
   const message = {
     customType: "async-subagent-message",
     content: wakeupEnvelope(wakeup),
     display: true,
     details: wakeup,
   };
-  // Terminal results must wake the parent even when it is idle; autonomous
+  // Terminal results normally wake the parent even when it is idle; autonomous
   // subagent flows depend on the parent receiving each result exactly once.
   // Once-only delivery is enforced by durable delivery keys/claims in wakeups.ts.
-  pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" });
+  pi.sendMessage(message, { triggerTurn: options.triggerTurn ?? true, deliverAs: "steer" });
 }
 
-function pollAndSendWakeups(pi: ExtensionAPI, store: RunStore, identity: RootSessionIdentity, records?: RunIndexRecord[]): void {
+function pollAndSendWakeups(pi: ExtensionAPI, store: RunStore, identity: RootSessionIdentity, records?: RunIndexRecord[], options: { triggerTurn?: boolean } = {}): void {
+  if (compactionInProgress) return;
   for (const delivery of pollWakeups({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, ownerId: OWNER_ID, modelFollowUpOnly: true, records })) {
     if (isWakeupKeyHandled(store, identity.parentRunId, delivery.deliveryKey)) continue;
-    sendWakeup(pi, delivery.message);
+    sendWakeup(pi, delivery.message, { triggerTurn: options.triggerTurn });
     markDeliveredWakeupHandled(store, identity.parentRunId, delivery);
   }
 }
@@ -172,12 +177,15 @@ function reconcileTaskOwnedRuns(store: RunStore, rootSessionId: string | undefin
 }
 
 function tickPi(pi: ExtensionAPI, ctx: ExtensionContext): void {
+  if (compactionInProgress) return;
   const cwd = cwdOf(ctx);
   const identity = ensureRoot(cwd, piSessionIdOf(ctx));
   const store = new RunStore({ cwd });
   const records = store.listRecentRuns({ parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
   reconcileTaskOwnedRuns(store, identity.rootSessionId);
-  pollAndSendWakeups(pi, store, identity, records);
+  if (Date.now() >= manualCompactionWakeupCooldownUntil) {
+    pollAndSendWakeups(pi, store, identity, records, { triggerTurn: true });
+  }
   if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, records });
 }
 
@@ -217,6 +225,16 @@ function registerFastTrackCommand(pi: ExtensionAPI): void {
       if (currentCtx) refreshUi(currentCtx);
     },
   });
+}
+
+function isManualCompactionEvent(event: unknown): boolean {
+  const fields = event as { fromExtension?: unknown; fromHook?: unknown } | undefined;
+  if (typeof fields?.fromExtension === "boolean") return !fields.fromExtension;
+  if (typeof fields?.fromHook === "boolean") return fields.fromHook;
+  // Pi compaction events are not guaranteed to expose an origin field in all
+  // versions. When origin is unknown, use the manual-compatible policy so a
+  // post-compaction async wakeup cannot immediately start another parent turn.
+  return true;
 }
 
 function registerNamePackCommand(pi: ExtensionAPI): void {
@@ -306,16 +324,22 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
     stopTimers(currentCtx);
   });
 
-  pi.on("session_compact", async (_event, ctx) => {
-    const cwd = cwdOf(ctx);
-    const identity = ensureRoot(cwd, piSessionIdOf(ctx));
-    const message = buildCompactionReminder({
-      store: new RunStore({ cwd }),
-      parentRunId: identity.parentRunId,
-      rootSessionId: identity.rootSessionId,
-    });
-    if (!message) return;
-    pi.sendMessage(message, { deliverAs: "steer" });
+  pi.on("session_compact", async (event, ctx) => {
+    compactionInProgress = true;
+    try {
+      const cwd = cwdOf(ctx);
+      const identity = ensureRoot(cwd, piSessionIdOf(ctx));
+      const message = buildCompactionReminder({
+        store: new RunStore({ cwd }),
+        parentRunId: identity.parentRunId,
+        rootSessionId: identity.rootSessionId,
+      });
+      manualCompactionWakeupCooldownUntil = isManualCompactionEvent(event) ? Date.now() + MANUAL_COMPACTION_WAKEUP_COOLDOWN_MS : 0;
+      if (!message) return;
+      pi.sendMessage(message, { deliverAs: "steer" });
+    } finally {
+      compactionInProgress = false;
+    }
   });
 
   pi.on("before_agent_start", async (event, ctx) => {

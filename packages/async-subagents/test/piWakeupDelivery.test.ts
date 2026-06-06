@@ -55,6 +55,7 @@ async function withStartedExtension() {
     sent: harness.sent,
     renderers: harness.renderers,
     poll: async (ctxOverride: Record<string, unknown> = {}) => handlersMustGet(harness.handlers, "session_start")({}, { cwd, hasUI: false, ...ctxOverride }),
+    compact: async (event: Record<string, unknown> = { type: "session_compact", compactionEntry: {}, fromExtension: false }) => handlersMustGet(harness.handlers, "session_compact")(event, { cwd, hasUI: false }),
     shutdown: async () => {
       await handlersMustGet(harness.handlers, "session_shutdown")();
       if (previousHome === undefined) delete process.env.ASYNC_SUBAGENTS_HOME;
@@ -153,6 +154,69 @@ test("terminal result wakeup bodies are capped with subagent_result recovery mar
     assert.match(wakeup.message.content, /recover the full result/);
     assert.equal(wakeup.message.details?.result?.body, undefined);
     assert.equal(session.store.readStatus(runId).resultReady, true);
+  } finally {
+    await session.shutdown();
+  }
+});
+
+test("manual compaction cooldown defers wakeups without marking delivery state", async () => {
+  const session = await withStartedExtension();
+  const realDateNow = Date.now;
+  let now = realDateNow();
+  Date.now = () => now;
+  try {
+    await session.compact({ type: "session_compact", compactionEntry: {}, fromExtension: false });
+    const runId = createRun(session.store, session.cwd, session.identity.parentRunId, "completed");
+    session.store.writeStatus({ ...session.store.readStatus(runId), resultReady: true });
+    session.store.writeResult(createRunResult({ runId, parentRunId: session.identity.parentRunId, agentName: "scout", state: "completed", summary: "### Summary", body: "manual compact result" }));
+    writeDeliverySubscription(session.store, {
+      schemaVersion: SCHEMA_VERSION,
+      parentRunId: session.identity.parentRunId,
+      runId,
+      notifyOn: ["result", "completed", "failed", "cancelled", "expired"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await session.poll();
+
+    assert.equal(session.sent.some((item) => item.message?.customType === "async-subagent-message"), false);
+    assert.equal(session.store.readStatus(runId).resultReady, true, "cooldown must not mark the wakeup as handled");
+
+    now += 5_001;
+    await session.poll();
+
+    const wakeup = session.sent.find((item) => item.message?.customType === "async-subagent-message");
+    assert.ok(wakeup);
+    assert.equal(wakeup.message.details?.result?.runId, runId);
+    assert.deepEqual(wakeup.options, { triggerTurn: true, deliverAs: "steer" });
+    assert.equal(session.store.readStatus(runId).resultReady, false);
+  } finally {
+    Date.now = realDateNow;
+    await session.shutdown();
+  }
+});
+
+test("auto compaction does not suppress post-compaction wakeup turns", async () => {
+  const session = await withStartedExtension();
+  try {
+    await session.compact({ type: "session_compact", compactionEntry: {}, fromExtension: true });
+    const runId = createRun(session.store, session.cwd, session.identity.parentRunId, "completed");
+    session.store.writeStatus({ ...session.store.readStatus(runId), resultReady: true });
+    session.store.writeResult(createRunResult({ runId, parentRunId: session.identity.parentRunId, agentName: "scout", state: "completed", summary: "### Summary", body: "auto compact result" }));
+    writeDeliverySubscription(session.store, {
+      schemaVersion: SCHEMA_VERSION,
+      parentRunId: session.identity.parentRunId,
+      runId,
+      notifyOn: ["result", "completed", "failed", "cancelled", "expired"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await session.poll();
+
+    const wakeup = session.sent.find((item) => item.message?.customType === "async-subagent-message");
+    assert.ok(wakeup);
+    assert.equal(wakeup.message.details?.result?.runId, runId);
+    assert.deepEqual(wakeup.options, { triggerTurn: true, deliverAs: "steer" });
   } finally {
     await session.shutdown();
   }
