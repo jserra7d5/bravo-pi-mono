@@ -1,0 +1,18 @@
+{
+  "name": "@bravo/dynamic-skills",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi extension for dynamic subtree skill discovery.",
+  "keywords": ["pi-package"],
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "exports": { ".": "./dist/src/types.js" },
+  "devDependencies": { "@types/node": "latest", "typescript": "latest" },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" },
+  "engines": { "node": ">=22.13" },
+  "pi": { "extensions": ["./extensions/pi"], "skills": [] }
+}

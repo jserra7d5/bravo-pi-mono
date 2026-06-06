@@ -1,6 +1,10 @@
 # Project-local Pi extensions
 
-This directory contains Pi extensions that are auto-discovered when running `pi` from this repository. Reload them in a live interactive session with `/reload`.
+This directory contains project-local Pi extension files that are auto-discovered when running `pi` from this repository. Project-local Pi packages are configured in `.pi/settings.json`. Reload extension/package changes in a live interactive session with `/reload`.
+
+## Project Pi packages
+
+`.pi/settings.json` installs `../packages/dynamic-skills` as a project-local Pi package. That package provides read-triggered dynamic subtree skill discovery; see `packages/dynamic-skills/README.md` and `docs/specs/pi-dynamic-skill-discovery/design.md`.
 
 ## Codex accounts footer + model speed
 

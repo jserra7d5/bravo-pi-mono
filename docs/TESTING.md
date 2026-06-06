@@ -22,7 +22,7 @@ credentials** — the whole suite is safe to run on any dev box. The "gates" are
 | Bucket | Meaning | Packages |
 |--------|---------|----------|
 | `pure-unit` | No IO of any kind; pure functions / renderers. Fastest tier. | `gemini-code-assist`, `showcase` (whole pkg); plus most files in `async-subagents`, `bravo-goals`, `monitor`, `web-evidence-cache` |
-| `needs-fs` | Reads/writes real filesystem (tmp dirs, fixture files). Safe anywhere. | most packages (54 of 76 test files) |
+| `needs-fs` | Reads/writes real filesystem (tmp dirs, fixture files). Safe anywhere. | most packages, including `dynamic-skills` |
 | `needs-subprocess` | Spawns a local binary — `process.execPath` (node) running the package CLI, or `git` / `ps` / `sqlite3`. Needs those tools on PATH. | `codex-auth-balancer`, `loom`, `monitor`, `source-search`, `tango` |
 | `needs-db` | In-process sqlite (`node:sqlite` FTS5) or the `sqlite3` CLI on a real db file. No external DB server. | `web-evidence-cache` (sqlite.test.ts), `loom` |
 | `integration` | Spans modules + a real local resource. `tango/src/server.test.ts` starts an **in-process** HTTP server on `127.0.0.1:0` and `fetch`es it — local only, no external network. | `tango` |
@@ -39,11 +39,11 @@ or string literals — see the categorization report.
 | One package, skip rebuild (dist already built) | `node --test packages/<pkg>/dist/test/*.test.js` |
 | tango (flat dist layout) | `node --test packages/tango/dist/*.test.js` |
 | Fast tier only (pure-unit pkgs, sub-second) | `node --test packages/gemini-code-assist/dist/test/*.test.js packages/showcase/dist/test/*.test.js` |
-| Everything (build all, then run all) | `npm run build && for p in async-subagents bravo-goals codex-auth-balancer gemini-code-assist loom monitor pi-extension-background-bash showcase source-search web-evidence-cache; do node --test packages/$p/dist/test/*.test.js; done; node --test packages/tango/dist/*.test.js` |
+| Everything (build all, then run all) | `npm run build && for p in async-subagents bravo-goals codex-auth-balancer dynamic-skills gemini-code-assist loom monitor pi-extension-background-bash showcase source-search web-evidence-cache; do node --test packages/$p/dist/test/*.test.js; done; node --test packages/tango/dist/*.test.js` |
 | Slowest tier (subprocess-heavy; deselect from fast loop) | `loom`, `tango`, `pi-extension-background-bash`, `monitor` scheduler tests |
 
-Whole-suite wall time is ~**40s** serial on a linux-x86_64 dev box (~817 test
-cases across 12 packages). `loom` (~9s for 7 CLI-spawning tests) and `tango`
+Whole-suite wall time is ~**40s** serial on a linux-x86_64 dev box (~833 test
+cases across 13 packages). `loom` (~9s for 7 CLI-spawning tests) and `tango`
 (~12s) dominate; the pure-unit packages run in well under 1s combined.
 
 ### Known pre-existing failures (as of baseline)
