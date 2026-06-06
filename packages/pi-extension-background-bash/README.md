@@ -6,7 +6,7 @@ Disabled by default. Enable at extension load with `PI_BACKGROUND_BASH_ENABLED=1
 
 For async-subagents, add `src/async-subagents-global.ts` as a `defaultExtensions` entry in `~/.async-subagents/config.json`; that wrapper sets `PI_BACKGROUND_BASH_ENABLED=1` for child Pi processes and then loads the normal extension.
 
-When enabled, the extension registers `bash` plus `background_task_list`, `background_task_status`, and `background_task_stop`. Foreground calls delegate to Pi's exported `createBashTool`; background calls spawn a managed process, write `.pi/background-bash/<taskId>/output.log`, persist task metadata, and enforce max runtime/output caps.
+When enabled, the extension registers `bash` plus `background_task_list`, `background_task_status`, and `background_task_stop`. Foreground calls delegate to Pi's exported `createBashTool`; background calls spawn a managed process, write `~/.pi/background-bash/<taskId>/output.log` by default, persist task metadata, and enforce max runtime/output caps. The task record stores the original command cwd as metadata; repo-local `.pi/background-bash` storage is opt-in via `backgroundBash.dataDir`.
 
 Prefer enabling this extension and relying on Pi tool override precedence. If precedence is ambiguous, explicitly remove the built-in `bash` from active tools and expose this extension's `bash`; use `--exclude-tools bash` only as a workaround.
 

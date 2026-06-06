@@ -163,7 +163,7 @@ Returns normal Pi tool content, not a raw polymorphic object. The model-visible 
 Background command started.
 Task: bg_20260531_abcdef
 Status: running
-Output: .pi/background-bash/bg_20260531_abcdef/output.log
+Output: ~/.pi/background-bash/bg_20260531_abcdef/output.log
 
 Use read on the output path or /tasks for status. Completion will be reported in the UI; model wake-up is opt-in.
 ```
@@ -237,7 +237,7 @@ For `run_in_background: true`:
 2. Create a task directory under a configured data root, for example:
 
 ```txt
-.pi/background-bash/<taskId>/
+~/.pi/background-bash/<taskId>/
   metadata.json
   output.log
   stderr.log        # optional; default may combine streams into output.log
@@ -318,7 +318,7 @@ Use a structured XML-like message envelope for durable agent-visible events:
   <status>exited</status>
   <exit_code>0</exit_code>
   <command>npm run dev</command>
-  <output_path>.pi/background-bash/bg_20260531_abcdef/output.log</output_path>
+  <output_path>~/.pi/background-bash/bg_20260531_abcdef/output.log</output_path>
   <started_at>2026-05-31T12:00:00.000Z</started_at>
   <completed_at>2026-05-31T12:03:25.000Z</completed_at>
   <summary>Background command completed successfully.</summary>
@@ -341,8 +341,8 @@ The primary output integration is ordinary file reading:
 
 - Return `outputPath` from background `bash` calls.
 - Mention that the agent can use the normal read tool on that path.
-- Prefer an extension data directory outside normal source indexing for logs when possible; if logs live under the workspace, add/document ignore entries such as `.gitignore` and source-search exclusions.
-- Prefer workspace-relative paths only when they are readable by the agent and will not pollute repository search/indexing.
+- Store logs and metadata outside active source worktrees by default, under Pi-owned state such as `~/.pi/background-bash`.
+- Workspace/repo-local storage is an explicit opt-in only via `dataDir`; if used, add/document ignore entries such as `.gitignore` and source-search exclusions.
 - Enforce maximum output bytes per task. On hard output cap overflow, stop the task by default; optional rotation must still enforce a cumulative cap.
 - Write clear sentinel lines for lifecycle events:
   - task started
@@ -466,7 +466,7 @@ Security posture:
 
 - This extension runs trusted local commands with the same broad power as `bash`; it does not sandbox commands.
 - Make opt-in status explicit in docs and extension description.
-- Store logs in a predictable extension/workspace location and avoid world-writable unsafe paths.
+- Store logs in a predictable Pi-owned extension location by default and avoid world-writable unsafe paths.
 - Write log files with restrictive filesystem permissions where practical, while preserving normal read-tool access for the owning user.
 - Sanitize task ids and never derive paths from raw commands.
 - Avoid logging secrets from environment/config beyond what the command itself outputs.
@@ -503,6 +503,7 @@ type BackgroundBashConfig = {
 Defaults:
 
 - `enabled`: false until extension is installed/enabled.
+- `dataDir`: `~/.pi/background-bash`; relative configured values resolve against the session cwd and are therefore explicit repo-local opt-ins.
 - `defaultMaxRuntimeMs`: unset or conservative package default.
 - `defaultMaxOutputBytes`: bounded.
 - `shutdownPolicy`: `kill-session-tasks`.
@@ -671,7 +672,7 @@ Do not bulk-edit every async subagent blindly. Some roles may intentionally avoi
 - What exact API should extensions use for prompt metadata replacement for an overridden built-in tool?
 - What is the safest default for model-visible completion notifications versus UI-only notifications?
 - Should persistent tasks be supported in v1, or deferred until ownership/restart semantics are clearer?
-- What output directory is best across single-workspace and multi-root sessions?
+- Should the global output directory later be namespaced by session/profile for easier retention and cleanup?
 - What Windows process-tree semantics are acceptable?
 - How should this interact with user-bash (`!`) interception, if at all?
 - Are existing durable monitor tools stable upstream APIs or environment-specific tooling? If stable, the background runner should wrap them; if not, implement native process management in the extension.

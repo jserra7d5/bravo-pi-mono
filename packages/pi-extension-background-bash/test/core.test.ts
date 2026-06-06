@@ -28,6 +28,18 @@ test("registration and prompt guidance are consistently disabled unless load con
   if (old === undefined) delete process.env.PI_BACKGROUND_BASH_ENABLED; else process.env.PI_BACKGROUND_BASH_ENABLED = old;
 });
 
+test("default data directory is Pi-global, not cwd-local", async () => {
+  const root = await tmp();
+  try {
+    const cfg = readConfig({ enabled: true }, root);
+    assert.equal(cfg.dataDir, path.join(os.homedir(), ".pi", "background-bash"));
+    assert.equal(cfg.dataDir.startsWith(root), false);
+
+    const local = readConfig({ enabled: true, dataDir: ".custom/background-bash" }, root);
+    assert.equal(local.dataDir, path.join(root, ".custom", "background-bash"));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("registry registers tools when env opt-in is enabled", async () => {
   const old = process.env.PI_BACKGROUND_BASH_ENABLED;
   process.env.PI_BACKGROUND_BASH_ENABLED = "1";
@@ -174,7 +186,7 @@ test("registered renderers produce bounded background task cards", () => {
   assert.equal(bash.renderCall, undefined);
   assert.equal(bash.renderResult, undefined);
   const now = new Date().toISOString();
-  const task: BackgroundTaskRecord = { schemaVersion: 1, taskId: "bg_20260531_abcdef", command: "npm run dev -- --host 0.0.0.0", cwd: "/tmp", status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: ".pi/background-bash/bg_20260531_abcdef/output.log", metadataPath: "/tmp/meta.json", outputBytes: 12_288, maxOutputBytes: 10_000_000, maxRuntimeMs: 300_000, wakeOnCompletion: false };
+  const task: BackgroundTaskRecord = { schemaVersion: 1, taskId: "bg_20260531_abcdef", command: "npm run dev -- --host 0.0.0.0", cwd: "/tmp", status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(os.homedir(), ".pi/background-bash/bg_20260531_abcdef/output.log"), metadataPath: "/tmp/meta.json", outputBytes: 12_288, maxOutputBytes: 10_000_000, maxRuntimeMs: 300_000, wakeOnCompletion: false };
   const lines = (tools[1] as { renderResult?: Function }).renderResult?.({ content: [], details: { tasks: [task] } })?.render(56) ?? [];
   const list = lines.join("\n");
   assert.match(list, /tasks/);
@@ -194,7 +206,7 @@ test("self-shell background task renderers return fallback components on error d
 test("registered renderers normalize embedded newlines before chrome rendering", () => {
   const tools = buildBackgroundBashTools();
   const now = new Date().toISOString();
-  const task: BackgroundTaskRecord = { schemaVersion: 1, taskId: "bg_20260531_abcdef", command: "npm run dev\n-- --host 0.0.0.0", cwd: "/tmp", status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: ".pi/background-bash/bg_20260531_abcdef/output.log", metadataPath: "/tmp/meta.json", outputBytes: 12_288, maxOutputBytes: 10_000_000, maxRuntimeMs: 300_000, wakeOnCompletion: false };
+  const task: BackgroundTaskRecord = { schemaVersion: 1, taskId: "bg_20260531_abcdef", command: "npm run dev\n-- --host 0.0.0.0", cwd: "/tmp", status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(os.homedir(), ".pi/background-bash/bg_20260531_abcdef/output.log"), metadataPath: "/tmp/meta.json", outputBytes: 12_288, maxOutputBytes: 10_000_000, maxRuntimeMs: 300_000, wakeOnCompletion: false };
   const lines = (tools[1] as { renderResult?: Function }).renderResult?.({ content: [], details: { tasks: [task] } })?.render(56) ?? [];
   for (const line of lines) {
     assert.ok(!/[\r\n]/.test(line), `line contains embedded newline: ${JSON.stringify(line.replace(/\x1b\[[0-9;]*m/g, ""))}`);

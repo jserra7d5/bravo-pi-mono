@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
 export interface BackgroundBashConfig {
   enabled: boolean;
@@ -17,12 +18,16 @@ export interface ResolvedBackgroundBashConfig extends Required<Omit<BackgroundBa
   dataDir: string;
 }
 
+function defaultDataDir(): string {
+  return join(homedir(), ".pi", "background-bash");
+}
+
 export function readConfig(raw: unknown, cwd = process.cwd()): ResolvedBackgroundBashConfig {
   const cfg = (raw && typeof raw === "object" ? raw : {}) as BackgroundBashConfig;
   const envEnabled = process.env.PI_BACKGROUND_BASH_ENABLED === "1" || process.env.PI_BACKGROUND_BASH_ENABLED === "true";
   return {
     enabled: Boolean(cfg.enabled ?? envEnabled),
-    dataDir: resolve(cwd, cfg.dataDir ?? ".pi/background-bash"),
+    dataDir: cfg.dataDir === undefined ? defaultDataDir() : resolve(cwd, cfg.dataDir),
     defaultMaxRuntimeMs: cfg.defaultMaxRuntimeMs ?? 30 * 60 * 1000,
     defaultMaxOutputBytes: cfg.defaultMaxOutputBytes ?? 10 * 1024 * 1024,
     idleTimeoutMs: cfg.idleTimeoutMs ?? 0,
