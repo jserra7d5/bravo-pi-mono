@@ -1,0 +1,92 @@
+## AGREE+STRENGTHEN
+
+- Keep the core principle: **“oldText is a locator for exactly one current region.”** This is the real distribution-shifter. It generalizes better than “small” vs “large.” Supported by `prompt-design/references/principles-vs-behaviors.md`.
+- Kill “smallest possible.” It is a misweighted rule: it plausibly pushes toward `not_unique`. Replace with **“smallest context that is unique”**, not “longer is safer.”
+- Strengthen the tool-layer fix over prompt prose:
+  - `not_found` should say “re-read current content,” not “check whitespace.”
+  - `not_unique` should say “add a nearby unique anchor.”
+  - The fuzzy-normalization whole-file rewrite is a correctness bug, not merely a contract issue. Fix implementation or loudly surface it. Do not bury this in model guidance.
+- The author is right that errors are teaching surfaces. `behavior-shaping` says reflection only helps when the signal is reliable; current `not_found` gives a weak/misleading signal.
+
+## WEAKEN+CUT
+
+- Cut always-on guideline 2 as written:
+  > “If you have already edited this file in this turn… re-read… single most common cause…”
+
+  This is a behavior, not a principle. It overfires and adds read-churn. Move most of it to `not_found` error and/or a staleness guard. Use always-on only as: **“Use current file content; refresh the target region if your view may be stale.”**
+  References: `behavior-shaping/references/intervention-anti-patterns.md` on over-prescription and prompt rot; `context-engineering` on static vs runtime tiering.
+
+- Cut Example B from always-on surface. It teaches a specific operational behavior and duplicates what the error/tool layer can detect better. Also the `read(path="utils.ts", offset=…)` pseudo-call inside another tool contract is cross-tool double-documentation.
+
+- Example A is the only possibly load-bearing example. Even then, make it one compact micro-example or move it to docs/lazy help unless eval proves it shifts `not_unique`.
+
+- Cut the anti-pattern catalog from per-call advertisement. Keep its content as error-time messages or internal docs. If any one entry survives always-on, it should be one sentence:
+  > “When text repeats, add a nearby unique anchor instead of guessing.”
+
+- Do not advertise fuzzy matching in `oldText` schema. It may encourage sloppier copying, and current fuzzy behavior has a dangerous whole-file normalization side effect. Keep the contract simple: exact current text; tolerate implementation quirks silently or report them on success/error.
+
+- “Prefer one unique anchor over a large block” is useful but brittle if made procedural. Generalize:
+  > “Include enough surrounding context to disambiguate; avoid unrelated padding.”
+
+## MISSED
+
+- The “60% stale snapshot” claim is a proxy, not proof. “File edited earlier in turn” does not prove the failed `oldText` came from a stale read or that the target region changed. Treat as correlation until trace-level evidence confirms.
+- “Eval set already exists” is overstated. Logged calls are a corpus, not an eval. Replaying old tool calls measures matcher/error changes, not whether the new contract shifts model-generated `oldText`.
+- Eval must compare old vs new advertisements by asking models to produce edits from representative consumed contexts. Needed guard metrics:
+  - overall edit success rate;
+  - `not_unique` down without `not_found` up;
+  - currently-successful edits do not regress;
+  - read-call churn does not spike;
+  - multi-edit overlap/no-op does not increase.
+- Case mix must include target, adjacent, and distant cases per `behavior-shaping/references/eval-driven-iteration.md`: repeated locators, stale-ish same-file followups, currently successful small edits, multi-edit disjoint edits, nearby/overlapping edits, files with Unicode punctuation.
+- Multi-run matters. A single replay is verification-by-hunch / single-case verification.
+
+## VERDICT
+
+Leanest contract I would ship:
+
+**description**
+```text
+Edit one file by replacing text. Each oldText must identify exactly one current region of the file. Multiple edits in one call are matched against the original file, so targets must be disjoint.
+```
+
+**promptSnippet**
+```text
+Replace unique current text regions; batch disjoint edits in one call.
+```
+
+**promptGuidelines**
+```text
+1. Copy oldText from current file content. If your view may be stale, read the target region first.
+2. Use the smallest context that is unique, not the smallest substring. If text repeats, add a nearby anchor.
+3. For nearby or overlapping changes, merge them into one edit; separate edits must be disjoint.
+```
+
+**schema oldText**
+```text
+Text to replace. Must match exactly one current region of the file. Include enough surrounding context to disambiguate repeated text; avoid large unrelated blocks.
+```
+
+**schema edits**
+```text
+One or more replacements in a single file. Each oldText is matched against the original file content, not the result of earlier edits in this call.
+```
+
+**error tier**
+
+`not_found`
+```text
+Could not find edits[{i}] in {path}: oldText does not match the file's current content. Re-read the target region and retry with text copied from the current file. If this file was edited earlier, your previous copy may be stale.
+```
+
+`not_unique`
+```text
+Found {n} occurrences of edits[{i}] in {path}. oldText must identify exactly one region; add a nearby unique anchor such as an enclosing declaration, heading, or distinctive neighboring line.
+```
+
+`overlap`
+```text
+edits[{a}] and edits[{b}] overlap in {path}. Each oldText is matched against the original file, so merge overlapping changes into one edit or target disjoint regions.
+```
+
+Everything else — examples, full anti-pattern catalog, stale-snapshot statistics, near-miss hints, fuzzy-normalization disclosure — belongs in runtime/error/tool tier unless eval proves always-on examples buy back their token cost.

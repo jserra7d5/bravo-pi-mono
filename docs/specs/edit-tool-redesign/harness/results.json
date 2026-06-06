@@ -1,0 +1,717 @@
+{
+  "fixture": "/home/joe/Documents/projects/bravo-pi-mono/docs/specs/edit-tool-redesign/fixtures/edit-cases.jsonl",
+  "metrics": {
+    "case_counts": {
+      "all": {
+        "total": 2035,
+        "success": 1739,
+        "fail": 296
+      },
+      "recon_present": {
+        "total": 1918,
+        "success": 1658,
+        "fail": 260
+      },
+      "windowed": {
+        "total": 1770,
+        "success": 1535,
+        "fail": 235
+      },
+      "high_fidelity": {
+        "total": 142,
+        "success": 117,
+        "fail": 25
+      }
+    },
+    "port_fidelity": {
+      "all": {
+        "failures_with_recon": 260,
+        "error_type_reproduced": 172,
+        "exact_error_text_reproduced": 148,
+        "reproduction_rate_pct": 66.15,
+        "exact_error_text_rate_pct": 56.92
+      },
+      "recon_present": {
+        "failures_with_recon": 260,
+        "error_type_reproduced": 172,
+        "exact_error_text_reproduced": 148,
+        "reproduction_rate_pct": 66.15,
+        "exact_error_text_rate_pct": 56.92
+      },
+      "high_fidelity": {
+        "failures_with_recon": 25,
+        "error_type_reproduced": 22,
+        "exact_error_text_reproduced": 22,
+        "reproduction_rate_pct": 88.0,
+        "exact_error_text_rate_pct": 88.0
+      },
+      "windowed": {
+        "failures_with_recon": 235,
+        "error_type_reproduced": 150,
+        "exact_error_text_reproduced": 126,
+        "reproduction_rate_pct": 63.83,
+        "exact_error_text_rate_pct": 53.62
+      }
+    },
+    "blast_radius": {
+      "all": {
+        "old_fuzzy_success_cases": 0,
+        "old_outside_chars": 0,
+        "new_outside_chars": 0,
+        "old_outside_files": 0,
+        "old_outside_file_rate_pct": null
+      },
+      "recon_present": {
+        "old_fuzzy_success_cases": 0,
+        "old_outside_chars": 0,
+        "new_outside_chars": 0,
+        "old_outside_files": 0,
+        "old_outside_file_rate_pct": null
+      },
+      "high_fidelity": {
+        "old_fuzzy_success_cases": 0,
+        "old_outside_chars": 0,
+        "new_outside_chars": 0,
+        "old_outside_files": 0,
+        "old_outside_file_rate_pct": null
+      },
+      "windowed": {
+        "old_fuzzy_success_cases": 0,
+        "old_outside_chars": 0,
+        "new_outside_chars": 0,
+        "old_outside_files": 0,
+        "old_outside_file_rate_pct": null
+      }
+    },
+    "not_unique_recovery": {
+      "all": {
+        "not_unique_failures": 129,
+        "occurrences_ge_2": 58,
+        "occurrences_ge_2_rate_pct": 44.96
+      },
+      "recon_present": {
+        "not_unique_failures": 129,
+        "occurrences_ge_2": 58,
+        "occurrences_ge_2_rate_pct": 44.96
+      },
+      "windowed": {
+        "not_unique_failures": 120,
+        "occurrences_ge_2": 49,
+        "occurrences_ge_2_rate_pct": 40.83
+      },
+      "high_fidelity": {
+        "not_unique_failures": 9,
+        "occurrences_ge_2": 9,
+        "occurrences_ge_2_rate_pct": 100.0
+      }
+    },
+    "not_found_recovery": {
+      "all": {
+        "not_found_failures": 118,
+        "near_miss_or_read_range": 107,
+        "near_miss_or_read_range_rate_pct": 90.68
+      },
+      "recon_present": {
+        "not_found_failures": 118,
+        "near_miss_or_read_range": 107,
+        "near_miss_or_read_range_rate_pct": 90.68
+      },
+      "high_fidelity": {
+        "not_found_failures": 13,
+        "near_miss_or_read_range": 10,
+        "near_miss_or_read_range_rate_pct": 76.92
+      },
+      "windowed": {
+        "not_found_failures": 105,
+        "near_miss_or_read_range": 97,
+        "near_miss_or_read_range_rate_pct": 92.38
+      }
+    },
+    "regression_guard": {
+      "all": {
+        "success_cases": 1658,
+        "divergent": 1235,
+        "old_reproduced_success_cases": 423,
+        "same_intended_span_output": 423,
+        "same_intended_span_rate_pct": 25.51,
+        "same_intended_span_rate_among_old_reproduced_pct": 100.0
+      },
+      "recon_present": {
+        "success_cases": 1658,
+        "divergent": 1235,
+        "old_reproduced_success_cases": 423,
+        "same_intended_span_output": 423,
+        "same_intended_span_rate_pct": 25.51,
+        "same_intended_span_rate_among_old_reproduced_pct": 100.0
+      },
+      "windowed": {
+        "success_cases": 1535,
+        "divergent": 1203,
+        "old_reproduced_success_cases": 332,
+        "same_intended_span_output": 332,
+        "same_intended_span_rate_pct": 21.63,
+        "same_intended_span_rate_among_old_reproduced_pct": 100.0
+      },
+      "high_fidelity": {
+        "success_cases": 117,
+        "old_reproduced_success_cases": 91,
+        "same_intended_span_output": 91,
+        "divergent": 26,
+        "same_intended_span_rate_pct": 77.78,
+        "same_intended_span_rate_among_old_reproduced_pct": 100.0
+      }
+    }
+  },
+  "divergences": [
+    {
+      "case_id": "2026-04-25T04-00-11-636Z_019dc2cb-8774-7520-88a6-bba37d3fea37.jsonl#177",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-25T04-00-11-636Z_019dc2cb-8774-7520-88a6-bba37d3fea37.jsonl#206",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-05-31T22-10-44-027Z_019e8016-e2bb-7181-9020-5010f264e04b.jsonl#295",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#333",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#349",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#363",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#365",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#774",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#833",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#852",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#884",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#904",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1064",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1076",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1131",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1139",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1145",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1161",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1193",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1195",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1201",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1207",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1211",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1221",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1225",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1277",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1822",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1863",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1874",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#714",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#786",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#816",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#869",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#915",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#917",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#921",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#931",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1004",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1160",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1172",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1351",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1380",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1446",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1463",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1479",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1502",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1504",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1506",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1512",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1516",
+      "old_ok": false,
+      "new_ok": false,
+      "old_error_type": "not_found",
+      "new_error_code": "not_found"
+    }
+  ],
+  "port_mismatches_high_fidelity": [
+    {
+      "case_id": "2026-04-26T22-38-24-455Z_019dcbf1-a4c6-72ad-8420-4a57ef73036d.jsonl#39",
+      "expected": "not_found",
+      "actual": null,
+      "windowed": false,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-06-03T02-11-26-087Z_019e8b3f-f907-7fa1-adac-8351c92dceed.jsonl#441",
+      "expected": "not_found",
+      "actual": null,
+      "windowed": false,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-04-27T06-37-30-762Z_019dcda8-470a-7649-a28b-5169843eee4c.jsonl#80",
+      "expected": "not_found",
+      "actual": null,
+      "windowed": false,
+      "dirty": false
+    }
+  ],
+  "port_mismatches_windowed_sample": [
+    {
+      "case_id": "2026-04-26T21-43-37-015Z_019dcbbf-7b36-737e-a70f-6fa81c210d8a.jsonl#46",
+      "expected": "not_found",
+      "actual": null,
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-04-26T23-29-29-210Z_019dcc20-6879-773c-bfb9-2cdc2ca0b1f2.jsonl#1074",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#808",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1158",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-04-27T00-18-10-213Z_019dcc4c-faa4-7745-9fa8-406b5e2a2d8f.jsonl#1477",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-04-27T04-05-01-260Z_019dcd1c-aacb-7479-8c1b-41634f987782.jsonl#827",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-04-27T07-44-19-265Z_019dcde5-7140-775d-97c1-3b63f5dae478.jsonl#243",
+      "expected": "not_found",
+      "actual": null,
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-18T20-14-54-497Z_019e3cba-2c20-77ac-9461-a98c7754e0f6.jsonl#294",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-18T20-14-54-497Z_019e3cba-2c20-77ac-9461-a98c7754e0f6.jsonl#471",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": true
+    },
+    {
+      "case_id": "2026-05-18T20-14-54-497Z_019e3cba-2c20-77ac-9461-a98c7754e0f6.jsonl#812",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": true
+    },
+    {
+      "case_id": "2026-05-18T20-14-54-497Z_019e3cba-2c20-77ac-9461-a98c7754e0f6.jsonl#1099",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-18T20-14-54-497Z_019e3cba-2c20-77ac-9461-a98c7754e0f6.jsonl#1180",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-18T20-14-54-497Z_019e3cba-2c20-77ac-9461-a98c7754e0f6.jsonl#1208",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-18T20-14-54-497Z_019e3cba-2c20-77ac-9461-a98c7754e0f6.jsonl#1220",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": true
+    },
+    {
+      "case_id": "2026-05-18T20-14-54-497Z_019e3cba-2c20-77ac-9461-a98c7754e0f6.jsonl#1450",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": true
+    },
+    {
+      "case_id": "2026-05-18T22-42-24-160Z_019e3d41-3520-7f32-b20f-92a7e8a01d61.jsonl#140",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-19T00-26-20-750Z_019e3da0-5ece-7b97-813c-552751a12e7c.jsonl#232",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": true
+    },
+    {
+      "case_id": "2026-05-19T04-50-36-009Z_019e3e92-4d69-75e6-9622-22dd53580b83.jsonl#476",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-21T00-58-03-566Z_019e480a-1fae-7494-b8f9-fd65b4641a44.jsonl#1279",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-21T00-58-03-566Z_019e480a-1fae-7494-b8f9-fd65b4641a44.jsonl#1786",
+      "expected": "no_change",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-21T07-51-14-278Z_019e4984-6666-7d9b-b153-6871942c9270.jsonl#88",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-21T07-51-14-278Z_019e4984-6666-7d9b-b153-6871942c9270.jsonl#126",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-24T22-18-13-055Z_019e5c11-38bf-7d30-8b89-cac0a82742bc.jsonl#83",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": false
+    },
+    {
+      "case_id": "2026-05-25T01-27-28-124Z_019e5cbe-7c7c-7bf4-adae-c9c30964e972.jsonl#323",
+      "expected": "not_unique",
+      "actual": "not_found",
+      "windowed": true,
+      "dirty": true
+    },
+    {
+      "case_id": "2026-05-25T03-09-57-151Z_019e5d1c-501f-7fd9-80c0-c55abdcedb8c.jsonl#399",
+      "expected": "not_unique",
+      "actual": null,
+      "windowed": true,
+      "dirty": false
+    }
+  ]
+}

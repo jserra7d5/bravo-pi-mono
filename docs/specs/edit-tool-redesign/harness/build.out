@@ -1,0 +1,24 @@
+Implemented the replay harness under:
+
+- `harness/matcher_old.py`
+- `harness/matcher_new.py`
+- `harness/replay.py`
+- `harness/results.json`
+- `harness/REPORT.md`
+
+Validation run completed with `python3 replay.py` and `python3 -m py_compile matcher_old.py matcher_new.py replay.py`.
+
+Concise metrics:
+
+| Metric | all | recon_present | high_fidelity |
+|---|---:|---:|---:|
+| Port fidelity, error type | 172/260 = 66.15% | 172/260 = 66.15% | 22/25 = 88.0% |
+| Port fidelity, exact error text | 148/260 = 56.92% | 148/260 = 56.92% | 22/25 = 88.0% |
+| Old fuzzy success outside-span blast radius | 0/0 reproduced old fuzzy successes | 0/0 | 0/0 |
+| New outside-span mutation | 0 chars | 0 chars | 0 chars |
+| `not_unique` recovery with ≥2 occurrences | 58/129 = 44.96% | 58/129 = 44.96% | 9/9 = 100.0% |
+| `not_found` recovery with near-miss/read_range | 107/118 = 90.68% | 107/118 = 90.68% | 10/13 = 76.92% |
+| Regression guard, all recorded successes | 423/1658 = 25.51% | 423/1658 = 25.51% | 91/117 = 77.78% |
+| Regression guard, comparable old-reproduced successes | 423/423 = 100.0% | 423/423 = 100.0% | 91/91 = 100.0% |
+
+Caveat: the fixture’s reconstructed content does not reproduce any recorded success that takes the old fuzzy path, so the blast-radius denominator is 0 in this replay. Windowed recon remains partial, so failure reproduction and occurrence counts are approximate outside the high-fidelity subset.

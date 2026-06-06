@@ -1,0 +1,133 @@
+## AGREE+STRENGTHEN
+
+- **Harness-first attribution is right.** `not_found` and `not_unique` are not “model carelessness”; they are weak tool signals and weak locator affordances. This follows `behavior-shaping/SKILL.md` and `diagnostic-forensics.md`: default to harness/tool context before blaming the model.
+- **The old principle is wrong:** “small as possible” over-weights brevity and causes `not_unique`. Replace with: **oldText is a current, unique locator**.
+- **Runtime tier beats always-on prose.** Staleness recovery belongs primarily in the tool error envelope, not in promptGuidelines. `context-engineering/SKILL.md` is explicit: static/dynamic/runtime tiering; pay runtime context only when needed.
+- **The fuzzy normalization finding is the strongest part of the proposal.** But 4.6 under-reacts: this is not just transparency debt; it is a matcher correctness bug.
+
+## WEAKEN+REDIRECT
+
+- **4.3 staleness prompt is too prompt-layer.**
+  “If you edited this file earlier, re-read” is a workaround for a tool that can know or infer staleness. Better:
+  - read returns `revision`;
+  - edit accepts/infers `base_revision`;
+  - if file changed since last read, return `code: "stale_snapshot"` with a `read_range` hint.
+  Prompt prose is ignorable and costs tokens every call. Tool state is self-correcting.
+
+- **4.5 error strings are too prose-shaped.**
+  Per `tool-design/references/return-shapes.md`, errors should be structured recovery envelopes, not paragraphs. Minimal reliable signal:
+
+```json
+{
+  "status": "error",
+  "error_type": "ToolExecutionError",
+  "code": "not_found",
+  "path": "x.ts",
+  "edit_index": 0,
+  "message": "oldText did not match current file content.",
+  "suggested_action": "read_range_and_retry",
+  "recovery": {
+    "staleness": {
+      "file_mutated_since_last_read": true,
+      "last_read_revision": "abc",
+      "current_revision": "def"
+    },
+    "read_range": { "path": "x.ts", "offset": 120, "limit": 30 },
+    "near_misses": [
+      {
+        "line_start": 124,
+        "line_end": 131,
+        "score": 0.82,
+        "preview": "compact excerpt..."
+      }
+    ]
+  }
+}
+```
+
+- **`not_unique` should not merely say “provide more context.”** Return candidates:
+
+```json
+{
+  "status": "error",
+  "error_type": "ToolExecutionError",
+  "code": "not_unique",
+  "path": "x.ts",
+  "edit_index": 0,
+  "occurrence_count": 3,
+  "occurrences": [
+    { "occurrence": 1, "line_start": 42, "line_end": 42, "before": "function a()", "match": "timeout: 30", "after": "}" },
+    { "occurrence": 2, "line_start": 88, "line_end": 88, "before": "retry:", "match": "timeout: 30", "after": "}" }
+  ],
+  "suggested_action": "retry_with_adjacent_anchor_from_target_occurrence"
+}
+```
+
+That is the “reliable reflection signal” required by `behavior-shaping/SKILL.md`.
+
+## MISSED
+
+- **4.6 is insufficient. Severity: P1 correctness / release-blocker for redesign.**
+  Current matcher normalizes the whole file when any edit uses fuzzy matching, then writes that normalized whole file and diffs normalized→normalized. This violates edit scope and hides unrelated mutation. A success note is not enough.
+
+  Required matcher behavior:
+  1. Match exact first.
+  2. If fuzzy needed, normalize only for locating.
+  3. Maintain a normalized-index → raw-index map.
+  4. Map the matched fuzzy span back to the raw file span.
+  5. Apply replacement only to that raw span.
+  6. Generate diff/patch from **raw original → final written content**.
+  7. If span mapping is ambiguous, fail with structured `fuzzy_ambiguous` candidates.
+
+- **Exact-string locator is partly the root fragility.** Keep it as one locator mode, but add safer structural modes:
+  - `range` locator: `{start_line, start_col?, end_line, end_col?, expected_text | expected_hash}`
+  - `anchor` locator: `{anchor_text, oldText, occurrence_within_anchor?}`
+  - text locator remains: `{oldText}`
+
+  Do **not** use bare line ranges without `revision`/`expected_text`; they silently edit wrong regions after drift. Do **not** use bare `occurrence: 2`; occurrence indices are unstable unless derived from a returned `not_unique` candidate set and guarded by revision.
+
+- **Tool result shape is missing.** Success should expose enough to verify:
+
+```json
+{
+  "status": "ok",
+  "path": "x.ts",
+  "edits_applied": 2,
+  "first_changed_line": 88,
+  "matches": [
+    { "edit_index": 0, "match_kind": "exact", "line_start": 88, "line_end": 91 },
+    { "edit_index": 1, "match_kind": "fuzzy", "line_start": 140, "line_end": 144 }
+  ],
+  "diff": "...",
+  "patch": "..."
+}
+```
+
+## TOOL-PRESENTATION CONTRACT GAPS AFTER REWRITE
+
+Relevant missing elements from `context-engineering/SKILL.md` and `tool-design/references/guidance-fields.md`:
+
+- **Return type / return processing:** missing and important. The model needs structured success/error fields, especially `diff`, `patch`, `matches`, `recovery`.
+- **Fallback:** missing and important. `not_found → read_range_and_retry`; `not_unique → retry_with_anchor`; `overlap → merge_or_disjoint`.
+- **Invariants:** missing as structured contract. Important:
+  - edits match original snapshot;
+  - replacement spans must be disjoint;
+  - fuzzy match never mutates outside the matched raw span;
+  - diff is raw-original→final.
+- **use_when / avoid_when:** moderately important:
+  - use `edit` for targeted replacements;
+  - use `write` for new files or complete rewrites;
+  - use `read` before uncertain/stale edits.
+- **Examples:** useful only if compact. Two examples are justified by empirical frequency. More is checklist bloat once tool affordances exist.
+- **Reasoning traces:** useful for the two high-error patterns, but secondary to structured recovery returns.
+- **Signature/parameters:** already mostly covered by native schema; don’t duplicate heavily.
+
+## VERDICT
+
+Perfect split:
+
+- **Always-on contract:** one short principle: `oldText/locator must identify exactly one current region`; batch disjoint edits; use `write` for whole-file rewrites.
+- **Runtime/error tier:** structured `not_found`, `stale_snapshot`, `not_unique`, `overlap`, `no_change` envelopes with line ranges, near-misses, occurrences, and suggested next action.
+- **Tool layer:** revision-aware reads/edits, candidate returns, scoped fuzzy matching with raw-span mapping, raw→final diffs, and locator variants guarded by `expected_text`/`revision`.
+
+The proposal moves in the right direction, but still treats tool prose as the main remedy. The durable fix is tool affordance + structured recovery signal.
