@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { renderLiveWidget, updateLiveWidget } from "../extensions/pi/liveWidget.js";
+import { clearLiveWidget, renderLiveWidget, updateLiveWidget } from "../extensions/pi/liveWidget.js";
 import { markWakeupHandled } from "../extensions/pi/wakeups.js";
 import { visWidth } from "../extensions/pi/renderers.js";
 import { RunStore } from "../src/runStore.js";
@@ -581,6 +581,48 @@ test("updateLiveWidget clears the widget when there are no visible rows", () => 
   updateLiveWidget(ctx, { store: w.store, parentRunId: w.parentRunId });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].value, undefined);
+});
+
+test("clearLiveWidget is idempotent across repeated clears", () => {
+  const calls: Array<{ value: unknown }> = [];
+  const ctx = {
+    ui: {
+      setWidget(_key: string, value: unknown) {
+        calls.push({ value });
+      },
+    },
+  };
+
+  clearLiveWidget(ctx);
+  clearLiveWidget(ctx);
+  clearLiveWidget(ctx);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].value, undefined);
+});
+
+test("live widget component render output stays stable across fake time without update", () => {
+  const empty = workspace();
+  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
+
+  const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
+  const w = workspace();
+  addRun({ ...w, displayName: "Rex", state: "running", summary: "working", updatedAt: new Date(baseNow - 10_000).toISOString() });
+
+  type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void; update?(input: Parameters<typeof updateLiveWidget>[1]): void };
+  let captured: WidgetFactory | undefined;
+  const ctx = { ui: { setWidget(_key: string, value: unknown) { if (typeof value === "function") captured = value as WidgetFactory; } } };
+
+  withFakeNow(baseNow, () => {
+    updateLiveWidget(ctx, { store: w.store, parentRunId: w.parentRunId });
+  });
+  assert.ok(captured, "expected setWidget to receive a factory function");
+
+  const component = captured!(undefined, undefined);
+  const initial = withFakeNow(baseNow, () => component.render(72));
+  const later = withFakeNow(baseNow + 45_000, () => component.render(72));
+
+  assert.deepEqual(later, initial);
 });
 
 test("live widget renders task summary and maps task to run rows", () => {

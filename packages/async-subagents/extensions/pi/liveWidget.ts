@@ -341,23 +341,29 @@ interface RenderRequester {
 }
 
 let mountedWidget: LiveWidgetComponent | undefined;
+const clearedWidgetContexts = new WeakSet<object>();
 
 function createLiveWidgetComponent(input: LiveWidgetInput, tui: unknown): LiveWidgetComponent {
-  let currentInput = input;
-  let currentSignature = liveWidgetRenderSignature(input, input.snapshot ?? prepareLiveWidgetSnapshot(input, Date.now()));
+  const initialNow = Date.now();
+  const initialSnapshot = input.snapshot ?? prepareLiveWidgetSnapshot(input, initialNow);
+  let currentInput = { ...input, snapshot: initialSnapshot };
+  let currentRenderNow = initialNow;
+  let currentSignature = liveWidgetRenderSignature(input, initialSnapshot);
   const renderHost = tui as RenderRequester | undefined;
   const component: LiveWidgetComponent = {
     update(nextInput: LiveWidgetInput) {
-      const nextSnapshot = nextInput.snapshot ?? prepareLiveWidgetSnapshot(nextInput, Date.now());
+      const nextNow = Date.now();
+      const nextSnapshot = nextInput.snapshot ?? prepareLiveWidgetSnapshot(nextInput, nextNow);
       const nextSignature = liveWidgetRenderSignature(nextInput, nextSnapshot);
-      currentInput = { ...nextInput, snapshot: nextSnapshot };
       if (nextSignature !== currentSignature) {
         currentSignature = nextSignature;
+        currentInput = { ...nextInput, snapshot: nextSnapshot };
+        currentRenderNow = nextNow;
         renderHost?.requestRender?.();
       }
     },
     render(width: number) {
-      return renderAt(currentInput, width, Date.now());
+      return renderAt(currentInput, width, currentRenderNow);
     },
     invalidate() {},
     dispose() {
@@ -378,7 +384,10 @@ interface UiSetWidget {
 export function clearLiveWidget(ctx: unknown): void {
   const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
   if (!ui?.setWidget) return;
+  const contextObject = typeof ctx === "object" && ctx !== null ? ctx : undefined;
+  if (!mountedWidget && contextObject && clearedWidgetContexts.has(contextObject)) return;
   mountedWidget = undefined;
+  if (contextObject) clearedWidgetContexts.add(contextObject);
   ui.setWidget("async-subagents-live", undefined, { placement: "belowEditor" });
 }
 
@@ -398,6 +407,7 @@ export function updateLiveWidget(ctx: unknown, input: LiveWidgetInput): void {
     mountedWidget.update?.(snapshotInput);
     return;
   }
+  if (typeof ctx === "object" && ctx !== null) clearedWidgetContexts.delete(ctx);
   ui.setWidget(
     "async-subagents-live",
     (tui) => {
