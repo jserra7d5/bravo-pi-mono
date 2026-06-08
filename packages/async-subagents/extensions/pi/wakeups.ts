@@ -268,7 +268,7 @@ function taskDelivery(event: TaskEvent, task?: ReturnType<TaskStore["readTask"]>
       bodyAvailable: terminal?.message.bodyAvailable,
       bodyTruncation: terminal?.message.bodyTruncation,
       taskEvent: event,
-      task: { taskId: event.taskId, title: task?.title, status: task?.status, owner: task?.owner ? { runId: task.owner.runId, displayName: task.owner.displayName, agent: task.owner.agent } : undefined, receiptPath: task?.result?.receiptPath },
+      task: { taskId: event.taskId, title: task?.title, status: task?.status, owner: task?.owner ? { runId: task.owner.runId, displayName: task.owner.displayName, agent: task.owner.agent } : undefined, receiptPath: task?.status === "result_ready" && task.result?.state === "submitted" ? task.result.receiptPath : undefined },
       result: terminal?.message.result,
       status: terminal?.message.status,
       next: taskWakeupNext(event),
@@ -319,6 +319,7 @@ function pendingForRun(store: RunStore, parentRunId: string, runId: string, noti
 }
 
 const TASK_TERMINAL_WAKEUP_COALESCE_MS = 2_000;
+const TASK_READY_WAKEUP_DEBOUNCE_MS = 500;
 const DELIVERY_CLAIM_TTL_MS = 60_000;
 
 function claimDelivery(store: RunStore, deliveryKey: string, ownerId: string, nowMs?: number): boolean {
@@ -437,11 +438,12 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
   const taskStore = new TaskStore(input.store);
   const cursor = state.taskEventCursors?.[input.rootSessionId] ?? { eventOffset: 0 };
   const taskEventRead = taskStore.readEvents(input.rootSessionId, cursor);
+  const wakeableTaskEvents = taskEventRead.records.filter((event) => event.parentRunId === input.parentRunId && event.wake === true && ["task.result_submitted", "task.failed", "task.needs_input", "task.ready"].includes(event.type));
   let taskCursorBlocked = false;
   // Lazily loaded only if a task.ready event is encountered; used to confirm the
   // task is still ready by derived state (deps satisfied, unowned) before nudging.
   let readyCheckTasks: ReturnType<TaskStore["listTasks"]> | undefined;
-  for (const event of taskEventRead.records.filter((event) => event.parentRunId === input.parentRunId && event.wake === true && ["task.result_submitted", "task.failed", "task.needs_input", "task.ready"].includes(event.type))) {
+  for (const event of wakeableTaskEvents) {
     if (state.delivered[taskEventDeliveryKey(event)] || state.handled[taskEventDeliveryKey(event)]) continue;
     let task; try { task = taskStore.readTask(input.rootSessionId, event.taskId); } catch { /* event remains deliverable without task details */ }
     // A `task.ready` nudge is only worth delivering if the task is still ready
@@ -452,8 +454,13 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
     if (event.type === "task.ready") {
       if (!readyCheckTasks) readyCheckTasks = taskStore.listTasks(input.rootSessionId, { reconcile: false });
       if (!isReadyWakeupStillActionable(task, readyCheckTasks)) continue;
+      const hasLaterReady = taskEventRead.records.some((candidate) => candidate.taskId === event.taskId && candidate.sequence > event.sequence && candidate.type === "task.ready");
+      if (hasLaterReady) continue;
+      const eventMs = Date.parse(event.createdAt);
+      if (Number.isFinite(eventMs) && (input.nowMs ?? Date.now()) - eventMs < TASK_READY_WAKEUP_DEBOUNCE_MS) { taskCursorBlocked = true; break; }
     }
-    if (event.type === "task.result_submitted" && event.runId) {
+    if (event.type === "task.result_submitted") {
+      if (!task || task.status !== "result_ready" || task.result?.state !== "submitted" || !event.runId || task.owner?.runId !== event.runId) continue;
       const subscription = subscriptions.get(event.runId);
       const terminalNotifyEnabled = Boolean(subscription && subscription.notifyOn.some((type) => ["result", "completed", "failed", "cancelled", "expired"].includes(type)));
       let terminal: WakeupDelivery | undefined;
@@ -484,6 +491,11 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
     if (input.modelFollowUpOnly && !isActionableModelWakeup(delivery)) continue;
     if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) { taskCursorBlocked = true; break; }
     if (isWakeupKeyHandled(input.store, input.parentRunId, delivery.deliveryKey)) { releaseDeliveryClaim(input.store, delivery.deliveryKey); continue; }
+    if (event.type === "task.ready") {
+      const currentTask = taskStore.readTask(input.rootSessionId, event.taskId);
+      const currentTasks = taskStore.listTasks(input.rootSessionId, { reconcile: false });
+      if (!isReadyWakeupStillActionable(currentTask, currentTasks)) { releaseDeliveryClaim(input.store, delivery.deliveryKey); continue; }
+    }
     deliveries.push(delivery);
     const deliveredAt = new Date(input.nowMs ?? Date.now()).toISOString();
     state.delivered[delivery.deliveryKey] = deliveredAt;

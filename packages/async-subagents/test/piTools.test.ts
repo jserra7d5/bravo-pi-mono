@@ -120,6 +120,32 @@ test("task_get default and receipt view surface receipt body and model-facing co
   assert.match(result.content[0]?.text ?? "", /artifact\.md/);
 });
 
+test("task_reopen includes subagent_start next hint when reopened task is ready", async () => {
+  const previousRunId = process.env.ASYNC_SUBAGENTS_RUN_ID;
+  const previousSingularRunId = process.env.ASYNC_SUBAGENT_RUN_ID;
+  delete process.env.ASYNC_SUBAGENTS_RUN_ID;
+  delete process.env.ASYNC_SUBAGENT_RUN_ID;
+  try {
+    const w = workspace();
+    const built = tools(w.identity);
+    const taskStore = new TaskStore(new RunStore({ cwd: w.root }));
+    const [task] = taskStore.createTasks(w.identity.rootSessionId, { parentRunId: w.identity.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+    const token = newTaskToken();
+    taskStore.claimTask(w.identity.rootSessionId, task.id, { runId: "run_task_reopen", agent: "worker", displayName: "Worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+    taskStore.submitResult(w.identity.rootSessionId, task.id, { runId: "run_task_reopen", taskToken: token, summary: "not enough" });
+
+    const result = await built.task_reopen.execute("reopen", { taskId: task.id, reason: "redo" }, undefined, undefined, { cwd: w.root });
+
+    assert.equal(result.isError, undefined);
+    assert.deepEqual((result.details.next as unknown[])[0], { tool: "subagent_start", args: { taskId: task.id, agent: "<agent>" } });
+  } finally {
+    if (previousRunId === undefined) delete process.env.ASYNC_SUBAGENTS_RUN_ID;
+    else process.env.ASYNC_SUBAGENTS_RUN_ID = previousRunId;
+    if (previousSingularRunId === undefined) delete process.env.ASYNC_SUBAGENT_RUN_ID;
+    else process.env.ASYNC_SUBAGENT_RUN_ID = previousSingularRunId;
+  }
+});
+
 test("subagent_result for task-owned runs includes the durable task receipt", async () => {
   const w = workspace();
   const store = new RunStore({ cwd: w.root });

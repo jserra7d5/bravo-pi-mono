@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { acquireRootSessionLease } from "../src/leases.js";
@@ -242,8 +242,10 @@ test("pollWakeups delivers a ready task as a start-now nudge", () => {
   const taskStore = new TaskStore(store);
   const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
   acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+  const readyEvent = taskStore.readEvents(parentRunId).find((event) => event.type === "task.ready" && event.taskId === task.id);
+  assert.ok(readyEvent);
 
-  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", nowMs: Date.parse(readyEvent.createdAt) + 1_000 });
   const ready = deliveries.find((d) => d.message.taskEvent?.type === "task.ready");
   assert.ok(ready, "expected a task.ready wakeup for the immediately-ready task");
   assert.equal(ready?.message.kind, "task_wakeup");
@@ -262,6 +264,123 @@ test("pollWakeups skips a ready wakeup once the task is claimed", () => {
 
   const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
   assert.equal(deliveries.some((d) => d.message.taskEvent?.type === "task.ready"), false);
+});
+
+test("pollWakeups preserves too-young ready cursor then suppresses after immediate claim", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const readyEvent = taskStore.readEvents(parentRunId).find((event) => event.type === "task.ready" && event.taskId === task.id);
+  assert.ok(readyEvent);
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const tooSoon = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", nowMs: Date.parse(readyEvent.createdAt) + 100 });
+  assert.equal(tooSoon.length, 0);
+  const statePath = deliveryStatePath(store, parentRunId);
+  const cursorAfterTooSoon = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")).taskEventCursors?.[parentRunId]?.eventOffset ?? 0 : 0;
+  assert.equal(cursorAfterTooSoon, 0, "too-young task.ready must not advance the task event cursor");
+
+  const token = newTaskToken();
+  taskStore.claimTask(parentRunId, task.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  const afterClaim = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", nowMs: Date.parse(readyEvent.createdAt) + 1_000 });
+  assert.equal(afterClaim.some((d) => d.message.taskEvent?.type === "task.ready"), false);
+});
+
+test("pollWakeups preserves original ready nudge after claim release without replacement ready", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const initialReady = taskStore.readEvents(parentRunId).find((event) => event.type === "task.ready" && event.taskId === task.id);
+  assert.ok(initialReady);
+  const token = newTaskToken();
+  taskStore.claimTask(parentRunId, task.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.releaseClaim(parentRunId, task.id, { runId: "task_run_1", reason: "launch failed" });
+  assert.equal(taskStore.readEvents(parentRunId).filter((event) => event.type === "task.ready" && event.taskId === task.id).length, 1, "release does not emit replacement ready");
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", nowMs: Date.parse(initialReady.createdAt) + 1_000 });
+  assert.ok(deliveries.some((d) => d.message.taskEvent?.eventId === initialReady.eventId), "original ready remains actionable after release");
+});
+
+test("pollWakeups skips stale ready after claim and direct reopen without submitted result", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const initialReady = taskStore.readEvents(parentRunId).find((event) => event.type === "task.ready" && event.taskId === task.id);
+  assert.ok(initialReady);
+  const token = newTaskToken();
+  taskStore.claimTask(parentRunId, task.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.reopenTask(parentRunId, task.id, { reason: "redo" });
+  const currentReady = taskStore.readEvents(parentRunId).filter((event) => event.type === "task.ready" && event.taskId === task.id).at(-1);
+  assert.ok(currentReady);
+  assert.notEqual(currentReady.eventId, initialReady.eventId);
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", nowMs: Date.parse(currentReady.createdAt) + 1_000 });
+  assert.equal(deliveries.some((d) => d.message.taskEvent?.eventId === initialReady.eventId), false);
+  assert.ok(deliveries.some((d) => d.message.taskEvent?.eventId === currentReady.eventId), "current ready event remains deliverable");
+});
+
+test("pollWakeups skips stale pre-reopen ready and result events after reopen", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const initialReady = taskStore.readEvents(parentRunId).find((event) => event.type === "task.ready" && event.taskId === task.id);
+  assert.ok(initialReady);
+  const token = newTaskToken();
+  taskStore.claimTask(parentRunId, task.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.submitResult(parentRunId, task.id, { runId: "task_run_1", taskToken: token, summary: "done" });
+  taskStore.reopenTask(parentRunId, task.id, { reason: "redo" });
+  const currentReady = taskStore.readEvents(parentRunId).filter((event) => event.type === "task.ready" && event.taskId === task.id).at(-1);
+  assert.ok(currentReady);
+  assert.notEqual(currentReady.eventId, initialReady.eventId);
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", nowMs: Date.parse(currentReady.createdAt) + 1_000 });
+  assert.equal(deliveries.some((d) => d.message.taskEvent?.eventId === initialReady.eventId), false);
+  assert.equal(deliveries.some((d) => d.message.taskEvent?.type === "task.result_submitted"), false);
+  assert.ok(deliveries.some((d) => d.message.taskEvent?.eventId === currentReady.eventId), "current ready event remains deliverable");
+});
+
+test("pollWakeups skips stale result_submitted after reopen then claim", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const token1 = newTaskToken();
+  taskStore.claimTask(parentRunId, task.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token1) });
+  taskStore.submitResult(parentRunId, task.id, { runId: "task_run_1", taskToken: token1, summary: "done" });
+  taskStore.reopenTask(parentRunId, task.id, { reason: "redo" });
+  const token2 = newTaskToken();
+  taskStore.claimTask(parentRunId, task.id, { runId: "task_run_2", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token2) });
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(deliveries.some((d) => d.message.taskEvent?.type === "task.result_submitted"), false);
+  assert.equal(deliveries.some((d) => d.message.taskEvent?.type === "task.ready"), false);
+});
+
+test("task.ready wakeup for reopened rejected result omits stale receiptPath", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const taskStore = new TaskStore(store);
+  const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
+  const token = newTaskToken();
+  taskStore.claimTask(parentRunId, task.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.submitResult(parentRunId, task.id, { runId: "task_run_1", taskToken: token, summary: "done", receipt: { ok: false } });
+  taskStore.reopenTask(parentRunId, task.id, { reason: "redo" });
+  const readyEvent = taskStore.readEvents(parentRunId).filter((event) => event.type === "task.ready" && event.taskId === task.id).at(-1);
+  assert.ok(readyEvent);
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", nowMs: Date.parse(readyEvent.createdAt) + 1_000 });
+  const ready = deliveries.find((d) => d.message.taskEvent?.eventId === readyEvent.eventId);
+  assert.ok(ready);
+  assert.equal(ready.message.task?.receiptPath, undefined);
 });
 
 test("accepting a task wakes the parent to start a newly-ready dependent", () => {
@@ -283,7 +402,9 @@ test("accepting a task wakes the parent to start a newly-ready dependent", () =>
   assert.equal(before.some((d) => d.message.taskEvent?.taskId === review.id), false);
 
   taskStore.acceptResult(parentRunId, impl.id, {});
-  const after = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  const readyEvent = taskStore.readEvents(parentRunId).filter((event) => event.type === "task.ready" && event.taskId === review.id).at(-1);
+  assert.ok(readyEvent);
+  const after = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", nowMs: Date.parse(readyEvent.createdAt) + 1_000 });
   const ready = after.find((d) => d.message.taskEvent?.taskId === review.id && d.message.state === "task.ready");
   assert.ok(ready, "expected a ready wakeup for the newly-unblocked dependent");
   assert.deepEqual(ready?.message.next, [{ tool: "subagent_start", args: { taskId: review.id } }]);
