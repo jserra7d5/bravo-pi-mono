@@ -132,7 +132,7 @@ test("task_reopen includes subagent_start next hint when reopened task is ready"
     const [task] = taskStore.createTasks(w.identity.rootSessionId, { parentRunId: w.identity.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
     const token = newTaskToken();
     taskStore.claimTask(w.identity.rootSessionId, task.id, { runId: "run_task_reopen", agent: "worker", displayName: "Worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-    taskStore.submitResult(w.identity.rootSessionId, task.id, { runId: "run_task_reopen", taskToken: token, summary: "not enough" });
+    taskStore.submitResult(w.identity.rootSessionId, task.id, { runId: "run_task_reopen", taskToken: token, summary: "not enough", receipt: { finding: "not enough" } });
 
     const result = await built.task_reopen.execute("reopen", { taskId: task.id, reason: "redo" }, undefined, undefined, { cwd: w.root });
 
@@ -603,16 +603,42 @@ test("task_get and subagent_result surface missing receipt diagnostics", async (
   const [task] = taskStore.createTasks(w.identity.rootSessionId, { parentRunId: w.identity.parentRunId, tasks: [{ title: "Assess", description: "Assess it" }] }).tasks;
   const token = newTaskToken();
   taskStore.claimTask(w.identity.rootSessionId, task.id, { runId, agent: "scout", displayName: "Scout", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-  taskStore.submitResult(w.identity.rootSessionId, task.id, { runId, taskToken: token, summary: "findings ready" });
-  store.writeResult(createRunResult({ runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", body: `Submitted result for ${task.id}` }));
+  const legacyTask = taskStore.readTask(w.identity.rootSessionId, task.id);
+  writeFileSync(join(taskStore.pathsFor(w.identity.rootSessionId).tasksDir, `${task.id}.json`), JSON.stringify({
+    ...legacyTask,
+    status: "result_ready",
+    result: { state: "submitted", summary: "findings ready", submittedAt: new Date().toISOString() },
+    attempts: legacyTask.attempts.map((attempt) => attempt.runId === runId ? { ...attempt, status: "result_ready", endedAt: new Date().toISOString() } : attempt),
+    updatedAt: new Date().toISOString(),
+  }, null, 2));
+  store.writeResult(createRunResult({ runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", body: "Detailed recovered scout findings with exact files and commands." }));
 
   const taskGet = await built.task_get.execute("get", { taskId: task.id }, undefined, undefined, { cwd: w.root });
   assert.equal(((taskGet.details.result as { receiptDiagnostic?: { state?: string } }).receiptDiagnostic?.state), "missing");
+  assert.equal((taskGet.details.result as { recoveredRunBody?: string }).recoveredRunBody, "Detailed recovered scout findings with exact files and commands.");
+  assert.match(taskGet.content[0]?.text ?? "", /Recovered run body/);
   assert.match(taskGet.content[0]?.text ?? "", /Receipt diagnostic: missing/);
 
   const subagentResult = await built.subagent_result.execute("result", { runId }, undefined, undefined, { cwd: w.root });
   assert.equal((((subagentResult.details.taskReceipt as { result?: { receiptDiagnostic?: { state?: string } } }).result?.receiptDiagnostic?.state)), "missing");
   assert.match(subagentResult.content[0]?.text ?? "", /receiptDiagnostic/);
+});
+
+test("task_get renders substantive evidence payloads without missing receipt diagnostics", async () => {
+  const w = workspace();
+  const built = tools(w.identity);
+  const taskStore = new TaskStore(new RunStore({ cwd: w.root }));
+  const runId = "run_task_evidence_only";
+  const [task] = taskStore.createTasks(w.identity.rootSessionId, { parentRunId: w.identity.parentRunId, tasks: [{ title: "Map", description: "Map it" }] }).tasks;
+  const token = newTaskToken();
+  taskStore.claimTask(w.identity.rootSessionId, task.id, { runId, agent: "scout", displayName: "Scout", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  taskStore.submitResult(w.identity.rootSessionId, task.id, { runId, taskToken: token, summary: "mapped", evidence: ["packages/async-subagents/src/taskStore.ts: validates payloads"], commandsRun: ["npm test --workspace @bravo/async-subagents"], notes: "No receipt object needed because evidence is inline." });
+
+  const taskGet = await built.task_get.execute("get", { taskId: task.id, view: "receipt" }, undefined, undefined, { cwd: w.root });
+  assert.equal((taskGet.details.result as { receiptDiagnostic?: unknown }).receiptDiagnostic, undefined);
+  assert.match(taskGet.content[0]?.text ?? "", /Evidence:/);
+  assert.match(taskGet.content[0]?.text ?? "", /Commands run:/);
+  assert.match(taskGet.content[0]?.text ?? "", /No receipt object needed/);
 });
 
 test("duplicate subagent_start for an already owned task is idempotent and does not launch", async () => {

@@ -147,8 +147,8 @@ export default function childControlExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "task_submit_result",
     label: "Task Submit Result",
-    description: "Submit the durable result receipt for the task assigned to this child run. Only works with the harness-injected task identity.",
-    promptSnippet: "For task-owned runs, finish by calling task_submit_result with a concise summary plus receipt/artifact pointers. Do not mark the task accepted; the parent accepts results.",
+    description: "Submit the durable result receipt for the task assigned to this child run. Only works with the harness-injected task identity. Requires a receipt or substantive payload: artifactPaths, evidence, commandsRun, or notes.",
+    promptSnippet: "For task-owned runs, finish by calling task_submit_result with a concise summary plus a durable receipt or substantive payload (receipt, artifactPaths, evidence, commandsRun, or notes). Do not submit summary-only results. Do not mark the task accepted; the parent accepts results.",
     parameters: Type.Object({ summary: Type.String(), receipt: Type.Optional(Type.Any()), artifactPaths: Type.Optional(Type.Array(Type.String())), evidence: Type.Optional(Type.Array(Type.String())), commandsRun: Type.Optional(Type.Array(Type.String())), notes: Type.Optional(Type.String()) }),
     async execute(_toolCallId, params) {
       const id = taskIdentity();

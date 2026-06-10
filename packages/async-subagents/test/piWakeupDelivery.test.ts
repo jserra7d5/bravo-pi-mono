@@ -293,7 +293,7 @@ test("task wakeup polling persists a task-event cursor after catch-up", async ()
     const [task] = taskStore.createTasks(session.identity.rootSessionId, { parentRunId: session.identity.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
     const token = newTaskToken();
     taskStore.claimTask(session.identity.rootSessionId, task.id, { runId: "task_run_1", agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-    taskStore.submitResult(session.identity.rootSessionId, task.id, { runId: "task_run_1", taskToken: token, summary: "task done" });
+    taskStore.submitResult(session.identity.rootSessionId, task.id, { runId: "task_run_1", taskToken: token, summary: "task done", receipt: { ok: true } });
 
     await session.poll();
 
@@ -366,7 +366,7 @@ test("task-owned terminal result coalesces task and run result wakeups", async (
     const [task] = taskStore.createTasks(session.identity.rootSessionId, { parentRunId: session.identity.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
     const token = newTaskToken();
     taskStore.claimTask(session.identity.rootSessionId, task.id, { runId, agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-    taskStore.submitResult(session.identity.rootSessionId, task.id, { runId, taskToken: token, summary: "task done" });
+    taskStore.submitResult(session.identity.rootSessionId, task.id, { runId, taskToken: token, summary: "task done", receipt: { ok: true } });
     session.store.writeStatus({ ...createInitialStatus({
       runId,
       parentRunId: session.identity.parentRunId,

@@ -14,7 +14,7 @@ import { deriveTaskState, unresolvedDependencies } from "../../src/taskState.js"
 import { isTerminalRunState, isThinkingLevel } from "../../src/schemas.js";
 import { startSubagent, type StartSubagentInput } from "../../src/start.js";
 import { readSubagentStatus, updateRunStatus } from "../../src/status.js";
-import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult } from "../../src/types.js";
+import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult, type TaskRecord } from "../../src/types.js";
 import { readParentPiSessionRef } from "../../src/piSession.js";
 import { markTaskWakeupHandled, markWakeupHandled, markWakeupKeyHandled, taskEventDeliveryKey, writeDeliverySubscription } from "./wakeups.js";
 import {
@@ -126,9 +126,18 @@ function compactTaskRows(tasks: ReturnType<TaskStore["listTasks"]>) {
 
 interface ReceiptReadResult { receipt?: unknown; diagnostic?: { state: "missing" | "unreadable" | "invalid"; message: string; receiptPath?: string } }
 
-function readReceipt(result: { receiptPath?: string } | undefined): ReceiptReadResult {
+function hasSubstantiveResultPayload(result: { artifactPaths?: string[]; evidence?: string[]; commandsRun?: string[]; notes?: string } | undefined): boolean {
+  return Boolean(
+    result?.artifactPaths?.some((item) => typeof item === "string" && item.trim()) ||
+    result?.evidence?.some((item) => typeof item === "string" && item.trim()) ||
+    result?.commandsRun?.some((item) => typeof item === "string" && item.trim()) ||
+    (typeof result?.notes === "string" && result.notes.trim())
+  );
+}
+
+function readReceipt(result: { receiptPath?: string; artifactPaths?: string[]; evidence?: string[]; commandsRun?: string[]; notes?: string } | undefined): ReceiptReadResult {
   const receiptPath = result?.receiptPath;
-  if (!receiptPath) return { diagnostic: { state: "missing", message: "task result has no receiptPath" } };
+  if (!receiptPath) return hasSubstantiveResultPayload(result) ? {} : { diagnostic: { state: "missing", message: "task result has no receiptPath" } };
   if (!existsSync(receiptPath)) return { diagnostic: { state: "missing", message: "receipt file is missing", receiptPath } };
   let rawText: string;
   try {
@@ -145,9 +154,19 @@ function readReceipt(result: { receiptPath?: string } | undefined): ReceiptReadR
   }
 }
 
-function resultWithReceipt<T extends { receiptPath?: string }>(result: T): T & { receipt?: unknown; receiptDiagnostic?: ReceiptReadResult["diagnostic"] } {
+function resultWithReceipt<T extends { receiptPath?: string; artifactPaths?: string[]; evidence?: string[]; commandsRun?: string[]; notes?: string }>(result: T): T & { receipt?: unknown; receiptDiagnostic?: ReceiptReadResult["diagnostic"] } {
   const receipt = readReceipt(result);
   return { ...result, receipt: receipt.receipt, receiptDiagnostic: receipt.diagnostic };
+}
+
+function resultWithReceiptAndRunRecovery<T extends { receiptPath?: string; artifactPaths?: string[]; evidence?: string[]; commandsRun?: string[]; notes?: string }>(result: T, task: TaskRecord, runStore: RunStore): T & { receipt?: unknown; receiptDiagnostic?: ReceiptReadResult["diagnostic"]; recoveredRunBody?: string; recoveredRunId?: string } {
+  const shaped = resultWithReceipt(result);
+  if (!shaped.receiptDiagnostic || shaped.receiptDiagnostic.state !== "missing") return shaped;
+  const runId = task.owner?.runId ?? task.attempts.at(-1)?.runId;
+  if (!runId) return shaped;
+  const runResult = runStore.readResult(runId);
+  if (typeof runResult?.body !== "string" || !runResult.body.trim()) return shaped;
+  return { ...shaped, recoveredRunBody: runResult.body, recoveredRunId: runId };
 }
 
 function formatTaskListContent(summary: string, rows: ReturnType<typeof compactTaskRows>): string {
@@ -163,12 +182,16 @@ function formatTaskGetContent(summary: string, details: Record<string, unknown>,
   const lines = [summary, `Status: ${details.state}/${details.status}`];
   const owner = details.owner as { runId?: string; displayName?: string; agent?: string } | undefined;
   if (owner?.runId) lines.push(`Owner: ${owner.runId}${owner.displayName ? ` (${owner.displayName})` : ""}${owner.agent ? ` agent=${owner.agent}` : ""}`);
-  const result = details.result as { summary?: string; receiptPath?: string; artifactPaths?: string[]; receipt?: unknown; receiptDiagnostic?: { state?: string; message?: string } } | undefined;
+  const result = details.result as { summary?: string; receiptPath?: string; artifactPaths?: string[]; evidence?: string[]; commandsRun?: string[]; notes?: string; receipt?: unknown; receiptDiagnostic?: { state?: string; message?: string }; recoveredRunBody?: string; recoveredRunId?: string } | undefined;
   if (result) {
     lines.push(`Result: ${result.summary ?? "submitted"}`);
     if (result.receiptPath) lines.push(`Receipt path: ${result.receiptPath}`);
     if (result.artifactPaths?.length) lines.push(`Artifacts: ${result.artifactPaths.join(", ")}`);
+    if (view !== "status" && result.evidence?.length) lines.push("Evidence:", ...result.evidence.map((item) => `- ${item}`));
+    if (view !== "status" && result.commandsRun?.length) lines.push("Commands run:", ...result.commandsRun.map((item) => `- ${item}`));
+    if (view !== "status" && result.notes) lines.push("Notes:", result.notes);
     if (view !== "status" && result.receipt !== undefined) lines.push("Receipt:", JSON.stringify(result.receipt, null, 2));
+    if (view !== "status" && result.recoveredRunBody) lines.push(`Recovered run body${result.recoveredRunId ? ` (${result.recoveredRunId})` : ""}:`, result.recoveredRunBody);
     if (result.receiptDiagnostic) lines.push(`Receipt diagnostic: ${result.receiptDiagnostic.state} - ${result.receiptDiagnostic.message}`);
   }
   return lines.join("\n");
@@ -711,12 +734,12 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       description: "Read one task in detail with progressive disclosure: default view is smart and includes the submitted result receipt/diagnostic when a task is result_ready/completed; explicit view=status returns compact status and pointers only; view=receipt adds the submitted result receipt; view=full adds description, attempts, and recent events. Use after a task wakeup when the wakeup summary is not enough to decide whether to accept, reopen, or unblock.",
       parameters: taskGetSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
-        const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const taskId = String(params.taskId); const store = taskStoreFor(cwd); const all = store.listTasks(root.rootSessionId); const task = store.readTask(root.rootSessionId, taskId); const deps = unresolvedDependencies(task, all);
+        const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const taskId = String(params.taskId); const store = taskStoreFor(cwd); const runStore = storeFor(cwd); const all = store.listTasks(root.rootSessionId); const task = store.readTask(root.rootSessionId, taskId); const deps = unresolvedDependencies(task, all);
         const explicitView = typeof params.view === "string";
         const view = params.view === "receipt" || params.view === "full" ? params.view : "status";
-        markTaskWakeupHandled(storeFor(cwd), root.parentRunId, task.id);
+        markTaskWakeupHandled(runStore, root.parentRunId, task.id);
         const compactResult = task.result ? { state: task.result.state, summary: task.result.summary, receiptPath: task.result.receiptPath, artifactPaths: task.result.artifactPaths, submittedAt: task.result.submittedAt } : undefined;
-        const fullResult = task.result ? resultWithReceipt(task.result) : undefined;
+        const fullResult = task.result ? resultWithReceiptAndRunRecovery(task.result, task, runStore) : undefined;
         const includeReceiptByDefault = !explicitView && Boolean(task.result) && ["result_ready", "completed"].includes(task.status);
         const base: Record<string, unknown> = { taskId: task.id, title: task.title, status: task.status, state: deriveTaskState(task, all), dependsOn: task.dependsOn, unresolvedDependencies: deps.map((d) => ({ taskId: d.id, title: d.title, status: d.status })), owner: task.owner ? { runId: task.owner.runId, displayName: task.owner.displayName, agent: task.owner.agent } : undefined, result: view === "status" && !includeReceiptByDefault ? compactResult : fullResult, next: task.status === "result_ready" ? [{ tool: "task_get", args: { taskId: task.id, view: "receipt" } }, { tool: "task_accept_result", args: { taskId: task.id } }] : [] };
         if (view === "full") Object.assign(base, { description: task.description, activeForm: task.activeForm, attempts: task.attempts, events: store.readEvents(root.rootSessionId).filter((e) => e.taskId === task.id).slice(-20) });
@@ -738,7 +761,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     },
     {
       name: "task_reopen", label: "Task Reopen", description: "Parent-only: reject a submitted result or reopen a work item back to pending for another attempt. Use when a result is insufficient or a premise changed. Pass force to also reset dependents built on the now-invalid result; the returned next hints interrupt their owner runs.", parameters: taskReopenSchema,
-      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) { const denied = parentOnly(); if (denied) return denied; const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); try { const tasks = taskStoreFor(cwd); const before = tasks.listTasks(root.rootSessionId); const taskId = String(params.taskId); const affectedIds = new Set<string>(); const queue = [taskId]; while (queue.length) { const current = queue.shift()!; for (const candidate of before) { if (!candidate.dependsOn.includes(current) || affectedIds.has(candidate.id)) continue; affectedIds.add(candidate.id); queue.push(candidate.id); } } const affected = before.filter((candidate) => affectedIds.has(candidate.id) && ["running", "result_ready", "completed"].includes(candidate.status)); const task = tasks.reopenTask(root.rootSessionId, taskId, { actor: root.parentRunId, reason: String(params.reason), activeForm: typeof params.activeForm === "string" ? params.activeForm : undefined, force: params.force === true }); markTaskWakeupHandled(storeFor(cwd), root.parentRunId, task.id); for (const dep of affected) markTaskWakeupHandled(storeFor(cwd), root.parentRunId, dep.id); await runtime.afterMutation?.(ctx, cwd, root); const after = tasks.listTasks(root.rootSessionId); const readyAfterReopen = deriveTaskState(task, after) === "ready" ? [{ tool: "subagent_start", args: { taskId: task.id, agent: "<agent>" } }] : []; return response(`Reopened ${task.id}`, { taskId: task.id, status: task.status, affectedDependents: affected.map((dep) => ({ taskId: dep.id, title: dep.title, status: dep.status, owner: dep.owner ? { runId: dep.owner.runId, displayName: dep.owner.displayName, agent: dep.owner.agent } : undefined })), next: [...readyAfterReopen, ...affected.flatMap((dep) => dep.owner ? [{ tool: "subagent_interrupt", args: { runId: dep.owner.runId, action: "cancel", reason: `Task ${dep.id} invalidated by reopen of ${task.id}` } }] : [])] }); } catch (error) { return response(error instanceof Error ? error.message : String(error), { code: (error as any).code ?? "TASK_REOPEN_FAILED", next: [{ tool: "task_get", args: { taskId: params.taskId, view: "full" } }] }, true); } },
+      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) { const denied = parentOnly(); if (denied) return denied; const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); try { const tasks = taskStoreFor(cwd); const before = tasks.listTasks(root.rootSessionId); const taskId = String(params.taskId); const affectedIds = new Set<string>(); const queue = [taskId]; while (queue.length) { const current = queue.shift()!; for (const candidate of before) { if (!candidate.dependsOn.includes(current) || affectedIds.has(candidate.id)) continue; affectedIds.add(candidate.id); queue.push(candidate.id); } } const affected = before.filter((candidate) => affectedIds.has(candidate.id) && ["running", "result_ready", "completed"].includes(candidate.status)); const beforeTask = before.find((candidate) => candidate.id === taskId); const task = tasks.reopenTask(root.rootSessionId, taskId, { actor: root.parentRunId, reason: String(params.reason), activeForm: typeof params.activeForm === "string" ? params.activeForm : undefined, force: params.force === true }); markTaskWakeupHandled(storeFor(cwd), root.parentRunId, task.id); for (const dep of affected) markTaskWakeupHandled(storeFor(cwd), root.parentRunId, dep.id); await runtime.afterMutation?.(ctx, cwd, root); const after = tasks.listTasks(root.rootSessionId); const readyAfterReopen = deriveTaskState(task, after) === "ready" ? [{ tool: "subagent_start", args: { taskId: task.id, agent: "<agent>" } }] : []; return response(`Reopened ${task.id}`, { taskId: task.id, status: task.status, affectedDependents: affected.map((dep) => ({ taskId: dep.id, title: dep.title, status: dep.status, owner: dep.owner ? { runId: dep.owner.runId, displayName: dep.owner.displayName, agent: dep.owner.agent } : undefined })), next: [...readyAfterReopen, ...(beforeTask?.status === "running" && beforeTask.owner ? [{ tool: "subagent_interrupt", args: { runId: beforeTask.owner.runId, action: "cancel", reason: `Task ${task.id} reopened: ${String(params.reason)}` } }] : []), ...affected.flatMap((dep) => dep.owner ? [{ tool: "subagent_interrupt", args: { runId: dep.owner.runId, action: "cancel", reason: `Task ${dep.id} invalidated by reopen of ${task.id}` } }] : [])] }); } catch (error) { return response(error instanceof Error ? error.message : String(error), { code: (error as any).code ?? "TASK_REOPEN_FAILED", next: [{ tool: "task_get", args: { taskId: params.taskId, view: "full" } }] }, true); } },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "task_reopen"), renderResult: renderSubagentToolResultComponent, renderShell: "self",
     },
     {
@@ -1020,7 +1043,13 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         };
         const summary = summarizeRunResult(result, runId);
         let content = resultBodyContent(summary, result, body);
-        if (taskReceipt) content += `\n\nTask receipt (${taskReceipt.taskId}):\n${JSON.stringify(taskReceipt.result, null, 2)}`;
+        if (taskReceipt) {
+          if (taskReceipt.result) content += `\n\nTask receipt (${taskReceipt.taskId}):\n${JSON.stringify(taskReceipt.result, null, 2)}`;
+          else if (taskReceipt.receiptDiagnostic && typeof taskReceipt.receiptDiagnostic === "object") {
+            const diagnostic = taskReceipt.receiptDiagnostic as { state?: string; message?: string };
+            content += `\n\nTask receipt (${taskReceipt.taskId}):\nReceipt diagnostic: ${diagnostic.state ?? "missing"} - ${diagnostic.message ?? "task has no submitted result receipt"}`;
+          }
+        }
         await runtime.afterMutation?.(ctx, cwd, root);
         return response(summary, details as Record<string, unknown>, false, content);
       },

@@ -58,6 +58,19 @@ test("TaskStore claim, submit, and accept enforce token ownership", () => {
   assert.equal(accepted.result?.state, "accepted");
 });
 
+test("TaskStore rejects summary-only task results", () => {
+  const s = store();
+  const [task] = s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Map", description: "Map it" }] }).tasks;
+  const token = newTaskToken();
+  s.tasks.claimTask(s.rootSessionId, task.id, { runId: "run_summary_only", agent: "scout", displayName: "Scout", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
+  assert.throws(() => s.tasks.submitResult(s.rootSessionId, task.id, { runId: "run_summary_only", taskToken: token, summary: "mapped the thing" }), /TASK_RESULT_RECEIPT_REQUIRED|substantive payload/i);
+  assert.throws(() => s.tasks.submitResult(s.rootSessionId, task.id, { runId: "run_summary_only", taskToken: token, summary: "empty object", receipt: {} }), /TASK_RESULT_RECEIPT_REQUIRED|substantive payload/i);
+  assert.throws(() => s.tasks.submitResult(s.rootSessionId, task.id, { runId: "run_summary_only", taskToken: token, summary: "null receipt", receipt: null as unknown as Record<string, unknown> }), /TASK_RESULT_RECEIPT_REQUIRED|substantive payload/i);
+  assert.throws(() => s.tasks.submitResult(s.rootSessionId, task.id, { runId: "run_summary_only", taskToken: token, summary: "blank artifact", artifactPaths: [""] }), /TASK_RESULT_RECEIPT_REQUIRED|nonblank/i);
+  assert.throws(() => s.tasks.submitResult(s.rootSessionId, task.id, { runId: "run_summary_only", taskToken: token, summary: "blank arrays", evidence: ["  "], commandsRun: ["\t"], notes: "" }), /TASK_RESULT_RECEIPT_REQUIRED|substantive payload/i);
+  assert.equal(s.tasks.readTask(s.rootSessionId, task.id).status, "running");
+});
+
 test("TaskStore force reopen invalidates transitive completed dependents", () => {
   const s = store();
   const created = s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [
@@ -68,7 +81,7 @@ test("TaskStore force reopen invalidates transitive completed dependents", () =>
   for (const task of created) {
     const token = newTaskToken();
     s.tasks.claimTask(s.rootSessionId, task.id, { runId: `run_${task.id}`, agent: "worker", displayName: "Rex", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-    s.tasks.submitResult(s.rootSessionId, task.id, { runId: `run_${task.id}`, taskToken: token, summary: `done ${task.id}` });
+    s.tasks.submitResult(s.rootSessionId, task.id, { runId: `run_${task.id}`, taskToken: token, summary: `done ${task.id}`, receipt: { taskId: task.id } });
     s.tasks.acceptResult(s.rootSessionId, task.id, {});
   }
   s.tasks.reopenTask(s.rootSessionId, created[0].id, { reason: "bad premise", force: true });
@@ -83,7 +96,7 @@ test("TaskStore reopen re-emits a ready wakeup so the task can be restarted", ()
   const [task] = s.tasks.createTasks(s.rootSessionId, { parentRunId: s.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
   const token = newTaskToken();
   s.tasks.claimTask(s.rootSessionId, task.id, { runId: "run_1", agent: "worker", displayName: "Rex", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-  s.tasks.submitResult(s.rootSessionId, task.id, { runId: "run_1", taskToken: token, summary: "done" });
+  s.tasks.submitResult(s.rootSessionId, task.id, { runId: "run_1", taskToken: token, summary: "done", receipt: { ok: true } });
   s.tasks.acceptResult(s.rootSessionId, task.id, {});
   const readyBefore = s.tasks.readEvents(s.rootSessionId).filter((event) => event.type === "task.ready" && event.taskId === task.id && event.wake === true).length;
   s.tasks.reopenTask(s.rootSessionId, task.id, { reason: "redo it" });
@@ -201,7 +214,7 @@ test("TaskStore clearTasks cancels all non-completed tasks", () => {
   const allBefore = s.tasks.listTasks(s.rootSessionId);
   const token = newTaskToken();
   s.tasks.claimTask(s.rootSessionId, allBefore[0].id, { runId: "run_1", agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-  s.tasks.submitResult(s.rootSessionId, allBefore[0].id, { runId: "run_1", taskToken: token, summary: "done A" });
+  s.tasks.submitResult(s.rootSessionId, allBefore[0].id, { runId: "run_1", taskToken: token, summary: "done A", receipt: { ok: true } });
   s.tasks.acceptResult(s.rootSessionId, allBefore[0].id, {});
 
   // Leave the second task actively owned when clearing.

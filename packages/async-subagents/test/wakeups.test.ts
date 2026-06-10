@@ -185,7 +185,7 @@ test("pollWakeups coalesces task-owned terminal results into a task result wakeu
   const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
   const token = newTaskToken();
   taskStore.claimTask(parentRunId, task.id, { runId, agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-  taskStore.submitResult(parentRunId, task.id, { runId, taskToken: token, summary: "task done" });
+  taskStore.submitResult(parentRunId, task.id, { runId, taskToken: token, summary: "task done", receipt: { ok: true } });
   store.writeStatus({ ...createInitialStatus({
     runId,
     parentRunId,
@@ -222,7 +222,7 @@ test("pollWakeups task cursor catch-up does not full-read unchanged task events"
   const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
   const token = newTaskToken();
   taskStore.claimTask(parentRunId, task.id, { runId: "task_run_1", agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-  taskStore.submitResult(parentRunId, task.id, { runId: "task_run_1", taskToken: token, summary: "task done" });
+  taskStore.submitResult(parentRunId, task.id, { runId: "task_run_1", taskToken: token, summary: "task done", receipt: { ok: true } });
   acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
 
   const first = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
@@ -333,7 +333,7 @@ test("pollWakeups skips stale pre-reopen ready and result events after reopen", 
   assert.ok(initialReady);
   const token = newTaskToken();
   taskStore.claimTask(parentRunId, task.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-  taskStore.submitResult(parentRunId, task.id, { runId: "task_run_1", taskToken: token, summary: "done" });
+  taskStore.submitResult(parentRunId, task.id, { runId: "task_run_1", taskToken: token, summary: "done", receipt: { ok: true } });
   taskStore.reopenTask(parentRunId, task.id, { reason: "redo" });
   const currentReady = taskStore.readEvents(parentRunId).filter((event) => event.type === "task.ready" && event.taskId === task.id).at(-1);
   assert.ok(currentReady);
@@ -353,7 +353,7 @@ test("pollWakeups skips stale result_submitted after reopen then claim", () => {
   const [task] = taskStore.createTasks(parentRunId, { parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
   const token1 = newTaskToken();
   taskStore.claimTask(parentRunId, task.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token1) });
-  taskStore.submitResult(parentRunId, task.id, { runId: "task_run_1", taskToken: token1, summary: "done" });
+  taskStore.submitResult(parentRunId, task.id, { runId: "task_run_1", taskToken: token1, summary: "done", receipt: { ok: true } });
   taskStore.reopenTask(parentRunId, task.id, { reason: "redo" });
   const token2 = newTaskToken();
   taskStore.claimTask(parentRunId, task.id, { runId: "task_run_2", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token2) });
@@ -394,7 +394,7 @@ test("accepting a task wakes the parent to start a newly-ready dependent", () =>
   const [impl, review] = created;
   const token = newTaskToken();
   taskStore.claimTask(parentRunId, impl.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-  taskStore.submitResult(parentRunId, impl.id, { runId: "task_run_1", taskToken: token, summary: "impl done" });
+  taskStore.submitResult(parentRunId, impl.id, { runId: "task_run_1", taskToken: token, summary: "impl done", receipt: { ok: true } });
   acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: 10_000 });
 
   // Drain the result-ready wakeup; the dependent is still blocked at this point.
@@ -421,7 +421,7 @@ test("pollWakeups skips a ready wakeup when a dependency regressed before delive
   const [impl, review] = created;
   const token = newTaskToken();
   taskStore.claimTask(parentRunId, impl.id, { runId: "task_run_1", agent: "agent", displayName: "agent", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-  taskStore.submitResult(parentRunId, impl.id, { runId: "task_run_1", taskToken: token, summary: "impl done" });
+  taskStore.submitResult(parentRunId, impl.id, { runId: "task_run_1", taskToken: token, summary: "impl done", receipt: { ok: true } });
   taskStore.acceptResult(parentRunId, impl.id, {}); // review becomes ready -> task.ready(review) emitted
   // Reopen impl before the review ready wakeup is delivered; review is now blocked again.
   taskStore.reopenTask(parentRunId, impl.id, { reason: "redo" });

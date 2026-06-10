@@ -57,7 +57,7 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
     ? `\n\n# Explicit Includes\n\n${includeFragments.map((fragment) => `## ${fragment.name}\n\n${fragment.body}`).join("\n\n")}`
     : "";
   const taskOwnedContract = input.taskAssignment
-    ? `\n\n# Task-Owned Result Contract\n\nYou are assigned to task ${input.taskAssignment.task.id}. Your durable handoff is the task result receipt, not a large final answer.\n\nWhen done:\n1. Call task_submit_result with a concise summary and receipt/artifact pointers.\n2. Keep your final answer brief: \"Submitted result for ${input.taskAssignment.task.id}.\"\n3. Do not duplicate the full receipt or artifact content in your final answer.\n\nUse task_update_progress for non-terminal progress and task_report_blocked if you need parent input.`
+    ? `\n\n# Task-Owned Result Contract\n\nYou are assigned to task ${input.taskAssignment.task.id}. Your durable handoff is the task result receipt, not a large final answer.\n\nWhen done:\n1. Call task_submit_result with a concise summary plus a substantive receipt payload: receipt, artifactPaths, evidence, commandsRun, or notes. Summary-only submissions are invalid.\n2. Keep your final answer brief: \"Submitted result for ${input.taskAssignment.task.id}.\"\n3. Do not duplicate the full receipt or artifact content in your final answer.\n\nUse task_update_progress for non-terminal progress and task_report_blocked if you need parent input.`
     : "";
   writeFileSync(systemPath, `${input.definition.body.trim()}${includeText}\n\n# Runtime Contract\n\n${runtimeContract}${taskOwnedContract}\n`, "utf8");
   const forkPreamble =
@@ -65,7 +65,7 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
       ? "You are running in a branched child Pi session. The inherited conversation is reference context only. Do not continue the parent thread or answer old user turns. Execute only the delegated task below and report the requested result.\n\n"
       : "";
   const assignment = input.taskAssignment
-    ? `## Assigned Durable Task\n\nTask ID: ${input.taskAssignment.task.id}\nTitle: ${input.taskAssignment.task.title}\nAllowed task mutation: submit result/progress only for ${input.taskAssignment.task.id}.\nResult contract: attach a concise receipt/artifacts; do not mark parent acceptance.\nDependencies accepted:\n${(input.taskAssignment.dependencies ?? []).map((dep) => `- ${dep.id}: ${dep.title}`).join("\n") || "- (none)"}\n\n`
+    ? `## Assigned Durable Task\n\nTask ID: ${input.taskAssignment.task.id}\nTitle: ${input.taskAssignment.task.title}\nAllowed task mutation: submit result/progress only for ${input.taskAssignment.task.id}.\nResult contract: attach a concise receipt/artifacts/evidence/notes payload; summary-only submissions are invalid; do not mark parent acceptance.\nDependencies accepted:\n${(input.taskAssignment.dependencies ?? []).map((dep) => `- ${dep.id}: ${dep.title}`).join("\n") || "- (none)"}\n\n`
     : "";
   writeFileSync(
     taskPath,
