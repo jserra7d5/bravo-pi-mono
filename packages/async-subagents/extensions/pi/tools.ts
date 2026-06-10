@@ -10,6 +10,7 @@ import { readSubagentResult } from "../../src/result.js";
 import { createRootSession, readRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import { TaskStore, hashTaskToken, newTaskToken } from "../../src/taskStore.js";
+import { readTaskRuntimeState } from "../../src/taskRuntime.js";
 import { deriveTaskState, unresolvedDependencies } from "../../src/taskState.js";
 import { isTerminalRunState, isThinkingLevel } from "../../src/schemas.js";
 import { startSubagent, type StartSubagentInput } from "../../src/start.js";
@@ -47,8 +48,13 @@ export interface ToolRuntime {
   getRootIdentity?: (cwd: string, piSessionId?: string) => RootSessionIdentity | undefined;
   setRootIdentity?: (identity: RootSessionIdentity) => void;
   startSubagent?: (input: StartSubagentInput) => ReturnType<typeof startSubagent>;
+  isTaskRuntimeEnabled?: (cwd: string, rootSessionId: string) => boolean;
   afterMutation?: (ctx: unknown, cwd: string, identity: RootSessionIdentity) => void | Promise<void>;
 }
+
+export const TASK_TOOL_NAMES = ["task_create", "task_list", "task_get", "task_accept_result", "task_reopen", "task_cancel", "task_clear"] as const;
+export const DIRECT_SUBAGENT_TOOL_NAMES = ["subagent_start", "subagent_status", "subagent_message", "subagent_continue", "subagent_interrupt", "subagent_result", "subagent_name_pack"] as const;
+export const ASYNC_SUBAGENT_TOOL_NAMES = [...TASK_TOOL_NAMES, ...DIRECT_SUBAGENT_TOOL_NAMES] as const;
 
 interface ToolResponse {
   content: Array<{ type: "text"; text: string }>;
@@ -106,6 +112,18 @@ function parentOnly(): ToolResponse | undefined {
 
 function taskStoreFor(cwd: string): TaskStore {
   return new TaskStore(storeFor(cwd));
+}
+
+function isTaskRuntimeEnabled(runtime: ToolRuntime, cwd: string, rootSessionId: string): boolean {
+  return runtime.isTaskRuntimeEnabled?.(cwd, rootSessionId) ?? readTaskRuntimeState(storeFor(cwd).runRoot, rootSessionId).enabled;
+}
+
+function taskRuntimeDisabledResponse(): ToolResponse {
+  return response("Task runtime is disabled for this root session. Use /tasks on to re-enable task orchestration, or use direct subagent_start without taskId.", { code: "TASK_RUNTIME_DISABLED" }, true);
+}
+
+function requireTaskRuntime(runtime: ToolRuntime, cwd: string, root: RootSessionIdentity): ToolResponse | undefined {
+  return isTaskRuntimeEnabled(runtime, cwd, root.rootSessionId) ? undefined : taskRuntimeDisabledResponse();
 }
 
 function compactTaskRows(tasks: ReturnType<TaskStore["listTasks"]>) {
@@ -692,7 +710,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       parameters: taskCreateSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const denied = parentOnly(); if (denied) return denied;
-        const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const store = taskStoreFor(cwd);
+        const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const disabled = requireTaskRuntime(runtime, cwd, root); if (disabled) return disabled; const store = taskStoreFor(cwd);
         try {
           const result = store.createTasks(root.rootSessionId, { parentRunId: root.parentRunId, tasks: (params.tasks as any[]) ?? [] });
           await runtime.afterMutation?.(ctx, cwd, root);
@@ -717,7 +735,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       description: "List the active task queue with derived readiness (ready / blocked / running / result_ready). Use to see what is startable now or what is blocking progress; completed and cancelled history are hidden unless includeCompleted is set. This is a read — to make progress, start ready tasks with subagent_start({ taskId }) and accept result_ready tasks with task_accept_result.",
       parameters: taskListSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
-        const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const store = taskStoreFor(cwd); const all = store.listTasks(root.rootSessionId);
+        const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const disabled = requireTaskRuntime(runtime, cwd, root); if (disabled) return disabled; const store = taskStoreFor(cwd); const all = store.listTasks(root.rootSessionId);
         const states = Array.isArray(params.states) ? new Set(params.states.filter((s): s is string => typeof s === "string")) : undefined;
         const includeCompleted = params.includeCompleted === true; const limit = typeof params.limit === "number" ? params.limit : 50;
         const rows = compactTaskRows(all).filter((row) => (includeCompleted || (row.status !== "completed" && row.status !== "cancelled")) && (!states || states.has(row.status) || states.has(String(row.state)))).slice(0, limit);
@@ -734,7 +752,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       description: "Read one task in detail with progressive disclosure: default view is smart and includes the submitted result receipt/diagnostic when a task is result_ready/completed; explicit view=status returns compact status and pointers only; view=receipt adds the submitted result receipt; view=full adds description, attempts, and recent events. Use after a task wakeup when the wakeup summary is not enough to decide whether to accept, reopen, or unblock.",
       parameters: taskGetSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
-        const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const taskId = String(params.taskId); const store = taskStoreFor(cwd); const runStore = storeFor(cwd); const all = store.listTasks(root.rootSessionId); const task = store.readTask(root.rootSessionId, taskId); const deps = unresolvedDependencies(task, all);
+        const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const disabled = requireTaskRuntime(runtime, cwd, root); if (disabled) return disabled; const taskId = String(params.taskId); const store = taskStoreFor(cwd); const runStore = storeFor(cwd); const all = store.listTasks(root.rootSessionId); const task = store.readTask(root.rootSessionId, taskId); const deps = unresolvedDependencies(task, all);
         const explicitView = typeof params.view === "string";
         const view = params.view === "receipt" || params.view === "full" ? params.view : "status";
         markTaskWakeupHandled(runStore, root.parentRunId, task.id);
@@ -756,17 +774,17 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
       label: "Task Accept Result",
       description: "Parent-only: accept a child-submitted result, moving the task to completed and unblocking its dependents (newly-ready dependents then wake you to start them). Use when a result_ready task's result is sufficient. If the result is inadequate, use task_reopen instead. A result_ready task that is never accepted permanently blocks the rest of the plan.",
       parameters: taskAcceptResultSchema,
-      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) { const denied = parentOnly(); if (denied) return denied; const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); try { const task = taskStoreFor(cwd).acceptResult(root.rootSessionId, String(params.taskId), { actor: root.parentRunId, summary: typeof params.summary === "string" ? params.summary : undefined }); markTaskWakeupHandled(storeFor(cwd), root.parentRunId, task.id); await runtime.afterMutation?.(ctx, cwd, root); return response(`Accepted ${task.id}`, { taskId: task.id, status: task.status, result: task.result, next: [{ tool: "task_list", args: {} }] }); } catch (error) { return response(error instanceof Error ? error.message : String(error), { code: (error as any).code ?? "TASK_ACCEPT_FAILED" }, true); } },
+      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) { const denied = parentOnly(); if (denied) return denied; const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const disabled = requireTaskRuntime(runtime, cwd, root); if (disabled) return disabled; try { const task = taskStoreFor(cwd).acceptResult(root.rootSessionId, String(params.taskId), { actor: root.parentRunId, summary: typeof params.summary === "string" ? params.summary : undefined }); markTaskWakeupHandled(storeFor(cwd), root.parentRunId, task.id); await runtime.afterMutation?.(ctx, cwd, root); return response(`Accepted ${task.id}`, { taskId: task.id, status: task.status, result: task.result, next: [{ tool: "task_list", args: {} }] }); } catch (error) { return response(error instanceof Error ? error.message : String(error), { code: (error as any).code ?? "TASK_ACCEPT_FAILED" }, true); } },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "task_accept_result"), renderResult: renderSubagentToolResultComponent, renderShell: "self",
     },
     {
       name: "task_reopen", label: "Task Reopen", description: "Parent-only: reject a submitted result or reopen a work item back to pending for another attempt. Use when a result is insufficient or a premise changed. Pass force to also reset dependents built on the now-invalid result; the returned next hints interrupt their owner runs.", parameters: taskReopenSchema,
-      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) { const denied = parentOnly(); if (denied) return denied; const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); try { const tasks = taskStoreFor(cwd); const before = tasks.listTasks(root.rootSessionId); const taskId = String(params.taskId); const affectedIds = new Set<string>(); const queue = [taskId]; while (queue.length) { const current = queue.shift()!; for (const candidate of before) { if (!candidate.dependsOn.includes(current) || affectedIds.has(candidate.id)) continue; affectedIds.add(candidate.id); queue.push(candidate.id); } } const affected = before.filter((candidate) => affectedIds.has(candidate.id) && ["running", "result_ready", "completed"].includes(candidate.status)); const beforeTask = before.find((candidate) => candidate.id === taskId); const task = tasks.reopenTask(root.rootSessionId, taskId, { actor: root.parentRunId, reason: String(params.reason), activeForm: typeof params.activeForm === "string" ? params.activeForm : undefined, force: params.force === true }); markTaskWakeupHandled(storeFor(cwd), root.parentRunId, task.id); for (const dep of affected) markTaskWakeupHandled(storeFor(cwd), root.parentRunId, dep.id); await runtime.afterMutation?.(ctx, cwd, root); const after = tasks.listTasks(root.rootSessionId); const readyAfterReopen = deriveTaskState(task, after) === "ready" ? [{ tool: "subagent_start", args: { taskId: task.id, agent: "<agent>" } }] : []; return response(`Reopened ${task.id}`, { taskId: task.id, status: task.status, affectedDependents: affected.map((dep) => ({ taskId: dep.id, title: dep.title, status: dep.status, owner: dep.owner ? { runId: dep.owner.runId, displayName: dep.owner.displayName, agent: dep.owner.agent } : undefined })), next: [...readyAfterReopen, ...(beforeTask?.status === "running" && beforeTask.owner ? [{ tool: "subagent_interrupt", args: { runId: beforeTask.owner.runId, action: "cancel", reason: `Task ${task.id} reopened: ${String(params.reason)}` } }] : []), ...affected.flatMap((dep) => dep.owner ? [{ tool: "subagent_interrupt", args: { runId: dep.owner.runId, action: "cancel", reason: `Task ${dep.id} invalidated by reopen of ${task.id}` } }] : [])] }); } catch (error) { return response(error instanceof Error ? error.message : String(error), { code: (error as any).code ?? "TASK_REOPEN_FAILED", next: [{ tool: "task_get", args: { taskId: params.taskId, view: "full" } }] }, true); } },
+      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) { const denied = parentOnly(); if (denied) return denied; const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const disabled = requireTaskRuntime(runtime, cwd, root); if (disabled) return disabled; try { const tasks = taskStoreFor(cwd); const before = tasks.listTasks(root.rootSessionId); const taskId = String(params.taskId); const affectedIds = new Set<string>(); const queue = [taskId]; while (queue.length) { const current = queue.shift()!; for (const candidate of before) { if (!candidate.dependsOn.includes(current) || affectedIds.has(candidate.id)) continue; affectedIds.add(candidate.id); queue.push(candidate.id); } } const affected = before.filter((candidate) => affectedIds.has(candidate.id) && ["running", "result_ready", "completed"].includes(candidate.status)); const beforeTask = before.find((candidate) => candidate.id === taskId); const task = tasks.reopenTask(root.rootSessionId, taskId, { actor: root.parentRunId, reason: String(params.reason), activeForm: typeof params.activeForm === "string" ? params.activeForm : undefined, force: params.force === true }); markTaskWakeupHandled(storeFor(cwd), root.parentRunId, task.id); for (const dep of affected) markTaskWakeupHandled(storeFor(cwd), root.parentRunId, dep.id); await runtime.afterMutation?.(ctx, cwd, root); const after = tasks.listTasks(root.rootSessionId); const readyAfterReopen = deriveTaskState(task, after) === "ready" ? [{ tool: "subagent_start", args: { taskId: task.id, agent: "<agent>" } }] : []; return response(`Reopened ${task.id}`, { taskId: task.id, status: task.status, affectedDependents: affected.map((dep) => ({ taskId: dep.id, title: dep.title, status: dep.status, owner: dep.owner ? { runId: dep.owner.runId, displayName: dep.owner.displayName, agent: dep.owner.agent } : undefined })), next: [...readyAfterReopen, ...(beforeTask?.status === "running" && beforeTask.owner ? [{ tool: "subagent_interrupt", args: { runId: beforeTask.owner.runId, action: "cancel", reason: `Task ${task.id} reopened: ${String(params.reason)}` } }] : []), ...affected.flatMap((dep) => dep.owner ? [{ tool: "subagent_interrupt", args: { runId: dep.owner.runId, action: "cancel", reason: `Task ${dep.id} invalidated by reopen of ${task.id}` } }] : [])] }); } catch (error) { return response(error instanceof Error ? error.message : String(error), { code: (error as any).code ?? "TASK_REOPEN_FAILED", next: [{ tool: "task_get", args: { taskId: params.taskId, view: "full" } }] }, true); } },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "task_reopen"), renderResult: renderSubagentToolResultComponent, renderShell: "self",
     },
     {
       name: "task_cancel", label: "Task Cancel", description: "Parent-only: cancel a single task you no longer need. Use for one task; to abandon the whole plan use task_clear. If the task is running, the returned next hint interrupts its owner run.", parameters: taskCancelSchema,
-      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) { const denied = parentOnly(); if (denied) return denied; const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); try { const task = taskStoreFor(cwd).cancelTask(root.rootSessionId, String(params.taskId), { actor: root.parentRunId, reason: String(params.reason) }); markTaskWakeupHandled(storeFor(cwd), root.parentRunId, task.id); await runtime.afterMutation?.(ctx, cwd, root); return response(`Cancelled ${task.id}`, { taskId: task.id, status: task.status, next: task.owner ? [{ tool: "subagent_interrupt", args: { runId: task.owner.runId, action: "cancel", reason: params.reason } }] : [] }); } catch (error) { return response(error instanceof Error ? error.message : String(error), { code: (error as any).code ?? "TASK_CANCEL_FAILED" }, true); } },
+      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) { const denied = parentOnly(); if (denied) return denied; const cwd = ctxCwd(ctx); const root = rootFor(runtime, cwd, ctx); const disabled = requireTaskRuntime(runtime, cwd, root); if (disabled) return disabled; try { const task = taskStoreFor(cwd).cancelTask(root.rootSessionId, String(params.taskId), { actor: root.parentRunId, reason: String(params.reason) }); markTaskWakeupHandled(storeFor(cwd), root.parentRunId, task.id); await runtime.afterMutation?.(ctx, cwd, root); return response(`Cancelled ${task.id}`, { taskId: task.id, status: task.status, next: task.owner ? [{ tool: "subagent_interrupt", args: { runId: task.owner.runId, action: "cancel", reason: params.reason } }] : [] }); } catch (error) { return response(error instanceof Error ? error.message : String(error), { code: (error as any).code ?? "TASK_CANCEL_FAILED" }, true); } },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "task_cancel"), renderResult: renderSubagentToolResultComponent, renderShell: "self",
     },
     {
@@ -778,6 +796,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const denied = parentOnly(); if (denied) return denied;
         const cwd = ctxCwd(ctx);
         const root = rootFor(runtime, cwd, ctx);
+        const disabled = requireTaskRuntime(runtime, cwd, root); if (disabled) return disabled;
         try {
           const store = taskStoreFor(cwd);
           const runStore = storeFor(cwd);
@@ -833,6 +852,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         let taskRunId: string | undefined;
         if (taskId) {
           const denied = parentOnly(); if (denied) return denied;
+          const disabled = requireTaskRuntime(runtime, sessionCwd, root); if (disabled) return disabled;
           const tasks = taskStoreFor(sessionCwd);
           const all = tasks.listTasks(root.rootSessionId);
           const task = tasks.readTask(root.rootSessionId, taskId);

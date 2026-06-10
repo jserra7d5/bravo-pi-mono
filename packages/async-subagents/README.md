@@ -170,6 +170,19 @@ Model-facing wakeups are runtime envelopes marked `NOT USER INPUT`. Terminal res
 
 ## Task orchestration
 
+Task orchestration is enabled by default per root session. The Pi footer/status area shows a minimal `tasks:on` or `tasks:off` badge.
+
+Commands:
+
+```text
+/tasks            # status
+/tasks status     # status
+/tasks on         # enable task orchestration for this async root session
+/tasks off        # disable task orchestration for this async root session
+```
+
+Turning tasks off hides/disables `task_*` tools, task-owned `subagent_start({ taskId })`, task wakeups, and task rows in the live widget while preserving direct `subagent_start` handoff. `/tasks off` is rejected while active tasks or task-owned runs remain, so task-owned children cannot be stranded behind a hidden receipt/acceptance path.
+
 Async subagents also provide a lightweight durable task layer scoped by root session. Use tasks for multi-step, dependency-ordered work over time; for simple independent parallel fanout, call direct `subagent_start` for each child instead of creating a task plan. Parent tools create/query/accept task state (`task_create`, `task_list`, `task_get`, `task_accept_result`, `task_reopen`, `task_cancel`, `task_clear`). `subagent_start({ taskId })` is the only spawn path for task-owned child runs; it validates readiness, claims the task, injects task identity/token env, and adds a task-owned result contract to the child prompt. Duplicate starts for already owned/running/result-ready tasks are idempotent and return the existing task/run state without launching another child. Children submit durable receipts with `task_submit_result` and may use `task_update_progress` or `task_report_blocked`; parent acceptance is still required before dependencies are satisfied.
 
 The parent session owns scheduling, and the runtime keeps the loop moving with forward-progress wakeups rather than auto-spawning children (which agent runs a task is a parent decision). A task with no unresolved dependencies emits a `task.ready` wakeup — at creation for immediately-ready tasks, at acceptance for dependents that just unblocked, and after a reopen when the task is immediately ready again — so a created-then-idle session does not leave ready tasks sitting at `ready` forever. Ready wakeups are briefly debounced and re-checked at delivery: if the parent already claimed the task (the normal in-turn path) the nudge is skipped without advancing past a too-young event, so no stale spam. The suggested next action is the concrete one for each event — `subagent_start({ taskId })` for a ready task, `task_get({ taskId, view: "receipt" })` for a submitted result before accept/reopen, and `task_get` for failures or blockers — instead of always pointing back at a passive read.

@@ -51,6 +51,57 @@ function continuationLockPath(store: RunStore, rootRunId: string, piSessionPath:
   return join(resolve(store.runRoot, ".."), "continuation-locks", `${key}.json`);
 }
 
+test("task tools fail closed when task runtime is disabled", async () => {
+  const w = workspace();
+  const built = buildSubagentTools({
+    getRootIdentity() { return w.identity; },
+    isTaskRuntimeEnabled() { return false; },
+  });
+  const toolsByName = Object.fromEntries(built.map((tool) => [tool.name, tool]));
+
+  const result = await toolsByName.task_list.execute("list", {}, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "TASK_RUNTIME_DISABLED");
+});
+
+test("taskless direct subagent_start remains available while taskId is rejected before launch", async () => {
+  const previousRunId = process.env.ASYNC_SUBAGENTS_RUN_ID;
+  const previousSingularRunId = process.env.ASYNC_SUBAGENT_RUN_ID;
+  delete process.env.ASYNC_SUBAGENTS_RUN_ID;
+  delete process.env.ASYNC_SUBAGENT_RUN_ID;
+  try {
+    const w = workspace();
+    let launches = 0;
+    const built = buildSubagentTools({
+      getRootIdentity() { return w.identity; },
+      isTaskRuntimeEnabled() { return false; },
+      async startSubagent(input) {
+        launches += 1;
+        return { runId: input.runId ?? "run_direct", started: true, state: "running", displayName: "Direct" } as never;
+      },
+    });
+    const toolsByName = Object.fromEntries(built.map((tool) => [tool.name, tool]));
+    const taskStore = new TaskStore(new RunStore({ cwd: w.root }));
+    const [task] = taskStore.createTasks(w.identity.rootSessionId, { parentRunId: w.identity.parentRunId, tasks: [{ title: "A", description: "A" }] }).tasks;
+
+    const direct = await toolsByName.subagent_start.execute("direct", { agent: "scout", task: "Look" }, undefined, undefined, { cwd: w.root });
+    const rejected = await toolsByName.subagent_start.execute("task", { taskId: task.id, agent: "scout", task: "Look" }, undefined, undefined, { cwd: w.root });
+
+    assert.equal(direct.isError, undefined);
+    assert.equal(launches, 1);
+    assert.equal(rejected.isError, true);
+    assert.equal(rejected.details.code, "TASK_RUNTIME_DISABLED");
+    assert.equal(taskStore.readTask(w.identity.rootSessionId, task.id).owner, undefined);
+    assert.equal(launches, 1);
+  } finally {
+    if (previousRunId === undefined) delete process.env.ASYNC_SUBAGENTS_RUN_ID;
+    else process.env.ASYNC_SUBAGENTS_RUN_ID = previousRunId;
+    if (previousSingularRunId === undefined) delete process.env.ASYNC_SUBAGENT_RUN_ID;
+    else process.env.ASYNC_SUBAGENT_RUN_ID = previousSingularRunId;
+  }
+});
+
 test("subagent_status tool defaults to root session direct children", async () => {
   const w = workspace();
   const built = tools(w.identity);

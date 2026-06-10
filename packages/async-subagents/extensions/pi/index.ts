@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type Component } from "@earendil-works/pi-tui";
 import { readFastTrackState, writeFastTrackState } from "../../src/fastTrack.js";
+import { findActiveTaskRuntimeBlockers, readTaskRuntimeState, writeTaskRuntimeState } from "../../src/taskRuntime.js";
 import { acquireRootSessionLease } from "../../src/leases.js";
 import { NAME_PACKS, readNamePackSelection, writeNamePackSelection, type NamePackId } from "../../src/namePacks.js";
 import { createRootSession, readRootSession } from "../../src/rootSession.js";
@@ -12,7 +13,7 @@ import { clearLiveWidget, updateLiveWidget } from "./liveWidget.js";
 import { renderDiscoveredAgentCatalog } from "./agentCatalog.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
-import { registerSubagentTools, type ToolRuntime } from "./tools.js";
+import { ASYNC_SUBAGENT_TOOL_NAMES, TASK_TOOL_NAMES, registerSubagentTools, type ToolRuntime } from "./tools.js";
 import { isWakeupKeyHandled, markDeliveredWakeupHandled, pollWakeups } from "./wakeups.js";
 import { TaskStore } from "../../src/taskStore.js";
 
@@ -78,9 +79,9 @@ function refreshUi(ctx: ExtensionContext): void {
   const cwd = cwdOf(ctx);
   const identity = ensureRoot(cwd, piSessionIdOf(ctx));
   const store = new RunStore({ cwd });
-  // The widget is the canonical async-subagents surface; the old setStatus
-  // segment was redundant alongside the codex footer and has been removed.
-  if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
+  const enabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
+  setTasksStatusBadge(ctx, enabled);
+  if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, tasksEnabled: enabled });
 }
 
 function wakeupEnvelope(wakeup: WakeupMessage): string {
@@ -157,9 +158,10 @@ function sendWakeup(pi: ExtensionAPI, wakeup: WakeupMessage, options: { triggerT
   pi.sendMessage(message, { triggerTurn: options.triggerTurn ?? true, deliverAs: "steer" });
 }
 
-function pollAndSendWakeups(pi: ExtensionAPI, store: RunStore, identity: RootSessionIdentity, records?: RunIndexRecord[], options: { triggerTurn?: boolean } = {}): void {
+function pollAndSendWakeups(pi: ExtensionAPI, store: RunStore, identity: RootSessionIdentity, records?: RunIndexRecord[], options: { triggerTurn?: boolean; tasksEnabled?: boolean } = {}): void {
   if (compactionInProgress) return;
   for (const delivery of pollWakeups({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, ownerId: OWNER_ID, modelFollowUpOnly: true, records })) {
+    if (options.tasksEnabled === false && delivery.message.kind === "task_wakeup") continue;
     if (isWakeupKeyHandled(store, identity.parentRunId, delivery.deliveryKey)) continue;
     sendWakeup(pi, delivery.message, { triggerTurn: options.triggerTurn });
     markDeliveredWakeupHandled(store, identity.parentRunId, delivery);
@@ -182,11 +184,13 @@ function tickPi(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const identity = ensureRoot(cwd, piSessionIdOf(ctx));
   const store = new RunStore({ cwd });
   const records = store.listRecentRuns({ parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
-  reconcileTaskOwnedRuns(store, identity.rootSessionId);
+  const enabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
+  setTasksStatusBadge(ctx, enabled);
+  if (enabled) reconcileTaskOwnedRuns(store, identity.rootSessionId);
   if (Date.now() >= manualCompactionWakeupCooldownUntil) {
-    pollAndSendWakeups(pi, store, identity, records, { triggerTurn: true });
+    pollAndSendWakeups(pi, store, identity, records, { triggerTurn: true, tasksEnabled: enabled });
   }
-  if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, records });
+  if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, records, tasksEnabled: enabled });
 }
 
 function isNamePackId(value: string): value is NamePackId {
@@ -203,6 +207,39 @@ function namePackSummary(cwd: string): string {
 function fastTrackSummary(cwd: string, rootSessionId: string): string {
   const state = readFastTrackState(new RunStore({ cwd }).runRoot, rootSessionId);
   return `async-subagents fast-track is ${state.enabled ? "on" : "off"}`;
+}
+
+function tasksEnabled(cwd: string, rootSessionId: string): boolean {
+  return readTaskRuntimeState(new RunStore({ cwd }).runRoot, rootSessionId).enabled;
+}
+
+function setTasksStatusBadge(ctx: ExtensionContext | ExtensionCommandContext, enabled: boolean): void {
+  const ui = (ctx as { ui?: { setStatus?: (key: string, value: string | undefined) => void } }).ui;
+  ui?.setStatus?.("async-subagents-tasks", `tasks:${enabled ? "on" : "off"}`);
+}
+
+export async function applyActiveTaskTools(pi: ExtensionAPI, enabled: boolean): Promise<void> {
+  const api = pi as ExtensionAPI & { getActiveTools?: () => unknown | Promise<unknown>; setActiveTools?: (names: string[]) => unknown | Promise<unknown> };
+  if (typeof api.getActiveTools !== "function" || typeof api.setActiveTools !== "function") return;
+  const raw = await api.getActiveTools();
+  if (!Array.isArray(raw)) return;
+  const active = raw.filter((name): name is string => typeof name === "string");
+  const asyncSet = new Set<string>(ASYNC_SUBAGENT_TOOL_NAMES);
+  const hasAsyncTool = active.some((name) => asyncSet.has(name));
+  if (!hasAsyncTool) return;
+  const nonAsync = active.filter((name) => !asyncSet.has(name));
+  const taskSet = new Set<string>(TASK_TOOL_NAMES);
+  const directNames = ASYNC_SUBAGENT_TOOL_NAMES.filter((name) => !taskSet.has(name));
+  const next = [...nonAsync, ...directNames, ...(enabled ? TASK_TOOL_NAMES : [])];
+  await api.setActiveTools([...new Set(next)]);
+}
+
+function blockerSummary(blockers: ReturnType<typeof findActiveTaskRuntimeBlockers>): string {
+  const rows = blockers.slice(0, 5).map((blocker) => blocker.kind === "task"
+    ? `${blocker.taskId} status=${blocker.status}${blocker.runId ? ` run=${blocker.runId}` : ""}`
+    : `${blocker.taskId} run=${blocker.runId} state=${blocker.runState}`);
+  const suffix = blockers.length > rows.length ? `\n...and ${blockers.length - rows.length} more` : "";
+  return `Cannot turn tasks off while active task runtime state exists:\n${rows.map((row) => `- ${row}`).join("\n")}${suffix}\nAccept, cancel, clear, or wait for task-owned runs before retrying.`;
 }
 
 function registerFastTrackCommand(pi: ExtensionAPI): void {
@@ -222,6 +259,41 @@ function registerFastTrackCommand(pi: ExtensionAPI): void {
       }
       writeFastTrackState(new RunStore({ cwd }).runRoot, identity.rootSessionId, arg === "on");
       ctx.ui.notify(`async-subagents fast-track ${arg}`, "info");
+      if (currentCtx) refreshUi(currentCtx);
+    },
+  });
+}
+
+function registerTasksCommand(pi: ExtensionAPI): void {
+  pi.registerCommand("tasks", {
+    description: "Inspect or change async-subagents task orchestration for this root session.",
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const cwd = cwdOf(ctx);
+      const identity = ensureRoot(cwd, piSessionIdOf(ctx));
+      const store = new RunStore({ cwd });
+      const arg = args.trim();
+      if (!arg || arg === "status") {
+        const enabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
+        setTasksStatusBadge(ctx, enabled);
+        ctx.ui.notify(`async-subagents tasks: ${enabled ? "on" : "off"}`, "info");
+        return;
+      }
+      if (arg !== "on" && arg !== "off") {
+        ctx.ui.notify("Usage: /tasks [on|off|status]", "error");
+        return;
+      }
+      if (arg === "off") {
+        const blockers = findActiveTaskRuntimeBlockers(store, identity.rootSessionId);
+        if (blockers.length) {
+          ctx.ui.notify(blockerSummary(blockers), "error");
+          return;
+        }
+      }
+      const enabled = arg === "on";
+      writeTaskRuntimeState(store.runRoot, identity.rootSessionId, enabled);
+      await applyActiveTaskTools(pi, enabled);
+      setTasksStatusBadge(ctx, enabled);
+      ctx.ui.notify(`async-subagents tasks ${arg}`, "info");
       if (currentCtx) refreshUi(currentCtx);
     },
   });
@@ -298,6 +370,9 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
     setRootIdentity(identity) {
       roots.set(rootCacheKey(identity.cwd, identity.piSessionId), identity);
     },
+    isTaskRuntimeEnabled(cwd, rootSessionId) {
+      return tasksEnabled(cwd, rootSessionId);
+    },
     afterMutation(ctx) {
       if (ctx) refreshUi(ctx as ExtensionContext);
     },
@@ -316,7 +391,11 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     stopTimers();
-    ensureRoot(cwdOf(ctx), piSessionIdOf(ctx));
+    const cwd = cwdOf(ctx);
+    const identity = ensureRoot(cwd, piSessionIdOf(ctx));
+    const enabled = tasksEnabled(cwd, identity.rootSessionId);
+    await applyActiveTaskTools(pi, enabled);
+    setTasksStatusBadge(ctx, enabled);
     startTimers(pi, ctx);
   });
 
@@ -345,12 +424,15 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     const cwd = cwdOf(ctx);
     const identity = ensureRoot(cwd, piSessionIdOf(ctx));
-    const fastTrackArmed = readFastTrackState(new RunStore({ cwd }).runRoot, identity.rootSessionId).enabled;
+    const store = new RunStore({ cwd });
+    const fastTrackArmed = readFastTrackState(store.runRoot, identity.rootSessionId).enabled;
+    const enabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
     const catalog = renderDiscoveredAgentCatalog({ cwd, env: process.env });
-    return { systemPrompt: appendAsyncSubagentsPrompt(event.systemPrompt, catalog, { fastTrackArmed }) };
+    return { systemPrompt: appendAsyncSubagentsPrompt(event.systemPrompt, catalog, { fastTrackArmed, tasksEnabled: enabled }) };
   });
 
   registerSubagentTools(pi, runtime);
   registerFastTrackCommand(pi);
+  registerTasksCommand(pi);
   registerNamePackCommand(pi);
 }

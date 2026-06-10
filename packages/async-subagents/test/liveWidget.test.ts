@@ -625,6 +625,19 @@ test("live widget component render output stays stable across fake time without 
   assert.deepEqual(later, initial);
 });
 
+test("live widget hides task rows when task runtime is disabled", () => {
+  const w = workspace();
+  const taskStore = new TaskStore(w.store);
+  taskStore.createTasks(w.parentRunId, {
+    parentRunId: w.parentRunId,
+    tasks: [{ alias: "t1", title: "Task 1", description: "First" }]
+  });
+
+  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, tasksEnabled: false, width: 72 });
+
+  assert.equal(lines.map(stripAnsi).join("\n").includes("Task 1"), false);
+});
+
 test("live widget renders task summary and maps task to run rows", () => {
   const w = workspace();
   const taskStore = new TaskStore(w.store);

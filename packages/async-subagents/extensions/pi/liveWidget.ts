@@ -27,6 +27,7 @@ export interface LiveWidgetInput {
   records?: RunIndexRecord[];
   snapshot?: LiveWidgetSnapshot;
   fastTrackArmed?: boolean;
+  tasksEnabled?: boolean;
   // Optional explicit width — when omitted (the production path), pi tells the
   // widget its real container width via the Component.render(width) callback.
   // This is required: pi's widget container is narrower than the full terminal,
@@ -202,7 +203,7 @@ function runIdTaskMap(tasks: TaskRecord[]): Map<string, TaskRecord> {
 }
 
 function readTasksForSnapshot(input: LiveWidgetInput): TaskRecord[] {
-  if (!input.rootSessionId) return [];
+  if (input.tasksEnabled === false || !input.rootSessionId) return [];
   try {
     return new TaskStore(input.store).listTasks(input.rootSessionId, { reconcile: "nonblocking" });
   } catch {
@@ -233,7 +234,7 @@ function renderAt(input: LiveWidgetInput, width: number, now: number): string[] 
   const { rows, tasks, taskStates, taskUnresolvedDependencyIds, runIdToTask } = snapshot;
   const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
   const visibleRows = rows.filter((row) => visible(row, now, terminalCompletedVisibleMs));
-  const visibleTasks = visibleTasksFor(tasks, taskStates, now);
+  const visibleTasks = input.tasksEnabled === false ? [] : visibleTasksFor(tasks, taskStates, now);
   const fastTrackArmed = input.fastTrackArmed ?? false;
 
   if (!visibleRows.length && !visibleTasks.length && !fastTrackArmed) return [];
@@ -293,7 +294,7 @@ function liveWidgetRenderSignature(input: LiveWidgetInput, snapshot: LiveWidgetS
       } : undefined,
     };
   });
-  const tasks = snapshot.visibleTasks.map((task) => ({
+  const tasks = input.tasksEnabled === false ? [] : snapshot.visibleTasks.map((task) => ({
     id: task.id,
     title: task.title,
     status: snapshot.taskStates.get(task.id) ?? task.status,
@@ -303,7 +304,7 @@ function liveWidgetRenderSignature(input: LiveWidgetInput, snapshot: LiveWidgetS
     ownerAgent: task.owner?.agent,
     unresolvedDependencyIds: snapshot.taskUnresolvedDependencyIds.get(task.id) ?? [],
   }));
-  const taskCounts = snapshot.tasks.map((task) => [task.id, snapshot.taskStates.get(task.id) ?? task.status]);
+  const taskCounts = input.tasksEnabled === false ? [] : snapshot.tasks.map((task) => [task.id, snapshot.taskStates.get(task.id) ?? task.status]);
   return JSON.stringify({
     maxRows: input.maxRows ?? 5,
     terminalCompletedVisibleMs,
