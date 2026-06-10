@@ -9,10 +9,10 @@
 // /codex-accounts refresh explicitly refreshes the owned cache state.
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { getUsage, ingestDirectPiLiveUsage, refreshUsage, resolveStateRoot } from "../../packages/codex-auth-balancer/src/index.ts";
 import type { CodexUsage, CodexAccountSlot, CodexAccountStatus, UsageWindow } from "../../packages/codex-auth-balancer/src/index.ts";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -353,6 +353,7 @@ export interface FooterRenderState {
 	providerCount: number;
 	thinking: string | null;
 	fast: boolean;
+	tasksEnabled: boolean;
 	ctxPct: number;
 	ctxUsed: number;
 	ctxWindow: number;
@@ -389,8 +390,9 @@ export function renderTopLine(width: number, s: FooterRenderState): string {
 	if (s.model) {
 		let prov = s.providerCount > 1 && s.provider ? `${c.dim}${s.provider}${R}${c.dim} · ${R}` : "";
 		const thinkStr = s.thinking ? `${c.dim}  thinking ${R}${c.text}${s.thinking}${R}` : "";
+		const tasksStr = `${c.dim}  tasks:${R}${s.tasksEnabled ? c.ok : c.warn}${s.tasksEnabled ? "on" : "off"}${R}`;
 		const fastStr = s.fast ? `${c.dim}  speed ${R}${c.ok}fast${R}` : "";
-		const suffix = `${thinkStr}${fastStr}`;
+		const suffix = `${thinkStr}${fastStr}${tasksStr}`;
 		let modelMax = maxRight - visWidth(prov) - visWidth(suffix);
 		if (modelMax < 4 && prov) {
 			prov = "";
@@ -399,7 +401,8 @@ export function renderTopLine(width: number, s: FooterRenderState): string {
 		const modelText = modelMax > 0 ? truncEnd(s.model, modelMax) : "";
 		right = `${prov}${identityColor(s.model)}${modelText}${R}${suffix}`;
 	} else {
-		right = s.fast ? `${c.dim}no model  speed ${R}${c.ok}fast${R}` : `${c.dim}no model${R}`;
+		const tasksStr = `${c.dim}  tasks:${R}${s.tasksEnabled ? c.ok : c.warn}${s.tasksEnabled ? "on" : "off"}${R}`;
+		right = s.fast ? `${c.dim}no model  speed ${R}${c.ok}fast${R}${tasksStr}` : `${c.dim}no model${R}${tasksStr}`;
 	}
 	if (visWidth(right) > maxRight) right = `${c.dim}${truncEnd(stripAnsi(right), maxRight)}${R}`;
 
@@ -433,6 +436,10 @@ export function costSegment(cost: number | null, sub: boolean): string | null {
 	const formatted = cost < 1 ? cost.toFixed(3) : cost.toFixed(2);
 	const dollar = `${c.cost}$${formatted}${R}`;
 	return sub ? `${dollar} ${c.sub}sub${R}` : dollar;
+}
+
+export function tasksSegment(enabled: boolean): string {
+	return `${c.dim}tasks:${R}${enabled ? c.ok : c.warn}${enabled ? "on" : "off"}${R}`;
 }
 
 export function codexWindowSegment(
@@ -554,6 +561,49 @@ function readBalancedAffinitySlot(sessionId: string | undefined): string | undef
 	}
 }
 
+function findAsyncProjectRoot(cwd: string): string {
+	let current = resolve(cwd);
+	while (true) {
+		if (existsSync(join(current, ".git")) || existsSync(join(current, "package.json")) || existsSync(join(current, ".subagents"))) return current;
+		const parent = dirname(current);
+		if (parent === current) return resolve(cwd);
+		current = parent;
+	}
+}
+
+function asyncSubagentsHome(): string {
+	return process.env.ASYNC_SUBAGENTS_HOME ? resolve(process.env.ASYNC_SUBAGENTS_HOME) : join(process.env.HOME || process.env.USERPROFILE || ".", ".async-subagents");
+}
+
+function asyncSubagentsRunRoot(cwd: string): string {
+	const projectRoot = findAsyncProjectRoot(cwd);
+	const scope = createHash("sha256").update(projectRoot).digest("base64url").slice(0, 16);
+	return join(asyncSubagentsHome(), "projects", scope, "runs");
+}
+
+function readAsyncSubagentsTaskMode(ctx: ExtensionContext): boolean {
+	try {
+		const runRoot = asyncSubagentsRunRoot(ctx.cwd);
+		const sessionsDir = resolve(runRoot, "..", "sessions");
+		if (!existsSync(sessionsDir)) return true;
+		const piSessionId = ctx.sessionManager.getSessionId();
+		const identity = readdirSync(sessionsDir)
+			.filter((file) => file.endsWith(".json"))
+			.map((file) => JSON.parse(readFileSync(join(sessionsDir, file), "utf8")) as { cwd?: unknown; piSessionId?: unknown; rootSessionId?: unknown; updatedAt?: unknown })
+			.filter((session) => typeof session.rootSessionId === "string" && resolve(String(session.cwd)) === resolve(ctx.cwd))
+			.filter((session) => !piSessionId || session.piSessionId === piSessionId)
+			.sort((a, b) => String(a.updatedAt ?? "").localeCompare(String(b.updatedAt ?? "")))
+			.at(-1);
+		if (!identity || typeof identity.rootSessionId !== "string") return true;
+		const statePath = join(runRoot, "session-task-runtime", `${identity.rootSessionId}.json`);
+		if (!existsSync(statePath)) return true;
+		const state = JSON.parse(readFileSync(statePath, "utf8")) as { enabled?: unknown };
+		return state.enabled !== false;
+	} catch {
+		return true;
+	}
+}
+
 interface FooterCostState {
 	totalCost: number;
 	entryCount: number;
@@ -661,6 +711,7 @@ function collectState(
 		providerCount,
 		thinking,
 		fast: fastEnabled,
+		tasksEnabled: readAsyncSubagentsTaskMode(ctx),
 		ctxPct,
 		ctxUsed,
 		ctxWindow: contextWindow,

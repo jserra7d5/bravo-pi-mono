@@ -19,6 +19,7 @@ import {
 	renderStatsLine,
 	renderTopLine,
 	stripAnsi,
+	tasksSegment,
 	threshold,
 	parseCodexUsage,
 	redactCodexAccountLabel,
@@ -28,7 +29,7 @@ import {
 import {
 	identitySlot as asyncSubagentsIdentitySlot,
 	identityColor as asyncSubagentsIdentityColor,
-} from "../../../packages/async-subagents/extensions/pi/renderers.ts";
+} from "../../../packages/async-subagents/dist/extensions/pi/renderers.js";
 
 function makeState(overrides: Partial<FooterRenderState> = {}): FooterRenderState {
 	return {
@@ -40,6 +41,7 @@ function makeState(overrides: Partial<FooterRenderState> = {}): FooterRenderStat
 		providerCount: 2,
 		thinking: "medium",
 		fast: false,
+		tasksEnabled: true,
 		ctxPct: 12,
 		ctxUsed: 33_000,
 		ctxWindow: 272_000,
@@ -416,6 +418,13 @@ test("renderFooter still emits two lines when codex data is missing", () => {
 test("renderFooter handles unknown context (post-compaction)", () => {
 	const lines = renderFooter(makeState({ ctxKnown: false, ctxPct: 0, ctxUsed: 0 }), 94);
 	assert.ok(stripAnsi(lines[1]).includes("?%"));
+});
+
+test("renderTopLine includes sticky async task mode badge", () => {
+	assert.equal(stripAnsi(tasksSegment(true)), "tasks:on");
+	assert.equal(stripAnsi(tasksSegment(false)), "tasks:off");
+	assert.ok(stripAnsi(renderTopLine(120, makeState({ tasksEnabled: true }))).includes("tasks:on"));
+	assert.ok(stripAnsi(renderTopLine(120, makeState({ tasksEnabled: false }))).includes("tasks:off"));
 });
 
 // ── extreme-narrow overflow on both lines ──────────────────────────────────

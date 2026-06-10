@@ -24,6 +24,8 @@ Use `/fast on|off|status` in an interactive Pi session.
 - `/fast off` persists normal speed and removes the footer indicator.
 - `/fast status` reports the current mode.
 
+The footer also reads async-subagents task runtime state and shows `tasks:on` or `tasks:off`; package-level `setStatus()` badges are not visible while this custom footer owns `setFooter()`.
+
 Fast mode is intentionally UI-scoped: the extension only applies the request override when `ctx.hasUI` is true. Async subagents and noninteractive child Pi launches therefore stay normal by default, even when the sticky interactive setting is on.
 
 Current provider mapping:
