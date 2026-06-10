@@ -170,7 +170,7 @@ Model-facing wakeups are runtime envelopes marked `NOT USER INPUT`. Terminal res
 
 ## Task orchestration
 
-Task orchestration is enabled by default per root session. The Pi footer/status area shows a minimal `tasks:on` or `tasks:off` badge.
+Task orchestration is enabled by default and sticks to the Pi session like Caveman mode: `/tasks on|off` writes a session-history marker, restores across session-tree updates, and syncs the runtime state used by tools. The Pi footer/status area shows a minimal `tasks:on` or `tasks:off` badge.
 
 Commands:
 

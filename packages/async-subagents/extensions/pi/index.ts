@@ -18,6 +18,7 @@ import { isWakeupKeyHandled, markDeliveredWakeupHandled, pollWakeups } from "./w
 import { TaskStore } from "../../src/taskStore.js";
 
 const OWNER_ID = `pi-${process.pid}-${Date.now().toString(36)}`;
+const TASK_RUNTIME_STATE_ENTRY_TYPE = "bravo-async-subagents-task-runtime-state";
 const roots = new Map<string, RootSessionIdentity>();
 
 let piTimer: ReturnType<typeof setInterval> | undefined;
@@ -213,9 +214,31 @@ function tasksEnabled(cwd: string, rootSessionId: string): boolean {
   return readTaskRuntimeState(new RunStore({ cwd }).runRoot, rootSessionId).enabled;
 }
 
+type TaskRuntimeStateEntry = { enabled: boolean };
+
+function isTaskRuntimeStateEntry(value: unknown): value is TaskRuntimeStateEntry {
+  return Boolean(value && typeof value === "object" && typeof (value as { enabled?: unknown }).enabled === "boolean");
+}
+
+function restoreStickyTaskRuntimeState(ctx: ExtensionContext, store: RunStore, rootSessionId: string): boolean {
+  let enabled = readTaskRuntimeState(store.runRoot, rootSessionId).enabled;
+  for (const entry of ctx.sessionManager.getBranch()) {
+    if (entry.type !== "custom" || entry.customType !== TASK_RUNTIME_STATE_ENTRY_TYPE) continue;
+    if (!isTaskRuntimeStateEntry(entry.data)) continue;
+    enabled = entry.data.enabled;
+  }
+  writeTaskRuntimeState(store.runRoot, rootSessionId, enabled);
+  return enabled;
+}
+
+function appendStickyTaskRuntimeState(pi: ExtensionAPI, enabled: boolean): void {
+  pi.appendEntry(TASK_RUNTIME_STATE_ENTRY_TYPE, { enabled });
+}
+
 function setTasksStatusBadge(ctx: ExtensionContext | ExtensionCommandContext, enabled: boolean): void {
   const ui = (ctx as { ui?: { setStatus?: (key: string, value: string | undefined) => void } }).ui;
-  ui?.setStatus?.("async-subagents-tasks", `tasks:${enabled ? "on" : "off"}`);
+  ui?.setStatus?.("async-subagents-tasks", undefined);
+  ui?.setStatus?.("tasks", `tasks:${enabled ? "on" : "off"}`);
 }
 
 export async function applyActiveTaskTools(pi: ExtensionAPI, enabled: boolean): Promise<void> {
@@ -291,6 +314,7 @@ function registerTasksCommand(pi: ExtensionAPI): void {
       }
       const enabled = arg === "on";
       writeTaskRuntimeState(store.runRoot, identity.rootSessionId, enabled);
+      appendStickyTaskRuntimeState(pi, enabled);
       await applyActiveTaskTools(pi, enabled);
       setTasksStatusBadge(ctx, enabled);
       ctx.ui.notify(`async-subagents tasks ${arg}`, "info");
@@ -389,15 +413,22 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
     return new Text(typeof content === "string" ? content : "", 0, 0);
   });
 
-  pi.on("session_start", async (_event, ctx) => {
-    stopTimers();
+  const restoreTaskRuntimeMode = async (ctx: ExtensionContext) => {
     const cwd = cwdOf(ctx);
     const identity = ensureRoot(cwd, piSessionIdOf(ctx));
-    const enabled = tasksEnabled(cwd, identity.rootSessionId);
+    const store = new RunStore({ cwd });
+    const enabled = restoreStickyTaskRuntimeState(ctx, store, identity.rootSessionId);
     await applyActiveTaskTools(pi, enabled);
     setTasksStatusBadge(ctx, enabled);
+  };
+
+  pi.on("session_start", async (_event, ctx) => {
+    stopTimers();
+    await restoreTaskRuntimeMode(ctx);
     startTimers(pi, ctx);
   });
+
+  pi.on("session_tree", async (_event, ctx) => restoreTaskRuntimeMode(ctx));
 
   pi.on("session_shutdown", async () => {
     stopTimers(currentCtx);
