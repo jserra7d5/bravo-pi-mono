@@ -264,9 +264,9 @@ function registerFastTrackCommand(pi: ExtensionAPI): void {
   });
 }
 
-function registerTaskModeCommand(pi: ExtensionAPI): void {
-  pi.registerCommand("task-mode", {
-    description: "Inspect or change async-subagents task orchestration mode for this root session.",
+function registerTasksCommand(pi: ExtensionAPI): void {
+  pi.registerCommand("tasks", {
+    description: "Inspect or change async-subagents task orchestration for this root session.",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const cwd = cwdOf(ctx);
       const identity = ensureRoot(cwd, piSessionIdOf(ctx));
@@ -279,7 +279,7 @@ function registerTaskModeCommand(pi: ExtensionAPI): void {
         return;
       }
       if (arg !== "on" && arg !== "off") {
-        ctx.ui.notify("Usage: /task-mode [on|off|status]", "error");
+        ctx.ui.notify("Usage: /tasks [on|off|status]", "error");
         return;
       }
       if (arg === "off") {
@@ -433,6 +433,6 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
 
   registerSubagentTools(pi, runtime);
   registerFastTrackCommand(pi);
-  registerTaskModeCommand(pi);
+  registerTasksCommand(pi);
   registerNamePackCommand(pi);
 }

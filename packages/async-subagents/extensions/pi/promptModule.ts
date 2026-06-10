@@ -95,7 +95,7 @@ function asyncSubagentsSessionState(options?: { fastTrackArmed?: boolean; tasksE
     lines.push(`- Fast-track policy is currently **${status}**. ${guidance}`);
   }
   if (options?.tasksEnabled === false) {
-    lines.push("- Task orchestration is off. Use direct `subagent_start` without `taskId` for handoffs; `task_*` tools and task-owned runs are unavailable until `/task-mode on`.");
+    lines.push("- Task orchestration is off. Use direct `subagent_start` without `taskId` for handoffs; `task_*` tools and task-owned runs are unavailable until `/tasks on`.");
   } else if (options?.tasksEnabled === true) {
     lines.push("- Task orchestration is on. Task tools and task-owned `subagent_start({ taskId })` are available when the tool catalog exposes them.");
   }

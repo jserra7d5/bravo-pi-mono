@@ -119,7 +119,7 @@ function isTaskRuntimeEnabled(runtime: ToolRuntime, cwd: string, rootSessionId: 
 }
 
 function taskRuntimeDisabledResponse(): ToolResponse {
-  return response("Task runtime is disabled for this root session. Use /task-mode on to re-enable task orchestration, or use direct subagent_start without taskId.", { code: "TASK_RUNTIME_DISABLED" }, true);
+  return response("Task runtime is disabled for this root session. Use /tasks on to re-enable task orchestration, or use direct subagent_start without taskId.", { code: "TASK_RUNTIME_DISABLED" }, true);
 }
 
 function requireTaskRuntime(runtime: ToolRuntime, cwd: string, root: RootSessionIdentity): ToolResponse | undefined {

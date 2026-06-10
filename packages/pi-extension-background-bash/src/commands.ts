@@ -10,7 +10,7 @@ function resolveId(registry: TaskRegistry, raw: string | undefined) { if (!raw) 
 async function tail(path: string, n: number) { const text = await readFile(path, "utf8").catch(() => ""); return text.split(/\r?\n/).slice(-Math.max(1, Math.min(200, n))).join("\n"); }
 
 export function registerTaskCommands(pi: { registerCommand?: (name: string, spec: { description?: string; handler: (args: string, ctx: unknown) => unknown }) => void }) {
-  pi.registerCommand?.("tasks", { description: "List, show, tail, stop, or cleanup background bash tasks", handler: async (args: string, ctx: unknown) => {
+  pi.registerCommand?.("bash-tasks", { description: "List, show, tail, stop, or cleanup background bash tasks", handler: async (args: string, ctx: unknown) => {
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const sub = parts[0] ?? "list";
     const cfg = configFromContext(ctx, cwdOf(ctx));
@@ -34,6 +34,6 @@ export function registerTaskCommands(pi: { registerCommand?: (name: string, spec
       for (const t of tasks) if (!["starting", "running", "blocked"].includes(t.status)) { registry.remove(t.taskId); removed++; }
       notify(ctx, [`Cleaned up ${removed} completed background task${removed === 1 ? "" : "s"}.`]); return;
     }
-    notify(ctx, ["Usage: /tasks [list|all|show <id>|tail <id> [lines]|stop <id>|cleanup]"]);
+    notify(ctx, ["Usage: /bash-tasks [list|all|show <id>|tail <id> [lines]|stop <id>|cleanup]"]);
   } });
 }
