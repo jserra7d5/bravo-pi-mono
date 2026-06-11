@@ -23,10 +23,18 @@ Selection and reservations:
 - Launch metadata includes reservation and launch IDs so `syncBack()` and cleanup can release the correct reservation.
 - `prepareLaunch()` writes both `codex/auth.json` and `pi-agent/auth.json`. `syncBack()` copies both back to the selected slot with compare-and-swap conflict checks so interactive Pi OAuth refreshes are retained without overwriting newer slot state.
 
+Credential health and recovery:
+
+- Lease-time OAuth refresh failures are classified through the shared `classifyOAuthRefreshError` (`src/oauth-error.ts`). A *hard* failure — `invalid_grant`, a reused/rotated refresh token, an HTTP 400/401/403, or a structurally unusable token response — durably marks the slot `broken` (via a `source: 'broken'` usage snapshot), so selection skips it and the footer badges it red. A *transient* failure (network/timeout/408/429/5xx) does **not** mark the slot broken; the provider cools it down and rotates instead.
+- `broken` is self-healing: any later successful request writes a fresh `source: 'live'` `ok`/`limited` snapshot that supersedes the broken snapshot (newer `id` wins in the `latestUsageEntries` view), so a recovered account un-breaks automatically.
+- `unbrickSlot(stateRoot, slot)` is the operator escape hatch: it writes a `source: 'manual'`, `status: 'unknown'` snapshot so a slot becomes selectable again without hand-editing the database.
+- The footer extension exposes `/reauth <slot>`: it backs up the slot's credentials, runs `codex logout`/`codex login` against that slot's `CODEX_HOME` (surfacing and auto-opening the auth URL), seeds `pi-openai-codex.json` from the refreshed `auth.json`, then re-probes usage — a successful probe clears any `broken` status.
+
 Security constraints:
 
 - Isolated directories must be absolute and safe; cleanup requires package metadata and matching isolated-dir/state metadata.
 - Raw tokens, keys, token-derived auth hashes, and generation IDs are internal only and are redacted/omitted from CLI/API/log output.
+- OAuth refresh failures are recorded with a non-secret `error_kind` (`invalid_grant` | `transient` | `unknown`) and an upstream message redacted through the shared `redactSecretsInText` (JWTs and `Bearer` headers stripped) before it reaches the reservation event log or stderr. The error thrown to callers remains the generic `selected slot access token refresh failed`.
 - Sync-back conflicts retain the isolated directory with a marker or wrapper warning instead of overwriting newer state.
 
 Authswap is not a supported runtime or migration dependency. Account state and usage cache are owned by this package.

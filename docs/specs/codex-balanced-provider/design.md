@@ -139,7 +139,7 @@ A token lease is acceptable for bounded requests and async subagents because Cod
 
 - Required TTL = expected max runtime/request duration + safety buffer.
 - If TTL is insufficient, refresh before lease start.
-- If refresh fails, fail closed.
+- If refresh fails, **fail over before failing closed**. A lease-acquisition failure (refresh failed, no usable token, TTL still insufficient) is not terminal: the stream wrapper returns a `lease-failed` outcome and the rotation policy moves to the next slot. The turn only fails closed once every slot has been tried, and the terminal error then surfaces the genuine lease error rather than a synthesized "all accounts rate limited" message. A hard refresh failure additionally marks that slot `broken` (see auth-balancer design) so it is skipped on subsequent selections.
 - Every lease has `expires_at`; lease acquisition opportunistically marks stale reservations expired before selecting a slot. A reaper path must make slots reusable after crashes, SIGKILL, or abandoned command-backed leases.
 
 Top-level interactive sessions are less bounded, so the provider should lease per provider request rather than once per process. Pi's command-backed provider key resolution and/or the custom stream wrapper make this possible without relying on a single startup token.

@@ -139,6 +139,56 @@ test('rotate-on-429: a forwarded upstream error has tokens/secrets redacted', as
   assert.match(msg, /\[REDACTED/, 'redaction marker present');
 });
 
+test('DEFECT A: a lease failure on the auto-selected slot fails over to a healthy slot', async () => {
+  const rec: Recorder = { leaseCalls: [], finished: [], sleeps: [] };
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => {
+      rec.leaseCalls.push(input.preferred_slot);
+      // Round-0 auto-selection (preferred_slot undefined) is broken; the forced slot is healthy.
+      if (input.preferred_slot === undefined) throw new Error('selected slot access token refresh failed');
+      const slot = input.preferred_slot;
+      return { schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose, lease_id: `lease-${slot}`, access_token: `tok_slot${slot}_xxxxxxxx`, slot, label: slot, expires_at: 0, reservation_id: `res-${slot}`, launch_id: `launch-${slot}` } as any;
+    },
+    finishLease: async (input: any) => { rec.finished.push({ lease_id: input.lease_id, status: input.status }); return {} as any; },
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }, { slot: '2', primaryRemaining: 90 }],
+    ingestUsage: async () => ({} as any),
+    createUpstream: ((_m: any, _c: any, options: any) => (async function* () {
+      await options.onResponse?.({ status: 200, headers: {} }, _m);
+      yield { type: 'done', reason: 'stop', message: fakeMsg() };
+    })()) as any,
+    sleep: async (ms: number) => { rec.sleeps.push(ms); },
+    rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+  };
+  const run = createBalancedStreamRunner(deps);
+  const events = await collect(run(MODEL, { messages: [] } as any, { sessionId: 's1' } as any));
+  const types = events.map(e => e.type);
+
+  assert.ok(types.includes('done'), 'failover should deliver the healthy slot success');
+  assert.ok(!types.includes('error'), 'a broken auto-selected slot must not end the turn');
+  assert.deepEqual(rec.leaseCalls, [undefined, '2'], 'auto-select first, then force the healthy slot');
+});
+
+test('DEFECT A: when every slot fails to lease, the real lease error is surfaced (not the rate-limit string)', async () => {
+  const rec: Recorder = { leaseCalls: [], finished: [], sleeps: [] };
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => { rec.leaseCalls.push(input.preferred_slot); throw new Error('selected slot access token refresh failed'); },
+    finishLease: async (input: any) => { rec.finished.push({ lease_id: input.lease_id, status: input.status }); return {} as any; },
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }, { slot: '2', primaryRemaining: 90 }],
+    ingestUsage: async () => ({} as any),
+    createUpstream: ((_m: any, _c: any, _options: any) => (async function* () { /* never reached */ })()) as any,
+    sleep: async (ms: number) => { rec.sleeps.push(ms); },
+    rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+  };
+  const run = createBalancedStreamRunner(deps);
+  const events = await collect(run(MODEL, { messages: [] } as any, { sessionId: 's1' } as any));
+  const errors = events.filter(e => e.type === 'error');
+
+  assert.equal(errors.length, 1, 'exactly one terminal error event');
+  const msg = String(errors[0].error.errorMessage);
+  assert.match(msg, /refresh failed/, 'surfaces the genuine lease error');
+  assert.doesNotMatch(msg, /rate limited/i, 'must NOT mask it with the rate-limit string');
+});
+
 test('rotate-on-429: a non-rate error surfaces immediately without rotating', async () => {
   const rec: Recorder = { leaseCalls: [], finished: [], sleeps: [] };
   const deps: Partial<BalancedRunnerDeps> = {

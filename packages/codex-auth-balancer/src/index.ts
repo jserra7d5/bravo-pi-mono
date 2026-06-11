@@ -6,6 +6,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { openaiCodexOAuthProvider, type OAuthCredentials } from '@earendil-works/pi-ai/oauth';
+import { classifyOAuthRefreshError, redactSecretsInText } from './oauth-error.js';
 
 export type UsageWindow = {
   label: 'primary' | 'secondary' | string;
@@ -23,7 +24,7 @@ export type CodexAccountSlot = {
   activePi: boolean;
   activeCodex: boolean;
   status: CodexAccountStatus;
-  usage?: { primary?: UsageWindow; secondary?: UsageWindow; updatedAt?: number; source?: 'cache' | 'probe' | 'live' | 'unknown' };
+  usage?: { primary?: UsageWindow; secondary?: UsageWindow; updatedAt?: number; source?: 'cache' | 'probe' | 'live' | 'broken' | 'manual' | 'unknown' };
   problem?: { code: string; message: string };
 };
 export type CodexUsage = { accounts: CodexAccountSlot[]; generatedAt: number; staleAfterMs: number; unavailable?: boolean; error?: string };
@@ -32,7 +33,7 @@ export type UsageEntry = {
   primary?: UsageWindow;
   secondary?: UsageWindow;
   updatedAt?: number;
-  source?: 'cache' | 'probe' | 'live' | 'unknown';
+  source?: 'cache' | 'probe' | 'live' | 'broken' | 'manual' | 'unknown';
   status?: CodexAccountStatus;
   problem?: { code: string; message: string };
 };
@@ -995,6 +996,36 @@ function markReservation(stateRoot: string, reservationId: string | undefined, l
     closeDb(db);
   }
 }
+function writeBrokenSnapshot(stateRoot: string, slot: string, code: string, message: string) {
+  const db = openDb(stateRoot);
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      writeUsageSnapshot(db, { slot, updatedAt: Date.now(), source: 'broken', status: 'broken', problem: { code, message } });
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } finally {
+    closeDb(db);
+  }
+}
+export function unbrickSlot(stateRoot: string, slot: string) {
+  const db = openDb(stateRoot);
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      writeUsageSnapshot(db, { slot, updatedAt: Date.now(), source: 'manual', status: 'unknown' });
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } finally {
+    closeDb(db);
+  }
+}
 function assertSafeIsolatedDir(isolatedDir: string, stateRoot?: string) { const dir = path.resolve(isolatedDir); if (!path.isAbsolute(isolatedDir)) throw new Error('isolatedDir must be absolute'); if (dir === path.parse(dir).root || dir === os.homedir()) throw new Error('refusing unsafe isolatedDir'); if (stateRoot) { const root = path.resolve(stateRoot); if (dir === root || dir.startsWith(root + path.sep)) throw new Error('isolatedDir must not be inside stateRoot'); const marker = `${path.sep}auth${path.sep}codex-balancer`; if (!dir.endsWith(marker) && !dir.startsWith(os.tmpdir() + path.sep)) throw new Error('isolatedDir must be a run auth/codex-balancer dir or temp test dir'); } return dir; }
 export async function prepareLaunch(isolatedDir: string, opts: { stateRoot?: string; slot?: string; runId?: string; rootRunId?: string; reservationTtlMs?: number } = {}): Promise<PrepareLaunchResult> {
   const stateRoot = opts.stateRoot || resolveStateRoot();
@@ -1210,8 +1241,21 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
             expires: parsed.expiresAt || 0,
             accountId: parsed.accountId || account.accountIdHash || account.idHash,
           } as OAuthCredentials);
-        } catch {
-          throw new Error('selected slot access token refresh failed');
+        } catch (refreshError) {
+          const upstream = refreshError instanceof Error ? refreshError.message : String(refreshError);
+          const kind = classifyOAuthRefreshError(upstream);
+          const redactedUpstream = redactSecretsInText(upstream);
+          if (process.env.CODEX_BALANCER_LOG_REFRESH_ERRORS) {
+            process.stderr.write(`[codex-balancer] refresh failed slot=${account.slot} kind=${kind}: ${redactedUpstream}\n`);
+          }
+          if (kind === 'invalid_grant') {
+            try { writeBrokenSnapshot(stateRoot, account.slot, 'refresh_invalid_grant', redactedUpstream); } catch { /* ignore */ }
+          }
+          const err = new Error('selected slot access token refresh failed');
+          (err as any).errorKind = kind;
+          (err as any).redactedUpstream = redactedUpstream;
+          (err as any).cause = refreshError;
+          throw err;
         }
         if (input.abort_signal?.aborted) {
           markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'aborted_after_refresh' });
@@ -1224,7 +1268,9 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (input.abort_signal?.aborted || message.includes('cannot refresh')) throw error;
-      markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'access_token_refresh_failed', message });
+      const error_kind = (error as any)?.errorKind ?? 'unknown';
+      const redactedMessage = (error as any)?.redactedUpstream ?? redactSecretsInText(message);
+      markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'access_token_refresh_failed', error_kind, message: redactedMessage });
       throw new Error('selected slot access token refresh failed');
     }
   }

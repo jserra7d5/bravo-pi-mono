@@ -8,8 +8,9 @@
 // Codex account usage is cache-only through @bravo/codex-auth-balancer;
 // /codex-accounts refresh explicitly refreshes the owned cache state.
 
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { getUsage, ingestDirectPiLiveUsage, refreshUsage, resolveStateRoot } from "../../packages/codex-auth-balancer/src/index.ts";
 import type { CodexUsage, CodexAccountSlot, CodexAccountStatus, UsageWindow } from "../../packages/codex-auth-balancer/src/index.ts";
 import { dirname, join, resolve } from "node:path";
@@ -164,6 +165,82 @@ async function readCodexUsageCache(): Promise<CodexUsage> {
 
 async function refreshCodexUsageCache(): Promise<CodexUsage> {
 	return refreshUsage({ all: true });
+}
+
+// ── slot re-authentication (/reauth) ───────────────────────────────────────
+// Shells out to the `codex` CLI against the slot's CODEX_HOME — the proven
+// recipe that produces a complete codex auth.json (incl. id_token) — then seeds
+// the pi credential and re-probes usage (a successful probe supersedes any
+// 'broken' status, un-breaking the slot).
+
+const REAUTH_TIMEOUT_MS = 5 * 60 * 1000;
+const AUTH_URL_RE = /(https?:\/\/[^\s'"]+)/;
+
+function runCodexCmd(
+	args: string[],
+	env: NodeJS.ProcessEnv,
+	onLine?: (line: string) => void,
+	timeoutMs?: number,
+): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const child = spawn("codex", args, { env, stdio: ["ignore", "pipe", "pipe"] });
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		if (timeoutMs) {
+			timer = setTimeout(() => {
+				try { child.kill("SIGTERM"); } catch { /* already gone */ }
+				reject(new Error(`codex ${args[0]} timed out after ${Math.round(timeoutMs / 1000)}s`));
+			}, timeoutMs);
+		}
+		const onData = (buf: Buffer): void => {
+			for (const line of buf.toString().split(/\r?\n/)) if (line.trim()) onLine?.(line);
+		};
+		child.stdout?.on("data", onData);
+		child.stderr?.on("data", onData);
+		child.on("error", (e) => { if (timer) clearTimeout(timer); reject(e); });
+		child.on("close", (code) => { if (timer) clearTimeout(timer); resolve(code ?? 1); });
+	});
+}
+
+type ReauthResult = { ok: boolean; message: string };
+
+async function reauthSlot(
+	slot: string,
+	notify: (msg: string, level?: "info" | "error") => void,
+): Promise<ReauthResult> {
+	const stateRoot = resolveStateRoot();
+	const slotDir = join(stateRoot, "accounts", slot);
+	const authPath = join(slotDir, "auth.json");
+	const piAuthPath = join(slotDir, "pi-openai-codex.json");
+	if (!existsSync(slotDir)) return { ok: false, message: `unknown slot ${slot} (${slotDir} does not exist)` };
+
+	// 1. Back up existing credentials (both shapes), best-effort.
+	const ts = new Date().toISOString().replace(/[:.]/g, "-");
+	try { if (existsSync(authPath)) copyFileSync(authPath, `${authPath}.bak-${ts}`); } catch { /* best-effort */ }
+	try { if (existsSync(piAuthPath)) copyFileSync(piAuthPath, `${piAuthPath}.bak-${ts}`); } catch { /* best-effort */ }
+
+	const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: slotDir };
+
+	// 2. Logout (ignore failures) then interactive login.
+	await runCodexCmd(["logout"], env).catch(() => undefined);
+
+	let opened = false;
+	const code = await runCodexCmd(["login"], env, (line) => {
+		if (opened) return;
+		const m = line.match(AUTH_URL_RE);
+		if (!m) return;
+		opened = true;
+		const url = m[1];
+		notify(`Authenticate slot ${slot} in your browser: ${url}`, "info");
+		try { spawn("xdg-open", [url], { stdio: "ignore", detached: true }).unref(); } catch { /* no browser opener */ }
+	}, REAUTH_TIMEOUT_MS);
+	if (code !== 0) return { ok: false, message: `codex login exited with code ${code}` };
+	if (!existsSync(authPath)) return { ok: false, message: "codex login completed but produced no auth.json" };
+
+	// 3. Seed the pi credential from the fresh codex auth, then re-probe usage.
+	copyFileSync(authPath, piAuthPath);
+	try { chmodSync(piAuthPath, 0o600); } catch { /* best-effort perms */ }
+	await refreshUsage({ slot });
+	return { ok: true, message: `slot ${slot} re-authenticated` };
 }
 
 function formatReset(resetAt: number | undefined, now = Date.now()): string | undefined {
@@ -845,6 +922,33 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 			refreshBalancedAffinity(ctx);
 			requestRender();
 			ctx.ui.notify(codexUsage.unavailable ? "Codex account usage cache unavailable." : `Codex accounts: ${codexUsage.accounts.length}`, codexUsage.unavailable ? "error" : "info");
+		},
+	});
+
+	pi.registerCommand("reauth", {
+		description: "Re-authenticate a Codex balancer account slot (/reauth <slot>).",
+		handler: async (args, ctx) => {
+			const slot = args.trim();
+			if (!slot || !/^[A-Za-z0-9_-]+$/.test(slot)) {
+				ctx.ui.notify("Usage: /reauth <slot>  (e.g. /reauth 2)", "error");
+				return;
+			}
+			ctx.ui.notify(`Re-authenticating slot ${slot}… complete the browser login when it opens.`, "info");
+			let result: ReauthResult;
+			try {
+				result = await reauthSlot(slot, (m, l) => ctx.ui.notify(m, l ?? "info"));
+			} catch (e) {
+				ctx.ui.notify(`Re-auth failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+				return;
+			}
+			if (!result.ok) {
+				ctx.ui.notify(`Re-auth failed: ${result.message}`, "error");
+				return;
+			}
+			codexUsage = await readCodexUsageCache();
+			refreshBalancedAffinity(ctx);
+			requestRender();
+			ctx.ui.notify(`✓ ${result.message}.`, "info");
 		},
 	});
 

@@ -5,7 +5,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { cleanupLaunch, finishTokenLease, getDbStatus, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, startTokenLease, syncBack } from '../src/index.js';
+import { DatabaseSync } from 'node:sqlite';
+import { cleanupLaunch, finishTokenLease, getDbStatus, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, startTokenLease, syncBack, unbrickSlot } from '../src/index.js';
 import codexBalancedProvider, { getBalancedCodexModels } from '../extensions/pi/index.js';
 import { openaiCodexOAuthProvider } from '@earendil-works/pi-ai/oauth';
 
@@ -542,4 +543,137 @@ test('syncBack and cleanup preserve terminal reservation state', async () => {
   await cleanupLaunch(iso);
   const released = await listReservations({ stateRoot: root, includeInactive: true });
   assert.equal(released.find(x => x.id === p.metadata.reservation_id)?.state, 'completed');
+});
+
+const leaseArgs = (root: string, slot: string) => ({ stateRoot: root, provider: 'bravo-codex-balanced' as const, model: 'bravo-codex-balanced/fake', purpose: 'pi-provider-request' as const, expected_runtime_ms: 1000, ttl_safety_buffer_ms: 1000, preferred_slot: slot });
+async function seedRefreshSlot(root: string, slot: string) {
+  await writeJson(path.join(root, 'accounts', slot, 'pi-openai-codex.json'), { access: 'old-access-token', refresh: 'refresh-token', expires: Date.now() + 10 });
+  await writeJson(path.join(root, 'accounts', slot, 'auth.json'), { access_token: 'codex-token', expiry_date: Date.now() + 60_000 });
+}
+function latestFailedDetails(root: string, reservationId: string | undefined): any {
+  assert.ok(reservationId, 'expected a failed reservation id');
+  const db = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  try {
+    const row = db.prepare('SELECT details_json FROM launch_events WHERE reservation_id = ? AND event_type = ? ORDER BY id DESC LIMIT 1').get(reservationId, 'failed') as { details_json?: string } | undefined;
+    return row?.details_json ? JSON.parse(row.details_json) : undefined;
+  } finally {
+    try { db.close(); } catch { /* ignore */ }
+  }
+}
+
+test('startTokenLease marks slot broken on invalid_grant refresh failure and stops selecting it', async () => {
+  const root = await tmp();
+  await seedRefreshSlot(root, 'broke');
+  const original = openaiCodexOAuthProvider.refreshToken;
+  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}'); };
+  try {
+    await assert.rejects(startTokenLease(leaseArgs(root, 'broke')), /selected slot access token refresh failed/);
+  } finally {
+    (openaiCodexOAuthProvider as any).refreshToken = original;
+  }
+  const usage = await getUsage({ stateRoot: root });
+  const slot = usage.accounts.find(a => a.slot === 'broke');
+  assert.equal(slot?.status, 'broken');
+  assert.equal(slot?.problem?.code, 'refresh_invalid_grant');
+  // A follow-up selection must not pick the broken slot. With it being the only
+  // slot, chooseSlot has no candidate and startTokenLease must not succeed on it.
+  await writeJson(path.join(root, 'accounts', 'healthy', 'auth.json'), { access_token: 'healthy-token-123', expiry_date: Date.now() + 60_000 });
+  const next = await startTokenLease({ stateRoot: root, provider: 'bravo-codex-balanced', model: 'bravo-codex-balanced/fake', purpose: 'pi-provider-request', expected_runtime_ms: 1000, ttl_safety_buffer_ms: 1000, session_affinity_key: 'sess-broke' });
+  assert.notEqual(next.slot, 'broke');
+});
+
+test('startTokenLease does not break slot on transient refresh failure', async () => {
+  const root = await tmp();
+  await seedRefreshSlot(root, 'flap');
+  const original = openaiCodexOAuthProvider.refreshToken;
+  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error('OpenAI Codex token refresh failed (503): upstream'); };
+  try {
+    await assert.rejects(startTokenLease(leaseArgs(root, 'flap')), /selected slot access token refresh failed/);
+  } finally {
+    (openaiCodexOAuthProvider as any).refreshToken = original;
+  }
+  const usage = await getUsage({ stateRoot: root });
+  const slot = usage.accounts.find(a => a.slot === 'flap');
+  assert.notEqual(slot?.status, 'broken');
+  // Still selectable: refresh now succeeds and the slot leases.
+  (openaiCodexOAuthProvider as any).refreshToken = async () => ({ type: 'oauth', access: 'new-access-token', refresh: 'new-refresh-token', expires: Date.now() + 60_000, accountId: 'acct-1' });
+  try {
+    const lease = await startTokenLease(leaseArgs(root, 'flap'));
+    assert.equal(lease.slot, 'flap');
+  } finally {
+    (openaiCodexOAuthProvider as any).refreshToken = original;
+  }
+});
+
+test('startTokenLease records real error_kind in telemetry on hard failure', async () => {
+  const root = await tmp();
+  await seedRefreshSlot(root, 'tele');
+  const original = openaiCodexOAuthProvider.refreshToken;
+  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}'); };
+  try {
+    await assert.rejects(startTokenLease(leaseArgs(root, 'tele')), /selected slot access token refresh failed/);
+  } finally {
+    (openaiCodexOAuthProvider as any).refreshToken = original;
+  }
+  const reservation = (await listReservations({ stateRoot: root, includeInactive: true })).find(r => r.state === 'failed');
+  assert.ok(reservation, 'expected a failed reservation');
+  const details = latestFailedDetails(root, reservation?.id);
+  assert.equal(details?.error_kind, 'invalid_grant');
+});
+
+test('startTokenLease redacts secrets from recorded refresh failure details', async () => {
+  const root = await tmp();
+  await seedRefreshSlot(root, 'redact');
+  const jwt = 'eyJabc.eyJdef.sigghi';
+  const original = openaiCodexOAuthProvider.refreshToken;
+  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error(`refresh blew up token=${jwt} Bearer sk-secret`); };
+  try {
+    await assert.rejects(startTokenLease(leaseArgs(root, 'redact')), /selected slot access token refresh failed/);
+  } finally {
+    (openaiCodexOAuthProvider as any).refreshToken = original;
+  }
+  const reservation = (await listReservations({ stateRoot: root, includeInactive: true })).find(r => r.state === 'failed');
+  const details = latestFailedDetails(root, reservation?.id);
+  assert.match(details?.message, /\[REDACTED_TOKEN\]/);
+  assert.match(details?.message, /Bearer \[REDACTED\]/);
+  assert.doesNotMatch(details?.message, /sk-secret/);
+  assert.doesNotMatch(details?.message, /sigghi/);
+});
+
+test('startTokenLease preserves the generic refresh failure error message contract', async () => {
+  const root = await tmp();
+  await seedRefreshSlot(root, 'contract');
+  const original = openaiCodexOAuthProvider.refreshToken;
+  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}'); };
+  try {
+    await startTokenLease(leaseArgs(root, 'contract'));
+    assert.fail('expected startTokenLease to reject');
+  } catch (error) {
+    assert.equal((error as Error).message, 'selected slot access token refresh failed');
+  } finally {
+    (openaiCodexOAuthProvider as any).refreshToken = original;
+  }
+});
+
+test('unbrickSlot clears broken status and makes the slot selectable again', async () => {
+  const root = await tmp();
+  await seedRefreshSlot(root, 'fixme');
+  const original = openaiCodexOAuthProvider.refreshToken;
+  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}'); };
+  try {
+    await assert.rejects(startTokenLease(leaseArgs(root, 'fixme')), /selected slot access token refresh failed/);
+  } finally {
+    (openaiCodexOAuthProvider as any).refreshToken = original;
+  }
+  assert.equal((await getUsage({ stateRoot: root })).accounts.find(a => a.slot === 'fixme')?.status, 'broken');
+  unbrickSlot(root, 'fixme');
+  assert.equal((await getUsage({ stateRoot: root })).accounts.find(a => a.slot === 'fixme')?.status, 'unknown');
+  // Re-auth happened out of band; a healthy refresh now leases the slot.
+  (openaiCodexOAuthProvider as any).refreshToken = async () => ({ type: 'oauth', access: 'new-access-token', refresh: 'new-refresh-token', expires: Date.now() + 60_000, accountId: 'acct-1' });
+  try {
+    const lease = await startTokenLease(leaseArgs(root, 'fixme'));
+    assert.equal(lease.slot, 'fixme');
+  } finally {
+    (openaiCodexOAuthProvider as any).refreshToken = original;
+  }
 });

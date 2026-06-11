@@ -29,6 +29,7 @@ import {
   type RotationConfig,
   type SlotInfo,
 } from './rotation-policy.js';
+import { redactSecretsInText } from '../../src/oauth-error.js';
 
 const PROVIDER = 'bravo-codex-balanced';
 const UPSTREAM_PROVIDER = 'openai-codex';
@@ -65,8 +66,7 @@ function affinityFromOptions(options?: SimpleStreamOptions): string | undefined 
 }
 
 function redactedErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[REDACTED_TOKEN]').replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+  return redactSecretsInText(error instanceof Error ? error.message : String(error));
 }
 
 function errorTextOfEvent(event: AssistantMessageEvent | undefined): string | undefined {
@@ -135,6 +135,7 @@ async function runBalanced(
   const signal = options?.signal;
   let pushedTerminal = false;
   let lastSuppressedError: AssistantMessageEvent | undefined;
+  let lastLeaseError: unknown;
   let activeFinish: (() => Promise<void>) | undefined;
 
   // Keep the process-shared cooldown bounded: drop entries that have expired (and
@@ -178,11 +179,12 @@ async function runBalanced(
       });
     } catch (leaseError) {
       if (signal?.aborted) { forwardError(new Error('Request was aborted'), true); return { outcome: 'aborted', slot: forcedSlot ?? '(none)' }; }
-      // A forced slot that policy rejects (hard floor / broken) should not abort the
-      // whole turn — let rotation move on to the remaining accounts.
-      if (forcedSlot) return { outcome: 'rate-limited', slot: forcedSlot };
-      forwardError(leaseError);
-      return { outcome: 'other-error', slot: '(none)' };
+      // A lease failure (forced slot rejected, OR the round-0 auto-selected slot is
+      // broken) should not abort the whole turn — record the real error and let
+      // rotation move on to the remaining accounts. The error is surfaced by
+      // onExhausted only if every slot fails to lease.
+      lastLeaseError = leaseError;
+      return { outcome: 'lease-failed', slot: forcedSlot ?? '(none)' };
     }
 
     let finished = false;
@@ -264,9 +266,13 @@ async function runBalanced(
 
   const onExhausted = () => {
     if (pushedTerminal) return;
-    // Surface the real upstream rate-limit error (e.g. {"detail":"Rate limit exceeded"})
-    // rather than masking it with a synthesized message.
+    // Surface the most informative terminal error:
+    //  1. a real upstream rate-limit error (e.g. {"detail":"Rate limit exceeded"});
+    //  2. else the genuine lease-acquisition error (e.g. 'selected slot access token
+    //     refresh failed') so the user sees why, not a misleading rate-limit string;
+    //  3. else the synthesized rate-limit message as a last resort.
     if (lastSuppressedError) forwardTerminal(lastSuppressedError);
+    else if (lastLeaseError !== undefined) forwardError(lastLeaseError);
     else forwardError(new Error('All Codex accounts are rate limited — try again shortly.'));
   };
 

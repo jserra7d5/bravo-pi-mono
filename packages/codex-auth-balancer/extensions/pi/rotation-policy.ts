@@ -9,6 +9,7 @@ export type SlotInfo = { slot: string; primaryRemaining?: number };
 export type AttemptOutcome =
   | 'done'           // upstream succeeded; terminal event already forwarded to the user
   | 'rate-limited'   // 429 / usage limit BEFORE any content streamed; eligible to rotate
+  | 'lease-failed'   // token lease could not be acquired; rotate to another slot but do NOT cooldown
   | 'other-error'    // non-rate error before content; surface as-is
   | 'streamed-error' // error after content already streamed; must not rotate (would duplicate)
   | 'aborted';       // caller aborted
@@ -109,9 +110,13 @@ export async function runWithRotation(deps: RotationDeps): Promise<void> {
       const attempt = await deps.runAttempt(forced);
       triedThisRound.add(attempt.slot);
 
-      if (attempt.outcome !== 'rate-limited') return; // done / other-error / streamed-error / aborted
+      // Rotate on rate-limit (429) or lease-failed (could not acquire a token).
+      // Anything else (done / other-error / streamed-error / aborted) is terminal.
+      if (attempt.outcome !== 'rate-limited' && attempt.outcome !== 'lease-failed') return;
 
-      deps.cooldown.set(attempt.slot, deps.now() + deps.config.cooldownMs);
+      // Only a genuine rate-limit cools the slot down; a lease failure does not
+      // mean the account is over quota, so leave it eligible for later turns.
+      if (attempt.outcome === 'rate-limited') deps.cooldown.set(attempt.slot, deps.now() + deps.config.cooldownMs);
       const next = chooseNextSlot(await deps.listSlots(), triedThisRound, deps.cooldown, deps.now());
       if (next === undefined) break; // every slot tried this round
       if (deps.signalAborted()) return;

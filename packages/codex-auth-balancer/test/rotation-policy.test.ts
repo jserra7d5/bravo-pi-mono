@@ -122,6 +122,25 @@ test('runWithRotation: a 429 on the first slot rotates to the other slot', async
   assert.ok(h.cooldown.has('1'));             // failed slot put on cooldown
 });
 
+test('runWithRotation: a lease-failed on the first slot rotates to the next and succeeds', async () => {
+  const h = harness({ script: ['lease-failed', 'done'] });
+  await runWithRotation(h.deps);
+  assert.deepEqual(h.attempts, [undefined, '2'], 'auto first, then forced to the other slot');
+  assert.equal(h.exhausted, 0);
+  assert.ok(!h.cooldown.has('1'), 'a lease failure must NOT cooldown the slot (unlike a 429)');
+});
+
+test('runWithRotation: all slots lease-failed exhausts after covering every slot', async () => {
+  const h = harness({ script: ['lease-failed'] }); // always fails to lease
+  await runWithRotation(h.deps);
+  // 2 rounds x 2 slots = 4 attempts, one backoff sleep between rounds
+  assert.equal(h.attempts.length, 4);
+  assert.ok(h.attempts.includes('1') || h.attempts.includes(undefined), 'slot 1 covered (auto or forced)');
+  assert.ok(h.attempts.includes('2'), 'slot 2 covered');
+  assert.equal(h.exhausted, 1);
+  assert.equal(h.cooldown.size, 0, 'lease failures never cooldown any slot');
+});
+
 test('runWithRotation: when both slots rate-limit it backs off then exhausts', async () => {
   const h = harness({ script: ['rate-limited'] }); // always rate-limited
   await runWithRotation(h.deps);
