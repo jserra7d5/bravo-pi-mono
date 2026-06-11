@@ -4,7 +4,7 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
-import { ANTIGRAVITY_CLIENT_ID, ANTIGRAVITY_CLIENT_SECRET, ANTIGRAVITY_SCOPES, defaultAntigravityCredentialsPath } from './antigravity-client.js';
+import { ANTIGRAVITY_CLIENT_ID, antigravityClientSecret, ANTIGRAVITY_SCOPES, defaultAntigravityCredentialsPath } from './antigravity-client.js';
 
 const out = process.env.ANTIGRAVITY_CREDS_PATH ?? defaultAntigravityCredentialsPath();
 const port = process.env.PORT ? Number(process.env.PORT) : 17177;
@@ -27,7 +27,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const body = new URLSearchParams({
       client_id: ANTIGRAVITY_CLIENT_ID,
-      client_secret: ANTIGRAVITY_CLIENT_SECRET,
+      client_secret: antigravityClientSecret(),
       code,
       redirect_uri: redirectUri,
       grant_type: 'authorization_code',

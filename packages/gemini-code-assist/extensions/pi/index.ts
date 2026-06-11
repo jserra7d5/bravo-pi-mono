@@ -18,7 +18,7 @@ import {
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   ANTIGRAVITY_CLIENT_ID,
-  ANTIGRAVITY_CLIENT_SECRET,
+  antigravityClientSecret,
   ANTIGRAVITY_DEFAULT_MODEL,
   ANTIGRAVITY_ENDPOINT,
   ANTIGRAVITY_SCOPES,
@@ -290,7 +290,7 @@ async function login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> 
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: ANTIGRAVITY_CLIENT_ID, client_secret: ANTIGRAVITY_CLIENT_SECRET, code, redirect_uri: redirectUri, grant_type: "authorization_code" }),
+    body: new URLSearchParams({ client_id: ANTIGRAVITY_CLIENT_ID, client_secret: antigravityClientSecret(), code, redirect_uri: redirectUri, grant_type: "authorization_code" }),
   });
   if (!response.ok) throw new Error(`Antigravity OAuth exchange failed: ${await response.text()}`);
   const data = await response.json() as { access_token: string; refresh_token?: string; expires_in?: number };

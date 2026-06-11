@@ -4,11 +4,16 @@ import { dirname, join } from 'node:path';
 import { homedir, arch, platform } from 'node:os';
 import { extractTextFromSse, parseSseEvents, type SseEvent } from './sse.js';
 import { errorMessageForResponse } from './code-assist-client.js';
+import { resolveOAuthClientSecret } from './oauth-client.js';
 
 export const ANTIGRAVITY_ENDPOINT = 'https://daily-cloudcode-pa.googleapis.com';
 export const ANTIGRAVITY_DEFAULT_MODEL = 'gemini-3-flash-agent';
 export const ANTIGRAVITY_CLIENT_ID = '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com';
-export const ANTIGRAVITY_CLIENT_SECRET = '***REMOVED***';
+
+/** Resolve the Antigravity OAuth client secret (env override → ~/.gemini/oauth_client.json). Never hardcoded. */
+export function antigravityClientSecret(env: NodeJS.ProcessEnv = process.env): string {
+  return resolveOAuthClientSecret('antigravity', 'ANTIGRAVITY_CODE_ASSIST_CLIENT_SECRET', env);
+}
 export const ANTIGRAVITY_SCOPES = [
   'https://www.googleapis.com/auth/cloud-platform',
   'https://www.googleapis.com/auth/userinfo.email',
@@ -95,7 +100,7 @@ export async function refreshAntigravityCredentials(creds: AntigravityCredential
   if (!creds.refresh_token) throw new Error('Antigravity credentials have no refresh_token; rerun OAuth login.');
   const body = new URLSearchParams({
     client_id: process.env.ANTIGRAVITY_CODE_ASSIST_CLIENT_ID ?? ANTIGRAVITY_CLIENT_ID,
-    client_secret: process.env.ANTIGRAVITY_CODE_ASSIST_CLIENT_SECRET ?? ANTIGRAVITY_CLIENT_SECRET,
+    client_secret: antigravityClientSecret(),
     refresh_token: creds.refresh_token,
     grant_type: 'refresh_token',
     scope: ANTIGRAVITY_SCOPES.join(' '),

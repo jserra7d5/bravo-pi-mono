@@ -1,12 +1,17 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { resolveOAuthClientSecret } from './oauth-client.js';
 
 export const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 
 // Gemini CLI OAuth installed-app client constants/scopes used for Code Assist auth.
 export const GEMINI_CLI_OAUTH_CLIENT_ID = '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com';
-export const GEMINI_CLI_OAUTH_CLIENT_SECRET = '***REMOVED***';
+
+/** Resolve the Gemini CLI OAuth client secret (env override → ~/.gemini/oauth_client.json). Never hardcoded. */
+export function geminiCliClientSecret(env: NodeJS.ProcessEnv = process.env): string {
+  return resolveOAuthClientSecret('gemini-cli', 'GEMINI_CODE_ASSIST_CLIENT_SECRET', env);
+}
 export const GEMINI_CLI_OAUTH_SCOPES = [
   'https://www.googleapis.com/auth/cloud-platform',
   'https://www.googleapis.com/auth/userinfo.email',
@@ -47,7 +52,7 @@ export async function refreshCredentials(creds: OAuthCredentials, path: string, 
 
   const body = new URLSearchParams({
     client_id: process.env.GEMINI_CODE_ASSIST_CLIENT_ID ?? GEMINI_CLI_OAUTH_CLIENT_ID,
-    client_secret: process.env.GEMINI_CODE_ASSIST_CLIENT_SECRET ?? GEMINI_CLI_OAUTH_CLIENT_SECRET,
+    client_secret: geminiCliClientSecret(),
     refresh_token: creds.refresh_token,
     grant_type: 'refresh_token',
     scope: GEMINI_CLI_OAUTH_SCOPES.join(' '),
