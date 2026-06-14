@@ -4,6 +4,7 @@ import { isAccessTokenFresh } from '../src/credentials.js';
 import { buildHeaders, buildUserAgent, parseCustomHeaders } from '../src/headers.js';
 import { extractTextFromSse, parseSseEvents } from '../src/sse.js';
 import { assertSupportedSpikeModel, buildTextOnlyRequest, codeAssistUrl } from '../src/code-assist-client.js';
+import { antigravityUserAgent } from '../src/antigravity-client.js';
 import { collectUsageAndCacheMetrics, extractFunctionCallParts, extractModelContentFromSse, extractModelContentsFromSse, hasFunctionCall, hasThoughtSignature, hasThoughtSignatureOnFunctionCall, stripThoughtSignatures } from '../src/reasoning-continuity.js';
 
 test('parseCustomHeaders follows Gemini CLI semantics', () => {
@@ -34,6 +35,11 @@ test('buildHeaders preserves Gemini CLI precedence except protected Authorizatio
 test('buildUserAgent uses override version and model', () => {
   const ua = buildUserAgent('gemini-test', { GEMINI_CODE_ASSIST_USER_AGENT_VERSION: '1.2.3' });
   assert.match(ua, /^GeminiCLI\/1\.2\.3\/gemini-test \(.+; .+\)$/);
+});
+
+test('antigravityUserAgent defaults to current supported CLI version and supports override', () => {
+  assert.match(antigravityUserAgent({}), /^antigravity\/cli\/1\.0\.8 \w+\/\w+$/);
+  assert.match(antigravityUserAgent({ ANTIGRAVITY_CODE_ASSIST_USER_AGENT_VERSION: '9.9.9' }), /^antigravity\/cli\/9\.9\.9 \w+\/\w+$/);
 });
 
 test('isAccessTokenFresh requires token and more than refresh skew', () => {

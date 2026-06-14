@@ -132,6 +132,36 @@ Generation responses return:
 
 No server-side dollar cost, cumulative token ledger, or daily integer request usage endpoint has been found. The closest quota signal is model-level `quotaInfo.remainingFraction` and `resetTime`.
 
+## Troubleshooting: Antigravity CLI version gate
+
+If generation or Gemini scout subagents fail with:
+
+```text
+This version of Antigravity CLI is no longer supported. Please run "agy update", /logout, then log in again to continue using the product.
+```
+
+first suspect the request dialect / CLI version gate, not async-subagents. The provider sends an Antigravity-style `User-Agent` header; Antigravity may periodically reject older CLI versions even when OAuth, model registration, and `loadCodeAssist` still work.
+
+Triage sequence:
+
+1. Check current CLI metadata: `agy --version` and `agy changelog`.
+2. Compare against `antigravityUserAgent()` in `src/antigravity-client.ts`.
+3. Try a bounded provider smoke with an override, e.g. `ANTIGRAVITY_CODE_ASSIST_USER_AGENT_VERSION=<latest> pi ...`.
+4. If that works, bump the default UA version and keep the env override for emergency recovery.
+5. Revalidate both direct Pi and async scout paths.
+
+Relevant smoke commands:
+
+```bash
+pi --no-extensions \
+  -e $(pwd)/packages/gemini-code-assist/dist/extensions/pi/index.js \
+  --model antigravity-code-assist/gemini-3.5-flash \
+  --no-tools --no-session \
+  -p 'Reply exactly PI_PROVIDER_OK'
+```
+
+Then run a minimal `scout/gemini` async-subagent smoke; expected result body is a simple sentinel such as `GEMINI_SCOUT_SMOKE_OK`.
+
 ## Validation commands
 
 ```bash

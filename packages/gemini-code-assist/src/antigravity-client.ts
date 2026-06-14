@@ -69,9 +69,10 @@ export function antigravityStreamUrl(env: NodeJS.ProcessEnv = process.env): stri
   return `${antigravityMethodUrl('streamGenerateContent', env)}?alt=sse`;
 }
 
-export function antigravityUserAgent(): string {
+export function antigravityUserAgent(env: NodeJS.ProcessEnv = process.env): string {
   const goArch = arch() === 'x64' ? 'amd64' : arch();
-  return `antigravity/cli/1.0.0 ${platform()}/${goArch}`;
+  const version = env.ANTIGRAVITY_CODE_ASSIST_USER_AGENT_VERSION ?? '1.0.8';
+  return `antigravity/cli/${version} ${platform()}/${goArch}`;
 }
 
 export function buildAntigravityHeaders(accessToken: string): Record<string, string> {
