@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type Component } from "@earendil-works/pi-tui";
+import { renderClock } from "@bravo/render-clock";
 import { readFastTrackState, writeFastTrackState } from "../../src/fastTrack.js";
 import { findActiveTaskRuntimeBlockers, readTaskRuntimeState, writeTaskRuntimeState } from "../../src/taskRuntime.js";
 import { acquireRootSessionLease } from "../../src/leases.js";
@@ -9,7 +10,7 @@ import { createRootSession, readRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import type { RootSessionIdentity, RunIndexRecord } from "../../src/types.js";
 import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from "./compactionReminder.js";
-import { clearLiveWidget, updateLiveWidget } from "./liveWidget.js";
+import { clearLiveWidget, hasTimeDependentLiveWidgetItem, updateLiveWidget } from "./liveWidget.js";
 import { renderDiscoveredAgentCatalog } from "./agentCatalog.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
@@ -21,8 +22,9 @@ const OWNER_ID = `pi-${process.pid}-${Date.now().toString(36)}`;
 const TASK_RUNTIME_STATE_ENTRY_TYPE = "bravo-async-subagents-task-runtime-state";
 const roots = new Map<string, RootSessionIdentity>();
 
-let piTimer: ReturnType<typeof setInterval> | undefined;
-let leaseTimer: ReturnType<typeof setInterval> | undefined;
+let pollClockUnsubscribe: (() => void) | undefined;
+let visualClockUnsubscribe: (() => void) | undefined;
+let leaseTimer: (() => void) | undefined;
 let currentCtx: ExtensionContext | undefined;
 let compactionInProgress = false;
 let manualCompactionWakeupCooldownUntil = 0;
@@ -179,7 +181,7 @@ function reconcileTaskOwnedRuns(store: RunStore, rootSessionId: string | undefin
   try { new TaskStore(store).listTasks(rootSessionId, { reconcile: "nonblocking" }); } catch { /* best effort */ }
 }
 
-function tickPi(pi: ExtensionAPI, ctx: ExtensionContext): void {
+function tickAsyncTasksPoll(pi: ExtensionAPI, ctx: ExtensionContext): void {
   if (compactionInProgress) return;
   const cwd = cwdOf(ctx);
   const identity = ensureRoot(cwd, piSessionIdOf(ctx));
@@ -191,7 +193,40 @@ function tickPi(pi: ExtensionAPI, ctx: ExtensionContext): void {
   if (Date.now() >= manualCompactionWakeupCooldownUntil) {
     pollAndSendWakeups(pi, store, identity, records, { triggerTurn: true, tasksEnabled: enabled });
   }
-  if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, records, tasksEnabled: enabled });
+  maintainVisualClock(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, records, tasksEnabled: enabled });
+}
+
+function tickAsyncLiveWidget(ctx: ExtensionContext): void {
+  if (!ctx.hasUI) {
+    setVisualClockSubscribed(false);
+    return;
+  }
+  const cwd = cwdOf(ctx);
+  const identity = ensureRoot(cwd, piSessionIdOf(ctx));
+  const store = new RunStore({ cwd });
+  const enabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
+  const keepSubscribed = updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, tasksEnabled: enabled });
+  setVisualClockSubscribed(keepSubscribed);
+}
+
+function setVisualClockSubscribed(subscribed: boolean): void {
+  if (subscribed) {
+    if (visualClockUnsubscribe || !currentCtx?.hasUI) return;
+    visualClockUnsubscribe = renderClock.subscribe({
+      id: "async-live-widget",
+      intervalMs: 1_000,
+      reconcile: () => {
+        if (currentCtx) tickAsyncLiveWidget(currentCtx);
+      },
+    });
+    return;
+  }
+  visualClockUnsubscribe?.();
+  visualClockUnsubscribe = undefined;
+}
+
+function maintainVisualClock(ctx: ExtensionContext, input: Parameters<typeof hasTimeDependentLiveWidgetItem>[0]): void {
+  setVisualClockSubscribed(ctx.hasUI && hasTimeDependentLiveWidgetItem(input));
 }
 
 function isNamePackId(value: string): value is NamePackId {
@@ -235,10 +270,30 @@ function appendStickyTaskRuntimeState(pi: ExtensionAPI, enabled: boolean): void 
   pi.appendEntry(TASK_RUNTIME_STATE_ENTRY_TYPE, { enabled });
 }
 
+type StatusUi = { setStatus?: (key: string, value: string | undefined) => void };
+
+const lastStatusByUi = new WeakMap<StatusUi, Map<string, string | undefined>>();
+
+function setStatusIfChanged(ui: StatusUi | undefined, key: string, value: string | undefined): void {
+  if (!ui?.setStatus) return;
+  let lastStatus = lastStatusByUi.get(ui);
+  if (!lastStatus) {
+    lastStatus = new Map();
+    lastStatusByUi.set(ui, lastStatus);
+  }
+  if (lastStatus.has(key) && lastStatus.get(key) === value) return;
+  lastStatus.set(key, value);
+  ui.setStatus(key, value);
+}
+
 function setTasksStatusBadge(ctx: ExtensionContext | ExtensionCommandContext, enabled: boolean): void {
-  const ui = (ctx as { ui?: { setStatus?: (key: string, value: string | undefined) => void } }).ui;
-  ui?.setStatus?.("async-subagents-tasks", undefined);
-  ui?.setStatus?.("tasks", `tasks:${enabled ? "on" : "off"}`);
+  const ui = (ctx as { ui?: StatusUi }).ui;
+  setStatusIfChanged(ui, "tasks", `tasks:${enabled ? "on" : "off"}`);
+}
+
+// Test-only seam export for the status badge value-gating invariant.
+export function __setTasksStatusBadgeForTest(ctx: { ui?: StatusUi }, enabled: boolean): void {
+  setTasksStatusBadge(ctx as ExtensionContext | ExtensionCommandContext, enabled);
 }
 
 export async function applyActiveTaskTools(pi: ExtensionAPI, enabled: boolean): Promise<void> {
@@ -355,31 +410,52 @@ function registerNamePackCommand(pi: ExtensionAPI): void {
   });
 }
 
+type SubscribeOnlyClock = Pick<typeof renderClock, "subscribe">;
+
+function subscribeAsyncLease(clock: SubscribeOnlyClock, leaseBody: () => void | Promise<void>): () => void {
+  return clock.subscribe({
+    id: "async-lease",
+    intervalMs: 5_000,
+    reconcile: async () => leaseBody(),
+  });
+}
+
+// Test-only seam for the non-render async lease subscriber. The production
+// render clock owns cadence, in-flight suppression, and rejection capture.
+export function __subscribeAsyncLeaseForTest(clock: SubscribeOnlyClock, leaseBody: () => void | Promise<void>): () => void {
+  return subscribeAsyncLease(clock, leaseBody);
+}
+
 function startTimers(pi: ExtensionAPI, ctx: ExtensionContext): void {
   currentCtx = ctx;
   const cwd = cwdOf(ctx);
   const identity = ensureRoot(cwd, piSessionIdOf(ctx));
   acquireLease(cwd, identity);
-  tickPi(pi, ctx);
+  tickAsyncTasksPoll(pi, ctx);
+  if (ctx.hasUI) tickAsyncLiveWidget(ctx);
 
-  leaseTimer = setInterval(() => {
+  leaseTimer = subscribeAsyncLease(renderClock, async () => {
     const active = currentCtx;
     if (!active) return;
     const activeCwd = cwdOf(active);
     acquireLease(activeCwd, ensureRoot(activeCwd, piSessionIdOf(active)));
-  }, 5_000);
-  piTimer = setInterval(() => {
-    if (currentCtx) tickPi(pi, currentCtx);
-  }, 2_000);
-  leaseTimer.unref?.();
-  piTimer.unref?.();
+  });
+  pollClockUnsubscribe = renderClock.subscribe({
+    id: "async-tasks-poll",
+    intervalMs: 2_000,
+    reconcile: () => {
+      if (currentCtx) tickAsyncTasksPoll(pi, currentCtx);
+    },
+  });
 }
 
 function stopTimers(ctx?: ExtensionContext): void {
-  if (leaseTimer) clearInterval(leaseTimer);
-  if (piTimer) clearInterval(piTimer);
+  leaseTimer?.();
+  pollClockUnsubscribe?.();
+  visualClockUnsubscribe?.();
   leaseTimer = undefined;
-  piTimer = undefined;
+  pollClockUnsubscribe = undefined;
+  visualClockUnsubscribe = undefined;
   if (ctx) {
     clearLiveWidget(ctx);
   }

@@ -9,11 +9,14 @@
     "bravo-goals": "./dist/src/cli.js"
   },
   "scripts": {
+    "prebuild": "npm run build --workspace @bravo/render-clock",
     "build": "tsc -p tsconfig.json",
+    "precheck": "npm run build --workspace @bravo/render-clock",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js"
   },
   "dependencies": {
+    "@bravo/render-clock": "file:../render-clock",
     "yaml": "^2.8.1"
   },
   "devDependencies": {

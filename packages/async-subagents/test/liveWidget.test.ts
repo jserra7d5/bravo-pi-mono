@@ -1,12 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { clearLiveWidget, renderLiveWidget, updateLiveWidget } from "../extensions/pi/liveWidget.js";
+import { __resetRenderClockForTest, renderClock } from "@bravo/render-clock";
+import asyncSubagentsPiExtension from "../extensions/pi/index.js";
+import { clearLiveWidget, hasTimeDependentLiveWidgetItem, renderLiveWidget, updateLiveWidget } from "../extensions/pi/liveWidget.js";
 import { markWakeupHandled } from "../extensions/pi/wakeups.js";
 import { visWidth } from "../extensions/pi/renderers.js";
 import { RunStore } from "../src/runStore.js";
+import { readRootSession } from "../src/rootSession.js";
 import { TaskStore } from "../src/taskStore.js";
 import { resetTaskStateDerivationStatsForTest, taskStateDerivationStatsForTest } from "../src/taskState.js";
 import { createRunResult } from "../src/result.js";
@@ -30,6 +33,18 @@ function withFakeNow<T>(nowMs: number, fn: () => T): T {
 
 function stripAnsi(value: string): string {
   return value.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function visibleRunRowSegments(line: string): { withoutAge: string; summary: string; age: string } {
+  const visible = stripAnsi(line).slice(2, -1).trimEnd();
+  const ageMatch = visible.match(/  · \d{2}[smhd]$/);
+  assert.ok(ageMatch, `expected fixed-width age segment in "${visible}"`);
+  const age = ageMatch[0].trimStart();
+  const withoutAge = visible.slice(0, -ageMatch[0].length);
+  const glyphPrefix = "◐ ";
+  const glyphIndex = withoutAge.indexOf(glyphPrefix);
+  assert.notEqual(glyphIndex, -1, `expected running glyph in "${withoutAge}"`);
+  return { withoutAge, summary: withoutAge.slice(glyphIndex + glyphPrefix.length), age };
 }
 
 function workspace() {
@@ -191,7 +206,7 @@ test("live widget reconciles old dead cancel-request rows so they do not remain 
   assert.equal(w.store.readResult(runId), undefined);
 });
 
-test("live widget does not finalize non-cancel dead-pid rows from the render path", () => {
+test("live widget finalizes dead process-owned non-cancel rows from the render path", () => {
   const w = workspace();
   const old = isoAgo(10 * 60_000);
   const runId = addRun({
@@ -200,18 +215,91 @@ test("live widget does not finalize non-cancel dead-pid rows from the render pat
     state: "running",
     summary: "working",
     updatedAt: old,
-    pid: 999_999_999,
+    pid: 4242,
     processHealth: "alive",
   });
 
-  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
-  const body = lines.map(stripAnsi).join("\n");
-  assert.ok(body.includes("@Alex"));
+  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72, pidProber: () => "dead" });
+  assert.deepEqual(lines, []);
 
   const status = w.store.readStatus(runId);
-  assert.equal(status.state, "running");
+  assert.equal(status.state, "failed");
+  assert.equal(status.processHealth, "dead");
   assert.equal(status.resultReady, false);
+  assert.equal(status.updatedAt, old);
   assert.equal(w.store.readResult(runId), undefined);
+});
+
+test("live widget preserves unknown, alive, missing-pid, non-owned-state, and bad-timestamp cancel rows", () => {
+  const w = workspace();
+  const old = isoAgo(10 * 60_000);
+  const unknownRunId = addRun({ ...w, displayName: "Unknown", state: "running", summary: "eperm", updatedAt: old, pid: 111, processHealth: "alive" });
+  const aliveRunId = addRun({ ...w, displayName: "Alive", state: "running", summary: "alive", updatedAt: old, pid: 222, processHealth: "alive" });
+  const missingPidRunId = addRun({ ...w, displayName: "NoPid", state: "running", summary: "no pid", updatedAt: old, processHealth: "unknown" });
+  const pausedRunId = addRun({ ...w, displayName: "Paused", state: "paused", summary: "paused", updatedAt: old, pid: 333, processHealth: "alive" });
+  const badTimestampCancelRunId = addRun({
+    ...w,
+    displayName: "BadCancelTime",
+    state: "running",
+    summary: "Cancel requested: timestamp was not parseable",
+    updatedAt: "not-a-timestamp",
+    pid: 444,
+    processHealth: "alive",
+  });
+  const preservedRunIds = [unknownRunId, aliveRunId, missingPidRunId, pausedRunId, badTimestampCancelRunId];
+  const before = new Map(preservedRunIds.map((runId) => {
+    const status = w.store.readStatus(runId);
+    return [runId, { state: status.state, summary: status.summary, pid: status.pid, updatedAt: status.updatedAt }];
+  }));
+
+  const lines = renderLiveWidget({
+    store: w.store,
+    parentRunId: w.parentRunId,
+    width: 72,
+    pidProber: (pid) => pid === 111 ? "unknown" : pid === 222 ? "alive" : "dead",
+  });
+  const body = lines.map(stripAnsi).join("\n");
+  assert.ok(body.includes("@Unknown"));
+  assert.ok(body.includes("@Alive"));
+  assert.ok(body.includes("@NoPid"));
+  assert.ok(body.includes("@Paused"));
+  assert.ok(body.includes("@BadCancelTime"));
+
+  for (const runId of preservedRunIds) {
+    const status = w.store.readStatus(runId);
+    assert.deepEqual(
+      { state: status.state, summary: status.summary, pid: status.pid, updatedAt: status.updatedAt },
+      before.get(runId),
+      `expected ${runId} to be preserved unchanged`,
+    );
+  }
+});
+
+test("live widget retries dead process finalization after a filesystem write fault", () => {
+  const w = workspace();
+  const old = isoAgo(10 * 60_000);
+  const runId = addRun({
+    ...w,
+    displayName: "Retry",
+    state: "running",
+    summary: "working",
+    updatedAt: old,
+    pid: 5150,
+    processHealth: "alive",
+  });
+  const runDir = w.store.pathsFor({ runId }).runDir;
+
+  try {
+    chmodSync(runDir, 0o500);
+    assert.doesNotThrow(() => renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72, pidProber: () => "dead" }));
+    assert.equal(w.store.readStatus(runId).state, "running");
+  } finally {
+    chmodSync(runDir, 0o700);
+  }
+
+  const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72, pidProber: () => "dead" });
+  assert.deepEqual(lines, []);
+  assert.equal(w.store.readStatus(runId).state, "failed");
 });
 
 test("live widget leaves recent dead cancel requests for the supervisor to finalize", () => {
@@ -513,13 +601,13 @@ test("updateLiveWidget keeps pi TUI as this when requesting render after an upda
   assert.equal(tui.renderRequested, true);
 });
 
-test("updateLiveWidget suppresses render requests for age-only polling changes", () => {
+test("updateLiveWidget requests render only when visible rendered age changes", () => {
   const empty = workspace();
   updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
 
   const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
   const w = workspace();
-  addRun({ ...w, displayName: "Rex", state: "running", summary: "working", updatedAt: new Date(baseNow - 10_000).toISOString() });
+  addRun({ ...w, displayName: "Rex", state: "running", summary: "working", updatedAt: new Date(baseNow - 10_100).toISOString() });
 
   type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void; update?(input: Parameters<typeof updateLiveWidget>[1]): void };
   let captured: WidgetFactory | undefined;
@@ -532,11 +620,115 @@ test("updateLiveWidget suppresses render requests for age-only polling changes",
 
   let renders = 0;
   const component = captured!({ requestRender() { renders += 1; } }, undefined);
-  withFakeNow(baseNow + 2_000, () => {
+  component.render(72);
+  withFakeNow(baseNow + 800, () => {
+    component.update?.({ store: w.store, parentRunId: w.parentRunId });
+  });
+  assert.equal(renders, 0, "same rendered age bucket should not request render");
+
+  withFakeNow(baseNow + 1_000, () => {
+    component.update?.({ store: w.store, parentRunId: w.parentRunId });
+  });
+  assert.equal(renders, 1, "changed rendered age should request exactly once");
+});
+
+test("updateLiveWidget does not request render for age changes when layout drops age", () => {
+  const empty = workspace();
+  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
+
+  const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
+  const w = workspace();
+  addRun({ ...w, displayName: "Rex", state: "running", summary: "working", updatedAt: new Date(baseNow - 10_100).toISOString() });
+
+  type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void; update?(input: Parameters<typeof updateLiveWidget>[1]): void };
+  let captured: WidgetFactory | undefined;
+  const ctx = { ui: { setWidget(_key: string, value: unknown) { if (typeof value === "function") captured = value as WidgetFactory; } } };
+
+  withFakeNow(baseNow, () => {
+    updateLiveWidget(ctx, { store: w.store, parentRunId: w.parentRunId });
+  });
+  assert.ok(captured, "expected setWidget to receive a factory function");
+
+  let renders = 0;
+  const component = captured!({ requestRender() { renders += 1; } }, undefined);
+  component.render(53);
+  withFakeNow(baseNow + 1_000, () => {
     component.update?.({ store: w.store, parentRunId: w.parentRunId });
   });
 
   assert.equal(renders, 0);
+});
+
+test("live widget row dimensions stay stable across age boundary cutoffs", () => {
+  const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
+  for (const width of [54, 55, 70]) {
+    const w = workspace();
+    addRun({ ...w, displayName: "Rex", state: "running", summary: "summary near the truncation edge should not shift", updatedAt: new Date(baseNow - 59_900).toISOString() });
+
+    const before = withFakeNow(baseNow, () => renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width }));
+    const after = withFakeNow(baseNow + 200, () => renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width }));
+
+    assert.equal(after.length, before.length, `line count changed at width ${width}`);
+    assert.deepEqual(before.map(visWidth), before.map(() => width), `before widths at ${width}`);
+    assert.deepEqual(after.map(visWidth), after.map(() => width), `after widths at ${width}`);
+
+    const beforeRow = visibleRunRowSegments(before[1]);
+    const afterRow = visibleRunRowSegments(after[1]);
+    assert.equal(afterRow.summary, beforeRow.summary, `summary truncation shifted at width ${width}`);
+    assert.notEqual(afterRow.age, beforeRow.age, `age token did not cross bucket at width ${width}`);
+    assert.equal(afterRow.withoutAge, beforeRow.withoutAge, `non-age row content changed at width ${width}`);
+    assert.equal(visWidth(afterRow.age), visWidth(beforeRow.age), `age token width changed at width ${width}`);
+  }
+});
+
+test("visual render-clock subscriber unsubscribes when time-dependent rows expire while polling stays subscribed", async () => {
+  const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
+  let clockNow = baseNow;
+  __resetRenderClockForTest({
+    now: () => clockNow,
+    setInterval: () => ({ unref() {} }),
+    clearInterval() {},
+  });
+
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown | Promise<unknown>>();
+  const pi = {
+    on(name: string, handler: (event: unknown, ctx: unknown) => unknown | Promise<unknown>) { handlers.set(name, handler); },
+    registerCommand() {},
+    registerMessageRenderer() {},
+    registerTool() {},
+    sendMessage() {},
+    appendEntry() {},
+  };
+  asyncSubagentsPiExtension(pi as never);
+
+  const w = workspace();
+  const ctx = {
+    cwd: w.root,
+    hasUI: true,
+    sessionManager: { getSessionId: () => w.parentRunId, getBranch: () => [] },
+    ui: { setStatus() {}, setWidget() {}, notify() {} },
+  };
+
+  await withFakeNow(baseNow, () => handlers.get("session_start")?.({}, ctx) as Promise<unknown>);
+  const identity = readRootSession({ cwd: w.root, piSessionId: w.parentRunId });
+  assert.ok(identity, "expected session_start to create a root session");
+  addRun({ store: w.store, root: w.root, parentRunId: identity.parentRunId, displayName: "Done", state: "completed", summary: "done", updatedAt: new Date(baseNow - 10_000).toISOString() });
+  assert.equal(renderClock.subscriberCount(), 2, "poll and lease subscribers should be session-long before visible time-dependent work appears");
+
+  clockNow = baseNow + 2_000;
+  await withFakeNow(clockNow, () => {
+    renderClock.tick("manual");
+  });
+  assert.equal(renderClock.subscriberCount(), 3, "poll, lease, and visual subscribers should all be active");
+
+  clockNow = baseNow + 52_000;
+  await withFakeNow(clockNow, () => {
+    renderClock.tick("manual");
+  });
+  assert.equal(renderClock.subscriberCount(), 2, "visual subscriber should unsubscribe after terminal row expires");
+
+  await handlers.get("session_shutdown")?.({}, ctx);
+  assert.equal(renderClock.subscriberCount(), 0, "session shutdown should unsubscribe the poll and lease subscribers");
 });
 
 function terminalRunExpiryRenderTest(): void {
@@ -623,6 +815,21 @@ test("live widget component render output stays stable across fake time without 
   const later = withFakeNow(baseNow + 45_000, () => component.render(72));
 
   assert.deepEqual(later, initial);
+});
+
+test("task-only active live widget stays time-dependent", () => {
+  const w = workspace();
+  const taskStore = new TaskStore(w.store);
+  taskStore.createTasks(w.parentRunId, {
+    parentRunId: w.parentRunId,
+    tasks: [{ alias: "t1", title: "Task 1", description: "First" }]
+  });
+
+  assert.equal(hasTimeDependentLiveWidgetItem({
+    store: w.store,
+    parentRunId: w.parentRunId,
+    rootSessionId: w.parentRunId,
+  }), true);
 });
 
 test("live widget hides task rows when task runtime is disabled", () => {

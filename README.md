@@ -10,6 +10,7 @@ Personal pi/agent tooling monorepo.
 - `packages/bravo-goals` — Pi-first durable goal workspaces with task receipts, phase boundaries, HUD status, and Judge contracts.
 - `packages/caveman` — Pi extension for session-scoped terse response mode.
 - `packages/tui-enhancements` — Pi extension for Tab-triggered inline slash completion, multi-skill inline `/skill:name` expansion, and terminal link helpers (`/links`, `/copy-link`).
+- `packages/render-clock` — shared, change-aware render clock: one timer for all Pi-extension TUI surfaces (live age, HUD animation, footer countdown, I/O polls), with deterministic test injection.
 
 ## Tango quick start
 

@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type Component } from "@earendil-works/pi-tui";
+import { renderClock } from "@bravo/render-clock";
 import { join } from "node:path";
 import { registerGoalCommands } from "./commands.js";
 import { registerGoalValidationTools } from "./goal-validation.js";
@@ -16,7 +17,7 @@ import {
 } from "./messages.js";
 
 let currentCtx: ExtensionContext | undefined;
-let hudTimer: ReturnType<typeof setInterval> | undefined;
+let hudUnsubscribe: (() => void) | undefined;
 let refreshInFlight = false;
 let consecutiveFailures = 0;
 const watchdogNudges = new Map<string, number>();
@@ -51,15 +52,18 @@ function startHud(ctx: ExtensionContext): void {
 	stopHud();
 	currentCtx = ctx;
 	void refresh(ctx);
-	hudTimer = setInterval(() => {
-		if (currentCtx) void refresh(currentCtx);
-	}, 1_500);
-	hudTimer.unref?.();
+	hudUnsubscribe = renderClock.subscribe({
+		id: "bravo-goals-hud",
+		intervalMs: 1_500,
+		reconcile: () => {
+			if (currentCtx) return refresh(currentCtx);
+		},
+	});
 }
 
 function stopHud(): void {
-	if (hudTimer) clearInterval(hudTimer);
-	hudTimer = undefined;
+	hudUnsubscribe?.();
+	hudUnsubscribe = undefined;
 	if (currentCtx) clearHud(currentCtx);
 	currentCtx = undefined;
 	refreshInFlight = false;

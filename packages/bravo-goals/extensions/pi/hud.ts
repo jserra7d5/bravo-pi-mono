@@ -68,7 +68,7 @@ interface HudWidgetComponent {
 	render(width: number): string[];
 	invalidate(): void;
 	dispose?(): void;
-	update?(snapshot: HudSnapshot | undefined, frameIndex: number): void;
+	update?(snapshot: HudSnapshot | undefined, frameIndex: number, options?: { suppressRender?: boolean }): void;
 }
 
 interface HudWidgetSetter {
@@ -181,32 +181,62 @@ function normalizeInline(s: string): string {
 	return s.replace(/\t/g, "  ").replace(/\r?\n|\r/g, " ");
 }
 
+function isDefaultEmojiWide(cp: number): boolean {
+	return (
+		cp === 0x00a9 || cp === 0x00ae ||
+		cp === 0x203c || cp === 0x2049 ||
+		(cp >= 0x231a && cp <= 0x231b) ||
+		(cp >= 0x23e9 && cp <= 0x23ec) ||
+		cp === 0x23f0 || cp === 0x23f3 ||
+		(cp >= 0x25fd && cp <= 0x25fe) ||
+		(cp >= 0x2614 && cp <= 0x2615) ||
+		(cp >= 0x2648 && cp <= 0x2653) ||
+		cp === 0x267f || cp === 0x2693 || cp === 0x26a1 ||
+		(cp >= 0x26aa && cp <= 0x26ab) ||
+		(cp >= 0x26bd && cp <= 0x26be) ||
+		(cp >= 0x26c4 && cp <= 0x26c5) ||
+		cp === 0x26ce || cp === 0x26d4 || cp === 0x26ea ||
+		(cp >= 0x26f2 && cp <= 0x26f3) ||
+		cp === 0x26f5 || cp === 0x26fa || cp === 0x26fd ||
+		cp === 0x2705 || (cp >= 0x270a && cp <= 0x270b) ||
+		cp === 0x2728 || cp === 0x274c || cp === 0x274e ||
+		(cp >= 0x2753 && cp <= 0x2755) || cp === 0x2757 ||
+		(cp >= 0x2795 && cp <= 0x2797) || cp === 0x27b0 || cp === 0x27bf ||
+		(cp >= 0x2b1b && cp <= 0x2b1c) || cp === 0x2b50 || cp === 0x2b55 ||
+		(cp >= 0x1f000 && cp <= 0x1faff)
+	);
+}
+
+function canTakeEmojiPresentation(cp: number): boolean {
+	return (
+		isDefaultEmojiWide(cp) ||
+		(cp >= 0x2600 && cp <= 0x27bf) ||
+		(cp >= 0x2b00 && cp <= 0x2bff)
+	);
+}
+
 /**
  * Compute the visible terminal cell width of a string, stripping ANSI escape
  * sequences and accounting for variation selectors and wide (CJK/emoji) glyphs.
  */
 export function visWidth(s: string): number {
-	const stripped = normalizeInline(s).replace(/\x1b\[[0-9;]*m/g, "");
+	const chars = [...normalizeInline(s).replace(/\x1b\[[0-9;]*m/g, "")];
 	let w = 0;
-	for (const ch of stripped) {
-		const cp = ch.codePointAt(0) ?? 0;
+	for (let i = 0; i < chars.length; i++) {
+		const cp = chars[i]!.codePointAt(0) ?? 0;
 		if (cp === 0x200d || (cp >= 0xfe00 && cp <= 0xfe0f)) continue;
+		const nextCp = chars[i + 1]?.codePointAt(0);
 		if (
-			cp >= 0x1100 &&
-			(cp <= 0x115f ||
+			(nextCp === 0xfe0f && canTakeEmojiPresentation(cp)) ||
+			isDefaultEmojiWide(cp) ||
+			(cp >= 0x1100 && (
+				cp <= 0x115f ||
 				(cp >= 0x2e80 && cp <= 0x303e) ||
 				(cp >= 0x3041 && cp <= 0x33ff) ||
 				(cp >= 0x3400 && cp <= 0x4dbf) ||
 				(cp >= 0x4e00 && cp <= 0x9fff) ||
-				(cp >= 0xa000 && cp <= 0xa4cf) ||
-				(cp >= 0xac00 && cp <= 0xd7a3) ||
-				(cp >= 0xf900 && cp <= 0xfaff) ||
-				(cp >= 0xfe30 && cp <= 0xfe4f) ||
-				(cp >= 0xff00 && cp <= 0xff60) ||
-				(cp >= 0xffe0 && cp <= 0xffe6) ||
-				(cp >= 0x1f300 && cp <= 0x1f64f) ||
-				(cp >= 0x1f680 && cp <= 0x1f6ff) ||
-				(cp >= 0x1f900 && cp <= 0x1f9ff))
+				(cp >= 0xac00 && cp <= 0xd7a3)
+			))
 		) {
 			w += 2;
 		} else {
@@ -236,13 +266,17 @@ export function truncAnsi(str: string, maxCells: number): string {
 			i = end + 1;
 			continue;
 		}
-		const cp = str.codePointAt(i) ?? 0;
+		const cp = str.codePointAt(i);
+		if (cp === undefined) break;
 		const ch = String.fromCodePoint(cp);
-		const w = visWidth(ch);
+		const nextIndex = i + ch.length;
+		const nextCp = str.codePointAt(nextIndex);
+		const cluster = nextCp === 0xfe0f && canTakeEmojiPresentation(cp) ? ch + String.fromCodePoint(nextCp) : ch;
+		const w = visWidth(cluster);
 		if (cells + w > limit) break;
-		out += ch;
+		out += cluster;
 		cells += w;
-		i += ch.length;
+		i += cluster.length;
 	}
 	return out + "…" + C.reset;
 }
@@ -640,25 +674,26 @@ function hudRenderSignature(snapshot: HudSnapshot | undefined, frameIndex: numbe
 	});
 }
 
-function setHudStatus(ui: UiLike, value: string | undefined): void {
+function setHudStatus(ui: UiLike, value: string | undefined): boolean {
 	const existing = hudStatuses.get(ui);
-	if (value === existing?.value) return;
-	if (value === undefined && !existing) return;
+	if (value === existing?.value) return false;
+	if (value === undefined && !existing) return false;
 	if (value === undefined) hudStatuses.delete(ui);
 	else hudStatuses.set(ui, { value });
 	ui.setStatus?.(HUD_STATUS_KEY, value);
+	return true;
 }
 
 function createHudWidget(ui: UiLike, mount: HudWidgetMount, tui: unknown): HudWidgetComponent {
 	const requestRender = (tui as RenderRequester | undefined)?.requestRender;
 	const component: HudWidgetComponent = {
-		update(nextSnapshot: HudSnapshot | undefined, nextFrameIndex: number) {
+		update(nextSnapshot: HudSnapshot | undefined, nextFrameIndex: number, options?: { suppressRender?: boolean }) {
 			const nextSignature = hudRenderSignature(nextSnapshot, nextFrameIndex);
 			mount.snapshot = nextSnapshot;
 			mount.frameIndex = nextFrameIndex;
 			if (nextSignature !== mount.signature) {
 				mount.signature = nextSignature;
-				requestRender?.();
+				if (!options?.suppressRender) requestRender?.();
 			}
 		},
 		render(width: number) {
@@ -673,21 +708,24 @@ function createHudWidget(ui: UiLike, mount: HudWidgetMount, tui: unknown): HudWi
 	return component;
 }
 
-export async function updateHud(ctx: ContextLike): Promise<void> {
+export function updateHudSnapshot(ctx: ContextLike, snapshot: HudSnapshot | undefined, frameIndex: number): void {
 	const ui = ctx.ui;
 	if (!ui) return;
-	const snapshot = await snapshotForSession(ctx);
-	const frameIndex = nextJudgeFrame();
 	if (!snapshot) {
 		clearHud(ctx);
 		return;
 	}
-	setHudStatus(ui, renderStatusLine(snapshot, frameIndex));
+	const statusEmitted = setHudStatus(ui, renderStatusLine(snapshot, frameIndex));
 	const signature = hudRenderSignature(snapshot, frameIndex);
 	const existing = hudWidgetMounts.get(ui);
 	if (existing) {
 		if (existing.component) {
-			existing.component.update?.(snapshot, frameIndex);
+			// Safe coupling: setExtensionStatus/setStatus requests a full Pi render,
+			// which repaints this already-mounted widget from the snapshot/signature
+			// updated inside component.update. Suppressing the widget's own render
+			// request when the status line changed only avoids a redundant double
+			// render; it cannot drop a needed widget repaint.
+			existing.component.update?.(snapshot, frameIndex, { suppressRender: statusEmitted });
 		} else {
 			existing.snapshot = snapshot;
 			existing.frameIndex = frameIndex;
@@ -702,6 +740,11 @@ export async function updateHud(ctx: ContextLike): Promise<void> {
 		(tui) => createHudWidget(ui, mount, tui),
 		{ placement: "belowEditor" },
 	);
+}
+
+export async function updateHud(ctx: ContextLike): Promise<void> {
+	const snapshot = await snapshotForSession(ctx);
+	updateHudSnapshot(ctx, snapshot, nextJudgeFrame());
 }
 
 export function clearHud(ctx: ContextLike): void {

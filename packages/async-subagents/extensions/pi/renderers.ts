@@ -360,14 +360,18 @@ export function preview(value: string | undefined, max = 120): string {
   return singleLine.length <= max ? singleLine : `${singleLine.slice(0, Math.max(0, max - 1))}...`;
 }
 
+function fixedAge(value: number, unit: "s" | "m" | "h" | "d"): string {
+  return `${Math.min(99, Math.max(0, value)).toString().padStart(2, "0")}${unit}`;
+}
+
 function compactDuration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 60) return fixedAge(seconds, "s");
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60) return fixedAge(minutes, "m");
   const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
+  if (hours < 24) return fixedAge(hours, "h");
+  return fixedAge(Math.floor(hours / 24), "d");
 }
 
 function since(iso: string | undefined, now = Date.now()): string | undefined {
@@ -490,24 +494,30 @@ export function renderWidgetRow(width: number, ch: Chrome, r: WidgetRowInput): s
     return ch.rowBar(bar, glyph + " " + truncatedTask);
   }
 
-  const summary = urgent
-    ? ANSI.white + r.summary + ANSI.reset
-    : done
-      ? ANSI.dim + r.summary + ANSI.reset
-      : ANSI.gray + r.summary + ANSI.reset;
+  const summaryColor = urgent ? ANSI.white : done ? ANSI.dim : ANSI.gray;
   const age = r.age ? ANSI.dim + "· " + r.age + ANSI.reset : "";
 
   if (layout === "full") {
     const namePart = name + "  " + role;
     const COL = 22;
     const padCol = " ".repeat(Math.max(1, COL - visWidth(namePart)));
+    const leftWidth = COL + 2; // aligned name/role column + glyph and following space
+    const ageWidth = age ? 2 + visWidth(age) : 0;
+    const summaryWidth = Math.max(1, width - 4 - leftWidth - ageWidth);
+    const summary = summaryColor + truncAnsi(r.summary, summaryWidth) + ANSI.reset;
     return ch.rowBar(bar, namePart + padCol + glyph + " " + summary + (age ? "  " + age : ""));
   }
   if (layout === "no-role") {
     const COL = 12;
     const padCol = " ".repeat(Math.max(1, COL - visWidth(name)));
+    const leftWidth = COL + 2; // aligned name column + glyph and following space
+    const ageWidth = age ? 2 + visWidth(age) : 0;
+    const summaryWidth = Math.max(1, width - 4 - leftWidth - ageWidth);
+    const summary = summaryColor + truncAnsi(r.summary, summaryWidth) + ANSI.reset;
     return ch.rowBar(bar, name + padCol + glyph + " " + summary + (age ? "  " + age : ""));
   }
+  const summaryWidth = Math.max(1, width - 4 - visWidth(name) - 3);
+  const summary = summaryColor + truncAnsi(r.summary, summaryWidth) + ANSI.reset;
   return ch.rowBar(bar, name + " " + glyph + " " + summary);
 }
 

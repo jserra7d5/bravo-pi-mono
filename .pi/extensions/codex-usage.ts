@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { getUsage, ingestDirectPiLiveUsage, refreshUsage, resolveStateRoot } from "../../packages/codex-auth-balancer/src/index.ts";
 import type { CodexUsage, CodexAccountSlot, CodexAccountStatus, UsageWindow } from "../../packages/codex-auth-balancer/src/index.ts";
+import { renderClock, type RenderClock } from "../../packages/render-clock/src/index.ts";
 import { dirname, join, resolve } from "node:path";
 import type {
 	ExtensionAPI,
@@ -730,6 +731,40 @@ function codexWindowSemanticKey(window: UsageWindow | undefined): unknown {
 	};
 }
 
+export function footerResetBucketSignature(
+	usage: CodexUsage | undefined,
+	now = Date.now(),
+	balancedAffinitySlot?: string,
+): string {
+	return JSON.stringify(buildCodexState(usage, now, balancedAffinitySlot)) ?? "null";
+}
+
+export function applyFooterClockGate(
+	previousSignature: string | undefined,
+	nextSignature: string,
+	requestRender: () => void,
+): string {
+	if (previousSignature === undefined) return nextSignature;
+	if (nextSignature !== previousSignature) requestRender();
+	return nextSignature;
+}
+
+export function runFooterClockTick(
+	now: number,
+	deps: {
+		previousSignature: string | undefined;
+		usage: CodexUsage | undefined;
+		balancedAffinitySlot?: string;
+		requestRender: () => void;
+	},
+): string {
+	return applyFooterClockGate(
+		deps.previousSignature,
+		footerResetBucketSignature(deps.usage, now, deps.balancedAffinitySlot),
+		deps.requestRender,
+	);
+}
+
 function codexUsageSemanticKey(usage: CodexUsage | undefined, balancedAffinitySlot: string | undefined): string {
 	if (!usage) return "null";
 	if (usage.unavailable) return JSON.stringify({ unavailable: true, error: usage.error ?? null });
@@ -758,6 +793,7 @@ function collectState(
 	codexUsage: CodexUsage | undefined,
 	footerCost: FooterCostState,
 	balancedAffinitySlot: string | undefined,
+	now = Date.now(),
 ): FooterRenderState {
 	const usage = ctx.getContextUsage();
 	const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
@@ -795,14 +831,30 @@ function collectState(
 		ctxKnown,
 		cost: footerCost.totalCost > 0 || sub ? footerCost.totalCost : null,
 		sub,
-		codex: buildCodexState(codexUsage, Date.now(), isBalancedCodexModel(ctx.model) ? balancedAffinitySlot : undefined),
+		codex: buildCodexState(codexUsage, now, isBalancedCodexModel(ctx.model) ? balancedAffinitySlot : undefined),
 	};
 }
 
 // ── extension entry point ──────────────────────────────────────────────────
 
+type SubscribeOnlyClock = Pick<RenderClock, "subscribe">;
+
+function subscribeCodexUsagePoll(clock: SubscribeOnlyClock, pollBody: (now: number) => void | Promise<void>): () => void {
+	return clock.subscribe({
+		id: "codex-usage-poll",
+		intervalMs: POLL_INTERVAL_MS,
+		reconcile: async ({ now }) => pollBody(now),
+	});
+}
+
+// Test-only seam for the non-render usage poll subscriber. The production render
+// clock owns cadence, in-flight suppression, and rejection capture.
+export function __subscribeCodexUsagePollForTest(clock: SubscribeOnlyClock, pollBody: (now: number) => void | Promise<void>): () => void {
+	return subscribeCodexUsagePoll(clock, pollBody);
+}
+
 export default function codexUsageExtension(pi: ExtensionAPI): void {
-	let timer: ReturnType<typeof setInterval> | undefined;
+	let timer: (() => void) | undefined;
 	let lastRefresh = 0;
 	let inFlight = false;
 	let codexUsage: CodexUsage | undefined;
@@ -813,9 +865,15 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 	let tuiRef: TUI | undefined;
 	let footerInstalled = false;
 	let unsubBranch: (() => void) | undefined;
+	let unsubClock: (() => void) | undefined;
+	let lastRenderedResetSignature: string | undefined;
 
 	const requestRender = (): void => {
 		tuiRef?.requestRender();
+	};
+
+	const renderedResetSignature = (ctx: ExtensionContext, now = Date.now()): string => {
+		return footerResetBucketSignature(codexUsage, now, isBalancedCodexModel(ctx.model) ? balancedAffinitySlot : undefined);
 	};
 
 	const refreshBalancedAffinity = (ctx: ExtensionContext): void => {
@@ -826,30 +884,27 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 		footerCost = collectFooterCostState(ctx);
 	};
 
-	const refresh = (ctx: ExtensionContext, force = false): void => {
+	const refresh = async (ctx: ExtensionContext, force = false, now = Date.now()): Promise<void> => {
 		if (inFlight) return;
-		const now = Date.now();
 		if (!force && now - lastRefresh < MIN_REFRESH_MS) return;
 		lastRefresh = now;
 		inFlight = true;
-		void readCodexUsageCache()
-			.then((usage) => {
-				const previousSemanticKey = codexUsageSemanticKey(codexUsage, balancedAffinitySlot);
-				if (isCodexModel(ctx.model)) {
-					codexUsage = usage;
-				} else {
-					codexUsage = undefined;
-				}
-				refreshBalancedAffinity(ctx);
-				const nextSemanticKey = codexUsageSemanticKey(codexUsage, balancedAffinitySlot);
-				if (force || nextSemanticKey !== previousSemanticKey) requestRender();
-			})
-			.catch(() => {
-				// Silent: best-effort indicator, must not leak auth details.
-			})
-			.finally(() => {
-				inFlight = false;
-			});
+		try {
+			const usage = await readCodexUsageCache();
+			const previousSemanticKey = codexUsageSemanticKey(codexUsage, balancedAffinitySlot);
+			if (isCodexModel(ctx.model)) {
+				codexUsage = usage;
+			} else {
+				codexUsage = undefined;
+			}
+			refreshBalancedAffinity(ctx);
+			const nextSemanticKey = codexUsageSemanticKey(codexUsage, balancedAffinitySlot);
+			if (force || nextSemanticKey !== previousSemanticKey) requestRender();
+		} catch {
+			// Silent: best-effort indicator, must not leak auth details.
+		} finally {
+			inFlight = false;
+		}
 	};
 
 	const installFooter = (ctx: ExtensionContext): void => {
@@ -863,7 +918,9 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 
 			const component: Component & { dispose?(): void } = {
 				render(width: number): string[] {
-					const state = collectState(ctx, footerData, thinkingLevel, fastEnabled, codexUsage, footerCost, balancedAffinitySlot);
+					const now = Date.now();
+					lastRenderedResetSignature = renderedResetSignature(ctx, now);
+					const state = collectState(ctx, footerData, thinkingLevel, fastEnabled, codexUsage, footerCost, balancedAffinitySlot, now);
 					return renderFooter(state, Math.max(20, width));
 				},
 				invalidate(): void {
@@ -953,21 +1010,41 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		if (timer) clearInterval(timer);
+		timer?.();
+		timer = undefined;
+		if (unsubClock) {
+			unsubClock();
+			unsubClock = undefined;
+		}
+		lastRenderedResetSignature = undefined;
 		thinkingLevel = pi.getThinkingLevel?.() ?? "off";
 		fastEnabled = ctx.hasUI ? readFastModeSetting() : false;
 		recomputeFooterCost(ctx);
 		refreshBalancedAffinity(ctx);
 		installFooter(ctx);
-		refresh(ctx, true);
-		timer = setInterval(() => refresh(ctx), POLL_INTERVAL_MS);
+		if (ctx.hasUI) {
+			unsubClock = renderClock.subscribe({
+				id: "codex-footer",
+				intervalMs: 1000,
+				reconcile: ({ now }) => {
+					lastRenderedResetSignature = runFooterClockTick(now, {
+						previousSignature: lastRenderedResetSignature,
+						usage: codexUsage,
+						balancedAffinitySlot: isBalancedCodexModel(ctx.model) ? balancedAffinitySlot : undefined,
+						requestRender,
+					});
+				},
+			});
+		}
+		void refresh(ctx, true);
+		timer = subscribeCodexUsagePoll(renderClock, (now) => refresh(ctx, false, now));
 	});
 
 	pi.on("model_select", async (_event, ctx) => {
 		if (!isCodexModel(ctx.model)) codexUsage = undefined;
 		refreshBalancedAffinity(ctx);
 		requestRender();
-		refresh(ctx, true);
+		void refresh(ctx, true);
 	});
 
 	pi.on("thinking_level_select", async (event) => {
@@ -992,14 +1069,14 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 		recomputeFooterCost(ctx);
 		refreshBalancedAffinity(ctx);
 		requestRender();
-		refresh(ctx);
+		void refresh(ctx);
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
 		recomputeFooterCost(ctx);
 		refreshBalancedAffinity(ctx);
 		requestRender();
-		refresh(ctx, true);
+		void refresh(ctx, true);
 	});
 
 	pi.on("session_compact", async (_event, ctx) => {
@@ -1009,8 +1086,12 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		if (timer) {
-			clearInterval(timer);
+			timer();
 			timer = undefined;
+		}
+		if (unsubClock) {
+			unsubClock();
+			unsubClock = undefined;
 		}
 		if (unsubBranch) {
 			unsubBranch();

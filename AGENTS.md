@@ -11,6 +11,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `packages/bravo-goals/` contains the Bravo Goals CLI and Pi extension for workspace-level `.bravo/` goal workspaces, task receipts, phase boundaries, terminal HUD status, and Judge run contracts.
 - `packages/caveman/` contains the Pi extension for session-scoped terse response mode (`/caveman`, `/normal`).
 - `packages/tui-enhancements/` contains the Pi extension for Tab-triggered inline slash completion, multi-skill inline `/skill:name` expansion, and terminal link helpers (`/links`, `/copy-link`).
+- `packages/render-clock/` contains the shared, change-aware render clock: one process-wide `setInterval` that all Pi-extension TUI surfaces (live subagent age, bravo-goals HUD animation, the Codex footer countdown, and background I/O polls) subscribe to instead of owning their own timers. It is a dependency-free library with deterministic scheduler injection; read `packages/render-clock/README.md` and `docs/specs/render-clock-v1/design.md` before changing the clock contract, subscriber lifecycle, or which surfaces subscribe.
 - `packages/showcase/` contains the Pi extension package that registers the `showcase` tool for inline TUI rendering of requested file slices.
 - `packages/web-evidence-cache/` contains the Pi extension package for Brave-backed web discovery, temporary local web evidence artifacts, and SQLite FTS5 lookup; read `packages/web-evidence-cache/README.md` before changing web search, fetch safety, extraction, artifact, or lookup behavior.
 - `packages/source-search/` contains the Pi extension package for live TypeScript `ranked_search` tool-call discovery across arbitrary directories, using git-visible files when inside a checkout and filesystem walking otherwise. It has no index/cache/CLI/sidecar lifecycle, no workspace/repo registry, and no source-search skill; read `packages/source-search/README.md` and `docs/specs/source-search-v1/design.md` before changing live corpus selection, folder/root resolution, prompt guidance, or ranked-search behavior.
@@ -27,6 +28,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - Pi integrations should be thin adapters over reusable CLIs, not the only implementation surface.
 - For Pi integration/extension API reference, consult `/home/joe/Documents/misc/pi-mono` and `/home/joe/Documents/misc/pi-mono/AGENTS.md`.
 - Do not modify upstream pi source for package/extension work; use pi runtime extension/package mechanisms.
+- TUI surfaces that need a periodic tick (live age, animation frames, countdown refresh, background polls) should subscribe to `@bravo/render-clock` rather than starting their own `setInterval`. Visual subscribers must stay change-aware: only call `tui.requestRender()` when rendered output actually changes (use fixed-width fields so a tick is one width-stable line), and never poke `ui.setStatus`/`requestRender` on an unchanged value. Background I/O subscribers are non-render and rely on the clock's async overlap guard.
 - Async subagents are intentionally Pi-only and async-first in v1. Keep parent-child messaging, wait/result semantics, prompt isolation, and durable run files simple; do not reintroduce Tango-style chains, DAGs, peer intercom, worktree orchestration, or cross-harness adapters.
 - Async subagent built-ins should use fully-qualified `openai-codex/...` model ids so child Pi processes use Codex OAuth and do not drift to another provider.
 - Treat project-local executable extension code as trusted-code only.
@@ -45,6 +47,8 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `npm test --workspace @bravo/async-subagents` — build and run async subagents tests.
 - `npm run check --workspace @bravo/caveman` — type-check the Caveman Pi extension.
 - `npm run check --workspace @bravo/tui-enhancements` — type-check the TUI Enhancements Pi extension.
+- `npm run check --workspace @bravo/render-clock` — type-check the shared render clock.
+- `npm test --workspace @bravo/render-clock` — build and run the render clock tests.
 - `npm run check --workspace @bravo/gemini-code-assist` — type-check the Gemini/Antigravity Code Assist provider.
 - `npm test --workspace @bravo/gemini-code-assist` — build and run Gemini/Antigravity Code Assist tests.
 - `npm run check --workspace @bravo/pi-extension-background-bash` — type-check the Background Bash Pi extension.

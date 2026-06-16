@@ -62,10 +62,15 @@ Install or load the package as a Pi extension, then use:
 ```
 
 The extension renders a footer status and a below-editor HUD from
-`state.yaml` plus `.bravo/runtime/active-goals.yaml`. Idle-recovery prompts are
-also gated by fresh durable state: the watchdog re-reads `state.yaml` before
-sending and suppresses recovery if the active task has advanced or the goal is
-complete.
+`state.yaml` plus `.bravo/runtime/active-goals.yaml`. The HUD animation runs on
+the shared `@bravo/render-clock` (not its own `setInterval`) and stays
+change-aware via the existing `setHudStatus` value-diff and `refreshInFlight`
+guard, so an unchanged judge frame requests no render. HUD width math uses the
+canonical emoji-aware `visWidth` (variation-selector lookahead + wide ranges) so
+glyphs like `⚠️`/`✅` are measured as 2 cells and the chrome never emits an
+over-wide line. Idle-recovery prompts are also gated by fresh durable state: the
+watchdog re-reads `state.yaml` before sending and suppresses recovery if the
+active task has advanced or the goal is complete.
 
 `/goal prep` is interactive. It creates a draft goal workspace, then queues a
 prep prompt that tells the agent to read the placeholders and talk with you

@@ -29,7 +29,7 @@ import {
 import {
 	identitySlot as asyncSubagentsIdentitySlot,
 	identityColor as asyncSubagentsIdentityColor,
-} from "../../../packages/async-subagents/dist/extensions/pi/renderers.js";
+} from "../../../packages/async-subagents/extensions/pi/renderers.ts";
 
 function makeState(overrides: Partial<FooterRenderState> = {}): FooterRenderState {
 	return {

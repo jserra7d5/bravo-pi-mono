@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-	visWidth,
+	visWidth as hudVisWidth,
 	truncAnsi,
 	normalizeGoalState,
 	pickLayout,
@@ -11,6 +11,40 @@ import {
 	type GoalStateView,
 	type HudSnapshot,
 } from "../extensions/pi/hud.js";
+
+const visWidth = hudVisWidth;
+
+function referenceVisWidth(input: string): number {
+	let width = 0;
+	const codePoints = Array.from(input);
+	for (let i = 0; i < codePoints.length; i++) {
+		const ch = codePoints[i] ?? "";
+		const cp = ch.codePointAt(0) ?? 0;
+		if (ch === "\x1b") {
+			while (i + 1 < codePoints.length && !/[A-Za-z]/.test(codePoints[i + 1] ?? "")) i++;
+			if (i + 1 < codePoints.length) i++;
+			continue;
+		}
+		if (cp === 0x200d || (cp >= 0xfe00 && cp <= 0xfe0f)) continue;
+		if (codePoints[i + 1]?.codePointAt(0) === 0xfe0f || isReferenceWide(cp)) width += 2;
+		else width += 1;
+	}
+	return width;
+}
+
+function isReferenceWide(cp: number): boolean {
+	return (
+		(cp >= 0x1f000 && cp <= 0x1faff) ||
+		(cp >= 0x2600 && cp <= 0x27bf && cp !== 0x2713 && cp !== 0x26a0) ||
+		(cp >= 0x2e80 && cp <= 0xa4cf) ||
+		(cp >= 0xac00 && cp <= 0xd7a3) ||
+		(cp >= 0xf900 && cp <= 0xfaff) ||
+		(cp >= 0xfe10 && cp <= 0xfe19) ||
+		(cp >= 0xfe30 && cp <= 0xfe6f) ||
+		(cp >= 0xff00 && cp <= 0xff60) ||
+		(cp >= 0xffe0 && cp <= 0xffe6)
+	);
+}
 
 // ---- visWidth ---------------------------------------------------------------
 
@@ -24,25 +58,24 @@ test("visWidth: ANSI escape sequences contribute 0 cells", () => {
 	assert.equal(visWidth(colored), 5);
 });
 
-test("visWidth: emoji counts 2 cells", () => {
+test("visWidth: emoji and emoji-presentation glyphs count expected cells", () => {
 	assert.equal(visWidth("🚀"), 2);
 	assert.equal(visWidth("🛰️"), 2); // satellite + variation selector — VS contributes 0
+	assert.equal(visWidth("✅"), 2);
+	assert.equal(visWidth("✓"), 1);
+	assert.equal(visWidth("⚠"), 1);
+	assert.equal(visWidth("⚠️"), 2);
 });
 
-test("visWidth: variation selector (U+FE0F) does not add cells", () => {
-	// U+2714 (check mark) + U+FE0F (variation selector-16) = 2 chars, but 1 cell
-	const withVS = "✔️";
-	assert.equal(visWidth(withVS), 1);
+test("visWidth: variation selectors contribute 0 cells while VS16 can force emoji width", () => {
+	assert.equal(visWidth("\ufe0f"), 0);
+	assert.equal(visWidth("✔️"), 2);
 });
 
-test("visWidth: ZWJ sequences do not over-count", () => {
+test("visWidth: ZWJ sequences do not count joiners as cells", () => {
 	// Family emoji: 👨‍👩‍👧 = 5 code points (3 emoji + 2 ZWJ)
-	// Should count as 2 cells (a single emoji glyph slot), not 10
 	const family = "\u{1F468}‍\u{1F469}‍\u{1F467}";
-	const w = visWidth(family);
-	// Family emoji renders as 2 cells wide in most terminals
-	assert.ok(w <= 6, `expected <= 6 cells, got ${w}`);
-	// ZWJs should not add cells
+	assert.equal(visWidth(family), 6);
 	assert.equal(visWidth("‍"), 0);
 });
 
@@ -55,6 +88,18 @@ test("visWidth: mixed ANSI + emoji + ASCII", () => {
 	// "\x1b[0m" is 0 cells, "🚀" is 2, " hello" is 6
 	const s = "\x1b[0m🚀 hello";
 	assert.equal(visWidth(s), 8);
+});
+
+test("reference width oracle covers glyphs that affect HUD chrome", () => {
+	assert.equal(referenceVisWidth("✅"), 2);
+	assert.equal(referenceVisWidth("✓"), 1);
+	assert.equal(referenceVisWidth("⚠"), 1);
+	assert.equal(referenceVisWidth("⚠️"), 2);
+	assert.equal(referenceVisWidth("‍"), 0);
+	assert.equal(referenceVisWidth("汉"), 2);
+	for (const glyph of ["✅", "✓", "⚠", "⚠️", "‍", "汉"]) {
+		assert.equal(hudVisWidth(glyph), referenceVisWidth(glyph), `${glyph} width should match oracle`);
+	}
 });
 
 // ---- truncAnsi --------------------------------------------------------------
@@ -412,6 +457,44 @@ test("renderHud leaves room for Pi string-widget horizontal padding", () => {
 		}
 	} finally {
 		Object.defineProperty(process.stdout, "columns", { configurable: true, value: original });
+	}
+});
+
+test("HUD chrome holds width with emoji-presentation glyphs at responsive boundaries", () => {
+	const snap = makeSnapshot({
+		goal: {
+			id: "emoji-boundary",
+			title: "Emoji boundary ⚠️ ✅ with a long title to force truncation",
+			status: "active",
+		},
+		active_task: "task-emoji",
+		tasks: [
+			{
+				id: "task-emoji",
+				title: "Investigate ⚠️ and ship ✅ without overflowing HUD chrome",
+				status: "blocked",
+			},
+		],
+		judge: { last_verdict: "none", active: false },
+		progress: { completed_tasks: 0, total_tasks: 1 },
+	});
+
+	for (const width of [79, 80, 54, 55]) {
+		const lines = pickLayout(snap.state, width);
+		assert.ok(lines.length > 0, `expected lines at width ${width}`);
+		for (const line of lines) {
+			const oracleWidth = referenceVisWidth(line);
+			const hudWidth = hudVisWidth(line);
+			assert.ok(
+				oracleWidth <= width,
+				`line has oracle width ${oracleWidth}, expected <= ${width}: ${JSON.stringify(line)}`,
+			);
+			assert.equal(
+				hudWidth,
+				oracleWidth,
+				`HUD width ${hudWidth} should match oracle width ${oracleWidth}: ${JSON.stringify(line)}`,
+			);
+		}
 	}
 });
 

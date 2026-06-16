@@ -18,6 +18,9 @@ export interface LiveWidgetSnapshot {
   visibleTasks: TaskRecord[];
 }
 
+export type PidProbeResult = "alive" | "dead" | "unknown";
+export type PidProber = (pid: number) => PidProbeResult;
+
 export interface LiveWidgetInput {
   store: RunStore;
   parentRunId?: string;
@@ -28,11 +31,13 @@ export interface LiveWidgetInput {
   snapshot?: LiveWidgetSnapshot;
   fastTrackArmed?: boolean;
   tasksEnabled?: boolean;
+  pidProber?: PidProber;
   // Optional explicit width — when omitted (the production path), pi tells the
   // widget its real container width via the Component.render(width) callback.
   // This is required: pi's widget container is narrower than the full terminal,
   // so picking `process.stdout.columns` would overflow and wrap the chrome.
   width?: number;
+  renderNow?: number;
 }
 
 const TERMINAL_STATES = new Set(["completed", "failed", "cancelled", "expired"]);
@@ -80,26 +85,40 @@ function rowWithCurrentResultReady(input: LiveWidgetInput, row: RunSummaryRow): 
   return { ...row, resultReady: false };
 }
 
-function processHealth(pid: number | undefined): "unknown" | "alive" | "dead" {
-  if (!pid) return "unknown";
+function defaultPidProber(pid: number): PidProbeResult {
+  if (!Number.isFinite(pid) || pid <= 0) return "unknown";
   try {
     process.kill(pid, 0);
     return "alive";
-  } catch {
-    return "dead";
+  } catch (error) {
+    const code = (error as { code?: unknown } | undefined)?.code;
+    if (code === "ESRCH") return "dead";
+    return "unknown";
   }
 }
 
+function processHealth(pid: number | undefined, pidProber: PidProber = defaultPidProber): PidProbeResult {
+  if (!pid || !Number.isFinite(pid) || pid <= 0) return "unknown";
+  try {
+    return pidProber(pid);
+  } catch {
+    return "unknown";
+  }
+}
+
+function isCancelRequestRow(row: RunSummaryRow): boolean {
+  return row.summary?.startsWith("Cancel requested:") === true;
+}
+
 function cancelRequestAtMs(row: RunSummaryRow): number | undefined {
-  if (!row.summary?.startsWith("Cancel requested:")) return undefined;
   const rowUpdatedAtMs = Date.parse(row.updatedAt);
   return Number.isFinite(rowUpdatedAtMs) ? rowUpdatedAtMs : undefined;
 }
 
-function reconcileStaleCancelledLiveRow(input: LiveWidgetInput, row: RunSummaryRow, now: number, terminalCompletedVisibleMs: number): RunSummaryRow {
+const PROCESS_OWNED_ACTIVE_STATES = new Set(["running", "idle", "stalled"]);
+
+function reconcileDeadProcessOwnedLiveRow(input: LiveWidgetInput, row: RunSummaryRow, now: number, terminalCompletedVisibleMs: number): RunSummaryRow {
   if (isTerminal(row)) return row;
-  const cancelAtMs = cancelRequestAtMs(row);
-  if (cancelAtMs === undefined || now - cancelAtMs <= terminalCompletedVisibleMs) return row;
 
   let status;
   try {
@@ -107,15 +126,34 @@ function reconcileStaleCancelledLiveRow(input: LiveWidgetInput, row: RunSummaryR
   } catch {
     return row;
   }
-  if (TERMINAL_STATES.has(status.state) || !status.pid || processHealth(status.pid) !== "dead") return row;
 
-  const summary = "Cancelled after recorded child process exited before supervisor finalization";
-  const error = { code: "PARENT_CANCELLED_PROCESS_EXITED", message: summary, details: { pid: status.pid, processHealth: "dead" } };
+  if (TERMINAL_STATES.has(status.state)) return row;
+
+  const health = processHealth(status.pid, input.pidProber);
+  const isCancelRequest = isCancelRequestRow(row);
+  const cancelAtMs = isCancelRequest ? cancelRequestAtMs(row) : undefined;
+  const staleCancelRequest = cancelAtMs !== undefined && now - cancelAtMs > terminalCompletedVisibleMs;
+
+  if (isCancelRequest) {
+    if (health !== "dead" || cancelAtMs === undefined || !staleCancelRequest) return row;
+  } else if (!PROCESS_OWNED_ACTIVE_STATES.has(status.state) || health !== "dead") {
+    return row;
+  }
+
+  const finalState = isCancelRequest ? "cancelled" : "failed";
+  const summary = isCancelRequest
+    ? "Cancelled after recorded child process exited before supervisor finalization"
+    : "Failed after recorded child process exited before supervisor finalization";
+  const error = {
+    code: isCancelRequest ? "PARENT_CANCELLED_PROCESS_EXITED" : "PARENT_PROCESS_EXITED_WITHOUT_TERMINAL_STATUS",
+    message: summary,
+    details: { pid: status.pid, processHealth: "dead" },
+  };
 
   try {
     input.store.writeStatus({
       ...updateRunStatus(status, {
-        state: "cancelled",
+        state: finalState,
         writerRole: "parent-runtime",
         processHealth: "dead",
         resultReady: false,
@@ -128,7 +166,7 @@ function reconcileStaleCancelledLiveRow(input: LiveWidgetInput, row: RunSummaryR
     const updated = input.store.readRunSummary(row.runId);
     return {
       ...row,
-      state: "cancelled",
+      state: finalState,
       summary: updated?.summary ?? summary,
       resultReady: false,
       updatedAt: updated?.updatedAt ?? row.updatedAt,
@@ -163,18 +201,20 @@ function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVis
     records: input.records,
   });
   const rows = snapshot.rows
-    .map((row) => reconcileStaleCancelledLiveRow(input, row, now, terminalCompletedVisibleMs))
+    .map((row) => reconcileDeadProcessOwnedLiveRow(input, row, now, terminalCompletedVisibleMs))
     .map((row) => rowWithCurrentResultReady(input, row))
     .filter((row) => visible(row, now, terminalCompletedVisibleMs))
     .sort((a, b) => rowPriority(a) - rowPriority(b) || b.updatedAt.localeCompare(a.updatedAt));
   return { rows, totalCost: totalCostForRows(rows) };
 }
 
+const TASK_TERMINAL_GRACE_MS = 30_000;
+
 function visibleTasksFor(tasks: TaskRecord[], taskStates: Map<string, DerivedTaskState>, now: number): TaskRecord[] {
   // Keep just-completed/failed/cancelled tasks visible briefly so a plan that
   // finishes leaves on-screen evidence instead of vanishing the instant the last
   // task lands. Kept in sync with the same grace in renderers.renderWidgetCard.
-  const graceMs = 30_000;
+  const graceMs = TASK_TERMINAL_GRACE_MS;
   return tasks.filter(t => {
     const state = taskStates.get(t.id) ?? t.status;
     if (state === "completed" || state === "failed" || state === "cancelled") {
@@ -271,6 +311,22 @@ function hasVisibleRows(snapshot: LiveWidgetSnapshot, fastTrackArmed = false): b
   return fastTrackArmed || snapshot.rows.length > 0 || snapshot.visibleTasks.length > 0;
 }
 
+function hasTimeDependentSnapshotItem(snapshot: LiveWidgetSnapshot, now: number): boolean {
+  if (snapshot.rows.length > 0) return true;
+  return snapshot.visibleTasks.some((task) => {
+    const state = snapshot.taskStates.get(task.id) ?? task.status;
+    if (state !== "completed" && state !== "failed" && state !== "cancelled") return true;
+    const updatedAtMs = Date.parse(task.updatedAt);
+    return Number.isFinite(updatedAtMs) && now - updatedAtMs <= TASK_TERMINAL_GRACE_MS;
+  });
+}
+
+export function hasTimeDependentLiveWidgetItem(input: LiveWidgetInput, now = Date.now()): boolean {
+  const snapshot = input.snapshot ?? prepareLiveWidgetSnapshot(input, now);
+  const fastTrackArmed = input.fastTrackArmed ?? false;
+  return hasVisibleRows(snapshot, fastTrackArmed) && hasTimeDependentSnapshotItem(snapshot, now);
+}
+
 function liveWidgetRenderSignature(input: LiveWidgetInput, snapshot: LiveWidgetSnapshot): string {
   const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
   const rows = snapshot.rows.map((row) => {
@@ -341,30 +397,45 @@ interface RenderRequester {
   requestRender?: () => void;
 }
 
+function sameLines(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((line, index) => line === b[index]);
+}
+
 let mountedWidget: LiveWidgetComponent | undefined;
 const clearedWidgetContexts = new WeakSet<object>();
 
 function createLiveWidgetComponent(input: LiveWidgetInput, tui: unknown): LiveWidgetComponent {
-  const initialNow = Date.now();
+  const initialNow = input.renderNow ?? Date.now();
   const initialSnapshot = input.snapshot ?? prepareLiveWidgetSnapshot(input, initialNow);
   let currentInput = { ...input, snapshot: initialSnapshot };
   let currentRenderNow = initialNow;
   let currentSignature = liveWidgetRenderSignature(input, initialSnapshot);
+  let lastRenderedWidth: number | undefined;
+  let lastRenderedLines: string[] | undefined;
   const renderHost = tui as RenderRequester | undefined;
   const component: LiveWidgetComponent = {
     update(nextInput: LiveWidgetInput) {
-      const nextNow = Date.now();
+      const nextNow = nextInput.renderNow ?? Date.now();
       const nextSnapshot = nextInput.snapshot ?? prepareLiveWidgetSnapshot(nextInput, nextNow);
       const nextSignature = liveWidgetRenderSignature(nextInput, nextSnapshot);
-      if (nextSignature !== currentSignature) {
+      const nextCurrentInput = { ...nextInput, snapshot: nextSnapshot };
+      const structurallyChanged = nextSignature !== currentSignature;
+      const renderedChanged = !structurallyChanged && lastRenderedWidth !== undefined && lastRenderedLines !== undefined
+        ? !sameLines(lastRenderedLines, renderAt(nextCurrentInput, lastRenderedWidth, nextNow))
+        : false;
+
+      if (structurallyChanged || renderedChanged) {
         currentSignature = nextSignature;
-        currentInput = { ...nextInput, snapshot: nextSnapshot };
+        currentInput = nextCurrentInput;
         currentRenderNow = nextNow;
         renderHost?.requestRender?.();
       }
     },
     render(width: number) {
-      return renderAt(currentInput, width, currentRenderNow);
+      const lines = renderAt(currentInput, width, currentRenderNow);
+      lastRenderedWidth = width;
+      lastRenderedLines = lines.slice();
+      return lines;
     },
     invalidate() {},
     dispose() {
@@ -392,21 +463,23 @@ export function clearLiveWidget(ctx: unknown): void {
   ui.setWidget("async-subagents-live", undefined, { placement: "belowEditor" });
 }
 
-export function updateLiveWidget(ctx: unknown, input: LiveWidgetInput): void {
+export function updateLiveWidget(ctx: unknown, input: LiveWidgetInput): boolean {
   const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
-  if (!ui?.setWidget) return;
-  const snapshot = input.snapshot ?? prepareLiveWidgetSnapshot(input, Date.now());
+  if (!ui?.setWidget) return false;
+  const now = Date.now();
+  const snapshot = input.snapshot ?? prepareLiveWidgetSnapshot(input, now);
   const fastTrackArmed = input.fastTrackArmed ?? (input.rootSessionId ? readFastTrackState(input.store.runRoot, input.rootSessionId).enabled : false);
-  const snapshotInput = { ...input, snapshot, fastTrackArmed };
+  const snapshotInput = { ...input, snapshot, fastTrackArmed, renderNow: now };
+  const timeDependent = hasVisibleRows(snapshot, fastTrackArmed) && hasTimeDependentSnapshotItem(snapshot, now);
   // Use the precomputed snapshot so the visibility probe stays on the tick/update
   // path and the pi Component.render(width) callback performs no filesystem I/O.
   if (!hasVisibleRows(snapshot, fastTrackArmed)) {
     clearLiveWidget(ctx);
-    return;
+    return false;
   }
   if (mountedWidget) {
     mountedWidget.update?.(snapshotInput);
-    return;
+    return timeDependent;
   }
   if (typeof ctx === "object" && ctx !== null) clearedWidgetContexts.delete(ctx);
   ui.setWidget(
@@ -417,4 +490,5 @@ export function updateLiveWidget(ctx: unknown, input: LiveWidgetInput): void {
     },
     { placement: "belowEditor" },
   );
+  return timeDependent;
 }

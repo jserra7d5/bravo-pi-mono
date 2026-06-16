@@ -21,7 +21,7 @@ credentials** — the whole suite is safe to run on any dev box. The "gates" are
 
 | Bucket | Meaning | Packages |
 |--------|---------|----------|
-| `pure-unit` | No IO of any kind; pure functions / renderers. Fastest tier. | `gemini-code-assist`, `showcase` (whole pkg); plus most files in `async-subagents`, `bravo-goals`, `monitor`, `web-evidence-cache` |
+| `pure-unit` | No IO of any kind; pure functions / renderers. Fastest tier. | `gemini-code-assist`, `showcase`, `render-clock` (whole pkg); plus most files in `async-subagents`, `bravo-goals`, `monitor`, `web-evidence-cache` |
 | `needs-fs` | Reads/writes real filesystem (tmp dirs, fixture files). Safe anywhere. | most packages, including `dynamic-skills` |
 | `needs-subprocess` | Spawns a local binary — `process.execPath` (node) running the package CLI, or `git` / `ps` / `sqlite3`. Needs those tools on PATH. | `codex-auth-balancer`, `loom`, `monitor`, `source-search`, `tango` |
 | `needs-db` | In-process sqlite (`node:sqlite` FTS5) or the `sqlite3` CLI on a real db file. No external DB server. | `web-evidence-cache` (sqlite.test.ts), `loom` |
@@ -38,8 +38,8 @@ or string literals — see the categorization report.
 | One package (build + test) | `npm run test --workspace @bravo/<pkg>` |
 | One package, skip rebuild (dist already built) | `node --test packages/<pkg>/dist/test/*.test.js` |
 | tango (flat dist layout) | `node --test packages/tango/dist/*.test.js` |
-| Fast tier only (pure-unit pkgs, sub-second) | `node --test packages/gemini-code-assist/dist/test/*.test.js packages/showcase/dist/test/*.test.js` |
-| Everything (build all, then run all) | `npm run build && for p in async-subagents bravo-goals codex-auth-balancer dynamic-skills gemini-code-assist loom monitor pi-extension-background-bash showcase source-search web-evidence-cache; do node --test packages/$p/dist/test/*.test.js; done; node --test packages/tango/dist/*.test.js` |
+| Fast tier only (pure-unit pkgs, sub-second) | `node --test packages/gemini-code-assist/dist/test/*.test.js packages/showcase/dist/test/*.test.js packages/render-clock/dist/test/*.test.js` |
+| Everything (build all, then run all) | `npm run build && for p in async-subagents bravo-goals codex-auth-balancer dynamic-skills gemini-code-assist loom monitor pi-extension-background-bash render-clock showcase source-search web-evidence-cache; do node --test packages/$p/dist/test/*.test.js; done; node --test packages/tango/dist/*.test.js` |
 | Slowest tier (subprocess-heavy; deselect from fast loop) | `loom`, `tango`, `pi-extension-background-bash`, `monitor` scheduler tests |
 
 Whole-suite wall time is ~**40s** serial on a linux-x86_64 dev box (~837 test

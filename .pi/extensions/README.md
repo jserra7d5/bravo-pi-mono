@@ -12,6 +12,8 @@ This directory contains project-local Pi extension files that are auto-discovere
 
 When the selected model is Codex-backed, the footer reads normalized account/usage state from `@bravo/codex-auth-balancer`. Footer rendering and normal startup/turn refreshes are cache-only: they do not mutate global auth files or probe accounts. Invalid, stale, or unavailable cache output renders as unknown/stale instead of guessing.
 
+The footer rides the shared `@bravo/render-clock` (imported by relative path from `../../packages/render-clock/src/index.ts`) instead of owning timers. The live reset countdown derives from a clock-supplied `now` and requests a render only when the rendered reset-bucket signature changes, so an unchanged minute is byte-identical and idle ticks repaint nothing. The 5-minute Codex usage poll is a separate non-render clock subscriber whose render stays gated by the existing semantic cache-change check.
+
 Use `/codex-accounts status` to show the cached account state. Use `/codex-accounts refresh` to explicitly refresh through the Codex auth balancer package and then reread the cache.
 
 For interactive account balancing, use the `bravo-codex-balanced/*` provider models with the Codex balanced provider extension loaded. `pi-balanced` is the convenience launcher while this is piloted; it should load the provider path rather than relying on Pi/Codex auth-home swapping. Bare `pi` with `openai-codex/*` still uses `~/.pi/agent/auth.json` directly.

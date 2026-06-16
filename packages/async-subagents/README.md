@@ -27,6 +27,22 @@ supervisor lifecycle, parent Pi tools, terminal status widgets, wake-up polling,
 and the child-control transport used for inbox delivery and structured child
 events.
 
+### Render cadence
+
+The Pi extension drives its UI from the shared `@bravo/render-clock` rather than
+its own `setInterval`. Two subscribers run: a session-long **non-visual** one
+(status badge + task reconcile + wake-up polling, which never requests a render)
+and a **visual** one that updates the live widget only while a time-dependent
+item is visible (active runs/tasks, terminal rows within their expiry window, or
+finished tasks within the 30 s grace). The widget's elapsed age now ticks live
+via a fixed-width field whose width is reserved before summary truncation, so an
+age tick is one width-stable line and idle sessions request zero renders. The
+status badge is value-gated per `(ui, key)`. Dead-but-non-terminal "zombie" rows
+left by a child that exited without a terminal status are reconciled (via an
+injectable process-liveness probe) to `cancelled`/`failed` so they age out on
+resume; rows with unknown/unsignalable or missing pids are kept. The root-session
+lease is a non-render clock subscriber.
+
 ## Defaults
 
 Built-in agents are bounded oneshot agents:
