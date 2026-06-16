@@ -37,6 +37,12 @@ function makePi() {
   return { pi, handlers, renderers, sent };
 }
 
+// Faithful stand-in for the real ExtensionContext.sessionManager, which is
+// always present on Pi event handlers. restoreStickyTaskRuntimeState scans the
+// session branch for sticky task-mode entries; an empty branch reproduces the
+// prior no-sticky-state behavior without diverging from the real context shape.
+const sessionManager = { getSessionId: () => undefined, getBranch: () => [] };
+
 async function withStartedExtension() {
   const cwd = mkdtempSync(join(tmpdir(), "async-subagents-pi-wakeup-cwd-"));
   const home = mkdtempSync(join(tmpdir(), "async-subagents-pi-wakeup-home-"));
@@ -44,7 +50,7 @@ async function withStartedExtension() {
   process.env.ASYNC_SUBAGENTS_HOME = home;
   const harness = makePi();
   asyncSubagentsPiExtension(harness.pi as any);
-  await handlersMustGet(harness.handlers, "session_start")({}, { cwd, hasUI: false });
+  await handlersMustGet(harness.handlers, "session_start")({}, { cwd, hasUI: false, sessionManager });
   const identity = readRootSession({ cwd });
   assert.ok(identity);
   const store = new RunStore({ cwd });
@@ -54,8 +60,8 @@ async function withStartedExtension() {
     identity,
     sent: harness.sent,
     renderers: harness.renderers,
-    poll: async (ctxOverride: Record<string, unknown> = {}) => handlersMustGet(harness.handlers, "session_start")({}, { cwd, hasUI: false, ...ctxOverride }),
-    compact: async (event: Record<string, unknown> = { type: "session_compact", compactionEntry: {}, fromExtension: false }) => handlersMustGet(harness.handlers, "session_compact")(event, { cwd, hasUI: false }),
+    poll: async (ctxOverride: Record<string, unknown> = {}) => handlersMustGet(harness.handlers, "session_start")({}, { cwd, hasUI: false, sessionManager, ...ctxOverride }),
+    compact: async (event: Record<string, unknown> = { type: "session_compact", compactionEntry: {}, fromExtension: false }) => handlersMustGet(harness.handlers, "session_compact")(event, { cwd, hasUI: false, sessionManager }),
     shutdown: async () => {
       await handlersMustGet(harness.handlers, "session_shutdown")();
       if (previousHome === undefined) delete process.env.ASYNC_SUBAGENTS_HOME;

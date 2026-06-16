@@ -33,6 +33,10 @@ function addRun(input: { store: RunStore; root: string; parentRunId: string; dis
   return runId;
 }
 
+// Faithful stand-in for the real ExtensionContext.sessionManager, which is
+// always present on Pi event handlers and is read by restoreStickyTaskRuntimeState.
+const sessionManager = { getSessionId: () => undefined, getBranch: () => [] };
+
 function loadExtensionHarness() {
   const handlers = new Map<string, Function[]>();
   const sent: Array<{ message: any; options: any }> = [];
@@ -62,7 +66,7 @@ test("session_compact hook injects an async status reminder when runs need atten
   assert.ok(start);
   assert.ok(compact);
 
-  const ctx = { cwd: w.root, hasUI: false, ui: { setStatus() {}, setWidget() {} } };
+  const ctx = { cwd: w.root, hasUI: false, ui: { setStatus() {}, setWidget() {} }, sessionManager };
   await start({}, ctx);
   const identity = readRootSession({ cwd: w.root });
   assert.ok(identity);
@@ -82,7 +86,7 @@ test("session_compact hook injects an async status reminder when runs need atten
 test("session_compact hook stays quiet when there is no in-flight or unread async work", async () => {
   const w = workspace();
   const { handlers, sent } = loadExtensionHarness();
-  const ctx = { cwd: w.root, hasUI: false, ui: { setStatus() {}, setWidget() {} } };
+  const ctx = { cwd: w.root, hasUI: false, ui: { setStatus() {}, setWidget() {} }, sessionManager };
 
   await handlers.get("session_start")?.[0]?.({}, ctx);
   const identity = readRootSession({ cwd: w.root });
