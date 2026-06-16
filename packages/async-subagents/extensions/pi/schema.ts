@@ -15,7 +15,7 @@ export const subagentStartSchema = Type.Object({
   agent: Type.String({ description: "Agent definition name, such as scout, reviewer, or worker." }),
   variant: Type.Optional(Type.String({ description: "Optional agent variant name that overlays model/config while keeping the same agent prompt." })),
   task: Type.String({ description: "Bounded task for the child agent." }),
-  taskId: Type.Optional(Type.String({ description: "Optional durable task id to claim and execute. subagent_start is the canonical launch surface for task-owned child runs." })),
+  taskId: Type.Optional(Type.String({ description: "Optional parent-owned milestone id to associate with this child run for traceability. Milestone status is updated separately with task_update." })),
   cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current Pi session cwd." })),
   files: Type.Optional(Type.Array(Type.String(), { description: "Relevant files to mention in the child task prompt." })),
   skills: Type.Optional(Type.Array(Type.String(), { description: "Additional skill names to enable for this child run, merged with the agent definition skills. Children do not inherit parent-session skills automatically. Pass skill names only; path-like values are rejected." })),
@@ -79,15 +79,27 @@ const TaskSpec = Type.Object({
 });
 
 export const taskCreateSchema = Type.Object({ tasks: Type.Array(TaskSpec) });
-export const taskListSchema = Type.Object({ states: Type.Optional(Type.Array(Type.String({ description: "Optional status/derived-state filters. Default visibility still hides completed and cancelled history unless includeCompleted is true." }))), includeCompleted: Type.Optional(Type.Boolean({ default: false, description: "Include completed and cancelled history rows. Defaults to false so task_list shows the active queue." })), limit: Type.Optional(Type.Number({ default: 50 })) });
-export const taskGetSchema = Type.Object({ taskId: Type.String(), view: Type.Optional(StringEnum(["status", "receipt", "full"] as const, { description: "Omit for smart default; use status to opt down to compact pointers only, receipt for result receipt, full for description/attempts/events." })) });
-export const taskAcceptResultSchema = Type.Object({ taskId: Type.String(), summary: Type.Optional(Type.String()) });
-export const taskReopenSchema = Type.Object({ taskId: Type.String(), reason: Type.String(), activeForm: Type.Optional(Type.String()), force: Type.Optional(Type.Boolean()) });
+const TASK_STATUSES = ["open", "active", "blocked", "done", "failed", "cancelled"] as const;
+
+export const taskListSchema = Type.Object({ states: Type.Optional(Type.Array(Type.String({ description: "Optional status/readiness filters. Default visibility hides done and cancelled history unless includeCompleted is true." }))), includeCompleted: Type.Optional(Type.Boolean({ default: false, description: "Include done and cancelled history rows. Defaults to false so task_list shows active milestone work." })), limit: Type.Optional(Type.Number({ default: 50 })) });
+export const taskGetSchema = Type.Object({ taskId: Type.String(), view: Type.Optional(StringEnum(["status", "full"] as const, { description: "Omit for compact detail; use full to include recent task audit events." })) });
+export const taskUpdateSchema = Type.Object({
+  taskId: Type.String(),
+  status: Type.Optional(StringEnum(TASK_STATUSES, { description: "Parent-authored milestone status." })),
+  title: Type.Optional(Type.String()),
+  description: Type.Optional(Type.String()),
+  dependsOn: Type.Optional(Type.Array(Type.String())),
+  notes: Type.Optional(Type.String()),
+  appendNotes: Type.Optional(Type.String()),
+  activeForm: Type.Optional(Type.String()),
+  addAttemptRunIds: Type.Optional(Type.Array(Type.String())),
+  addReceiptPaths: Type.Optional(Type.Array(Type.String())),
+  addArtifactPaths: Type.Optional(Type.Array(Type.String())),
+  addEvidence: Type.Optional(Type.Array(Type.String())),
+  force: Type.Optional(Type.Boolean()),
+});
 export const taskCancelSchema = Type.Object({ taskId: Type.String(), reason: Type.String() });
-export const taskClearSchema = Type.Object({ reason: Type.String({ description: "Reason for bulk cancelling/clearing all non-completed tasks." }) });
-export const taskSubmitResultSchema = Type.Object({ summary: Type.String(), receipt: Type.Optional(Type.Any()), artifactPaths: Type.Optional(Type.Array(Type.String())), evidence: Type.Optional(Type.Array(Type.String())), commandsRun: Type.Optional(Type.Array(Type.String())), notes: Type.Optional(Type.String()) });
-export const taskUpdateProgressSchema = Type.Object({ summary: Type.Optional(Type.String()), activeForm: Type.Optional(Type.String()) });
-export const taskReportBlockedSchema = Type.Object({ summary: Type.String(), notes: Type.Optional(Type.String()) });
+export const taskClearSchema = Type.Object({ reason: Type.String({ description: "Reason for bulk cancelling/clearing all non-done tasks." }) });
 
 export const subagentStatusSchema = Type.Object({
   runIds: Type.Optional(Type.Array(Type.String())),

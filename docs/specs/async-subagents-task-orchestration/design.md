@@ -1,7 +1,9 @@
 # Async Subagents Task Orchestration Design
 
 Date: 2026-05-28
-Status: Draft
+Status: Superseded by `docs/specs/async-subagents-milestone-tasks/design.md`
+
+> Superseded: this document describes the retired child-owned task lifecycle with task claims, task tokens, `result_ready`, `task_accept_result`, `task_reopen`, and task wakeups. The current implementation uses parent-owned milestone tasks. See `docs/specs/async-subagents-milestone-tasks/design.md` and `packages/async-subagents/README.md` for the active contract.
 
 ## Problem
 

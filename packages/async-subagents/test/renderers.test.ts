@@ -76,7 +76,6 @@ test("stateGlyph maps each runtime state to its decision-2 glyph", () => {
   assert.equal(stateGlyph("failed").g, "✗");
   assert.equal(stateGlyph("cancelled").g, "⊘");
   assert.equal(stateGlyph("expired").g, "⊘");
-  assert.equal(stateGlyph("result_ready").g, "★");
 });
 
 test("stateGlyph colors are semantic", () => {
@@ -84,13 +83,11 @@ test("stateGlyph colors are semantic", () => {
   const amber = "\x1b[38;2;229;156;72m";
   const green = "\x1b[38;2;106;191;115m";
   const red = "\x1b[38;2;220;88;88m";
-  const gold = "\x1b[38;2;229;181;72m";
   const gray = "\x1b[38;2;110;110;110m";
   assert.equal(stateGlyph("running").color, cyan);
   assert.equal(stateGlyph("waiting_for_input").color, amber);
   assert.equal(stateGlyph("completed").color, green);
   assert.equal(stateGlyph("failed").color, red);
-  assert.equal(stateGlyph("result_ready").color, gold);
   assert.equal(stateGlyph("blocked").color, gray);
 });
 
@@ -544,22 +541,6 @@ test("renderSubagentWakeMessage renders a wake card with badge and no fake affor
   assert.doesNotMatch(stripped, /\[ reply \]|\[ view \]|\[ continue \]/);
 });
 
-test("renderSubagentWakeMessage renders task ready id in the header without an agent mention", () => {
-  const rendered = renderSubagentWakeMessage({
-    kind: "task_wakeup",
-    title: "Task ready to start",
-    runId: "",
-    state: "task.ready",
-    summary: "Task ready to start: T-0014 Demo task-owned blocked flow",
-    taskEvent: { type: "task.ready", taskId: "T-0014", parentRunId: "root", at: new Date().toISOString(), seq: 1, wake: true } as any,
-    task: { taskId: "T-0014", title: "Demo task-owned blocked flow", status: "pending" },
-  });
-  const stripped = stripAnsi(rendered);
-  assert.match(stripped.split("\n")[0] ?? "", /Task 0014 ready to start/);
-  assert.doesNotMatch(stripped, /@Task ready to start|@Task 0014 ready to start/);
-  assert.ok(stripped.includes("Demo task-owned blocked flow"));
-});
-
 test("renderSubagentWakeMessage preserves an explicitly empty inline body", () => {
   const rendered = renderSubagentWakeMessage({
     kind: "subagent_wakeup",
@@ -702,7 +683,7 @@ test("renderWidgetRow formats row with task at different layouts", () => {
     task: {
       id: "T-004",
       title: "Implement task lifecycle",
-      status: "running"
+      status: "active"
     }
   };
   const full = stripAnsi(renderWidgetRow(72, ch72, row));
@@ -729,9 +710,8 @@ test("renderWidgetCard renders task section with priority and overflow", () => {
     id: "T-001",
     title: "First Task",
     description: "First",
-    status: "completed" as const,
+    status: "done" as const,
     dependsOn: [],
-    attempts: [],
     createdBy: "root",
     parentRunId: "root",
     createdAt: new Date().toISOString(),
@@ -742,9 +722,8 @@ test("renderWidgetCard renders task section with priority and overflow", () => {
     id: "T-002",
     title: "Second Task",
     description: "Second",
-    status: "result_ready" as const,
+    status: "active" as const,
     dependsOn: [],
-    attempts: [],
     createdBy: "root",
     parentRunId: "root",
     createdAt: new Date().toISOString(),
@@ -755,9 +734,8 @@ test("renderWidgetCard renders task section with priority and overflow", () => {
     id: "T-003",
     title: "Third Task",
     description: "Third",
-    status: "pending" as const,
+    status: "open" as const,
     dependsOn: [],
-    attempts: [],
     createdBy: "root",
     parentRunId: "root",
     createdAt: new Date().toISOString(),
@@ -774,7 +752,7 @@ test("renderWidgetCard renders task section with priority and overflow", () => {
 
   const text = card.map(stripAnsi).join("\n");
   assert.ok(text.includes("Tasks"));
-  assert.ok(text.includes("T-002 Second Task"), "prioritizes result_ready");
+  assert.ok(text.includes("T-002 Second Task"), "prioritizes active task");
   assert.ok(text.includes("T-003 Third Task"), "includes ready task");
   assert.ok(text.includes("T-001 First Task"));
 });

@@ -108,6 +108,5 @@ test("compaction reminder includes task counts in text and details", () => {
   assert.ok(tc);
   assert.equal(tc.ready, 1);
   assert.equal(tc.blocked, 1);
-  assert.equal(tc.resultReady, 0);
-  assert.equal(tc.running, 0);
+  assert.equal(tc.active, 0);
 });

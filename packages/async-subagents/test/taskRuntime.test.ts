@@ -48,7 +48,7 @@ test("active task runtime blockers include non-terminal tasks", () => {
 
     const blockers = findActiveTaskRuntimeBlockers(store, identity.rootSessionId);
 
-    assert.equal(blockers.some((blocker) => blocker.kind === "task" && blocker.taskId === task.id && blocker.status === "pending"), true);
+    assert.equal(blockers.some((blocker) => blocker.kind === "task" && blocker.taskId === task.id && blocker.status === "open"), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -1,5 +1,5 @@
 import type { RunSummaryRow } from "../../src/watcher.js";
-import type { DerivedTaskState, RunEvent, RunResult, RunStatus, SubagentMessageResult, SubagentStartResult, TaskEvent, TaskRecord } from "../../src/types.js";
+import type { DerivedTaskState, RunEvent, RunResult, RunStatus, SubagentMessageResult, SubagentStartResult, TaskRecord } from "../../src/types.js";
 import { deriveTaskState, unresolvedDependencies } from "../../src/taskState.js";
 
 export interface TextTheme {
@@ -21,8 +21,7 @@ export type SubagentToolName =
   | "task_create"
   | "task_list"
   | "task_get"
-  | "task_accept_result"
-  | "task_reopen"
+  | "task_update"
   | "task_cancel"
   | "task_clear";
 
@@ -32,7 +31,7 @@ export interface TextRenderable {
 }
 
 export interface WakeupMessage {
-  kind: "subagent_wakeup" | "task_wakeup";
+  kind: "subagent_wakeup";
   title: string;
   runId: string;
   runDir?: string;
@@ -42,8 +41,7 @@ export interface WakeupMessage {
   bodyAvailable?: boolean;
   bodyTruncation?: Record<string, unknown>;
   event?: RunEvent;
-  taskEvent?: TaskEvent;
-  task?: { taskId: string; title?: string; status?: string; owner?: { runId?: string; displayName?: string; agent?: string }; receiptPath?: string };
+  task?: { taskId: string; title?: string; status?: string };
   result?: RunResult;
   status?: { agentName?: string; displayName?: string };
   next?: Array<{ tool: string; args: Record<string, unknown> }>;
@@ -294,6 +292,10 @@ export function stateGlyph(state: string | undefined, resultReady = false): Stat
   }
   switch (state) {
     case "ready": return { g: "▫", color: ANSI.gray, label: "ready" };
+    case "waiting": return { g: "◌", color: ANSI.gray, label: "waiting" };
+    case "open": return { g: "▫", color: ANSI.gray, label: "open" };
+    case "active": return { g: "◐", color: ANSI.cyan, label: "active" };
+    case "done": return { g: "✓", color: ANSI.green, label: "done" };
     case "running": return { g: "◐", color: ANSI.cyan, label: "working" };
     case "queued":
     case "created": return { g: "○", color: ANSI.gray, label: "starting" };
@@ -304,7 +306,6 @@ export function stateGlyph(state: string | undefined, resultReady = false): Stat
     case "paused": return { g: "⏸", color: ANSI.gray, label: "paused" };
     case "stalled": return { g: "◌", color: ANSI.amber, label: "stalled" };
     case "completed": return { g: "✓", color: ANSI.green, label: "done" };
-    case "result_ready": return { g: "★", color: ANSI.gold, label: "result ready" };
     case "failed": return { g: "✗", color: ANSI.red, label: "failed" };
     case "cancelled": return { g: "⊘", color: ANSI.gray, label: "cancelled" };
     case "expired": return { g: "⊘", color: ANSI.gray, label: "expired" };
@@ -448,7 +449,7 @@ export function renderWidgetRow(width: number, ch: Chrome, r: WidgetRowInput): s
   const glyph = gl.color + (urgent ? ANSI.bold : "") + gl.g + ANSI.reset;
 
   if (r.task) {
-    const statusText = (r.state === "result_ready" || r.resultReady)
+    const statusText = r.resultReady
       ? "result ready"
       : (r.state === "waiting_for_input" || r.state === "question")
         ? "needs input"
@@ -546,39 +547,33 @@ function headerBadgeFits(width: number, title: string, badge: string): boolean {
   return visWidth(left) + visWidth(right) <= width;
 }
 
-function taskPriority(state: string): number {
+function taskPriority(state: string | null): number {
   switch (state) {
-    case "result_ready": return 1;
-    case "running": return 2;
-    case "ready": return 3;
+    case "ready": return 1;
+    case "waiting": return 2;
+    case "active": return 3;
     case "blocked": return 4;
     case "failed": return 5;
-    case "completed": return 6;
+    case "done": return 6;
     case "cancelled": return 7;
     default: return 8;
   }
 }
 
-export function renderTaskSectionRow(width: number, task: TaskRecord, allTasks: TaskRecord[], precomputedState?: DerivedTaskState, precomputedUnresolvedDependencyIds?: string[]): string {
-  const state = precomputedState ?? deriveTaskState(task, allTasks);
+export function renderTaskSectionRow(width: number, task: TaskRecord, allTasks: TaskRecord[], precomputedState?: string | null, precomputedUnresolvedDependencyIds?: string[]): string {
+  const readiness = precomputedState ?? deriveTaskState(task, allTasks);
+  const state = readiness ?? task.status;
   const gl = stateGlyph(state);
   const glyph = gl.color + gl.g + ANSI.reset;
 
   const taskId = ANSI.white + task.id + ANSI.reset;
   const title = task.title;
 
-  const ownerName = task.owner?.displayName ?? task.owner?.agent;
-  const owner = ownerName ? idMention(capName(ownerName)) : "";
-
   let statusText: string = state;
-  if (state === "blocked") {
+  if (readiness === "waiting") {
     const depIds = precomputedUnresolvedDependencyIds ?? unresolvedDependencies(task, allTasks).map(d => d.id);
-    if (depIds.length > 0) {
-      statusText = `blocked by ${depIds.join(", ")}`;
-    }
-  } else if (state === "result_ready") {
-    statusText = "result ready";
-  } else if (state === "running" && task.activeForm) {
+    if (depIds.length > 0) statusText = `waiting on ${depIds.join(", ")}`;
+  } else if (state === "active" && task.activeForm) {
     statusText = task.activeForm;
   }
 
@@ -586,7 +581,7 @@ export function renderTaskSectionRow(width: number, task: TaskRecord, allTasks: 
 
   if (width >= 72) {
     const leftPart = "  " + glyph + " " + taskId + " ";
-    const rightPart = (owner ? owner + "  " : "") + status;
+    const rightPart = status;
     const leftWidth = 11;
     const rightWidth = visWidth(rightPart);
     const maxTitleWidth = width - 4 - leftWidth - (rightWidth ? rightWidth + 2 : 0);
@@ -598,7 +593,7 @@ export function renderTaskSectionRow(width: number, task: TaskRecord, allTasks: 
     return centerPart + padRight + rightPart;
   } else if (width >= 54) {
     const leftPart = "  " + glyph + " " + taskId + " ";
-    const rightPart = owner ? owner : status;
+    const rightPart = status;
     const leftWidth = 11;
     const rightWidth = visWidth(rightPart);
     const maxTitleWidth = width - 4 - leftWidth - (rightWidth ? rightWidth + 2 : 0);
@@ -622,7 +617,7 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
   const ch = chrome(width);
   const activeCount = input.rows.filter((r) => !isTerminalWidgetState(r.state) && !(r.done || isDoneState(r.state))).length;
   const urgentCount = input.rows.filter((r) => r.urgent || isUrgentState(r.state)).length;
-  const readyCount = input.rows.filter((r) => r.resultReady || r.state === "result_ready").length;
+  const readyCount = input.rows.filter((r) => r.resultReady).length;
   const baseSegments = [
     activeCount ? `${ANSI.cyan}${activeCount} active${ANSI.reset}` : "",
     urgentCount ? `${ANSI.amber}${urgentCount} need you${ANSI.reset}` : "",
@@ -655,10 +650,10 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
   // Match liveWidget.visibleTasksFor: keep just-finished tasks on screen briefly.
   const graceMs = 30_000;
   const taskStates = input.taskStates;
-  const stateFor = (task: TaskRecord): DerivedTaskState => taskStates?.get(task.id) ?? deriveTaskState(task, allTasks);
+  const stateFor = (task: TaskRecord): string => taskStates?.get(task.id) ?? deriveTaskState(task, allTasks) ?? task.status;
   const visibleTasks = (input.tasks ?? []).filter(t => {
     const state = stateFor(t);
-    if (state === "completed" || state === "failed" || state === "cancelled") {
+    if (state === "done" || state === "failed" || state === "cancelled") {
       const updatedAtMs = Date.parse(t.updatedAt);
       if (Number.isFinite(updatedAtMs)) {
         return now - updatedAtMs <= graceMs;
@@ -669,23 +664,23 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
 
   if (visibleTasks.length > 0) {
     let tReadyCount = 0;
-    let tRunningCount = 0;
-    let tResultReadyCount = 0;
+    let tActiveCount = 0;
+    let tWaitingCount = 0;
     let tBlockedCount = 0;
     let tFailedCount = 0;
     for (const t of allTasks) {
       const state = stateFor(t);
       if (state === "ready") tReadyCount += 1;
-      else if (state === "running") tRunningCount += 1;
-      else if (state === "result_ready") tResultReadyCount += 1;
+      else if (state === "active") tActiveCount += 1;
+      else if (state === "waiting") tWaitingCount += 1;
       else if (state === "blocked") tBlockedCount += 1;
       else if (state === "failed") tFailedCount += 1;
     }
 
     const taskSegments = [
       tReadyCount ? `${tReadyCount} ready` : "",
-      tRunningCount ? `${tRunningCount} running` : "",
-      tResultReadyCount ? `${tResultReadyCount} result ready` : "",
+      tActiveCount ? `${tActiveCount} active` : "",
+      tWaitingCount ? `${tWaitingCount} waiting` : "",
       tBlockedCount ? `${tBlockedCount} blocked` : "",
       tFailedCount ? `${tFailedCount} failed` : "",
     ].filter(Boolean);
@@ -720,12 +715,9 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
           omittedCounts[state] = (omittedCounts[state] || 0) + 1;
         }
         const omittedParts: string[] = [];
-        const statesOrder = ["result_ready", "running", "ready", "blocked", "failed", "completed", "cancelled"];
+        const statesOrder = ["ready", "waiting", "active", "blocked", "failed", "done", "cancelled"];
         for (const st of statesOrder) {
-          if (omittedCounts[st]) {
-            const label = st === "result_ready" ? "result ready" : st;
-            omittedParts.push(`${omittedCounts[st]} ${label}`);
-          }
+          if (omittedCounts[st]) omittedParts.push(`${omittedCounts[st]} ${st}`);
         }
         const overflowText = `${ANSI.gray}… +${omittedParts.join(", ")}${ANSI.reset}`;
         out.push(ch.row(overflowText));
@@ -970,7 +962,6 @@ function deriveWakeBadge(kind: string): string {
     case "blocked": return "blocked";
     case "failed": return "failed";
     case "completed": return "result ready";
-    case "result_ready": return "result ready";
     case "cancelled": return "cancelled";
     case "expired": return "expired";
     case "paused": return "paused";
@@ -1062,25 +1053,12 @@ function renderSubagentCallCard(toolName: SubagentToolName | undefined, args: Re
       }
       return renderToolCallCard({ width, title: "task status", badge: "○ reading", rows });
     }
-    case "task_accept_result": {
+    case "task_update": {
       const rows: [string, string][] = [["taskId", typeof args.taskId === "string" ? args.taskId : ""]];
-      if (args.summary !== undefined) {
-        rows.push(["summary", preview(String(args.summary), 100)]);
-      }
-      return renderToolCallCard({ width, title: "accept task", badge: "✓ accept", rows });
-    }
-    case "task_reopen": {
-      const rows: [string, string][] = [
-        ["taskId", typeof args.taskId === "string" ? args.taskId : ""],
-        ["reason", typeof args.reason === "string" ? preview(args.reason, 80) : ""]
-      ];
-      if (args.activeForm !== undefined) {
-        rows.push(["activeForm", String(args.activeForm)]);
-      }
-      if (args.force !== undefined) {
-        rows.push(["force", args.force ? "true" : "false"]);
-      }
-      return renderToolCallCard({ width, title: "reopen task", badge: "⚠ reopen", rows });
+      if (args.status !== undefined) rows.push(["status", String(args.status)]);
+      if (args.appendNotes !== undefined) rows.push(["notes", preview(String(args.appendNotes), 100)]);
+      if (args.force !== undefined) rows.push(["force", args.force ? "true" : "false"]);
+      return renderToolCallCard({ width, title: "update task", badge: "○ update", rows });
     }
     case "task_cancel": {
       const rows: [string, string][] = [
@@ -1237,33 +1215,6 @@ export function renderSubagentToolResultComponent(result: unknown, options?: Ren
 // Wake messages
 // ----------------------------------------------------------------------------
 
-function taskDisplayNumber(taskId: string | undefined): string | undefined {
-  const match = /^T-(\d+)$/.exec(taskId ?? "");
-  return match?.[1] ?? taskId;
-}
-
-function taskWakeDisplayName(message: WakeupMessage): string {
-  const taskId = taskDisplayNumber(message.task?.taskId ?? message.taskEvent?.taskId);
-  const prefix = taskId ? `Task ${taskId}` : "Task";
-  switch (message.state) {
-    case "task.ready": return `${prefix} ready to start`;
-    case "task.result_submitted": return `${prefix} result ready`;
-    case "task.needs_input": return `${prefix} needs input`;
-    case "task.failed": return `${prefix} failed`;
-    default: return `${prefix} attention`;
-  }
-}
-
-function taskWakeKind(state: string | undefined): string {
-  switch (state) {
-    case "task.ready": return "ready";
-    case "task.result_submitted": return "result_ready";
-    case "task.needs_input": return "waiting_for_input";
-    case "task.failed": return "failed";
-    default: return "running";
-  }
-}
-
 function wakeCardInputFor(message: WakeupMessage, _options?: RenderOptions): WakeCardInput {
   const hasResult = Boolean(message.result);
   const result = message.result;
@@ -1275,17 +1226,6 @@ function wakeCardInputFor(message: WakeupMessage, _options?: RenderOptions): Wak
     if (message.bodyAvailable) return hasResult ? "Full child body available via subagent_result if you need recovery, artifacts, metadata, or a reread." : "Child event body available in wakeup details.";
     return undefined;
   })();
-  if (message.kind === "task_wakeup") {
-    return {
-      displayName: taskWakeDisplayName(message),
-      role: message.task?.title ?? message.title,
-      kind: taskWakeKind(message.state),
-      badge: message.state,
-      headline,
-      body,
-      displayAsMention: false,
-    };
-  }
   const kind = deriveWakeKind(message.state, hasResult);
   const agentName = result?.agentName ?? status?.agentName ?? message.title;
   const displayName = result?.displayName ?? status?.displayName ?? agentName;

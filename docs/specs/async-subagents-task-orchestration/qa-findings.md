@@ -1,5 +1,7 @@
 # Async Subagents Task Orchestration QA Findings
 
+> Superseded/historical: these findings were for the retired child-owned task lifecycle. Keep for archaeology only; current task behavior is the parent-owned milestone-task contract.
+
 ## Resolved UX / QA Issues
 
 ### QA-UX-001: Blocked task glyph/color reads as an error

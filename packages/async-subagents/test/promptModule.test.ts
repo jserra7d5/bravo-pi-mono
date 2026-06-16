@@ -36,7 +36,7 @@ test("taskless prompt omits task orchestration guidance", () => {
   assert.doesNotMatch(prompt, /task_create/);
   assert.doesNotMatch(prompt, /task_accept_result/);
   assert.doesNotMatch(prompt, /subagent_start\(\{ taskId/);
-  assert.match(prompt, /direct `subagent_start` without `taskId`/);
+  assert.match(prompt, /Use direct `subagent_start` for handoffs/);
   assert.match(prompt, /Use the async subagent tools/);
 });
 
@@ -45,7 +45,8 @@ test("taskless prompt can be restored to taskful guidance", () => {
   const taskful = appendAsyncSubagentsPrompt(taskless, "- `scout` — Finds evidence", { tasksEnabled: true });
   assert.match(taskful, /### Task orchestration/);
   assert.match(taskful, /task_create/);
-  assert.match(taskful, /task_accept_result/);
+  assert.match(taskful, /task_update\.newly_ready/);
+  assert.match(taskful, /There are no task-ready wakeups, task tokens, child task tools/);
   assert.match(taskful, /Task orchestration is on/);
   assert.doesNotMatch(taskful, /Task orchestration is off/);
   assert.equal((taskful.match(/^## Async Subagents$/gm) ?? []).length, 1);

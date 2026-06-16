@@ -47,10 +47,10 @@ export function findActiveTaskRuntimeBlockers(store: RunStore, rootSessionId: st
   const blockers: TaskRuntimeBlocker[] = [];
   const seenRuns = new Set<string>();
   for (const task of tasks) {
-    if (task.status !== "completed" && task.status !== "cancelled") {
-      blockers.push({ kind: "task", taskId: task.id, status: task.status, runId: task.owner?.runId });
+    if (task.status !== "done" && task.status !== "cancelled") {
+      blockers.push({ kind: "task", taskId: task.id, status: task.status });
     }
-    const runIds = [task.owner?.runId, ...task.attempts.map((attempt) => attempt.runId)].filter((runId): runId is string => typeof runId === "string" && Boolean(runId));
+    const runIds = (task.lastAttemptRunIds ?? []).filter((runId): runId is string => typeof runId === "string" && Boolean(runId));
     for (const runId of runIds) {
       if (seenRuns.has(runId)) continue;
       seenRuns.add(runId);
@@ -58,7 +58,7 @@ export function findActiveTaskRuntimeBlockers(store: RunStore, rootSessionId: st
         const status = store.readStatus(runId);
         if (!isTerminalRunState(status.state)) blockers.push({ kind: "run", taskId: task.id, runId, runState: status.state });
       } catch {
-        // Missing run state should not prevent hiding completed/cancelled task history.
+        // Missing run state should not prevent hiding done/cancelled task history.
       }
     }
   }

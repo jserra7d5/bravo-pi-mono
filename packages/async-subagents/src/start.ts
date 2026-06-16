@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyAgentVariant, resolveAgentDefinition } from "./agentDefinitions.js";
 import { loadAsyncSubagentsConfig, type CodexAuthBalancerConfig } from "./config.js";
-import { buildPiCommand, childControlEventTool, childControlExtensionPath, childControlTaskTools, inheritedExtensionPathsFromEnv, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
+import { buildPiCommand, childControlEventTool, childControlExtensionPath, inheritedExtensionPathsFromEnv, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
 import { assemblePrompt } from "./promptAssembly.js";
 import { SubagentError } from "./errors.js";
 import { evaluateFastTrack, readFastTrackState } from "./fastTrack.js";
@@ -62,7 +62,7 @@ export interface StartSubagentInput {
   piBin?: string;
   env?: Record<string, string>;
   fake?: StartFakeImmediateInput | StartFakeChildInput;
-  taskAssignment?: { task: TaskRecord; token: string; dependencies?: TaskRecord[] };
+  taskAssignment?: { task: TaskRecord; dependencies?: TaskRecord[] };
   fastTrack?: boolean;
 }
 
@@ -352,7 +352,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   let forkSourceLeafId: string | undefined;
   let forkFallback: { allowed: boolean; used: boolean; reason?: string } | null = null;
 
-  const runtimeBuiltinTools = input.taskAssignment ? [childControlEventTool, ...childControlTaskTools] : [childControlEventTool];
+  const runtimeBuiltinTools = [childControlEventTool];
   const runtimeExtensionPaths = [childControlExtensionPath];
   const launchLogPath = join(paths.logsDir, "launch.json");
   const asyncSubagentsConfig = loadAsyncSubagentsConfig({ cwd, env: { ...process.env, ...(input.env ?? {}) } });
@@ -519,12 +519,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     ASYNC_SUBAGENTS_RUN_ID: runId,
     ASYNC_SUBAGENTS_PARENT_RUN_ID: root.parentRunId,
     ASYNC_SUBAGENTS_ROOT_SESSION_ID: root.rootSessionId,
-    ...(input.taskAssignment
-      ? {
-          ASYNC_SUBAGENTS_TASK_ID: input.taskAssignment.task.id,
-          ASYNC_SUBAGENTS_TASK_TOKEN: input.taskAssignment.token,
-        }
-      : {}),
+
   };
   const balancedProviderEnv: Record<string, string> = !codexAuthBalancer && isCodexBalancedProviderModel(prompt.model) && asyncSubagentsConfig.codexAuthBalancer.stateDir
     ? { CODEX_AUTH_BALANCER_HOME: asyncSubagentsConfig.codexAuthBalancer.stateDir }

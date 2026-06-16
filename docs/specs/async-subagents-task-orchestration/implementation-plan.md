@@ -1,8 +1,10 @@
 # Async Subagents Task Orchestration Implementation Plan
 
 Date: 2026-05-28
-Status: Reviewed draft
+Status: Superseded by `docs/specs/async-subagents-milestone-tasks/implementation-plan.md`
 Spec: `docs/specs/async-subagents-task-orchestration/design.md`
+
+> Superseded: this plan implemented the retired child-owned task lifecycle. The active implementation direction is parent-owned milestone tasks with `task_update` and synchronous `newly_ready`; see `docs/specs/async-subagents-milestone-tasks/implementation-plan.md`.
 
 ## Review Feedback Incorporated
 

@@ -465,72 +465,6 @@ test("live widget task snapshot uses non-blocking reconcile", () => {
   assert.deepEqual(reconcileValues, ["nonblocking"]);
 });
 
-test("live widget non-blocking reconcile detects terminal owner runs", () => {
-  const empty = workspace();
-  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
-
-  const w = workspace();
-  const taskStore = new TaskStore(w.store);
-  const created = taskStore.createTasks(w.parentRunId, {
-    parentRunId: w.parentRunId,
-    tasks: [{ alias: "t1", title: "Task 1", description: "First" }]
-  });
-  const taskId = created.aliasToId["t1"];
-  const runId = addRun({ ...w, displayName: "Rex", state: "running", summary: "working" });
-  taskStore.claimTask(w.parentRunId, taskId, {
-    runId,
-    agent: "worker",
-    displayName: "Rex",
-    assignedAt: new Date().toISOString(),
-    tokenHash: "hash"
-  });
-  w.store.writeStatus({ ...w.store.readStatus(runId), state: "failed", summary: "failed", updatedAt: new Date().toISOString() });
-
-  updateLiveWidget({ ui: { setWidget() {} } }, { store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
-
-  const [task] = taskStore.listTasks(w.parentRunId, { reconcile: false });
-  assert.equal(task.status, "failed");
-  assert.ok(taskStore.readEvents(w.parentRunId).some((event) => event.type === "task.failed" && event.taskId === taskId && event.wake === true));
-});
-
-test("live widget non-blocking reconcile skips contended task locks without sleeping", () => {
-  const empty = workspace();
-  updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
-
-  const w = workspace();
-  const taskStore = new TaskStore(w.store);
-  const created = taskStore.createTasks(w.parentRunId, {
-    parentRunId: w.parentRunId,
-    tasks: [{ alias: "t1", title: "Task 1", description: "First" }]
-  });
-  const taskId = created.aliasToId["t1"];
-  const runId = addRun({ ...w, displayName: "Rex", state: "running", summary: "working" });
-  taskStore.claimTask(w.parentRunId, taskId, {
-    runId,
-    agent: "worker",
-    displayName: "Rex",
-    assignedAt: new Date().toISOString(),
-    tokenHash: "hash"
-  });
-  w.store.writeStatus({ ...w.store.readStatus(runId), state: "failed", summary: "failed", updatedAt: new Date().toISOString() });
-
-  const paths = taskStore.pathsFor(w.parentRunId);
-  mkdirSync(paths.lockDir, { recursive: true });
-  writeFileSync(join(paths.lockDir, "held.json"), JSON.stringify({ pid: process.pid, host: "other-host", createdAt: new Date().toISOString() }), "utf8");
-
-  const originalWait = Atomics.wait;
-  Atomics.wait = (() => { throw new Error("non-blocking reconcile must not sleep"); }) as typeof Atomics.wait;
-  try {
-    updateLiveWidget({ ui: { setWidget() {} } }, { store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
-  } finally {
-    Atomics.wait = originalWait;
-    rmSync(paths.lockDir, { recursive: true, force: true });
-  }
-
-  const [task] = taskStore.listTasks(w.parentRunId, { reconcile: false });
-  assert.equal(task.status, "running");
-});
-
 test("live widget precomputes task states once per snapshot and reuses them on render", () => {
   const empty = workspace();
   updateLiveWidget({ ui: { setWidget() {} } }, { store: empty.store, parentRunId: empty.parentRunId });
@@ -710,7 +644,7 @@ test("visual render-clock subscriber unsubscribes when time-dependent rows expir
   };
 
   await withFakeNow(baseNow, () => handlers.get("session_start")?.({}, ctx) as Promise<unknown>);
-  const identity = readRootSession({ cwd: w.root, piSessionId: w.parentRunId });
+  const identity = readRootSession({ cwd: w.root });
   assert.ok(identity, "expected session_start to create a root session");
   addRun({ store: w.store, root: w.root, parentRunId: identity.parentRunId, displayName: "Done", state: "completed", summary: "done", updatedAt: new Date(baseNow - 10_000).toISOString() });
   assert.equal(renderClock.subscriberCount(), 2, "poll and lease subscribers should be session-long before visible time-dependent work appears");
@@ -865,13 +799,7 @@ test("live widget renders task summary and maps task to run rows", () => {
     summary: "working on task 1"
   });
 
-  taskStore.claimTask(w.parentRunId, t1Id, {
-    runId,
-    agent: "worker",
-    displayName: "Rex",
-    assignedAt: new Date().toISOString(),
-    tokenHash: "somehash"
-  });
+  taskStore.updateTask(w.parentRunId, t1Id, { status: "active", addAttemptRunIds: [runId] });
 
   const lines = renderLiveWidget({
     store: w.store,

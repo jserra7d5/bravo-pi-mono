@@ -286,40 +286,10 @@ export interface RootSessionLease {
   expiresAt: string;
 }
 
-export type TaskStatus = "pending" | "running" | "result_ready" | "completed" | "failed" | "cancelled";
-export type TaskResultState = "submitted" | "accepted" | "rejected" | "superseded";
-export type DerivedTaskState = "ready" | "blocked" | TaskStatus;
-export type TaskEventType = "task.created" | "task.claimed" | "task.released" | "task.progress" | "task.needs_input" | "task.result_submitted" | "task.result_accepted" | "task.reopened" | "task.failed" | "task.cancelled" | "task.ready";
-
-export interface TaskOwner {
-  runId: string;
-  agent: string;
-  displayName: string;
-  assignedAt: string;
-  tokenHash: string;
-}
-
-export interface TaskResultReceipt {
-  state: TaskResultState;
-  summary: string;
-  receiptPath?: string;
-  artifactPaths?: string[];
-  evidence?: string[];
-  commandsRun?: string[];
-  notes?: string;
-  submittedAt?: string;
-  acceptedAt?: string;
-  rejectedAt?: string;
-}
-
-export interface TaskAttempt {
-  runId: string;
-  agent: string;
-  displayName: string;
-  startedAt: string;
-  endedAt?: string;
-  status: "running" | "result_ready" | "failed" | "cancelled";
-}
+export type TaskStatus = "open" | "active" | "blocked" | "done" | "failed" | "cancelled";
+export type TaskReadiness = "ready" | "waiting" | null;
+export type DerivedTaskState = TaskReadiness;
+export type TaskEventType = "task.created" | "task.updated" | "task.done" | "task.failed" | "task.cancelled" | "task.invalidated";
 
 export interface TaskRecord {
   schemaVersion: SchemaVersion;
@@ -328,16 +298,22 @@ export interface TaskRecord {
   description: string;
   status: TaskStatus;
   dependsOn: string[];
-  blocks?: string[];
-  owner?: TaskOwner;
+  notes?: string;
   activeForm?: string;
-  result?: TaskResultReceipt;
-  attempts: TaskAttempt[];
+  lastAttemptRunIds?: string[];
+  receiptPaths?: string[];
+  artifactPaths?: string[];
+  evidence?: string[];
   createdBy: string;
   parentRunId: string;
   createdAt: string;
   updatedAt: string;
 }
+
+export type TaskView = TaskRecord & {
+  readiness: TaskReadiness;
+  blockedBy: string[];
+};
 
 export interface TaskEvent {
   schemaVersion: SchemaVersion;

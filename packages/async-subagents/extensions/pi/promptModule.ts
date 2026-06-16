@@ -42,18 +42,17 @@ Subagent status events are control-plane information. Summarize them to the user
 
 ### Task orchestration
 
-Tasks are durable coordination state; subagent runs are execution attempts. Use a task plan only for multi-step work with real ordering constraints over time, for example implement → review → fix. For simple independent parallel fanout, skip task plans and call direct \`subagent_start\` for each child without a \`taskId\`.
+Tasks are parent-owned milestone board entries and durable external memory. Subagent runs are normal execution attempts; they do not own, claim, submit, or accept tasks. Use tasks for coarse lanes and hard dependency gates, not every small review/fix attempt.
 
-Creating tasks performs no work. You own the loop, and it is short:
+Workflow:
 
-1. \`task_create\` the plan. The result tells you which tasks are ready.
-2. For each ready task, call \`subagent_start({ taskId, agent })\` now. Do not stop after creating.
-3. When a result-ready wakeup arrives, read/review the receipt with \`task_get({ taskId, view: "receipt" })\`, then \`task_accept_result\` (or \`task_reopen\` if the work is insufficient). Acceptance is what unblocks dependents.
-4. Accepting a task wakes you for any dependents that just became ready; start those. Repeat until the plan is done.
+1. Create coarse milestones with \`task_create\`. The result includes \`newly_ready\`.
+2. Start normal child attempts directly with \`subagent_start\`, using task IDs only as prompt context when useful.
+3. Collect child results through normal async-subagent result/event wakeups.
+4. Update the relevant milestone with \`task_update\` (status, notes, attempts, receipts, artifacts, evidence).
+5. Treat \`task_create.newly_ready\` and \`task_update.newly_ready\` as the synchronous scheduling signal; start newly unblocked follow-up work before idling when you have enough concrete inputs.
 
-A \`task.ready\` wakeup means a task's dependencies are satisfied and it has no owner: start it. Ready tasks are parent-driven, so do not treat a ready task like a child you are waiting on — start it rather than idling, because no further signal is coming beyond the ready wakeup. A child-submitted result is not accepted completion until you accept it, and a result-ready task left unaccepted blocks the whole plan. Downstream children should consume task receipts/artifacts and \`task_get\` context, not sibling chat.
-
-Worked example: you \`task_create\` T-001 implement (ready) and T-002 review (depends on T-001); the result says 1 ready. You immediately \`subagent_start({ taskId: "T-001", agent: <implementing agent from the catalog> })\` and go idle. The owner submits T-001's result; you get a result-ready wakeup, read it with \`task_get({ taskId: "T-001", view: "receipt" })\`, and then \`task_accept_result({ taskId: "T-001" })\`. That wakes you with T-002 now ready, so you \`subagent_start({ taskId: "T-002", agent: <reviewing agent from the catalog> })\`. When T-002's result is accepted, the plan is done.
+There are no task-ready wakeups, task tokens, child task tools, \`task_accept_result\`, or \`task_reopen\`. Mark accepted completion with \`task_update({ taskId, status: "done" })\`; reopen/rework with \`task_update({ taskId, status: "open", ... })\`, using \`force\` only when intentionally invalidating downstream active/done milestones.
 
 ## Async Subagents Hard Rules
 
@@ -69,8 +68,8 @@ Worked example: you \`task_create\` T-001 implement (ready) and T-002 review (de
 10. Use \`@DisplayName\` for subagents in user-facing prose; use run IDs only for tool/internal references.
 11. Do not invent subagent names, variants, statuses, or results.
 12. Do not call \`subagent_status\` repeatedly to wait for completion; go idle and let async wakeups resume you.
-13. Do not use task tools to bypass ownership/dependency constraints; start task-owned children only with \`subagent_start({ taskId })\`.
-14. After \`task_create\`, start every ready task in the same turn; never create a task plan and then go idle. Drive the loop: start ready tasks, accept results, and start newly-ready tasks until the plan completes.
+13. Tasks are parent-owned milestones; children report normally and the parent mutates tasks with \`task_update\`.
+14. After \`task_create\` or \`task_update\`, inspect \`newly_ready\` and schedule any now-unblocked follow-up work before idling when inputs are ready.
 15. Treat \`fastTrack: true\` as a scarce speed lever for an armed critical-path implementation/planning/review child whose output-token latency bottlenecks the plan, including gating review; keep scouts, broad fanout, routine non-gating reviews, status checks, and Gemini/non-Codex variants on the normal lane by default.`;
 
 const SESSION_STATE_START = "<!-- async-subagents-session-state:start -->";
@@ -80,7 +79,7 @@ function asyncSubagentsPromptModule(tasksEnabled = true): string {
   if (tasksEnabled) return ASYNC_SUBAGENTS_PROMPT_MODULE;
   return ASYNC_SUBAGENTS_PROMPT_MODULE
     .replace(/\n\n### Task orchestration[\s\S]*?\n\n## Async Subagents Hard Rules/, "\n\n## Async Subagents Hard Rules")
-    .replace(/\n13\. Do not use task tools[^\n]*/, "")
+    .replace(/\n13\. Tasks are parent-owned milestones[^\n]*/, "")
     .replace(/\n14\. After `task_create`[^\n]*/, "")
     .replace(/\n15\. Treat `fastTrack: true`/, "\n13. Treat `fastTrack: true`");
 }
@@ -95,9 +94,9 @@ function asyncSubagentsSessionState(options?: { fastTrackArmed?: boolean; tasksE
     lines.push(`- Fast-track policy is currently **${status}**. ${guidance}`);
   }
   if (options?.tasksEnabled === false) {
-    lines.push("- Task orchestration is off. Use direct `subagent_start` without `taskId` for handoffs; `task_*` tools and task-owned runs are unavailable until `/tasks on`.");
+    lines.push("- Task orchestration is off. Use direct `subagent_start` for handoffs; `task_*` tools are unavailable until `/tasks on`.");
   } else if (options?.tasksEnabled === true) {
-    lines.push("- Task orchestration is on. Task tools and task-owned `subagent_start({ taskId })` are available when the tool catalog exposes them.");
+    lines.push("- Task orchestration is on. Tasks are parent-owned milestones; use `task_update.newly_ready` as the scheduling signal.");
   }
   if (!lines.length) return "";
   return `${SESSION_STATE_START}\n\n## Async Subagents Session State\n\n${lines.join("\n")}\n\n${SESSION_STATE_END}`;

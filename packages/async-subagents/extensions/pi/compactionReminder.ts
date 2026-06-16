@@ -22,10 +22,10 @@ export interface CompactionReminderDetails {
   resultReady: number;
   omitted: number;
   taskCounts?: {
-    resultReady: number;
-    running: number;
     ready: number;
+    waiting: number;
     blocked: number;
+    active: number;
     failed: number;
   };
   rows: Array<{
@@ -95,42 +95,31 @@ export function buildCompactionReminder(input: CompactionReminderInput): Compact
   const resultReady = rows.filter((row) => unreadResult(input, row)).length;
 
   let taskCountsLine = "";
-  let taskCounts = { resultReady: 0, running: 0, ready: 0, blocked: 0, failed: 0 };
+  let taskCounts = { ready: 0, waiting: 0, blocked: 0, active: 0, failed: 0 };
   if (input.rootSessionId) {
     try {
       const taskStore = new TaskStore(input.store);
       const tasks = taskStore.listTasks(input.rootSessionId);
-      const resultReadyTasks = tasks.filter(t => deriveTaskState(t, tasks) === "result_ready");
-      const runningTasks = tasks.filter(t => deriveTaskState(t, tasks) === "running");
       const readyTasks = tasks.filter(t => deriveTaskState(t, tasks) === "ready");
-      const blockedTasks = tasks.filter(t => deriveTaskState(t, tasks) === "blocked");
-      const failedTasks = tasks.filter(t => deriveTaskState(t, tasks) === "failed");
+      const waitingTasks = tasks.filter(t => deriveTaskState(t, tasks) === "waiting");
+      const blockedTasks = tasks.filter(t => t.status === "blocked");
+      const activeTasks = tasks.filter(t => t.status === "active");
+      const failedTasks = tasks.filter(t => t.status === "failed");
 
       taskCounts = {
-        resultReady: resultReadyTasks.length,
-        running: runningTasks.length,
         ready: readyTasks.length,
-        blocked: blockedTasks.length,
+        waiting: waitingTasks.length,
+        blocked: blockedTasks.length || waitingTasks.length,
+        active: activeTasks.length,
         failed: failedTasks.length,
       };
 
       const taskParts: string[] = [];
-      if (resultReadyTasks.length > 0) {
-        const ids = resultReadyTasks.map(t => t.id).join(", ");
-        taskParts.push(`${resultReadyTasks.length} result_ready (${ids})`);
-      }
-      if (runningTasks.length > 0) {
-        taskParts.push(`${runningTasks.length} running`);
-      }
-      if (readyTasks.length > 0) {
-        taskParts.push(`${readyTasks.length} ready`);
-      }
-      if (blockedTasks.length > 0) {
-        taskParts.push(`${blockedTasks.length} blocked`);
-      }
-      if (failedTasks.length > 0) {
-        taskParts.push(`${failedTasks.length} failed`);
-      }
+      if (readyTasks.length > 0) taskParts.push(`${readyTasks.length} ready`);
+      if (waitingTasks.length > 0) taskParts.push(`${waitingTasks.length} blocked/waiting`);
+      if (blockedTasks.length > 0) taskParts.push(`${blockedTasks.length} status-blocked`);
+      if (activeTasks.length > 0) taskParts.push(`${activeTasks.length} active`);
+      if (failedTasks.length > 0) taskParts.push(`${failedTasks.length} failed`);
 
       if (taskParts.length > 0) {
         taskCountsLine = `Tasks: ${taskParts.join(", ")}.`;

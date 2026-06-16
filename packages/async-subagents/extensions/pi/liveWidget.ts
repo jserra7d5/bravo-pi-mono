@@ -215,13 +215,13 @@ function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVis
 const TASK_TERMINAL_GRACE_MS = 30_000;
 
 function visibleTasksFor(tasks: TaskRecord[], taskStates: Map<string, DerivedTaskState>, now: number): TaskRecord[] {
-  // Keep just-completed/failed/cancelled tasks visible briefly so a plan that
-  // finishes leaves on-screen evidence instead of vanishing the instant the last
-  // task lands. Kept in sync with the same grace in renderers.renderWidgetCard.
+  // Keep just-done/failed/cancelled tasks visible briefly so a plan that finishes
+  // leaves on-screen evidence instead of vanishing the instant the last task lands.
+  // Kept in sync with the same grace in renderers.renderWidgetCard.
   const graceMs = TASK_TERMINAL_GRACE_MS;
   return tasks.filter(t => {
     const state = taskStates.get(t.id) ?? t.status;
-    if (state === "completed" || state === "failed" || state === "cancelled") {
+    if (state === "done" || state === "failed" || state === "cancelled") {
       const updatedAtMs = Date.parse(t.updatedAt);
       if (Number.isFinite(updatedAtMs)) {
         return now - updatedAtMs <= graceMs;
@@ -234,13 +234,8 @@ function visibleTasksFor(tasks: TaskRecord[], taskStates: Map<string, DerivedTas
 function runIdTaskMap(tasks: TaskRecord[]): Map<string, TaskRecord> {
   const runIdToTask = new Map<string, TaskRecord>();
   for (const task of tasks) {
-    if (task.owner?.runId) {
-      runIdToTask.set(task.owner.runId, task);
-    }
-    for (const attempt of task.attempts) {
-      if (attempt.runId) {
-        runIdToTask.set(attempt.runId, task);
-      }
+    for (const runId of task.lastAttemptRunIds ?? []) {
+      if (runId) runIdToTask.set(runId, task);
     }
   }
   return runIdToTask;
@@ -319,7 +314,7 @@ function hasTimeDependentSnapshotItem(snapshot: LiveWidgetSnapshot, now: number)
   if (snapshot.rows.length > 0) return true;
   return snapshot.visibleTasks.some((task) => {
     const state = snapshot.taskStates.get(task.id) ?? task.status;
-    if (state !== "completed" && state !== "failed" && state !== "cancelled") return true;
+    if (state !== "done" && state !== "failed" && state !== "cancelled") return true;
     const updatedAtMs = Date.parse(task.updatedAt);
     return Number.isFinite(updatedAtMs) && now - updatedAtMs <= TASK_TERMINAL_GRACE_MS;
   });
@@ -359,9 +354,6 @@ function liveWidgetRenderSignature(input: LiveWidgetInput, snapshot: LiveWidgetS
     title: task.title,
     status: snapshot.taskStates.get(task.id) ?? task.status,
     activeForm: task.activeForm,
-    ownerRunId: task.owner?.runId,
-    ownerDisplayName: task.owner?.displayName,
-    ownerAgent: task.owner?.agent,
     unresolvedDependencyIds: snapshot.taskUnresolvedDependencyIds.get(task.id) ?? [],
   }));
   const taskCounts = input.tasksEnabled === false ? [] : snapshot.tasks.map((task) => [task.id, snapshot.taskStates.get(task.id) ?? task.status]);

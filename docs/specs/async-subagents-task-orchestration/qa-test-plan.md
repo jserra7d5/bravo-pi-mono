@@ -1,5 +1,7 @@
 # Async Subagents Task Orchestration QA Test Plan
 
+> Superseded: this QA plan targets the retired child-owned task lifecycle. Current task validation lives with the milestone-task contract in `docs/specs/async-subagents-milestone-tasks/design.md`, `docs/specs/async-subagents-milestone-tasks/implementation-plan.md`, and the async-subagents test suite.
+
 ## Purpose
 
 Verify the async-subagents task orchestration feature works end-to-end across durable task state, parent tools, task-owned child runs, child result receipts, wakeups, reconciliation, prompt behavior, and TUI rendering.

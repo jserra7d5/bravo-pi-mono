@@ -8,7 +8,6 @@ import { createRunResult } from "../src/result.js";
 import { readRootSession } from "../src/rootSession.js";
 import { RunStore } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
-import { TaskStore, hashTaskToken, newTaskToken } from "../src/taskStore.js";
 import { SCHEMA_VERSION, type EventType, type RunState } from "../src/types.js";
 import { writeDeliverySubscription } from "../extensions/pi/wakeups.js";
 
@@ -292,33 +291,6 @@ test("paused wakeups instruct continue or cancel", async () => {
   }
 });
 
-test("task wakeup polling persists a task-event cursor after catch-up", async () => {
-  const session = await withStartedExtension();
-  try {
-    const taskStore = new TaskStore(session.store);
-    const [task] = taskStore.createTasks(session.identity.rootSessionId, { parentRunId: session.identity.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
-    const token = newTaskToken();
-    taskStore.claimTask(session.identity.rootSessionId, task.id, { runId: "task_run_1", agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-    taskStore.submitResult(session.identity.rootSessionId, task.id, { runId: "task_run_1", taskToken: token, summary: "task done", receipt: { ok: true } });
-
-    await session.poll();
-
-    const wakeup = session.sent.find((item) => item.message?.customType === "async-subagent-message" && item.message.details?.kind === "task_wakeup");
-    assert.ok(wakeup);
-    assert.equal(wakeup.message.details?.taskEvent?.type, "task.result_submitted");
-
-    const deliveryPath = join(resolve(session.store.runRoot, ".."), "delivery", `${session.identity.parentRunId}.json`);
-    const state = JSON.parse(readFileSync(deliveryPath, "utf8"));
-    assert.ok(state.taskEventCursors?.[session.identity.rootSessionId]?.eventOffset > 0);
-
-    const sentAfterFirstPoll = session.sent.length;
-    await session.poll();
-    assert.equal(session.sent.length, sentAfterFirstPoll, "delivered task wakeup is not delivered again");
-  } finally {
-    await session.shutdown();
-  }
-});
-
 for (const eventType of ["question", "blocked"] as const) {
   test(`${eventType} wakeups remain steerable and trigger parent action`, async () => {
     const session = await withStartedExtension();
@@ -362,54 +334,3 @@ for (const eventType of ["question", "blocked"] as const) {
     }
   });
 }
-
-test("task-owned terminal result coalesces task and run result wakeups", async () => {
-  const session = await withStartedExtension();
-  try {
-    const taskStore = new TaskStore(session.store);
-    const runId = "task_run_coalesce";
-    session.store.createRunDirectory({ runId, cwd: session.cwd, parentRunId: session.identity.parentRunId, rootSessionId: session.identity.rootSessionId });
-    const [task] = taskStore.createTasks(session.identity.rootSessionId, { parentRunId: session.identity.parentRunId, tasks: [{ title: "Implement", description: "Do it" }] }).tasks;
-    const token = newTaskToken();
-    taskStore.claimTask(session.identity.rootSessionId, task.id, { runId, agent: "worker", displayName: "worker", assignedAt: new Date().toISOString(), tokenHash: hashTaskToken(token) });
-    taskStore.submitResult(session.identity.rootSessionId, task.id, { runId, taskToken: token, summary: "task done", receipt: { ok: true } });
-    session.store.writeStatus({ ...createInitialStatus({
-      runId,
-      parentRunId: session.identity.parentRunId,
-      rootSessionId: session.identity.rootSessionId,
-      agentName: "worker",
-      agentSource: "builtin",
-      definitionPath: "/builtin/worker.md",
-      mode: "oneshot",
-      cwd: session.cwd,
-      state: "completed",
-    }), resultReady: true });
-    session.store.writeResult(createRunResult({ runId, parentRunId: session.identity.parentRunId, agentName: "worker", state: "completed", body: "terminal body" }));
-    writeDeliverySubscription(session.store, {
-      schemaVersion: SCHEMA_VERSION,
-      parentRunId: session.identity.parentRunId,
-      runId,
-      notifyOn: ["result", "completed"],
-      createdAt: new Date().toISOString(),
-    });
-
-    await session.poll();
-
-    const wakeups = session.sent.filter((item) => item.message?.customType === "async-subagent-message");
-    assert.equal(wakeups.length, 1);
-    assert.equal(wakeups[0]?.message.details?.kind, "task_wakeup");
-    assert.equal(wakeups[0]?.message.details?.taskEvent?.type, "task.result_submitted");
-    assert.equal(wakeups[0]?.message.details?.taskEvent?.taskId, task.id);
-    assert.equal(wakeups[0]?.message.details?.result?.runId, runId);
-    assert.deepEqual(wakeups[0]?.message.details?.next, [{ tool: "task_get", args: { taskId: task.id, view: "receipt" } }]);
-    assert.match(wakeups[0]?.message.content ?? "", /Review the receipt first: task_get/);
-    assert.match(wakeups[0]?.message.content ?? "", /task_accept_result/);
-    assert.match(wakeups[0]?.message.content ?? "", /task_reopen/);
-    assert.equal(session.store.readStatus(runId).resultReady, false);
-
-    await session.poll();
-    assert.equal(session.sent.filter((item) => item.message?.customType === "async-subagent-message").length, 1);
-  } finally {
-    await session.shutdown();
-  }
-});
