@@ -119,6 +119,8 @@ Implement:
 - `background_task_status({ taskId: string })`
 - `background_task_stop({ taskId: string, signal?: "SIGTERM" | "SIGKILL", killAfterMs?: number })`
 
+These controls are session-scoped: they list, inspect, and stop tasks whose persisted `ownerSessionId` matches the current Pi session. Tasks from older or unrelated sessions remain inspectable by their output paths but must not appear in the active TUI widget for a new session.
+
 Add `background_task_output` only if normal read/tail support is insufficient after testing.
 
 ### Task record

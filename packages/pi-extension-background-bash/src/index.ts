@@ -11,6 +11,10 @@ function sessionIdOf(ctx: unknown): string | undefined { const v = (ctx as { ses
 function runnerFor(ctx: unknown) { const cfg = configFromContext(ctx, cwdOf(ctx)); return new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg); }
 
 type BackgroundCounts = { running: number; blocked: number; failed: number; };
+
+function sessionOwned<T extends { ownerSessionId?: string }>(records: T[], sessionId?: string): T[] {
+  return records.filter((record) => sessionId ? record.ownerSessionId === sessionId : !record.ownerSessionId);
+}
 type BackgroundWidgetComponent = { invalidate(): void; render(width: number): string[]; dispose?(): void; update?(counts: BackgroundCounts): void; };
 type UiSetWidget = { setWidget?: (key: string, value: unknown, options?: Record<string, unknown>) => void };
 type RenderRequester = { requestRender?: () => void };
@@ -20,7 +24,7 @@ const backgroundWidgetMounts = new WeakMap<UiSetWidget, BackgroundWidgetMount>()
 
 function backgroundCounts(ctx: unknown): BackgroundCounts {
   const cfg = configFromContext(ctx, cwdOf(ctx));
-  const tasks = new TaskRegistry(cfg.dataDir).list(false);
+  const tasks = sessionOwned(new TaskRegistry(cfg.dataDir).list(false), sessionIdOf(ctx));
   return {
     running: tasks.filter(t => t.status === "running" || t.status === "starting").length,
     blocked: tasks.filter(t => t.status === "blocked").length,

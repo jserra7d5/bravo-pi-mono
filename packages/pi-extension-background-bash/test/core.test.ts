@@ -307,6 +307,64 @@ test("background bash widget does not remount while setWidget factory is still p
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("background bash widget only counts tasks owned by the current session", async () => {
+  const root = await tmp();
+  try {
+    const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data") }, root);
+    const registry = new TaskRegistry(cfg.dataDir);
+    const now = new Date().toISOString();
+    registry.upsert({ schemaVersion: 1, taskId: "bg_a", command: "sleep 10", cwd: root, ownerSessionId: "session-a", status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(root, "a.log"), metadataPath: path.join(root, "a.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+    registry.upsert({ schemaVersion: 1, taskId: "bg_b", command: "sleep 20", cwd: root, ownerSessionId: "session-b", status: "failed", createdAt: now, updatedAt: now, startedAt: now, endedAt: now, outputPath: path.join(root, "b.log"), metadataPath: path.join(root, "b.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+
+    let captured: ((tui: unknown) => { render(width: number): string[] }) | undefined;
+    const calls: unknown[] = [];
+    const ctxA = {
+      cwd: root,
+      config: { backgroundBash: { enabled: true, dataDir: cfg.dataDir } },
+      sessionManager: { getSessionId: () => "session-a" },
+      ui: { setWidget(_key: string, value: unknown) { calls.push(value); if (typeof value === "function") captured = value as typeof captured; } },
+    };
+
+    updateBackgroundBashWidget(ctxA);
+    assert.equal(calls.length, 1);
+    assert.match(captured!({ requestRender() {} }).render(40).join("\n"), /1 running/);
+    assert.doesNotMatch(captured!({ requestRender() {} }).render(40).join("\n"), /failed/);
+
+    const previousCalls = calls.length;
+    const ctxC = { ...ctxA, sessionManager: { getSessionId: () => "session-c" }, ui: { setWidget(_key: string, value: unknown) { calls.push(value); } } };
+    updateBackgroundBashWidget(ctxC);
+    assert.equal(calls.length, previousCalls, "sessions with no owned tasks should not mount a widget");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("background task tools are session scoped", async () => {
+  const root = await tmp();
+  try {
+    const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data") }, root);
+    const registry = new TaskRegistry(cfg.dataDir);
+    const now = new Date().toISOString();
+    registry.upsert({ schemaVersion: 1, taskId: "bg_a", command: "sleep 10", cwd: root, ownerSessionId: "session-a", status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(root, "a.log"), metadataPath: path.join(root, "a.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+    registry.upsert({ schemaVersion: 1, taskId: "bg_b", command: "sleep 20", cwd: root, ownerSessionId: "session-b", status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(root, "b.log"), metadataPath: path.join(root, "b.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+
+    const tools = buildBackgroundBashTools();
+    const list = tools.find((t) => t.name === "background_task_list")!;
+    const status = tools.find((t) => t.name === "background_task_status")!;
+    const stop = tools.find((t) => t.name === "background_task_stop")!;
+    const ctx = { cwd: root, config: { backgroundBash: { enabled: true, dataDir: cfg.dataDir } }, sessionManager: { getSessionId: () => "session-a" } };
+
+    const listed = await list.execute("call", {}, undefined, undefined, ctx) as { details: { tasks: BackgroundTaskRecord[] } };
+    assert.deepEqual(listed.details.tasks.map((t) => t.taskId), ["bg_a"]);
+
+    const otherStatus = await status.execute("call", { taskId: "bg_b" }, undefined, undefined, ctx) as { isError?: boolean; details: { code?: string } };
+    assert.equal(otherStatus.isError, true);
+    assert.equal(otherStatus.details.code, "TASK_NOT_FOUND");
+
+    const otherStop = await stop.execute("call", { taskId: "bg_b" }, undefined, undefined, ctx) as { isError?: boolean; details: { code?: string } };
+    assert.equal(otherStop.isError, true);
+    assert.equal(otherStop.details.code, "TASK_NOT_FOUND");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("background bash widget state is isolated by ui object", async () => {
   const rootA = await tmp();
   const rootB = await tmp();

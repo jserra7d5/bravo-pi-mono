@@ -180,7 +180,7 @@ type BackgroundTaskListInput = {
 };
 ```
 
-Returns task ids, commands, status, exit code, elapsed time, output path, and owner session.
+Returns task ids, commands, status, exit code, elapsed time, output path, and owner session for the current Pi session only.
 
 ### `background_task_status`
 
@@ -190,7 +190,7 @@ type BackgroundTaskStatusInput = {
 };
 ```
 
-Returns one task's current state and output file metadata.
+Returns one current-session task's current state and output file metadata.
 
 ### `background_task_stop`
 
@@ -425,11 +425,11 @@ Display compact state such as:
 BG: 2 running, 1 failed
 ```
 
-The widget should not force model turns. It is an operator awareness surface.
+The widget should not force model turns. It is an operator awareness surface scoped to the current Pi session, not a global cross-CWD process dashboard.
 
 Widget/status semantics:
 
-- Normal compact form: `BG 2 running`.
+- Normal compact form: `BG 2 running` for tasks owned by this session.
 - Attention form: `BG 1 failed` or `BG 1 blocked` with warning/error styling.
 - Timeout, orphaned, failed, and prompt-detected states should visually stand out.
 - The widget should avoid stealing vertical space and must truncate predictably at narrow widths.
