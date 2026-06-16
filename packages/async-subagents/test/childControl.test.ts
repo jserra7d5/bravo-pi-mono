@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createRenderClock, type RenderClock, type RenderClockScheduler } from "@bravo/render-clock";
 import childControlExtension from "../extensions/child-control/index.js";
 import { createInboxMessage } from "../src/message.js";
 import { RunStore } from "../src/runStore.js";
@@ -19,6 +20,106 @@ function withEnv(values: Record<string, string>, fn: () => Promise<void> | void)
       else process.env[key] = value;
     }
   });
+}
+
+function makeScheduler(start = 0): RenderClockScheduler & { advance(ms: number): void; fire(): void; activeIntervals(): number } {
+  let now = start;
+  const intervals = new Set<() => void>();
+  return {
+    now: () => now,
+    setInterval(cb: () => void) {
+      intervals.add(cb);
+      return { cb };
+    },
+    clearInterval(handle: { cb?: () => void }) {
+      if (handle.cb) intervals.delete(handle.cb);
+    },
+    advance(ms: number) {
+      now += ms;
+    },
+    fire() {
+      for (const cb of Array.from(intervals)) cb();
+    },
+    activeIntervals() {
+      return intervals.size;
+    },
+  } as RenderClockScheduler & { advance(ms: number): void; fire(): void; activeIntervals(): number };
+}
+
+type ChildControlFixture = {
+  root: string;
+  store: RunStore;
+  runId: string;
+  paths: ReturnType<RunStore["createRunDirectory"]>["paths"];
+  handlers: Map<string, (...args: any[]) => Promise<void> | void>;
+  sentUserMessages: Array<{ content: unknown; options: unknown }>;
+  thinkingLevels: string[];
+  pi: {
+    registerTool(tool: any): void;
+    on(event: string, handler: (...args: any[]) => Promise<void> | void): void;
+    sendUserMessage(content: unknown, options: unknown): void;
+    setThinkingLevel(level: string): void;
+  };
+  setSendUserMessage(fn: (content: unknown, options: unknown) => void): void;
+};
+
+function childControlFixture(): ChildControlFixture {
+  const root = mkdtempSync(join(tmpdir(), "async-subagents-child-control-"));
+  const store = new RunStore({ cwd: root, runRoot: join(root, ".subagents", "runs") });
+  const { runId, paths } = store.createRunDirectory({ cwd: root, parentRunId: "root_test", rootSessionId: "root_test" });
+  store.writeStatus(
+    createInitialStatus({
+      runId,
+      parentRunId: "root_test",
+      rootSessionId: "root_test",
+      agentName: "scout",
+      agentSource: "builtin",
+      definitionPath: "/builtin/scout.md",
+      mode: "interactive",
+      cwd: root,
+      state: "running",
+    }),
+  );
+  const handlers = new Map<string, (...args: any[]) => Promise<void> | void>();
+  const sentUserMessages: Array<{ content: unknown; options: unknown }> = [];
+  const thinkingLevels: string[] = [];
+  let sendUserMessage = (content: unknown, options: unknown) => {
+    sentUserMessages.push({ content, options });
+  };
+  const pi = {
+    registerTool(_tool: any) {},
+    on(event: string, handler: (...args: any[]) => Promise<void> | void) {
+      handlers.set(event, handler);
+    },
+    sendUserMessage(content: unknown, options: unknown) {
+      sendUserMessage(content, options);
+    },
+    setThinkingLevel(level: string) {
+      thinkingLevels.push(level);
+    },
+  };
+  return {
+    root,
+    store,
+    runId,
+    paths,
+    handlers,
+    sentUserMessages,
+    thinkingLevels,
+    pi,
+    setSendUserMessage(fn) {
+      sendUserMessage = fn;
+    },
+  };
+}
+
+function messageReceivedCount(store: RunStore, runId: string): number {
+  return store.readEvents(runId).records.filter((event) => event.type === "message.received").length;
+}
+
+async function startChild(fixture: ChildControlFixture, clock: RenderClock): Promise<void> {
+  childControlExtension(fixture.pi as never, { clock });
+  await fixture.handlers.get("session_start")?.();
 }
 
 function workspace() {
@@ -135,6 +236,258 @@ test("child-control delivers inbox messages and emits structured events", async 
       await handlers.get("session_shutdown")?.();
     },
   );
+});
+
+test("child-control recurring poll delivers post-start inbox messages on due clock ticks", async () => {
+  const fixture = childControlFixture();
+  const scheduler = makeScheduler();
+  const clock = createRenderClock({ baseIntervalMs: 1000, scheduler });
+
+  await withEnv(
+    {
+      ASYNC_SUBAGENTS_RUN_ID: fixture.runId,
+      ASYNC_SUBAGENTS_RUN_DIR: fixture.paths.runDir,
+      ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+    },
+    async () => {
+      await startChild(fixture, clock);
+      clock.tick("manual");
+      assert.equal(fixture.sentUserMessages.length, 0);
+      assert.equal(messageReceivedCount(fixture.store, fixture.runId), 0);
+
+      fixture.store.appendInboxMessage(
+        fixture.runId,
+        createInboxMessage({
+          toRunId: fixture.runId,
+          fromRunId: "root_test",
+          body: "Post-start delivery",
+        }),
+      );
+
+      scheduler.advance(999);
+      clock.tick("manual");
+      assert.equal(fixture.sentUserMessages.length, 0, "poll must not run before its 1s interval is due");
+      assert.equal(messageReceivedCount(fixture.store, fixture.runId), 0);
+
+      scheduler.advance(1);
+      clock.tick("manual");
+      assert.equal(fixture.sentUserMessages.length, 1);
+      assert.match(String(fixture.sentUserMessages[0]?.content), /Post-start delivery/);
+      assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
+
+      scheduler.advance(1000);
+      clock.tick("manual");
+      assert.equal(fixture.sentUserMessages.length, 1, "idle ticks must not duplicate delivered messages");
+      assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
+
+      await fixture.handlers.get("session_shutdown")?.();
+    },
+  );
+});
+
+test("child-control shutdown stops polling and is idempotent", async () => {
+  const fixture = childControlFixture();
+  const scheduler = makeScheduler();
+  const clock = createRenderClock({ baseIntervalMs: 1000, scheduler });
+
+  await withEnv(
+    {
+      ASYNC_SUBAGENTS_RUN_ID: fixture.runId,
+      ASYNC_SUBAGENTS_RUN_DIR: fixture.paths.runDir,
+      ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+    },
+    async () => {
+      await startChild(fixture, clock);
+      assert.equal(clock.subscriberCount(), 1);
+      await fixture.handlers.get("session_shutdown")?.();
+      await fixture.handlers.get("session_shutdown")?.();
+      assert.equal(clock.subscriberCount(), 0);
+      assert.equal(scheduler.activeIntervals(), 0);
+
+      fixture.store.appendInboxMessage(
+        fixture.runId,
+        createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "After shutdown" }),
+      );
+      scheduler.advance(1000);
+      clock.tick("manual");
+      assert.equal(fixture.sentUserMessages.length, 0);
+      assert.equal(messageReceivedCount(fixture.store, fixture.runId), 0);
+    },
+  );
+});
+
+test("child-control double session_start preserves cursor and does not replay", async () => {
+  const fixture = childControlFixture();
+  const scheduler = makeScheduler();
+  const clock = createRenderClock({ baseIntervalMs: 1000, scheduler });
+  fixture.store.appendInboxMessage(
+    fixture.runId,
+    createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "Already consumed" }),
+  );
+
+  await withEnv(
+    {
+      ASYNC_SUBAGENTS_RUN_ID: fixture.runId,
+      ASYNC_SUBAGENTS_RUN_DIR: fixture.paths.runDir,
+      ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+    },
+    async () => {
+      await startChild(fixture, clock);
+      assert.equal(fixture.sentUserMessages.length, 1);
+      assert.match(String(fixture.sentUserMessages[0]?.content), /Already consumed/);
+      assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
+      assert.equal(clock.subscriberCount(), 1);
+
+      await fixture.handlers.get("session_start")?.();
+      assert.equal(clock.subscriberCount(), 1);
+      assert.equal(fixture.sentUserMessages.length, 1, "second start must not replay the consumed inbox message");
+      assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
+
+      fixture.store.appendInboxMessage(
+        fixture.runId,
+        createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "New after restart" }),
+      );
+      scheduler.advance(1000);
+      clock.tick("manual");
+      assert.equal(fixture.sentUserMessages.length, 2);
+      assert.match(String(fixture.sentUserMessages.at(-1)?.content), /New after restart/);
+      assert.equal(messageReceivedCount(fixture.store, fixture.runId), 2);
+
+      await fixture.handlers.get("session_shutdown")?.();
+    },
+  );
+});
+
+test("child-control establishes poll when pre-existing inbox is malformed", async () => {
+  const fixture = childControlFixture();
+  const scheduler = makeScheduler();
+  const clock = createRenderClock({ baseIntervalMs: 1000, scheduler });
+  writeFileSync(fixture.paths.inboxPath, "{not json}\n", "utf8");
+  const originalError = console.error;
+  const errors: unknown[][] = [];
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    await withEnv(
+      {
+        ASYNC_SUBAGENTS_RUN_ID: fixture.runId,
+        ASYNC_SUBAGENTS_RUN_DIR: fixture.paths.runDir,
+        ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+      },
+      async () => {
+        await assert.doesNotReject(async () => startChild(fixture, clock));
+        assert.equal(clock.subscriberCount(), 1);
+        assert.equal(fixture.sentUserMessages.length, 0);
+        assert.equal(errors.length, 1);
+
+        writeFileSync(fixture.paths.inboxPath, "", "utf8");
+        fixture.store.appendInboxMessage(
+          fixture.runId,
+          createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "Recovered delivery" }),
+        );
+        clock.tick("manual");
+        assert.equal(fixture.sentUserMessages.length, 1);
+        assert.match(String(fixture.sentUserMessages[0]?.content), /Recovered delivery/);
+        assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
+
+        await fixture.handlers.get("session_shutdown")?.();
+      },
+    );
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("child-control does not resend when bookkeeping event append fails after delivery", async () => {
+  const fixture = childControlFixture();
+  const scheduler = makeScheduler();
+  const clock = createRenderClock({ baseIntervalMs: 1000, scheduler });
+  const originalError = console.error;
+  const errors: unknown[][] = [];
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    await withEnv(
+      {
+        ASYNC_SUBAGENTS_RUN_ID: fixture.runId,
+        ASYNC_SUBAGENTS_RUN_DIR: fixture.paths.runDir,
+        ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+      },
+      async () => {
+        await startChild(fixture, clock);
+        clock.tick("manual");
+        rmSync(fixture.paths.eventsPath, { force: true });
+        mkdirSync(fixture.paths.eventsPath);
+        fixture.store.appendInboxMessage(
+          fixture.runId,
+          createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "Bookkeeping may fail" }),
+        );
+
+        scheduler.advance(1000);
+        clock.tick("manual");
+        assert.equal(fixture.sentUserMessages.length, 1);
+        assert.match(String(fixture.sentUserMessages[0]?.content), /Bookkeeping may fail/);
+        assert.equal(errors.length, 1);
+
+        scheduler.advance(1000);
+        clock.tick("manual");
+        assert.equal(fixture.sentUserMessages.length, 1, "post-send event append failure must not cause a resend");
+        assert.equal(errors.length, 1);
+
+        await fixture.handlers.get("session_shutdown")?.();
+      },
+    );
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("child-control retries inbox message after transient send failure", async () => {
+  const fixture = childControlFixture();
+  const scheduler = makeScheduler();
+  const clock = createRenderClock({ baseIntervalMs: 1000, scheduler });
+  let failNextSend = true;
+  fixture.setSendUserMessage((content, options) => {
+    if (failNextSend) {
+      failNextSend = false;
+      throw new Error("transient send failure");
+    }
+    fixture.sentUserMessages.push({ content, options });
+  });
+  const originalError = console.error;
+  const errors: unknown[][] = [];
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    await withEnv(
+      {
+        ASYNC_SUBAGENTS_RUN_ID: fixture.runId,
+        ASYNC_SUBAGENTS_RUN_DIR: fixture.paths.runDir,
+        ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+      },
+      async () => {
+        await startChild(fixture, clock);
+        clock.tick("manual");
+        fixture.store.appendInboxMessage(
+          fixture.runId,
+          createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "Retry me" }),
+        );
+
+        scheduler.advance(1000);
+        clock.tick("manual");
+        assert.equal(errors.length, 1);
+        assert.equal(fixture.sentUserMessages.length, 0);
+        assert.equal(messageReceivedCount(fixture.store, fixture.runId), 0);
+
+        scheduler.advance(1000);
+        clock.tick("manual");
+        assert.equal(fixture.sentUserMessages.length, 1);
+        assert.match(String(fixture.sentUserMessages[0]?.content), /Retry me/);
+        assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
+
+        await fixture.handlers.get("session_shutdown")?.();
+      },
+    );
+  } finally {
+    console.error = originalError;
+  }
 });
 
 test("task-owned child launches allowlist task tools", async () => {

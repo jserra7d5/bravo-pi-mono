@@ -25,6 +25,7 @@ function tsFiles(dir: string): string[] {
 // rotting the guard while the other targets keep the file count above zero.
 const DIR_TARGETS = [
   "packages/async-subagents/extensions/pi",
+  "packages/async-subagents/extensions/child-control",
   "packages/bravo-goals/extensions/pi",
 ];
 const FILE_TARGETS = [".pi/extensions/codex-usage.ts"];

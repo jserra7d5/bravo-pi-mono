@@ -91,10 +91,20 @@ long/resumed-session run is an optional smoke check, not the proof.
   from an injected `now` and `requestRender`s only when the rendered reset-bucket
   signature changes; the 5 min usage poll is a non-render subscriber whose render
   stays gated by the existing semantic cache-change check.
+- **child-control** (`extensions/child-control/index.ts`): the child-side inbox
+  poll is a **non-render** clock subscriber (`async-child-inbox-poll`, 1 s) driving
+  the real `deliverInbox` path instead of a raw `setInterval`. The clock is
+  injected through an optional `clock` param (default singleton) so tests drive a
+  deterministic fake scheduler; the subscriber is established before the guarded
+  immediate delivery so a malformed pre-existing inbox cannot skip polling, a
+  second `session_start` for the same run preserves the cursor (no replay) and
+  replaces rather than stacks the subscriber, and the inbox cursor advances only
+  after a successful `sendUserMessage` (a send failure retries; post-send
+  bookkeeping is best-effort).
 
-The only `setInterval` remaining in any render surface is the one inside
-`@bravo/render-clock`. (The child-control inbox poll is a child-side,
-non-rendering timer and is intentionally out of scope.)
+The only `setInterval` remaining in any surface is the one inside
+`@bravo/render-clock`; every periodic tick in the repo's Pi extensions — lead and
+child — now flows through it.
 
 ## Verification
 

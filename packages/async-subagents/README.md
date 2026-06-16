@@ -43,6 +43,15 @@ injectable process-liveness probe) to `cancelled`/`failed` so they age out on
 resume; rows with unknown/unsignalable or missing pids are kept. The root-session
 lease is a non-render clock subscriber.
 
+Inside each **child** Pi session the child-control extension is also a
+`@bravo/render-clock` subscriber rather than owning its own `setInterval`: its
+inbox poll (`async-child-inbox-poll`, 1 s) is a non-render subscriber that runs
+the real `deliverInbox` on each due tick. The clock is injectable for
+deterministic tests, the subscriber is established before the guarded immediate
+delivery (a malformed pre-existing inbox cannot skip polling), and the inbox
+cursor advances only after a successful `sendUserMessage` so a transient send
+failure retries instead of dropping or double-sending a parent message.
+
 ## Defaults
 
 Built-in agents are bounded oneshot agents:

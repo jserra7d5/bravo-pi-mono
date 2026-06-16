@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { renderClock } from "@bravo/render-clock";
 import { Type } from "typebox";
 import { appendJsonl, atomicWriteJson, readJsonl } from "../../src/jsonl.js";
 import { RunStore } from "../../src/runStore.js";
@@ -17,11 +18,12 @@ type ChildControlState = {
   taskId?: string;
   taskToken?: string;
   cursor: number;
-  timer?: ReturnType<typeof setInterval>;
 };
 
 const CHILD_EVENT_TYPES = ["progress", "status", "question", "blocked", "artifact"] as const;
 const WAKE_TYPES = new Set<EventType>(["question", "blocked", "artifact"]);
+
+type SubscribeOnlyClock = Pick<typeof renderClock, "subscribe">;
 
 function env(name: string): string | undefined {
   return process.env[name] || process.env[name.replace("ASYNC_SUBAGENTS_", "ASYNC_SUBAGENT_")];
@@ -92,23 +94,39 @@ function parentMessageText(message: InboxMessage): string {
 }
 
 function deliverInbox(pi: ExtensionAPI, state: ChildControlState): void {
-  const read = readJsonl<InboxMessage>(join(state.runDir, "inbox.jsonl"), { offset: state.cursor });
-  state.cursor = read.nextOffset;
-  for (const message of read.records) {
-    appendEvent(state, {
-      type: "message.received",
-      summary: `Received ${message.type} from parent`,
-      body: message.body,
-      wake: false,
-      data: { messageId: message.messageId, messageType: message.type, requiresAck: message.requiresAck, thinkingLevel: message.thinkingLevel },
-    });
+  for (;;) {
+    const read = readJsonl<InboxMessage>(join(state.runDir, "inbox.jsonl"), { offset: state.cursor, maxRecords: 1 });
+    const message = read.records[0];
+    if (!message) break;
     if (message.thinkingLevel) pi.setThinkingLevel(message.thinkingLevel);
     pi.sendUserMessage(parentMessageText(message), { deliverAs: message.type === "cancel" ? "followUp" : "steer" });
+    state.cursor = read.nextOffset;
+    try {
+      appendEvent(state, {
+        type: "message.received",
+        summary: `Received ${message.type} from parent`,
+        body: message.body,
+        wake: false,
+        data: { messageId: message.messageId, messageType: message.type, requiresAck: message.requiresAck, thinkingLevel: message.thinkingLevel },
+      });
+    } catch (error) {
+      console.error("[async-subagents child-control] failed to record received inbox message", error);
+    }
   }
 }
 
-export default function childControlExtension(pi: ExtensionAPI) {
+function subscribeChildInboxPoll(clock: SubscribeOnlyClock, body: () => void): () => void {
+  return clock.subscribe({ id: "async-child-inbox-poll", intervalMs: 1_000, reconcile: body });
+}
+
+export function __subscribeChildInboxPollForTest(clock: SubscribeOnlyClock, body: () => void): () => void {
+  return subscribeChildInboxPoll(clock, body);
+}
+
+export default function childControlExtension(pi: ExtensionAPI, options?: { clock?: SubscribeOnlyClock }) {
+  const clock = options?.clock ?? renderClock;
   let state: ChildControlState | undefined;
+  let inboxPollUnsubscribe: (() => void) | undefined;
 
   const taskIdentity = () => {
     if (!state?.rootSessionId || !state.taskId || !state.taskToken) throw new Error("task tools are only available inside a task-owned async-subagents child run");
@@ -185,17 +203,24 @@ export default function childControlExtension(pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async () => {
-    state = childStateFromEnv();
-    if (!state) return;
-    deliverInbox(pi, state);
-    state.timer = setInterval(() => {
+    const next = childStateFromEnv();
+    if (!next) return;
+    if (!state || state.runId !== next.runId || state.runDir !== next.runDir) state = next;
+    inboxPollUnsubscribe?.();
+    inboxPollUnsubscribe = undefined;
+    inboxPollUnsubscribe = subscribeChildInboxPoll(clock, () => {
       if (state) deliverInbox(pi, state);
-    }, 1_000);
-    state.timer.unref?.();
+    });
+    try {
+      deliverInbox(pi, state);
+    } catch (error) {
+      console.error("[async-subagents child-control] initial inbox delivery failed", error);
+    }
   });
 
   pi.on("session_shutdown", async () => {
-    if (state?.timer) clearInterval(state.timer);
+    inboxPollUnsubscribe?.();
+    inboxPollUnsubscribe = undefined;
     state = undefined;
   });
 }
