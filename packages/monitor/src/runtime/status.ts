@@ -17,7 +17,7 @@ export class MonitorStatusService {
   async refresh(ctx?: any): Promise<void> {
     if (!ctx?.ui?.setStatus) return;
     const identity = getRuntimeIdentity(ctx);
-    const items = (await this.store.list({ include_archived: false })).filter((m) => monitorBelongsToRuntime(m, identity));
+    const items = (await this.store.list({ states: ["running", "triggered", "failed"], include_archived: false })).filter((m) => monitorBelongsToRuntime(m, identity));
     const summary = computeStatusSummary(items);
     const text = renderMonitorStatus(summary);
     if (text) ctx.ui.setStatus("monitors", text);
@@ -129,7 +129,7 @@ export class MonitorStatusService {
 
   async backfillPending(ctx?: any): Promise<number> {
     const identity = getRuntimeIdentity(ctx);
-    const monitors = (await this.store.list({ include_archived: false, limit: 1000 })).filter((m) => m.state === "running" && monitorBelongsToRuntime(m, identity));
+    const monitors = (await this.store.list({ states: ["running"], include_archived: false, limit: 1000 })).filter((m) => monitorBelongsToRuntime(m, identity));
     let delivered = 0;
     for (const monitor of monitors) {
       const results = await this.store.listResults(monitor.monitor_id, { limit: 100 });

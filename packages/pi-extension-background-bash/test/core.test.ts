@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -80,6 +80,45 @@ test("background runner uses Pi bash shell resolution", async () => {
     const rec = new TaskRegistry(cfg.dataDir).get(task.taskId)!;
     assert.equal(rec.status, "exited");
     assert.match(readFileSync(rec.outputPath, "utf8"), /bash-ok/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("registry remove deletes metadata-only terminal task artifacts", async () => {
+  const root = await tmp();
+  try {
+    const dataDir = path.join(root, "data");
+    const taskDir = path.join(dataDir, "bg_done");
+    mkdirSync(taskDir, { recursive: true });
+    const now = new Date().toISOString();
+    const registry = new TaskRegistry(dataDir);
+    const rec: BackgroundTaskRecord = { schemaVersion: 1, taskId: "bg_done", command: "true", cwd: root, status: "exited", createdAt: now, updatedAt: now, startedAt: now, endedAt: now, outputPath: path.join(taskDir, "output.log"), metadataPath: path.join(taskDir, "metadata.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false };
+    registry.upsert(rec);
+    writeFileSync(rec.outputPath, "done");
+
+    const reloaded = new TaskRegistry(dataDir);
+    assert.equal(reloaded.list(false).length, 0, "terminal task must not be in active registry");
+    assert.equal(reloaded.get("bg_done")?.status, "exited", "metadata-only terminal task should remain inspectable before removal");
+    assert.equal(reloaded.remove("bg_done"), true);
+    assert.equal(existsSync(taskDir), false, "remove should delete terminal metadata/output artifact directory");
+    assert.equal(new TaskRegistry(dataDir).get("bg_done"), undefined);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("stop leaves metadata-only terminal task terminal instead of resurrecting orphaned", async () => {
+  const root = await tmp();
+  try {
+    const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data") }, root);
+    const taskDir = path.join(cfg.dataDir, "bg_done");
+    mkdirSync(taskDir, { recursive: true });
+    const now = new Date().toISOString();
+    const rec: BackgroundTaskRecord = { schemaVersion: 1, taskId: "bg_done", command: "true", cwd: root, status: "exited", createdAt: now, updatedAt: now, startedAt: now, endedAt: now, pid: process.pid, outputPath: path.join(taskDir, "output.log"), metadataPath: path.join(taskDir, "metadata.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false };
+    const registry = new TaskRegistry(cfg.dataDir);
+    registry.upsert(rec);
+
+    const stopped = await new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg).stop("bg_done");
+    assert.equal(stopped?.status, "exited");
+    assert.equal(new TaskRegistry(cfg.dataDir).get("bg_done")?.status, "exited");
+    assert.equal(new TaskRegistry(cfg.dataDir).list(false).length, 0, "terminal stop target must not be re-added as active orphaned");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

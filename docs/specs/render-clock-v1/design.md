@@ -87,10 +87,13 @@ long/resumed-session run is an optional smoke check, not the proof.
   guard are retained; `visWidth`/truncation are aligned cell-for-cell with the
   canonical emoji-aware oracle (VS16 lookahead + wide ranges) to remove a
   width-undercount that could overflow a line and hard-exit Pi.
-- **footer** (`.pi/extensions/codex-usage.ts`): the live reset countdown derives
-  from an injected `now` and `requestRender`s only when the rendered reset-bucket
-  signature changes; the 5 min usage poll is a non-render subscriber whose render
-  stays gated by the existing semantic cache-change check.
+- **footer** (`.pi/extensions/codex-usage.ts`): the `setFooter()` component
+  renders from a cached `FooterRenderState`; startup/turn refreshes, usage cache
+  changes, branch changes, and `/fast` changes update that cache before requesting
+  repaint. The live reset countdown derives from an injected `now` and
+  `requestRender`s only when the rendered reset-bucket signature changes; the 5
+  min usage poll is a non-render subscriber whose render stays gated by the
+  existing semantic cache-change check.
 - **child-control** (`extensions/child-control/index.ts`): the child-side inbox
   poll is a **non-render** clock subscriber (`async-child-inbox-poll`, 1 s) driving
   the real `deliverInbox` path instead of a raw `setInterval`. The clock is

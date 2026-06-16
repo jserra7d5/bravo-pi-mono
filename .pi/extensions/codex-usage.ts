@@ -864,6 +864,8 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 	let fastEnabled = false;
 	let tuiRef: TUI | undefined;
 	let footerInstalled = false;
+	let footerDataRef: ReadonlyFooterDataProvider | undefined;
+	let cachedFooterState: FooterRenderState | undefined;
 	let unsubBranch: (() => void) | undefined;
 	let unsubClock: (() => void) | undefined;
 	let lastRenderedResetSignature: string | undefined;
@@ -874,6 +876,36 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 
 	const renderedResetSignature = (ctx: ExtensionContext, now = Date.now()): string => {
 		return footerResetBucketSignature(codexUsage, now, isBalancedCodexModel(ctx.model) ? balancedAffinitySlot : undefined);
+	};
+
+	const refreshCachedFooterState = (ctx: ExtensionContext, now = Date.now()): void => {
+		if (!footerDataRef) return;
+		cachedFooterState = collectState(ctx, footerDataRef, thinkingLevel, fastEnabled, codexUsage, footerCost, balancedAffinitySlot, now);
+		lastRenderedResetSignature = renderedResetSignature(ctx, now);
+	};
+
+	const fallbackFooterState = (ctx: ExtensionContext): FooterRenderState => ({
+		cwd: withTilde(ctx.cwd),
+		branch: null,
+		sessionName: null,
+		model: ctx.model?.id ?? null,
+		provider: ctx.model?.provider ?? null,
+		providerCount: 0,
+		thinking: null,
+		fast: fastEnabled,
+		tasksEnabled: true,
+		ctxPct: 0,
+		ctxUsed: 0,
+		ctxWindow: ctx.model?.contextWindow ?? 0,
+		ctxKnown: false,
+		cost: footerCost.totalCost > 0 ? footerCost.totalCost : null,
+		sub: false,
+		codex: null,
+	});
+
+	const refreshFooterAndRequestRender = (ctx: ExtensionContext, now = Date.now()): void => {
+		refreshCachedFooterState(ctx, now);
+		requestRender();
 	};
 
 	const refreshBalancedAffinity = (ctx: ExtensionContext): void => {
@@ -899,7 +931,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 			}
 			refreshBalancedAffinity(ctx);
 			const nextSemanticKey = codexUsageSemanticKey(codexUsage, balancedAffinitySlot);
-			if (force || nextSemanticKey !== previousSemanticKey) requestRender();
+			if (force || nextSemanticKey !== previousSemanticKey) refreshFooterAndRequestRender(ctx, now);
 		} catch {
 			// Silent: best-effort indicator, must not leak auth details.
 		} finally {
@@ -913,24 +945,25 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 
 		ctx.ui.setFooter((tui, _theme: Theme, footerData) => {
 			tuiRef = tui;
+			footerDataRef = footerData;
+			refreshCachedFooterState(ctx);
 			if (unsubBranch) unsubBranch();
-			unsubBranch = footerData.onBranchChange(() => tui.requestRender());
+			unsubBranch = footerData.onBranchChange(() => refreshFooterAndRequestRender(ctx));
 
 			const component: Component & { dispose?(): void } = {
 				render(width: number): string[] {
-					const now = Date.now();
-					lastRenderedResetSignature = renderedResetSignature(ctx, now);
-					const state = collectState(ctx, footerData, thinkingLevel, fastEnabled, codexUsage, footerCost, balancedAffinitySlot, now);
-					return renderFooter(state, Math.max(20, width));
+					return renderFooter(cachedFooterState ?? fallbackFooterState(ctx), Math.max(20, width));
 				},
 				invalidate(): void {
-					// Cached event-driven state is refreshed by session/model/turn events.
+					refreshCachedFooterState(ctx);
 				},
 				dispose(): void {
 					if (unsubBranch) {
 						unsubBranch();
 						unsubBranch = undefined;
 					}
+					footerDataRef = undefined;
+					cachedFooterState = undefined;
 					tuiRef = undefined;
 				},
 			};
@@ -953,7 +986,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 				}
 				fastEnabled = action === "on";
 				writeFastModeSetting(fastEnabled);
-				requestRender();
+				refreshFooterAndRequestRender(ctx);
 			}
 			ctx.ui.notify(`Model fast mode: ${fastEnabled ? "on" : "off"}`, "info");
 		},
@@ -967,7 +1000,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("Refreshing Codex account usage…", "info");
 				codexUsage = await refreshCodexUsageCache();
 				refreshBalancedAffinity(ctx);
-				requestRender();
+				refreshFooterAndRequestRender(ctx);
 				ctx.ui.notify(codexUsage.unavailable ? "Codex account usage refresh failed." : "Codex account usage refreshed.", codexUsage.unavailable ? "error" : "info");
 				return;
 			}
@@ -977,7 +1010,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 			}
 			codexUsage = await readCodexUsageCache();
 			refreshBalancedAffinity(ctx);
-			requestRender();
+			refreshFooterAndRequestRender(ctx);
 			ctx.ui.notify(codexUsage.unavailable ? "Codex account usage cache unavailable." : `Codex accounts: ${codexUsage.accounts.length}`, codexUsage.unavailable ? "error" : "info");
 		},
 	});
@@ -1004,7 +1037,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 			}
 			codexUsage = await readCodexUsageCache();
 			refreshBalancedAffinity(ctx);
-			requestRender();
+			refreshFooterAndRequestRender(ctx);
 			ctx.ui.notify(`✓ ${result.message}.`, "info");
 		},
 	});
@@ -1031,7 +1064,7 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 						previousSignature: lastRenderedResetSignature,
 						usage: codexUsage,
 						balancedAffinitySlot: isBalancedCodexModel(ctx.model) ? balancedAffinitySlot : undefined,
-						requestRender,
+						requestRender: () => refreshFooterAndRequestRender(ctx, now),
 					});
 				},
 			});
@@ -1043,13 +1076,13 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 	pi.on("model_select", async (_event, ctx) => {
 		if (!isCodexModel(ctx.model)) codexUsage = undefined;
 		refreshBalancedAffinity(ctx);
-		requestRender();
+		refreshFooterAndRequestRender(ctx);
 		void refresh(ctx, true);
 	});
 
-	pi.on("thinking_level_select", async (event) => {
+	pi.on("thinking_level_select", async (event, ctx) => {
 		thinkingLevel = event.level;
-		requestRender();
+		refreshFooterAndRequestRender(ctx);
 	});
 
 	pi.on("before_provider_request", async (event, ctx) => {
@@ -1062,26 +1095,26 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 			void ingestDirectPiLiveUsage({ headers: event.headers }).catch(() => undefined);
 		}
 		refreshBalancedAffinity(ctx);
-		requestRender();
+		refreshFooterAndRequestRender(ctx);
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
 		recomputeFooterCost(ctx);
 		refreshBalancedAffinity(ctx);
-		requestRender();
+		refreshFooterAndRequestRender(ctx);
 		void refresh(ctx);
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
 		recomputeFooterCost(ctx);
 		refreshBalancedAffinity(ctx);
-		requestRender();
+		refreshFooterAndRequestRender(ctx);
 		void refresh(ctx, true);
 	});
 
 	pi.on("session_compact", async (_event, ctx) => {
 		recomputeFooterCost(ctx);
-		requestRender();
+		refreshFooterAndRequestRender(ctx);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
@@ -1105,6 +1138,9 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 			}
 		}
 		footerInstalled = false;
+		footerDataRef = undefined;
+		cachedFooterState = undefined;
+		lastRenderedResetSignature = undefined;
 		tuiRef = undefined;
 	});
 }

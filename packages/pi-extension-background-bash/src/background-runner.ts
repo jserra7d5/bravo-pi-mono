@@ -101,7 +101,7 @@ export class BackgroundRunner {
 
   async stop(taskId: string, signal: "SIGTERM" | "SIGKILL" = "SIGTERM", killAfterMs = 5_000): Promise<BackgroundTaskRecord | undefined> {
     const record = this.registry.get(taskId);
-    if (!record?.pid) return record;
+    if (!record || terminal(record.status) || !record.pid) return record;
     const child = ownedChildren.get(taskId);
     if (child?.pid === record.pid && record.ownerRuntimeId === runtimeId) {
       await terminateProcessTree(record.pid, signal, killAfterMs);
@@ -114,7 +114,7 @@ export class BackgroundRunner {
   }
 
   reconcile(sessionId?: string): void {
-    for (const record of this.registry.list(true)) {
+    for (const record of this.registry.list(false)) {
       if (!liveStatuses.has(record.status)) continue;
       if (sessionId && record.ownerSessionId && record.ownerSessionId !== sessionId) continue;
       if (ownedChildren.has(record.taskId) && record.ownerRuntimeId === runtimeId) continue;
@@ -124,7 +124,7 @@ export class BackgroundRunner {
 
   async shutdown(sessionId?: string): Promise<void> {
     if (this.config.shutdownPolicy === "leave-running") return;
-    for (const record of this.registry.list(true)) {
+    for (const record of this.registry.list(false)) {
       if (!liveStatuses.has(record.status)) continue;
       if (sessionId && record.ownerSessionId && record.ownerSessionId !== sessionId) continue;
       if (ownedChildren.has(record.taskId) && record.ownerRuntimeId === runtimeId) await this.stop(record.taskId, "SIGTERM", 5_000);

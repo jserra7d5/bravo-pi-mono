@@ -193,12 +193,16 @@ function totalCostForRows(rows: RunSummaryRow[]): number | undefined {
 }
 
 function buildSnapshot(input: LiveWidgetInput, now: number, terminalCompletedVisibleMs: number): BuildResult {
+  const records = input.records ?? input.store.listActiveOrRecentRuns(
+    { parentRunId: input.parentRunId, rootSessionId: input.rootSessionId },
+    { nowMs: now, terminalVisibleMs: terminalCompletedVisibleMs },
+  );
   const snapshot = readWatcherSnapshot(input.store, {
     parentRunId: input.parentRunId,
     rootSessionId: input.rootSessionId,
     nowMs: now,
     completedVisibleMs: terminalCompletedVisibleMs,
-    records: input.records,
+    records,
   });
   const rows = snapshot.rows
     .map((row) => reconcileDeadProcessOwnedLiveRow(input, row, now, terminalCompletedVisibleMs))

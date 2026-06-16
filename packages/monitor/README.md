@@ -50,6 +50,12 @@ Watch a file condition:
 
 `monitor_start` returns a generated `output_path` under the monitor state directory. Inspect details with the normal `read` tool when needed.
 
+## Lifecycle and storage
+
+Monitor storage keeps canonical JSONL/snapshot files plus `monitors.active.json`, a small active-lifecycle index used by scheduler/status hot paths. The index contains only currently actionable monitor ids (`created`, `running`, `triggered`, `failed`) and is rebuilt automatically if missing or corrupt, so inactive historical monitors do not make every refresh scan old rows.
+
+Use `monitor_list` for active/recoverable monitors and `monitor_stop` when an observer is no longer needed. Stopping a monitor preserves its output/history but removes it from the active lifecycle index; stopped/completed/archived monitors remain inspectable through their output path and retained store files.
+
 ## Wakeups
 
 Monitor-originated follow-up messages use `customType: "monitor-event"` and visible headers such as:

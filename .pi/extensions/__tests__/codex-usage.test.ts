@@ -2,7 +2,7 @@
 //   node --experimental-strip-types --test .pi/extensions/__tests__/codex-usage.test.ts
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
+import codexUsageExtension, {
 	c,
 	bar,
 	applyModelSpeedToPayload,
@@ -425,6 +425,56 @@ test("renderTopLine includes sticky async task mode badge", () => {
 	assert.equal(stripAnsi(tasksSegment(false)), "tasks:off");
 	assert.ok(stripAnsi(renderTopLine(120, makeState({ tasksEnabled: true }))).includes("tasks:on"));
 	assert.ok(stripAnsi(renderTopLine(120, makeState({ tasksEnabled: false }))).includes("tasks:off"));
+});
+
+test("installed footer render uses cached state until invalidated", async () => {
+	const handlers = new Map<string, Function>();
+	let footerFactory: Function | undefined;
+	const commands = new Map<string, any>();
+	const pi = {
+		on: (event: string, handler: Function) => { handlers.set(event, handler); },
+		registerCommand: (name: string, command: any) => { commands.set(name, command); },
+		getThinkingLevel: () => "off",
+	} as any;
+	codexUsageExtension(pi);
+	assert.ok(commands.has("fast"));
+
+	const ctx = {
+		hasUI: true,
+		cwd: process.cwd(),
+		model: { id: "gpt-5.5", provider: "openai-codex", contextWindow: 1000 },
+		getContextUsage: () => ({ percent: 10, tokens: 100, contextWindow: 1000 }),
+		sessionManager: {
+			getSessionId: () => "session-1",
+			getSessionName: () => "cached-render",
+			getEntries: () => [],
+		},
+		modelRegistry: { isUsingOAuth: () => false },
+		ui: { setFooter: (factory: Function | undefined) => { footerFactory = factory; } },
+	} as any;
+	await handlers.get("session_start")?.({}, ctx);
+	assert.ok(footerFactory);
+
+	let branchCalls = 0;
+	let providerCountCalls = 0;
+	const footerData = {
+		getGitBranch: () => { branchCalls += 1; return "main"; },
+		getAvailableProviderCount: () => { providerCountCalls += 1; return 2; },
+		onBranchChange: () => () => undefined,
+	};
+	const component = footerFactory!({ requestRender() {} }, {}, footerData);
+	component.render(100);
+	component.render(100);
+	assert.equal(branchCalls, 1);
+	assert.equal(providerCountCalls, 1);
+
+	component.invalidate();
+	component.render(100);
+	assert.equal(branchCalls, 2);
+	assert.equal(providerCountCalls, 2);
+
+	component.dispose?.();
+	await handlers.get("session_shutdown")?.({}, ctx);
 });
 
 // ── extreme-narrow overflow on both lines ──────────────────────────────────

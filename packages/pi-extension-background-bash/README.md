@@ -8,6 +8,8 @@ For async-subagents, add `src/async-subagents-global.ts` as a `defaultExtensions
 
 When enabled, the extension registers `bash` plus `background_task_list`, `background_task_status`, and `background_task_stop`. It also registers the scoped slash command `/bash-tasks [list|all|show <id>|tail <id> [lines]|stop <id>|cleanup]` for human TUI inspection/control. Foreground calls delegate to Pi's exported `createBashTool`; background calls spawn a managed process, write `~/.pi/background-bash/<taskId>/output.log` by default, persist task metadata, and enforce max runtime/output caps. The task record stores the original command cwd as metadata; repo-local `.pi/background-bash` storage is opt-in via `backgroundBash.dataDir`.
 
+The registry file is an active-lifecycle index, not a full history table: it tracks starting/running/blocked/attention-needed tasks so list/status refreshes stay small. Terminal task metadata is still written under the task directory and can be inspected with `background_task_status`, `/bash-tasks show`, or `read` until cleanup. `background_task_stop` is for live or blocked tasks; if the target has already reached a terminal state, stop does not re-add it to the active registry.
+
 Prefer enabling this extension and relying on Pi tool override precedence. If precedence is ambiguous, explicitly remove the built-in `bash` from active tools and expose this extension's `bash`; use `--exclude-tools bash` only as a workaround.
 
 Model wake-up on completion is off by default. Pass `wake_on_completion: true` per call only when explicitly desired.

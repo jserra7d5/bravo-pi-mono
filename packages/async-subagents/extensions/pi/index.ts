@@ -186,7 +186,7 @@ function tickAsyncTasksPoll(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const cwd = cwdOf(ctx);
   const identity = ensureRoot(cwd, piSessionIdOf(ctx));
   const store = new RunStore({ cwd });
-  const records = store.listRecentRuns({ parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
+  const records = store.listActiveOrRecentRuns({ parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
   const enabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
   setTasksStatusBadge(ctx, enabled);
   if (enabled) reconcileTaskOwnedRuns(store, identity.rootSessionId);

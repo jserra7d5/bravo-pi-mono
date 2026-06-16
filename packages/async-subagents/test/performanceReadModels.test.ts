@@ -105,6 +105,73 @@ test("live widget summary cache avoids disk re-reading unchanged terminal summar
   assert.ok(lines.join("\n").includes(newRunId));
 });
 
+test("RunStore listActiveOrRecentRuns includes recent terminal runs and excludes expired terminal runs", () => {
+  const w = workspace();
+  const baseMs = Date.parse("2026-01-01T00:00:00.000Z");
+  const terminalVisibleMs = 1_000;
+  const recentRunId = addRun(w.store, w.root, w.parentRunId, "completed", new Date(baseMs).toISOString());
+  const oldRunId = addRun(w.store, w.root, w.parentRunId, "failed", new Date(baseMs - 1).toISOString());
+
+  const records = w.store.listActiveOrRecentRuns(
+    { parentRunId: w.parentRunId, rootSessionId: w.parentRunId },
+    { nowMs: baseMs + terminalVisibleMs, terminalVisibleMs },
+  );
+
+  assert.deepEqual(records.map((record) => record.runId), [recentRunId]);
+  assert.equal(records.some((record) => record.runId === oldRunId), false);
+});
+
+test("RunStore listActiveOrRecentRuns retains old terminal runs with ready results", () => {
+  const w = workspace();
+  const baseMs = Date.parse("2026-01-01T00:00:00.000Z");
+  const readyRunId = addRun(w.store, w.root, w.parentRunId, "completed", new Date(baseMs).toISOString());
+  w.store.writeStatus({ ...w.store.readStatus(readyRunId), resultReady: true, updatedAt: new Date(baseMs).toISOString(), lastActivityAt: new Date(baseMs).toISOString() });
+
+  const records = w.store.listActiveOrRecentRuns(
+    { parentRunId: w.parentRunId, rootSessionId: w.parentRunId },
+    { nowMs: baseMs + 10_000, terminalVisibleMs: 1_000 },
+  );
+
+  assert.deepEqual(records.map((record) => record.runId), [readyRunId]);
+});
+
+test("RunStore listActiveOrRecentRuns invalidates cached terminal exclusions when summaries mutate", () => {
+  const w = workspace();
+  const baseMs = Date.parse("2026-01-01T00:00:00.000Z");
+  const runId = addRun(w.store, w.root, w.parentRunId, "completed", new Date(baseMs).toISOString());
+  const filter = { parentRunId: w.parentRunId, rootSessionId: w.parentRunId };
+  const options = { nowMs: baseMs + 10_000, terminalVisibleMs: 1_000 };
+
+  assert.deepEqual(w.store.listActiveOrRecentRuns(filter, options), []);
+
+  w.store.writeStatus({
+    ...w.store.readStatus(runId),
+    state: "running",
+    summary: "reactivated after cached exclusion",
+    updatedAt: new Date(baseMs + 10_000).toISOString(),
+    lastActivityAt: new Date(baseMs + 10_000).toISOString(),
+  });
+
+  const records = w.store.listActiveOrRecentRuns(filter, options);
+  assert.deepEqual(records.map((record) => record.runId), [runId]);
+});
+
+test("RunStore listActiveOrRecentRuns exclusion cache is time-bound across visibility boundary", () => {
+  const w = workspace();
+  const baseMs = Date.parse("2026-01-01T00:00:00.000Z");
+  const terminalVisibleMs = 1_000;
+  const runId = addRun(w.store, w.root, w.parentRunId, "completed", new Date(baseMs).toISOString());
+  const filter = { parentRunId: w.parentRunId, rootSessionId: w.parentRunId };
+
+  assert.deepEqual(w.store.listActiveOrRecentRuns(filter, { nowMs: baseMs + terminalVisibleMs + 1, terminalVisibleMs }), []);
+
+  const recordsAtBoundary = w.store.listActiveOrRecentRuns(filter, { nowMs: baseMs + terminalVisibleMs, terminalVisibleMs });
+  assert.deepEqual(recordsAtBoundary.map((record) => record.runId), [runId]);
+
+  const recordsAfterBoundary = w.store.listActiveOrRecentRuns(filter, { nowMs: baseMs + terminalVisibleMs + 1, terminalVisibleMs });
+  assert.deepEqual(recordsAfterBoundary, []);
+});
+
 test("manual retention dry-run skips active and unhandled result-ready runs", () => {
   const w = workspace();
   const old = new Date(Date.now() - 10 * 60_000).toISOString();

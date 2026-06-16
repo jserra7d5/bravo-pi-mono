@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JsonlMonitorStore } from '../src/store/jsonl-store.js';
@@ -96,6 +96,28 @@ test('update blocks terminal stopped monitor resurrection but permits cleanup an
 
     const archived = await store.update('m1', undefined, { state: 'archived' });
     assert.equal(archived.state, 'archived');
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test('active index persists only active lifecycle monitors and rebuilds from corrupt index', async () => {
+  const { dir, store } = tmpStore();
+  try {
+    await store.create({ ...sampleRecord('m-running'), state: 'running' });
+    await store.create({ ...sampleRecord('m-stopped'), state: 'stopped' });
+    await store.update('m-running', undefined, { state: 'completed' });
+    await store.create({ ...sampleRecord('m-failed'), state: 'failed' });
+
+    let active = JSON.parse(readFileSync(join(dir, 'monitors.active.json'), 'utf8'));
+    assert.deepEqual(active.monitor_ids, ['m-failed']);
+
+    writeFileSync(join(dir, 'monitors.active.json'), JSON.stringify({ monitor_ids: ['m-stopped', 'm-missing'] }), 'utf8');
+    const reloaded = new JsonlMonitorStore(dir);
+    const failed = await reloaded.list({ states: ['failed'] });
+    assert.deepEqual(failed.map((m) => m.monitor_id), ['m-failed']);
+    active = JSON.parse(readFileSync(join(dir, 'monitors.active.json'), 'utf8'));
+    assert.deepEqual(active.monitor_ids, ['m-failed'], 'invalid active index should be rebuilt from snapshot/events');
   } finally {
     rmSync(dir, { recursive: true });
   }

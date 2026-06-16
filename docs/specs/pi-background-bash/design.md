@@ -265,7 +265,7 @@ Statuses:
 
 ## Task Registry and Persistence
 
-Persist registry state in extension-owned storage, with a file mirror in the task root for inspectability.
+Persist active lifecycle registry state in extension-owned storage, with a file mirror in each task root for inspectability. The registry is intentionally a hot-path index for starting/running/blocked/attention-needed tasks, not the complete historical source of truth.
 
 Task metadata fields:
 
@@ -302,6 +302,10 @@ type BackgroundTaskRecord = {
 Persistence policy:
 
 - Default tasks are session-owned and non-persistent.
+- Quiet terminal tasks (`exited`, `killed`, `unknown`) are removed from the active registry when metadata is updated; attention-needed lifecycle states such as `failed`, `timed_out`, and `orphaned` remain in the active index until cleanup/review.
+- Per-task `metadata.json` and logs remain inspectable until cleanup, even after a task leaves the active registry.
+- Listing without `includeCompleted` reads only the active lifecycle index; listing with completed tasks may scan per-task metadata directories.
+- Stop/status for a process-terminal task reads its metadata but must not re-add it to the active registry as orphaned or running.
 - On reload, reconcile registry with live PIDs and output files.
 - On full session shutdown, terminate non-persistent running tasks.
 - Persistent tasks may be added later behind an explicit schema option or config flag.

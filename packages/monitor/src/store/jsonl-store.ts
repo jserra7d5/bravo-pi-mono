@@ -19,13 +19,16 @@ import { FileLock } from "./lock.js";
 const SNAPSHOT_FILE = "monitors.snapshot.json";
 const EVENTS_FILE = "monitors.events.jsonl";
 const RESULTS_FILE = "monitors.results.jsonl";
+const ACTIVE_INDEX_FILE = "monitors.active.json";
 
 const TERMINAL_STATES = new Set(["completed", "stopped", "canceled", "expired", "archived", "succeeded", "failed", "triggered"]);
+const ACTIVE_STATES = new Set(["created", "running", "triggered", "failed"]);
 const STATE_EVENT_TYPES = new Set(["started", "stopped", "triggered", "failed", "succeeded", "completed", "expired", "archived"]);
 
 export class JsonlMonitorStore {
   private stateRoot: string;
   private monitors = new Map<string, MonitorRecord>();
+  private activeMonitorIds = new Set<string>();
   private results = new Map<string, MonitorResult[]>();
   private events: MonitorEvent[] = [];
   private initialized = false;
@@ -39,6 +42,10 @@ export class JsonlMonitorStore {
     mkdirSync(this.stateRoot, { recursive: true });
     this.loadSnapshot();
     this.loadEvents();
+    if (!this.loadActiveIndex()) {
+      this.rebuildActiveIndex();
+      this.saveActiveIndex();
+    }
     this.loadResults();
     this.initialized = true;
   }
@@ -53,6 +60,56 @@ export class JsonlMonitorStore {
 
   private resultsPath(): string {
     return join(this.stateRoot, RESULTS_FILE);
+  }
+
+  private activeIndexPath(): string {
+    return join(this.stateRoot, ACTIVE_INDEX_FILE);
+  }
+
+  private rebuildActiveIndex(): void {
+    this.activeMonitorIds = new Set(
+      Array.from(this.monitors.values())
+        .filter((m) => ACTIVE_STATES.has(m.state))
+        .map((m) => m.monitor_id)
+    );
+  }
+
+  private updateActiveIndexFor(record: MonitorRecord): void {
+    if (ACTIVE_STATES.has(record.state)) this.activeMonitorIds.add(record.monitor_id);
+    else this.activeMonitorIds.delete(record.monitor_id);
+  }
+
+  private saveActiveIndex(): void {
+    const path = this.activeIndexPath();
+    const tmp = path + ".tmp";
+    const data = { updated_at: nowISO(), monitor_ids: Array.from(this.activeMonitorIds).sort() };
+    writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
+    renameSync(tmp, path);
+  }
+
+  private loadActiveIndex(): boolean {
+    const path = this.activeIndexPath();
+    if (!existsSync(path)) return false;
+    try {
+      const data = JSON.parse(readFileSync(path, "utf8")) as { monitor_ids?: unknown };
+      if (!Array.isArray(data.monitor_ids)) return false;
+      const loadedIds = new Set<string>();
+      for (const id of data.monitor_ids) {
+        if (typeof id !== "string" || loadedIds.has(id)) return false;
+        const monitor = this.monitors.get(id);
+        if (!monitor || !ACTIVE_STATES.has(monitor.state)) return false;
+        loadedIds.add(id);
+      }
+      const expectedIds = Array.from(this.monitors.values())
+        .filter((m) => ACTIVE_STATES.has(m.state))
+        .map((m) => m.monitor_id);
+      if (expectedIds.length !== loadedIds.size) return false;
+      for (const id of expectedIds) if (!loadedIds.has(id)) return false;
+      this.activeMonitorIds = loadedIds;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private loadResults(): void {
@@ -190,6 +247,7 @@ export class JsonlMonitorStore {
             break;
         }
         m.updated_at = event.created_at;
+        this.updateActiveIndexFor(m);
         break;
       }
     }
@@ -198,7 +256,9 @@ export class JsonlMonitorStore {
   async create(record: MonitorRecord): Promise<MonitorRecord> {
     await this.init();
     this.monitors.set(record.monitor_id, record);
+    this.updateActiveIndexFor(record);
     this.saveSnapshot();
+    this.saveActiveIndex();
     const event: MonitorEvent = {
       event_id: generateEventId(),
       monitor_id: record.monitor_id,
@@ -217,7 +277,9 @@ export class JsonlMonitorStore {
 
   async list(filter: MonitorListFilter): Promise<MonitorRecord[]> {
     await this.init();
-    let items = Array.from(this.monitors.values());
+    let items = filter.states?.length && filter.states.every((s) => ACTIVE_STATES.has(s))
+      ? Array.from(this.activeMonitorIds, (id) => this.monitors.get(id)).filter((m): m is MonitorRecord => !!m)
+      : Array.from(this.monitors.values());
     if (filter.states?.length) {
       items = items.filter((m) => filter.states!.includes(m.state));
     }
@@ -257,7 +319,9 @@ export class JsonlMonitorStore {
     }
     const next = { ...m, ...patch, monitor_id: m.monitor_id, version: m.version + 1, updated_at: nowISO() };
     this.monitors.set(monitorId, next);
+    this.updateActiveIndexFor(next);
     this.saveSnapshot();
+    this.saveActiveIndex();
     return next;
   }
 
@@ -304,6 +368,7 @@ export class JsonlMonitorStore {
     this.applyEvent(event);
     this.appendEventLine(event);
     this.saveSnapshot();
+    this.saveActiveIndex();
   }
 
   async listEvents(filter: EventFilter): Promise<MonitorEvent[]> {
@@ -325,8 +390,9 @@ export class JsonlMonitorStore {
   async claimDue(now: Date, _lease: LeaseSpec, filter?: (monitor: MonitorRecord) => boolean): Promise<MonitorRecord[]> {
     await this.init();
     const due: MonitorRecord[] = [];
-    for (const m of this.monitors.values()) {
-      if (m.state !== "running") continue;
+    for (const monitorId of this.activeMonitorIds) {
+      const m = this.monitors.get(monitorId);
+      if (!m || m.state !== "running") continue;
       if (filter && !filter(m)) continue;
       if (m.next_run_at && Date.parse(m.next_run_at) <= now.getTime()) {
         if (m.lease_expires_at && Date.parse(m.lease_expires_at) > now.getTime()) continue;
@@ -396,16 +462,21 @@ export class JsonlMonitorStore {
       if (terminal.has(m.state) && Date.parse(m.updated_at) < _now.getTime() - archiveThreshold) {
         m.state = "archived";
         m.updated_at = nowISO();
+        this.updateActiveIndexFor(m);
         summary.monitors_archived++;
       }
     }
-    if (summary.monitors_archived) this.saveSnapshot();
+    if (summary.monitors_archived) {
+      this.saveSnapshot();
+      this.saveActiveIndex();
+    }
     return summary;
   }
 
   // For testing only
   _reset(stateRoot?: string): void {
     this.monitors.clear();
+    this.activeMonitorIds.clear();
     this.results.clear();
     this.events = [];
     this.initialized = false;

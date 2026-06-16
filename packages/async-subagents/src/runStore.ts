@@ -41,8 +41,21 @@ interface MemorySummaryCacheEntry {
   summary: RunSummaryReadModel;
 }
 
+interface RefreshPruneCacheItem {
+  include: boolean;
+  summaryState: SummaryFileState;
+  terminalExpiresAtMs?: number;
+}
+
+interface RefreshPruneCache {
+  items: Map<string, RefreshPruneCacheItem>;
+}
+
 const memoryIndexCaches = new Map<string, MemoryIndexCache>();
 const memorySummaryCaches = new Map<string, MemorySummaryCacheEntry>();
+const memoryRefreshPruneCaches = new Map<string, RefreshPruneCache>();
+
+const TERMINAL_RUN_STATES = new Set<RunStatus["state"]>(["completed", "failed", "cancelled", "expired"]);
 
 function sourceKey(paths: string[]): string {
   return paths.map((path) => resolve(path)).join("\0");
@@ -166,6 +179,11 @@ export interface RunStoreOptions {
   cwd?: string;
   runRoot?: string;
   env?: NodeJS.ProcessEnv;
+}
+
+export interface ActiveOrRecentRunsOptions {
+  nowMs?: number;
+  terminalVisibleMs?: number;
 }
 
 export class RunStore {
@@ -529,5 +547,47 @@ export class RunStore {
     const cache = this.getIndexCache();
     if (filter.rootSessionId) return (cache.byRootSessionId[filter.rootSessionId] ?? []).map((runId) => cache.byRunId[runId]).filter(Boolean).map(cloneRecord);
     return cache.records.map(cloneRecord);
+  }
+
+  listActiveOrRecentRuns(filter: Partial<Pick<RunIndexRecord, "parentRunId" | "rootSessionId">> = {}, options: ActiveOrRecentRunsOptions = {}): RunIndexRecord[] {
+    const records = this.listRecentRuns(filter);
+    const terminalVisibleMs = options.terminalVisibleMs ?? 60_000;
+    const nowMs = options.nowMs ?? Date.now();
+    const key = `${this.indexCacheKey()}\0${filter.parentRunId ?? ""}\0${filter.rootSessionId ?? ""}\0${terminalVisibleMs}`;
+    let cache = memoryRefreshPruneCaches.get(key);
+    if (!cache) {
+      cache = { items: new Map() };
+      memoryRefreshPruneCaches.set(key, cache);
+    }
+    const seen = new Set<string>();
+    const filtered = records.filter((record) => {
+      seen.add(record.runId);
+      const summaryPath = summaryPathForRunDir(record.runDir);
+      const summaryState = statSummaryFile(summaryPath);
+      const cached = cache.items.get(record.runId);
+      if (
+        cached
+        && !cached.include
+        && cached.terminalExpiresAtMs !== undefined
+        && nowMs > cached.terminalExpiresAtMs
+        && summaryStateUnchanged(cached.summaryState, summaryState)
+      ) return false;
+      const summary = this.readSummaryByRunDir(record.runDir);
+      if (!summary) {
+        cache.items.delete(record.runId);
+        return true;
+      }
+      const updatedAtMs = Date.parse(summary.updatedAt);
+      const terminalExpiresAtMs = Number.isFinite(updatedAtMs) ? updatedAtMs + terminalVisibleMs : undefined;
+      const oldTerminal = TERMINAL_RUN_STATES.has(summary.state)
+        && summary.resultReady !== true
+        && terminalExpiresAtMs !== undefined
+        && nowMs > terminalExpiresAtMs;
+      const include = !oldTerminal;
+      cache.items.set(record.runId, { include, summaryState, terminalExpiresAtMs });
+      return include;
+    });
+    for (const runId of cache.items.keys()) if (!seen.has(runId)) cache.items.delete(runId);
+    return filtered;
   }
 }
