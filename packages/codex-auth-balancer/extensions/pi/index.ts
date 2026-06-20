@@ -326,13 +326,41 @@ export function getBalancedCodexModels(): Model<typeof API>[] {
   return getModels('openai-codex').map((model) => publicModel(model as Model<typeof API>));
 }
 
-export default function codexBalancedProvider(pi: ExtensionAPI) {
+export function registerBalancedProvider(pi: ExtensionAPI): void {
+  const models = getBalancedCodexModels();
   pi.registerProvider(PROVIDER, {
     name: 'Bravo Codex Balanced',
-    baseUrl: getBalancedCodexModels()[0]?.baseUrl || 'https://chatgpt.com/backend-api/codex',
+    baseUrl: models[0]?.baseUrl || 'https://chatgpt.com/backend-api/codex',
+    // Placeholder only: the real, claim-bearing access token is injected per
+    // request by the lease inside createBalancedStreamRunner(). This value is
+    // what reaches the upstream if our api-handler override is ever lost (see
+    // below), which is why a lost override surfaces as the upstream
+    // "Failed to extract accountId from token" — it is not a JWT.
     apiKey: 'bravo-codex-balanced-lease',
     api: API,
     streamSimple: createBalancedStreamRunner() as any,
-    models: getBalancedCodexModels(),
+    models,
   });
+}
+
+export default function codexBalancedProvider(pi: ExtensionAPI) {
+  // registerProvider installs an override of the shared `openai-codex-responses`
+  // api-handler (pi-ai's api-registry is one global, last-writer-wins map); that
+  // override is what routes every request through the per-request balanced lease.
+  registerBalancedProvider(pi);
+
+  // pi's reload() — invoked by BOTH print-mode (`pi -p`) and the interactive TUI
+  // — calls resetApiProviders(), which clears the api-registry and re-registers
+  // ONLY the built-in handlers, silently dropping our override. (model-registry
+  // refresh() resets too, but re-applies registered providers afterward;
+  // reload() does not.) Once dropped, a bravo-codex-balanced request resolves to
+  // the BUILT-IN codex handler and is handed our placeholder apiKey, so the
+  // upstream extractAccountId() throws "Failed to extract accountId from token"
+  // and the lease/rotation path is never reached (no reservation, no failover).
+  // Re-assert before every turn and on (re)start so the override is always
+  // present at dispatch time. registerProvider is documented safe to call from
+  // event callbacks, takes effect immediately, and writes to the process-global
+  // registry pi dispatches from — so this self-heals any reset, whenever it ran.
+  pi.on('session_start', () => { registerBalancedProvider(pi); });
+  pi.on('turn_start', () => { registerBalancedProvider(pi); });
 }

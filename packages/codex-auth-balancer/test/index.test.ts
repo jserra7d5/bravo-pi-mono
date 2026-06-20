@@ -467,7 +467,7 @@ test('balanced provider defaults to SSE so response headers ingest live usage', 
   await writeJson(path.join(root, 'cache', 'usage.json'), { schema_version: 2, generated_at: Date.now(), accounts: { s1: { slot: 's1', status: 'ok', updatedAt: Date.now(), primary: { label: 'primary', remainingPercent: 100 } } } });
 
   let registered: any;
-  codexBalancedProvider({ registerProvider: (_id: string, provider: any) => { registered = provider; } } as any);
+  codexBalancedProvider({ registerProvider: (_id: string, provider: any) => { registered = provider; }, on: () => {} } as any);
   let fetchCount = 0;
   let webSocketConstructed = false;
   try {
@@ -510,6 +510,39 @@ test('balanced provider defaults to SSE so response headers ingest live usage', 
     if (oldWebSocket === undefined) delete (globalThis as any).WebSocket; else globalThis.WebSocket = oldWebSocket;
     if (oldHome === undefined) delete process.env.CODEX_AUTH_BALANCER_HOME; else process.env.CODEX_AUTH_BALANCER_HOME = oldHome;
   }
+});
+
+test('provider re-asserts its api-handler override on session_start and turn_start (survives pi reload() resetApiProviders)', () => {
+  // Regression: pi 0.79.8 reload() (print-mode + interactive TUI) calls
+  // resetApiProviders(), wiping our `openai-codex-responses` override and
+  // restoring only built-ins. After that, codex-balanced requests hit the
+  // built-in handler with our placeholder apiKey and the upstream throws
+  // "Failed to extract accountId from token" without ever leasing. The fix
+  // re-registers the provider on session_start and turn_start so the override
+  // is reinstalled before each dispatch.
+  const registrations: string[] = [];
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+  const mockPi = {
+    registerProvider: (id: string, _provider: any) => { registrations.push(id); },
+    on: (event: string, handler: (event: unknown, ctx: unknown) => void) => { handlers.set(event, handler); },
+  };
+
+  codexBalancedProvider(mockPi as any);
+
+  // Initial load registers exactly once and subscribes to both lifecycle events.
+  assert.deepEqual(registrations, ['bravo-codex-balanced']);
+  assert.ok(handlers.has('session_start'), 'subscribes to session_start');
+  assert.ok(handlers.has('turn_start'), 'subscribes to turn_start');
+
+  // Simulate a reload() wipe followed by the next turn: turn_start must
+  // re-register (reinstall the override) before the model is dispatched.
+  handlers.get('turn_start')!({ type: 'turn_start', turnIndex: 0, timestamp: 0 }, {});
+  assert.deepEqual(registrations, ['bravo-codex-balanced', 'bravo-codex-balanced']);
+
+  // session_start (e.g. reload's re-emit) also re-asserts.
+  handlers.get('session_start')!({ type: 'session_start' }, {});
+  assert.equal(registrations.length, 3);
+  assert.ok(registrations.every((id) => id === 'bravo-codex-balanced'));
 });
 
 test('startTokenLease extracts token from slot Pi auth, honors affinity, and finish is idempotent', async () => {
