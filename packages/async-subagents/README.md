@@ -130,10 +130,33 @@ Applied launches inject the package-owned `extensions/child-fast-track` child ex
 
 ## Codex auth balancer
 
-Async subagents can optionally launch Codex-backed children through `@bravo/codex-auth-balancer`. The balancer does not expose arbitrary child env to agents; it internally prepares isolated auth homes and injects only:
+When the balancer is enabled, every Codex-backed child launch is routed through the
+per-request lease provider `@bravo/codex-auth-balancer`. Requested Codex models are
+**remapped at launch**:
 
-- `PI_CODING_AGENT_DIR=<runDir>/auth/codex-balancer/pi-agent`
-- `CODEX_HOME=<runDir>/auth/codex-balancer/codex`
+- `openai-codex/<X>` → `bravo-codex-balanced/<X>`
+- `openai-codex-responses/<X>` → `bravo-codex-balanced/<X>`
+
+The child then acquires a token lease per provider request (no long-lived per-child
+credential copy). This is the normal Bravo Codex path and it eliminates the OAuth
+refresh-token rotation race that the older copied-credential path was exposed to.
+
+Provenance is preserved: the originally-requested model (e.g. `openai-codex/gpt-5.5`)
+is what status, results, and metadata report. Only the *launched/exec* model changes —
+the child `pi --model` and the `launchedModel` field in `launch.json` show the remapped
+`bravo-codex-balanced/*` id.
+
+### Extension requirement (important)
+
+Child Pi launches are intentionally isolated with `--no-extensions`. A
+`bravo-codex-balanced/*` model is registered by the codex-auth-balancer **provider Pi
+extension**, so async-subagents adds that extension's loadable module
+(`@bravo/codex-auth-balancer/extensions/pi` → `dist/extensions/pi/index.js`, resolved
+robustly relative to the installed package) to the child `-e` list automatically for
+every balanced launch. Before spawn, the cheap model preflight runs against the exact
+isolated extension set and **fails closed** (`MODEL_PREFLIGHT_FAILED` with a
+provider-extension hint) if the model still cannot resolve. The codex-auth-balancer
+package must be built (`dist/extensions/pi/index.js` present) for this to work.
 
 Enable it in `~/.async-subagents/config.json`:
 
@@ -153,9 +176,32 @@ Enable it in `~/.async-subagents/config.json`:
 }
 ```
 
-`stateDir` is optional; it defaults to `CODEX_AUTH_BALANCER_HOME` or `~/.bravo/codex-auth-balancer`. Balancing is fail-closed by default: if prepare-launch fails, the child run fails rather than silently using the parent's auth. Set `failClosed: false` only for explicit maintenance/debug fallback.
+`stateDir` is optional; it defaults to `CODEX_AUTH_BALANCER_HOME` or
+`~/.bravo/codex-auth-balancer`. It is propagated to balanced children as
+`CODEX_AUTH_BALANCER_HOME` so the provider extension reads the same lease state.
+When the balancer is **disabled**, no remap occurs and the requested model launches
+as-is (legacy behavior / escape hatch).
 
-The supervisor calls the package `syncBack` API after child exit so refreshed OAuth tokens are copied back safely, then `cleanupLaunch` on success. If sync-back reports a conflict, the isolated auth directory is retained with `ASYNC_SUBAGENTS_RETAINED.json` and must be inspected or cleaned up explicitly.
+### Retired copied-credential path
+
+The old path copied a refresh token into an isolated child auth home
+(`<runDir>/auth/codex-balancer/...`) that then rotated it lock-free — the rotation race
+class. It is now **dormant**: with the remap, balanced launches never trigger it, and
+`prepareCodexBalancer` short-circuits to a no-op for any Codex provider string. It can
+only be re-armed with the explicit opt-in flag:
+
+```json
+"codexAuthBalancer": { "enabled": true, "copiedCredentialsLegacy": true }
+```
+
+(or `CODEX_AUTH_BALANCER_COPIED_CREDENTIALS_LEGACY=1`). Under that flag the requested
+Codex model is **not** remapped, the isolated auth home is prepared with
+`PI_CODING_AGENT_DIR`/`CODEX_HOME` injected, the supervisor `syncBack`s refreshed OAuth
+tokens after child exit and `cleanupLaunch`es on success, and a sync-back conflict
+retains the isolated dir with `ASYNC_SUBAGENTS_RETAINED.json` for manual inspection.
+Use it only for explicit maintenance/debug. `failClosed` (default true) still applies:
+if legacy prepare-launch fails, the child run fails rather than silently using the
+parent's auth. Set `failClosed: false` only for explicit maintenance/debug fallback.
 
 Recorded children launch Pi with:
 

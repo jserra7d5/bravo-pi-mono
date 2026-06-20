@@ -55,6 +55,13 @@ export interface CodexAuthBalancerConfig {
   timeoutMs: number;
   failClosed: boolean;
   onlyForProviders: string[];
+  /**
+   * Opt-in escape hatch for the retired copied-credential launch path (copy a
+   * refresh token into an isolated child that rotates it lock-free). Off by
+   * default: every codex launch is remapped to the per-request bravo-codex-balanced
+   * lease provider instead. Set true only for explicit maintenance/debug.
+   */
+  copiedCredentialsLegacy: boolean;
 }
 
 export interface AsyncSubagentsConfig {
@@ -92,14 +99,15 @@ function parseCodexAuthBalancer(value: unknown, context: string, env: NodeJS.Pro
   const envEnabled = parseBoolEnv(env.CODEX_AUTH_BALANCER_ENABLED);
   const envTimeout = env.CODEX_AUTH_BALANCER_TIMEOUT_MS ? Number(env.CODEX_AUTH_BALANCER_TIMEOUT_MS) : undefined;
   const envMode = env.CODEX_AUTH_BALANCER_MODE;
-  const defaults: CodexAuthBalancerConfig = { enabled: envEnabled ?? false, provider: "bravo", stateDir: env.CODEX_AUTH_BALANCER_HOME ? resolve(env.CODEX_AUTH_BALANCER_HOME) : undefined, mode: "process-env", timeoutMs: envTimeout ?? 10000, failClosed: true, onlyForProviders: ["openai-codex", "openai-codex-responses"] };
+  const envCopiedCredentialsLegacy = parseBoolEnv(env.CODEX_AUTH_BALANCER_COPIED_CREDENTIALS_LEGACY);
+  const defaults: CodexAuthBalancerConfig = { enabled: envEnabled ?? false, provider: "bravo", stateDir: env.CODEX_AUTH_BALANCER_HOME ? resolve(env.CODEX_AUTH_BALANCER_HOME) : undefined, mode: "process-env", timeoutMs: envTimeout ?? 10000, failClosed: true, onlyForProviders: ["openai-codex", "openai-codex-responses"], copiedCredentialsLegacy: envCopiedCredentialsLegacy ?? false };
   if (value === undefined) {
     if (!Number.isInteger(defaults.timeoutMs) || defaults.timeoutMs < 1000 || defaults.timeoutMs > 60000) throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.timeoutMs must be an integer 1000..60000: ${context}`);
     if (envMode !== undefined && envMode !== "process-env") throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.mode must be process-env: ${context}`);
     return defaults;
   }
   if (!isRecord(value)) throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer must be an object: ${context}`);
-  assertOnlyKeys(value, ["enabled", "provider", "stateDir", "mode", "timeoutMs", "failClosed", "onlyForProviders"], context);
+  assertOnlyKeys(value, ["enabled", "provider", "stateDir", "mode", "timeoutMs", "failClosed", "onlyForProviders", "copiedCredentialsLegacy"], context);
   const config: CodexAuthBalancerConfig = { ...defaults };
   if (value.enabled !== undefined) {
     if (typeof value.enabled !== "boolean") throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.enabled must be boolean: ${context}`);
@@ -123,6 +131,10 @@ function parseCodexAuthBalancer(value: unknown, context: string, env: NodeJS.Pro
   if (value.onlyForProviders !== undefined) {
     if (!Array.isArray(value.onlyForProviders) || value.onlyForProviders.some((item) => typeof item !== "string")) throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.onlyForProviders must be a string array: ${context}`);
     config.onlyForProviders = value.onlyForProviders;
+  }
+  if (value.copiedCredentialsLegacy !== undefined) {
+    if (typeof value.copiedCredentialsLegacy !== "boolean") throw new SubagentError("INVALID_CONFIG", `codexAuthBalancer.copiedCredentialsLegacy must be boolean: ${context}`);
+    config.copiedCredentialsLegacy = value.copiedCredentialsLegacy;
   }
   return config;
 }

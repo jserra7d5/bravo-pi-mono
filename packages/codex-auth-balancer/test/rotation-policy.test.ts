@@ -158,6 +158,23 @@ test('runWithRotation: a single-account install does not back off or double-try'
   assert.equal(h.exhausted, 1);
 });
 
+test('runWithRotation: an auth-rejected on the first slot rotates and does NOT cooldown', async () => {
+  const h = harness({ script: ['auth-rejected', 'done'], slotList: slots([['1', 80], ['2', 90]]) });
+  await runWithRotation(h.deps);
+  assert.deepEqual(h.attempts, [undefined, '2'], 'auto first, then forced to the other slot');
+  assert.equal(h.exhausted, 0, 'a successful failover does not exhaust');
+  assert.equal(h.cooldown.size, 0, 'auth-rejection must NOT cooldown the slot (not a quota issue)');
+});
+
+test('runWithRotation: all slots auth-rejected exhausts after rotating over every slot', async () => {
+  const h = harness({ script: ['auth-rejected', 'auth-rejected'], slotList: slots([['1', 80], ['2', 90]]) });
+  await runWithRotation(h.deps);
+  assert.ok(h.attempts.length >= 2, 'it rotated to a second slot rather than surfacing immediately');
+  assert.ok(h.attempts.includes('2'), 'the other slot was tried');
+  assert.equal(h.exhausted, 1, 'onExhausted fired once every slot auth-rejected');
+  assert.equal(h.cooldown.size, 0, 'auth-rejection never cools any slot down');
+});
+
 test('runWithRotation: a non-rate error surfaces immediately without rotating', async () => {
   const h = harness({ script: ['other-error'] });
   await runWithRotation(h.deps);

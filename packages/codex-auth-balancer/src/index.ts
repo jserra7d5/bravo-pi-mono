@@ -177,6 +177,26 @@ const sha = (s: string | Buffer) => createHash('sha256').update(s).digest('hex')
 async function exists(p: string) { try { await fs.access(p); return true; } catch { return false; } }
 async function readJson<T>(p: string, fallback: T): Promise<T> { try { return JSON.parse(await fs.readFile(p, 'utf8')) as T; } catch { return fallback; } }
 async function writeJson(p: string, v: unknown) { await fs.mkdir(path.dirname(p), { recursive: true, mode: 0o700 }); await fs.writeFile(p, JSON.stringify(v, null, 2) + '\n', { mode: 0o600 }); }
+// Crash-safe credential write-back: write to a unique temp sibling then atomically rename
+// into place, so a concurrent reader never observes a half-written file (matches syncBack's
+// temp+rename pattern). Used on the lease refresh path where torn writes would brick a slot.
+async function atomicWriteJson(p: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(p), { recursive: true, mode: 0o700 });
+  const tmp = `${p}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`;
+  // Durability: flush the temp file's contents to disk before the rename so a crash can never
+  // leave a successfully-refreshed credential only partially persisted.
+  const handle = await fs.open(tmp, 'w', 0o600);
+  try {
+    await handle.writeFile(JSON.stringify(value, null, 2) + '\n');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await fs.rename(tmp, p);
+  // Flush the directory entry so the rename itself survives a crash.
+  const dir = await fs.open(path.dirname(p), 'r').catch(() => undefined);
+  if (dir) { try { await dir.sync(); } catch { /* some platforms disallow directory fsync */ } finally { await dir.close(); } }
+}
 async function salt(root: string) { const p = path.join(root, 'account-id-hash-salt'); if (!(await exists(p))) { await fs.mkdir(root, { recursive: true, mode: 0o700 }); await fs.writeFile(p, randomBytes(32).toString('hex') + '\n', { mode: 0o600 }); } return (await fs.readFile(p, 'utf8')).trim(); }
 export function resolveStateRoot(env: NodeJS.ProcessEnv = process.env): string { return path.resolve(env.CODEX_AUTH_BALANCER_HOME || path.join(os.homedir(), '.bravo', 'codex-auth-balancer')); }
 
@@ -303,6 +323,19 @@ function jwtExpiryMs(token: string | undefined): number | undefined {
   } catch {
     return undefined;
   }
+}
+const JWT_ACCOUNT_CLAIM_PATH = 'https://api.openai.com/auth';
+function accessTokenAccountId(token: string | undefined): string | undefined {
+  if (!token) return undefined;
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return undefined;
+    const payload = JSON.parse(Buffer.from(parts[1] || '', 'base64url').toString('utf8')) as unknown;
+    if (!isRecord(payload)) return undefined;
+    const auth = payload[JWT_ACCOUNT_CLAIM_PATH];
+    const id = isRecord(auth) ? auth.chatgpt_account_id : undefined;
+    return typeof id === 'string' && id.length > 0 ? id : undefined;
+  } catch { return undefined; }
 }
 function tokenFromAuth(value: unknown): { accessToken?: string; refreshToken?: string; expiresAt?: number; accountId?: string; nestedProvider?: boolean; codexCliShape?: boolean } {
   if (!isRecord(value)) return {};
@@ -996,7 +1029,7 @@ function markReservation(stateRoot: string, reservationId: string | undefined, l
     closeDb(db);
   }
 }
-function writeBrokenSnapshot(stateRoot: string, slot: string, code: string, message: string) {
+export function writeBrokenSnapshot(stateRoot: string, slot: string, code: string, message: string) {
   const db = openDb(stateRoot);
   try {
     db.exec('BEGIN IMMEDIATE');
@@ -1080,11 +1113,21 @@ export async function syncBack(isolatedDir: string, opts: { stateRoot?: string; 
         }
         const currentHash = sha(readFileSync(authPath));
         if (currentHash !== meta.generation) {
+          // Intentionally NOT merging child creds here: access-token exp does not order the opaque
+          // single-use refresh token, so a merge could roll the refresh token back and brick the
+          // slot. Conflicts are retained for manual/opt-in handling.
+          // KNOWN LIMITATION (opt-in legacy copied-credential path only): if the child rotated the
+          // refresh token, canonical may keep a now-consumed token and brick on its next refresh.
+          // That is handled at runtime by failover + quarantine (the slot self-excludes); the default
+          // per-request lease path never copies a refresh token and so never hits this.
           markReservationInDb(db, meta.reservation_id, meta.launch_id, 'conflict', { isolated_dir: isolatedDir, reason: 'codex_auth_changed' });
           db.exec('COMMIT');
           return { ok: false, conflict: true, retainedDir: isolatedDir };
         }
         if (existsSync(piAuthPath) && meta.pi_auth_hash && sha(readFileSync(piAuthPath)) !== meta.pi_auth_hash) {
+          // Intentionally NOT merging child creds here: access-token exp does not order the opaque
+          // single-use refresh token, so a merge could roll the refresh token back and brick the
+          // slot. Conflicts are retained for manual/opt-in handling.
           markReservationInDb(db, meta.reservation_id, meta.launch_id, 'conflict', { isolated_dir: isolatedDir, reason: 'pi_auth_changed' });
           db.exec('COMMIT');
           return { ok: false, conflict: true, retainedDir: isolatedDir };
@@ -1178,29 +1221,85 @@ async function writeAffinitySlot(stateRoot: string, key: string | undefined, slo
 }
 function refreshLockDir(stateRoot: string, slot: string) { return path.join(stateRoot, 'leases', 'refresh-locks', sha(slot).slice(0, 32)); }
 async function wait(ms: number) { await new Promise((resolve) => setTimeout(resolve, ms)); }
+const REFRESH_LOCK_STALE_MS = 30_000;
+const REFRESH_LOCK_HEARTBEAT_MS = 10_000;
+const REFRESH_LOCK_ACQUIRE_DEFAULT_MS = 60_000;
+// process.kill(pid, 0) probes liveness without delivering a signal. EPERM means the process
+// exists but we may not signal it (still alive); ESRCH means it is gone. This liveness check is
+// only valid because the refresh lock lives under a SAME-MACHINE local stateRoot (~/.bravo): a
+// pid from another host would be meaningless, but these locks are never shared across machines.
+export function isProcessAlive(pid: number | undefined): boolean {
+  if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e: any) { return e?.code === 'EPERM'; }
+}
+// Pure steal decision, exported for test: only reclaim a lock that is BOTH stale (mtime older
+// than staleMs, i.e. heartbeat stopped) AND whose owner process is dead. A slow-but-live refresh
+// keeps its mtime fresh via the heartbeat, so it is never stolen out from under itself.
+export function shouldStealRefreshLock(args: { ageMs: number; ownerAlive: boolean; staleMs: number }): boolean {
+  return args.ageMs > args.staleMs && !args.ownerAlive;
+}
+function refreshLockAcquireMs(): number {
+  const raw = process.env.CODEX_BALANCER_REFRESH_LOCK_ACQUIRE_MS;
+  if (raw === undefined) return REFRESH_LOCK_ACQUIRE_DEFAULT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isNaN(parsed) || parsed <= 0 ? REFRESH_LOCK_ACQUIRE_DEFAULT_MS : parsed;
+}
 async function withRefreshLock<T>(stateRoot: string, slot: string, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
   const lockDir = refreshLockDir(stateRoot, slot);
+  const ownerPath = path.join(lockDir, 'owner.json');
   await fs.mkdir(path.dirname(lockDir), { recursive: true, mode: 0o700 });
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + refreshLockAcquireMs();
+  // Unique per-acquisition token: in finally we only delete the lock if it still carries OUR
+  // nonce, so a holder can never delete a lock that another process legitimately stole and re-took.
+  const ownerNonce = randomBytes(12).toString('hex');
   while (true) {
     if (signal?.aborted) throw new Error('token lease aborted');
     try {
       await fs.mkdir(lockDir, { recursive: false, mode: 0o700 });
-      await writeJson(path.join(lockDir, 'owner.json'), { schema_version: 1, pid: process.pid, created_at: Date.now(), expires_at: Date.now() + 30_000 });
+      await writeJson(ownerPath, { schema_version: 1, pid: process.pid, nonce: ownerNonce, created_at: Date.now() });
       break;
     } catch (error: any) {
       if (error?.code !== 'EEXIST') throw error;
       const stat = await fs.stat(lockDir).catch(() => undefined);
-      if (stat && Date.now() - stat.mtimeMs > 30_000) await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+      const owner = await readJson<{ pid?: number } | null>(ownerPath, null);
+      const ageMs = stat ? Date.now() - stat.mtimeMs : Number.POSITIVE_INFINITY;
+      const ownerAlive = isProcessAlive(owner?.pid);
+      // Steal ONLY a lock that is both stale (heartbeat stopped) and owned by a dead process.
+      // FIX A.2: the stat/owner read above is a moment-in-time snapshot, so a plain rm here is a
+      // TOCTOU hazard — a concurrent process could re-acquire the lock between our read and the rm,
+      // and that rm would then delete its FRESH lock. Make the steal atomic via rename: only one
+      // stealer can win the rename of the stale dir, and the subsequent rm targets the private,
+      // already-moved-aside dir (never a live lock). Losers fall through and retry acquisition.
+      if (stat && shouldStealRefreshLock({ ageMs, ownerAlive, staleMs: REFRESH_LOCK_STALE_MS })) {
+        const dead = `${lockDir}.dead.${ownerNonce}`;
+        try {
+          await fs.rename(lockDir, dead);            // atomic; only one stealer can win this
+          await fs.rm(dead, { recursive: true, force: true }).catch(() => undefined);
+        } catch { /* someone else moved/took it first; fall through and retry */ }
+        continue; // retry acquisition; mkdir is the real atomic gate
+      }
       if (Date.now() >= deadline) throw new Error(`timed out waiting for token refresh lock for slot ${slot}`);
       await wait(100 + Math.floor(Math.random() * 150));
     }
   }
+  // Heartbeat: touch the lockDir mtime while we hold it so a slow/hung refresh (the fetch has no
+  // timeout) keeps the lock looking fresh and is never seen as stale by a concurrent acquirer.
+  const heartbeat = setInterval(() => {
+    const now = new Date();
+    fs.utimes(lockDir, now, now).catch(() => undefined);
+  }, REFRESH_LOCK_HEARTBEAT_MS);
+  heartbeat.unref();
   try {
     if (signal?.aborted) throw new Error('token lease aborted');
     return await fn();
   } finally {
-    await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+    clearInterval(heartbeat);
+    // FIX A.1: only remove the lock if it is STILL OURS (owner.json present and carrying our nonce).
+    // Deleting on a MISSING owner.json was a bug: another process can be mid-acquisition — it has
+    // created lockDir via mkdir but not yet written its owner.json — and our rm would delete that
+    // freshly-created lock out from under it. Never delete on missing/different; only on a match.
+    const current = await readJson<{ nonce?: string } | null>(ownerPath, null);
+    if (current?.nonce === ownerNonce) await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -1222,52 +1321,121 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
     markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'empty_access_token' });
     throw new Error('selected slot has no usable access token');
   }
-  if (!parsed.expiresAt || parsed.expiresAt <= requiredUntil) {
+  if (!parsed.expiresAt || parsed.expiresAt <= requiredUntil || !accessTokenAccountId(parsed.accessToken)) {
     try {
       await withRefreshLock(stateRoot, account.slot, input.abort_signal, async () => {
-        auth = await readJson<unknown>(authPath, undefined);
-        parsed = tokenFromAuth(auth);
-        if (parsed.expiresAt && parsed.expiresAt > requiredUntil) return;
-        if (!parsed.refreshToken) {
-          markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: parsed.expiresAt ? 'access_token_ttl_insufficient' : 'access_token_expiry_unknown' });
-          throw new Error(parsed.expiresAt ? 'selected slot access token expires before requested lease ttl and cannot refresh' : 'selected slot access token expiry is unknown and cannot refresh');
-        }
-        let refreshed: OAuthCredentials;
-        try {
-          refreshed = await openaiCodexOAuthProvider.refreshToken({
-            type: 'oauth',
-            access: parsed.accessToken || '',
-            refresh: parsed.refreshToken,
-            expires: parsed.expiresAt || 0,
-            accountId: parsed.accountId || account.accountIdHash || account.idHash,
-          } as OAuthCredentials);
-        } catch (refreshError) {
-          const upstream = refreshError instanceof Error ? refreshError.message : String(refreshError);
-          const kind = classifyOAuthRefreshError(upstream);
-          const redactedUpstream = redactSecretsInText(upstream);
-          if (process.env.CODEX_BALANCER_LOG_REFRESH_ERRORS) {
-            process.stderr.write(`[codex-balancer] refresh failed slot=${account.slot} kind=${kind}: ${redactedUpstream}\n`);
+        // Bounded refresh loop with advance-only recovery from a concurrent refresh-token
+        // rotation. OpenAI single-uses each refresh token, so an isolated pi-balanced child
+        // can rotate our token (R0->R1) and sync R1 to canonical between our read of R0 and
+        // our refresh of R0 — making our refresh fail invalid_grant ("already used") even
+        // though a valid R1 now sits on disk. SAFETY: OpenAI does reuse detection, so we
+        // never replay a failed token and never step back to an older one; the only recovery
+        // is to ADOPT a usable, claim-bearing access token that another process has already
+        // written to disk. We deliberately do NOT retry the refresh with a *different* refresh
+        // token: replaying a token that may already have been used elsewhere can trip OpenAI's
+        // refresh-token reuse detection and invalidate the whole token family. Recovery is read-only.
+        const MAX_REFRESH_ATTEMPTS = 3;
+        let attempt = 0;
+        while (attempt < MAX_REFRESH_ATTEMPTS) {
+          attempt += 1;
+          auth = await readJson<unknown>(authPath, undefined);
+          parsed = tokenFromAuth(auth);
+          // A concurrent process already produced a usable, claim-bearing token: done.
+          if (parsed.expiresAt && parsed.expiresAt > requiredUntil && accessTokenAccountId(parsed.accessToken)) return;
+          // An unexpired, ttl-sufficient token that merely lacks the account-id claim and
+          // has no refresh token cannot be repaired here; fall through to the final claim
+          // guard so it is recorded as 'claimless_access_token' rather than a bogus expiry error.
+          if (parsed.expiresAt && parsed.expiresAt > requiredUntil && !parsed.refreshToken) return;
+          if (!parsed.refreshToken) {
+            // FIX E: a claimless access token with NO refresh token is an unrepairable poison pill.
+            // Throwing the TTL/expiry error here (without bricking) would let it be reselected next
+            // turn. Quarantine it instead: write a broken snapshot and fail with the account-id
+            // error (which must NOT contain 'cannot refresh', so the outer catch records the failed
+            // reservation rather than re-throwing verbatim and skipping the broken-state telemetry).
+            if (!accessTokenAccountId(parsed.accessToken)) {
+              writeBrokenSnapshot(stateRoot, account.slot, 'claimless_access_token', 'access token has no chatgpt_account_id claim and cannot be refreshed');
+              markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'claimless_access_token' });
+              throw new Error('selected slot access token has no accountId claim');
+            }
+            markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: parsed.expiresAt ? 'access_token_ttl_insufficient' : 'access_token_expiry_unknown' });
+            throw new Error(parsed.expiresAt ? 'selected slot access token expires before requested lease ttl and cannot refresh' : 'selected slot access token expiry is unknown and cannot refresh');
           }
-          if (kind === 'invalid_grant') {
-            try { writeBrokenSnapshot(stateRoot, account.slot, 'refresh_invalid_grant', redactedUpstream); } catch { /* ignore */ }
+          let refreshed: OAuthCredentials;
+          try {
+            refreshed = await openaiCodexOAuthProvider.refreshToken({
+              type: 'oauth',
+              access: parsed.accessToken || '',
+              refresh: parsed.refreshToken,
+              expires: parsed.expiresAt || 0,
+              accountId: parsed.accountId || account.accountIdHash || account.idHash,
+            } as OAuthCredentials);
+          } catch (refreshError) {
+            const upstream = refreshError instanceof Error ? refreshError.message : String(refreshError);
+            const kind = classifyOAuthRefreshError(upstream);
+            const redactedUpstream = redactSecretsInText(upstream);
+            if (process.env.CODEX_BALANCER_LOG_REFRESH_ERRORS) {
+              process.stderr.write(`[codex-balancer] refresh failed slot=${account.slot} kind=${kind} attempt=${attempt}: ${redactedUpstream}\n`);
+            }
+            // Race recovery (reuse-safe): an invalid_grant may mean a concurrent process already
+            // rotated our token and completed its own refresh. Re-read disk; ONLY if a usable,
+            // claim-bearing access token has now materialized do we loop and adopt it (the loop top
+            // returns). We never retry the refresh with a different refresh token (reuse hazard).
+            if (kind === 'invalid_grant' && attempt < MAX_REFRESH_ATTEMPTS) {
+              await new Promise(r => setTimeout(r, 150));
+              const fresh = tokenFromAuth(await readJson<unknown>(authPath, undefined));
+              if (fresh.expiresAt && fresh.expiresAt > requiredUntil && accessTokenAccountId(fresh.accessToken)) {
+                continue; // a concurrent refresh produced a usable token; adopt it on the next iteration
+              }
+            }
+            // Not recoverable: token did not advance, not invalid_grant, or out of attempts.
+            // Preserve the existing brick+throw behavior. Transient never bricks, just throws.
+            if (kind === 'invalid_grant') {
+              try { writeBrokenSnapshot(stateRoot, account.slot, 'refresh_invalid_grant', redactedUpstream); } catch { /* ignore */ }
+            }
+            const err = new Error('selected slot access token refresh failed');
+            (err as any).errorKind = kind;
+            (err as any).redactedUpstream = redactedUpstream;
+            (err as any).cause = refreshError;
+            throw err;
           }
-          const err = new Error('selected slot access token refresh failed');
-          (err as any).errorKind = kind;
-          (err as any).redactedUpstream = redactedUpstream;
-          (err as any).cause = refreshError;
-          throw err;
+          if (input.abort_signal?.aborted) {
+            markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'aborted_after_refresh' });
+            throw new Error('token lease aborted');
+          }
+          // FIX B (intentional, do not reorder): we MUST persist the refreshed credential before
+          // the claimless guard below. The refreshed credential carries the freshly-rotated
+          // SINGLE-USE refresh token; not writing it would strand that token and brick the slot
+          // with invalid_grant on the next refresh. The claimless guard is an unreachable belt in
+          // production — the real openaiCodexOAuthProvider.refreshToken THROWS on a claimless access
+          // token (pi-ai validates the claim), so refreshed.access is always claim-bearing — but in
+          // the synthetic/mocked case it can fire, and the write above is still correct and required.
+          auth = withRefreshedTokenShape(auth, refreshed);
+          await atomicWriteJson(authPath, auth);
+          parsed = tokenFromAuth(auth);
+          if (!accessTokenAccountId(parsed.accessToken)) {
+            writeBrokenSnapshot(stateRoot, account.slot, 'refresh_claimless_token', 'refreshed access token has no chatgpt_account_id claim');
+            const err = new Error('selected slot access token refresh failed');
+            (err as any).errorKind = 'invalid_grant';
+            (err as any).redactedUpstream = 'refreshed access token has no chatgpt_account_id claim';
+            throw err;
+          }
+          return; // refreshed successfully into a claim-bearing token
         }
-        if (input.abort_signal?.aborted) {
-          markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'aborted_after_refresh' });
-          throw new Error('token lease aborted');
-        }
-        auth = withRefreshedTokenShape(auth, refreshed);
-        await writeJson(authPath, auth);
-        parsed = tokenFromAuth(auth);
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (input.abort_signal?.aborted || message.includes('cannot refresh')) throw error;
+      // FIX E: a claimless poison-pill thrown from inside the lock already wrote a broken snapshot
+      // and recorded the failed reservation; surface its message verbatim (mirroring the existing
+      // final-guard) instead of relabeling it as a generic refresh failure.
+      if (message.includes('no accountId claim')) throw error;
+      // A refresh-lock acquire timeout is contention, not a credential failure: the on-disk token
+      // may be perfectly valid. Record it accurately and surface the lock message verbatim instead
+      // of mislabeling it as a refresh failure (which would brick-adjacent the slot in telemetry).
+      if (message.includes('timed out waiting for token refresh lock')) {
+        markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'refresh_lock_acquire_timeout', slot: account.slot });
+        throw error;
+      }
       const error_kind = (error as any)?.errorKind ?? 'unknown';
       const redactedMessage = (error as any)?.redactedUpstream ?? redactSecretsInText(message);
       markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'access_token_refresh_failed', error_kind, message: redactedMessage });
@@ -1282,6 +1450,11 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
   if (!expiresAt || expiresAt <= requiredUntil) {
     markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'access_token_ttl_insufficient_after_refresh' });
     throw new Error('selected slot access token expires before requested lease ttl');
+  }
+  if (!accessTokenAccountId(accessToken)) {
+    writeBrokenSnapshot(stateRoot, account.slot, 'claimless_access_token', 'access token has no chatgpt_account_id claim and cannot be refreshed');
+    markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'claimless_access_token' });
+    throw new Error('selected slot access token has no accountId claim');
   }
   const lease: TokenLease = {
     schema_version: 1,

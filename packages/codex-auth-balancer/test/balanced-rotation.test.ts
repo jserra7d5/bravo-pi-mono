@@ -189,6 +189,80 @@ test('DEFECT A: when every slot fails to lease, the real lease error is surfaced
   assert.doesNotMatch(msg, /rate limited/i, 'must NOT mask it with the rate-limit string');
 });
 
+test('FIX #2: extractAccountId failure on the auto-selected slot rotates to the healthy slot', async () => {
+  const rec: Recorder = { leaseCalls: [], finished: [], sleeps: [] };
+  const broken: Array<{ slot: string; code: string }> = [];
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => {
+      rec.leaseCalls.push(input.preferred_slot);
+      const slot = input.preferred_slot ?? '1'; // auto-selection lands on slot 1
+      return { schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose, lease_id: `lease-${slot}`, access_token: `tok_slot${slot}_xxxxxxxx`, slot, label: slot, expires_at: 0, reservation_id: `res-${slot}`, launch_id: `launch-${slot}` } as any;
+    },
+    finishLease: async (input: any) => { rec.finished.push({ lease_id: input.lease_id, status: input.status }); return {} as any; },
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }, { slot: '2', primaryRemaining: 90 }],
+    ingestUsage: async () => ({} as any),
+    markBroken: (slot, code) => { broken.push({ slot, code }); },
+    createUpstream: ((_m: any, _c: any, options: any) => (async function* () {
+      const slot = String(options.apiKey).includes('slot1') ? '1' : '2';
+      if (slot === '1') {
+        await options.onResponse?.({ status: 401, headers: {} }, _m);
+        yield { type: 'error', reason: 'error', error: fakeMsg({ stopReason: 'error', errorMessage: 'Failed to extract accountId from token' }) };
+      } else {
+        await options.onResponse?.({ status: 200, headers: {} }, _m);
+        yield { type: 'done', reason: 'stop', message: fakeMsg() };
+      }
+    })()) as any,
+    sleep: async (ms: number) => { rec.sleeps.push(ms); },
+    rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+  };
+  const run = createBalancedStreamRunner(deps);
+  const events = await collect(run(MODEL, { messages: [] } as any, { sessionId: 's1' } as any));
+  const types = events.map(e => e.type);
+
+  assert.ok(types.includes('done'), 'failover should deliver the healthy slot success');
+  assert.ok(!types.includes('error'), 'a broken auto-selected slot must not end the turn');
+  assert.deepEqual(rec.leaseCalls, [undefined, '2'], 'auto-select first, then force the healthy slot');
+  assert.deepEqual(rec.finished, [
+    { lease_id: 'lease-1', status: 'failed' },
+    { lease_id: 'lease-2', status: 'completed' },
+  ]);
+  assert.ok(broken.some(b => b.slot === '1' && b.code === 'upstream_no_accountid'), 'the bad slot is quarantined broken');
+});
+
+test('FIX #2: all slots fail extractAccountId surfaces the accountId error terminally', async () => {
+  const rec: Recorder = { leaseCalls: [], finished: [], sleeps: [] };
+  const broken: Array<{ slot: string; code: string }> = [];
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => {
+      rec.leaseCalls.push(input.preferred_slot);
+      const slot = input.preferred_slot ?? '1'; // auto-selection lands on slot 1
+      return { schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose, lease_id: `lease-${slot}`, access_token: `tok_slot${slot}_xxxxxxxx`, slot, label: slot, expires_at: 0, reservation_id: `res-${slot}`, launch_id: `launch-${slot}` } as any;
+    },
+    finishLease: async (input: any) => { rec.finished.push({ lease_id: input.lease_id, status: input.status }); return {} as any; },
+    // listSlots reflects quarantine: a slot marked broken disappears from the pool,
+    // exactly as production loadAccounts() drops broken accounts. Once both slots are
+    // quarantined, the second round's "< 2 slots" guard stops further rotation.
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }, { slot: '2', primaryRemaining: 90 }].filter(s => !broken.some(b => b.slot === s.slot)),
+    ingestUsage: async () => ({} as any),
+    markBroken: (slot, code) => { broken.push({ slot, code }); },
+    createUpstream: ((_m: any, _c: any, options: any) => (async function* () {
+      await options.onResponse?.({ status: 401, headers: {} }, _m);
+      yield { type: 'error', reason: 'error', error: fakeMsg({ stopReason: 'error', errorMessage: 'Failed to extract accountId from token' }) };
+    })()) as any,
+    sleep: async (ms: number) => { rec.sleeps.push(ms); },
+    rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+  };
+  const run = createBalancedStreamRunner(deps);
+  const events = await collect(run(MODEL, { messages: [] } as any, { sessionId: 's1' } as any));
+  const errors = events.filter(e => e.type === 'error');
+
+  assert.equal(errors.length, 1, 'exactly one terminal error to the user');
+  assert.match(String(errors[0].error.errorMessage), /extract accountId/i, 'surfaces the genuine accountId error');
+  assert.deepEqual(rec.leaseCalls, [undefined, '2'], 'auto first, then force the other slot');
+  assert.ok(broken.some(b => b.slot === '1'), 'slot 1 quarantined broken');
+  assert.ok(broken.some(b => b.slot === '2'), 'slot 2 quarantined broken');
+});
+
 test('rotate-on-429: a non-rate error surfaces immediately without rotating', async () => {
   const rec: Recorder = { leaseCalls: [], finished: [], sleeps: [] };
   const deps: Partial<BalancedRunnerDeps> = {

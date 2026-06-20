@@ -14,7 +14,9 @@ import {
   finishTokenLease,
   ingestLiveUsage,
   loadAccounts,
+  resolveStateRoot,
   startTokenLease,
+  writeBrokenSnapshot,
   type FinishTokenLeaseInput,
   type LiveUsageIngestInput,
   type StartTokenLeaseInput,
@@ -73,6 +75,13 @@ function errorTextOfEvent(event: AssistantMessageEvent | undefined): string | un
   return event?.type === 'error' ? (event.error.errorMessage ?? undefined) : undefined;
 }
 
+// Narrow matcher: ONLY the upstream accountId-extraction failure (a leased token
+// the upstream couldn't extract a chatgpt_account_id from). Deliberately does NOT
+// match generic errors. Rate-limits are already classified earlier via classifyRateLimit.
+function isAuthRejection(text: string | undefined): boolean {
+  return !!text && /failed to extract accountid/i.test(text);
+}
+
 // ── Dependency seam (real I/O injected here; tests pass fakes) ───────────────
 
 export type BalancedRunnerDeps = {
@@ -81,6 +90,7 @@ export type BalancedRunnerDeps = {
   listSlots: (stateRoot?: string) => Promise<SlotInfo[]>;
   createUpstream: (model: Model<typeof API>, context: Context, options: SimpleStreamOptions) => AsyncIterable<AssistantMessageEvent>;
   ingestUsage: (input: LiveUsageIngestInput) => Promise<unknown>;
+  markBroken: (slot: string, code: string, message: string) => void;
   cooldown: Map<string, number>;
   config: RotationConfig;
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -108,6 +118,7 @@ function defaultRunnerDeps(): BalancedRunnerDeps {
     listSlots: async (stateRoot?: string) => (await loadAccounts(stateRoot)).map(a => ({ slot: a.slot, primaryRemaining: a.usage?.primary?.remainingPercent })),
     createUpstream: (model, context, options) => streamSimpleOpenAICodexResponses(model, context, options),
     ingestUsage: ingestLiveUsage,
+    markBroken: (slot, code, message) => { try { writeBrokenSnapshot(resolveStateRoot(), slot, code, message); } catch { /* ignore */ } },
     cooldown: sharedCooldown,
     config: DEFAULT_ROTATION_CONFIG,
     sleep: realSleep,
@@ -136,6 +147,7 @@ async function runBalanced(
   let pushedTerminal = false;
   let lastSuppressedError: AssistantMessageEvent | undefined;
   let lastLeaseError: unknown;
+  let lastAuthError: AssistantMessageEvent | undefined;
   let activeFinish: (() => Promise<void>) | undefined;
 
   // Keep the process-shared cooldown bounded: drop entries that have expired (and
@@ -256,6 +268,14 @@ async function runBalanced(
       lastSuppressedError = terminalError;
       return { outcome: 'rate-limited', slot: lease.slot };
     }
+    // Upstream rejected the leased token (e.g. couldn't extract a chatgpt_account_id).
+    // Quarantine the slot broken and rotate to another slot instead of surfacing it.
+    // finishLease('failed') already ran above (idempotent), so do not re-call it.
+    if (!contentPushed && !rateLimited && isAuthRejection(errorTextOfEvent(terminalError))) {
+      deps.markBroken(lease.slot, 'upstream_no_accountid', redactedErrorMessage(errorTextOfEvent(terminalError) ?? 'upstream could not extract accountId'));
+      lastAuthError = terminalError;
+      return { outcome: 'auth-rejected', slot: lease.slot };
+    }
     if (contentPushed) {
       if (terminalError) forwardTerminal(terminalError);
       return { outcome: 'streamed-error', slot: lease.slot };
@@ -270,9 +290,12 @@ async function runBalanced(
     //  1. a real upstream rate-limit error (e.g. {"detail":"Rate limit exceeded"});
     //  2. else the genuine lease-acquisition error (e.g. 'selected slot access token
     //     refresh failed') so the user sees why, not a misleading rate-limit string;
-    //  3. else the synthesized rate-limit message as a last resort.
+    //  3. else an upstream auth-rejection error (e.g. 'Failed to extract accountId
+    //     from token') when every slot was quarantined broken;
+    //  4. else the synthesized rate-limit message as a last resort.
     if (lastSuppressedError) forwardTerminal(lastSuppressedError);
     else if (lastLeaseError !== undefined) forwardError(lastLeaseError);
+    else if (lastAuthError) forwardTerminal(lastAuthError);
     else forwardError(new Error('All Codex accounts are rate limited — try again shortly.'));
   };
 

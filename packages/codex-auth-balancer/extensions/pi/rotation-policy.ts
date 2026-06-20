@@ -10,6 +10,7 @@ export type AttemptOutcome =
   | 'done'           // upstream succeeded; terminal event already forwarded to the user
   | 'rate-limited'   // 429 / usage limit BEFORE any content streamed; eligible to rotate
   | 'lease-failed'   // token lease could not be acquired; rotate to another slot but do NOT cooldown
+  | 'auth-rejected'  // upstream rejected the leased token (e.g. unextractable accountId / 401); rotate to another slot, do NOT cooldown (not a quota issue) — the slot is already quarantined broken
   | 'other-error'    // non-rate error before content; surface as-is
   | 'streamed-error' // error after content already streamed; must not rotate (would duplicate)
   | 'aborted';       // caller aborted
@@ -110,9 +111,10 @@ export async function runWithRotation(deps: RotationDeps): Promise<void> {
       const attempt = await deps.runAttempt(forced);
       triedThisRound.add(attempt.slot);
 
-      // Rotate on rate-limit (429) or lease-failed (could not acquire a token).
-      // Anything else (done / other-error / streamed-error / aborted) is terminal.
-      if (attempt.outcome !== 'rate-limited' && attempt.outcome !== 'lease-failed') return;
+      // Rotate on rate-limit (429), lease-failed (could not acquire a token), or
+      // auth-rejected (upstream rejected the leased token). Anything else
+      // (done / other-error / streamed-error / aborted) is terminal.
+      if (attempt.outcome !== 'rate-limited' && attempt.outcome !== 'lease-failed' && attempt.outcome !== 'auth-rejected') return;
 
       // Only a genuine rate-limit cools the slot down; a lease failure does not
       // mean the account is over quota, so leave it eligible for later turns.

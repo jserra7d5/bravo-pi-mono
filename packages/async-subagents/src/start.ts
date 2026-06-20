@@ -166,6 +166,41 @@ function isCodexBalancedProviderModel(model?: string): boolean {
   return provider === "bravo-codex-balanced";
 }
 
+const BALANCED_REMAP_PROVIDERS = ["openai-codex", "openai-codex-responses"] as const;
+
+/**
+ * Pure helper. Maps `openai-codex/<X>` and `openai-codex-responses/<X>` to
+ * `bravo-codex-balanced/<X>` so the launch flows through the per-request lease
+ * provider instead of the copied-credential path. `bravo-codex-balanced/*` and
+ * non-codex models are returned unchanged; `undefined` input returns `undefined`.
+ * The provider segment is matched case-sensitively against the canonical ids;
+ * only the provider prefix is rewritten, the model id is preserved verbatim.
+ */
+export function balancedModelId(model?: string): string | undefined {
+  if (model === undefined) return undefined;
+  const slash = model.indexOf("/");
+  if (slash < 0) return model;
+  const provider = model.slice(0, slash);
+  if (!(BALANCED_REMAP_PROVIDERS as readonly string[]).includes(provider)) return model;
+  return `bravo-codex-balanced/${model.slice(slash + 1)}`;
+}
+
+/**
+ * Resolve the codex-auth-balancer provider Pi extension to a loadable module
+ * file path, robustly relative to the installed package (honors the workspace
+ * symlink and the package `exports` map). Returns `undefined` if it cannot be
+ * resolved so callers fail closed via the preflight rather than crashing.
+ */
+function resolveBalancedProviderExtensionPath(): string | undefined {
+  try {
+    const resolved = import.meta.resolve("@bravo/codex-auth-balancer/extensions/pi");
+    const path = resolved.startsWith("file:") ? fileURLToPath(resolved) : resolved;
+    return existsSync(path) ? path : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function modelListed(output: string, model: string): boolean {
   const [provider, modelId] = model.includes("/") ? model.split(/\/(.+)/) as [string, string] : [undefined, model];
   return output.split(/\r?\n/).some((line) => {
@@ -295,6 +330,13 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 }
 
 async function prepareCodexBalancer(config: CodexAuthBalancerConfig, model: string | undefined, runDir: string, runId: string, rootRunId: string, ttlMs: number): Promise<CodexBalancerLaunch | undefined> {
+  // Dormant by default: the copied-credential branch (copy a refresh token into
+  // an isolated child that rotates it lock-free) is the OAuth rotation race class
+  // we are retiring. With the model remap every codex launch arrives here as a
+  // `bravo-codex-balanced/*` model and short-circuits below. The belt-and-
+  // suspenders guard ensures the copy branch is never taken for any odd codex
+  // provider string unless the operator explicitly opts back in.
+  if (config.copiedCredentialsLegacy !== true) return undefined;
   if (!config.enabled || isCodexBalancedProviderModel(model) || !isCodexModel(model, config.onlyForProviders)) return undefined;
   const isolatedDir = join(runDir, "auth", "codex-balancer");
   mkdirSync(isolatedDir, { recursive: true, mode: 0o700 });
@@ -508,9 +550,19 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     taskAssignment: input.taskAssignment ? { task: input.taskAssignment.task, dependencies: input.taskAssignment.dependencies } : undefined,
   });
 
+  // The originally-requested model (prompt.model) is preserved for user-facing
+  // status/metadata; effectiveModel is the model the child actually launches/execs.
+  // When the balancer is enabled we remap openai-codex/* and openai-codex-responses/*
+  // to bravo-codex-balanced/* so the launch goes through the per-request lease path.
+  // The remap is suppressed under the legacy escape hatch so the copied-credential
+  // path sees the original codex model end to end.
+  const balancerEnabled = asyncSubagentsConfig.codexAuthBalancer.enabled;
+  const remapEnabled = balancerEnabled && asyncSubagentsConfig.codexAuthBalancer.copiedCredentialsLegacy !== true;
+  const effectiveModel = remapEnabled ? (balancedModelId(prompt.model) ?? prompt.model) : prompt.model;
+
   let codexAuthBalancer: CodexBalancerLaunch | undefined;
   try {
-    codexAuthBalancer = await prepareCodexBalancer(asyncSubagentsConfig.codexAuthBalancer, prompt.model, paths.runDir, runId, root.rootRunId, effectiveMaxRunMs);
+    codexAuthBalancer = await prepareCodexBalancer(asyncSubagentsConfig.codexAuthBalancer, effectiveModel, paths.runDir, runId, root.rootRunId, effectiveMaxRunMs);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (asyncSubagentsConfig.codexAuthBalancer.failClosed) return failBeforeLaunch("CODEX_AUTH_BALANCER_FAILED", message);
@@ -521,12 +573,19 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     ASYNC_SUBAGENTS_ROOT_SESSION_ID: root.rootSessionId,
 
   };
-  const balancedProviderEnv: Record<string, string> = !codexAuthBalancer && isCodexBalancedProviderModel(prompt.model) && asyncSubagentsConfig.codexAuthBalancer.stateDir
+  const balancedProviderEnv: Record<string, string> = !codexAuthBalancer && isCodexBalancedProviderModel(effectiveModel) && asyncSubagentsConfig.codexAuthBalancer.stateDir
     ? { CODEX_AUTH_BALANCER_HOME: asyncSubagentsConfig.codexAuthBalancer.stateDir }
     : {};
   const effectiveExtraEnv = codexAuthBalancer ? { ...(input.env ?? {}), ...taskEnv, ...codexAuthBalancer.env } : { ...(input.env ?? {}), ...taskEnv, ...balancedProviderEnv };
   const inheritedExtensionPaths = inheritedExtensionPathsFromEnv({ ...process.env, ...effectiveExtraEnv });
   const fastTrackExtensions = fastTrack.applied ? [childFastTrackExtensionPath] : [];
+  // The child launches with --no-extensions, so a bravo-codex-balanced/* model
+  // only resolves if the codex-auth-balancer provider extension is on the -e list.
+  // Add it programmatically for balanced launches; the preflight still fails closed
+  // (MODEL_PREFLIGHT_FAILED + providerExtensionHint) if it cannot be resolved.
+  const balancedProviderExtensions = isCodexBalancedProviderModel(effectiveModel)
+    ? (() => { const p = resolveBalancedProviderExtensionPath(); return p ? [p] : []; })()
+    : [];
 
   const piCommand = buildPiCommand({
     piBin: input.piBin,
@@ -544,8 +603,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     defaultExtensionPaths: asyncSubagentsConfig.defaultExtensions.map((extension) => extension.realPath),
     defaultExtensionTools: asyncSubagentsConfig.defaultExtensions.flatMap((extension) => extension.tools),
     inheritedExtensionPaths,
-    extensions: [...prompt.extensions, ...fastTrackExtensions],
-    model: prompt.model,
+    extensions: [...prompt.extensions, ...fastTrackExtensions, ...balancedProviderExtensions],
+    model: effectiveModel,
     thinkingLevel: selectedThinkingLevel,
     contextPolicy,
     forkSourceSessionFile,
@@ -560,6 +619,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   writeLaunchLogWithMetadata(paths.runDir, command, {
     variant: input.variant,
     model: prompt.model,
+    launchedModel: effectiveModel,
     thinkingLevel: selectedThinkingLevel,
     userBuiltinTools: definition.tools,
     runtimeBuiltinTools,
@@ -569,7 +629,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     defaultExtensions: asyncSubagentsConfig.defaultExtensions,
     defaultExtensionTools: asyncSubagentsConfig.defaultExtensions.flatMap((extension) => extension.tools),
     inheritedExtensions: inheritedExtensionPaths,
-    extensions: [...prompt.extensions, ...fastTrackExtensions],
+    extensions: [...prompt.extensions, ...fastTrackExtensions, ...balancedProviderExtensions],
     fastTrack,
     contextPolicy,
     sessionPolicy,
@@ -584,12 +644,12 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     codexAuthBalancer: codexAuthBalancer?.metadata,
   });
 
-  if (prompt.model && !input.fake) {
-    const preflight = await preflightPiModelAvailability(command, prompt.model);
+  if (effectiveModel && !input.fake) {
+    const preflight = await preflightPiModelAvailability(command, effectiveModel);
     writeFileSync(join(paths.logsDir, "model-preflight.json"), `${JSON.stringify(preflight, null, 2)}\n`, "utf8");
     if (!preflight.ok) {
       await codexBalancerSyncBackAndCleanup({ codexAuthBalancer: codexAuthBalancer ? { isolatedDir: codexAuthBalancer.isolatedDir, selectedSlot: codexAuthBalancer.selectedSlot, stateDir: asyncSubagentsConfig.codexAuthBalancer.stateDir, timeoutMs: asyncSubagentsConfig.codexAuthBalancer.timeoutMs, metadata: codexAuthBalancer.metadata } : undefined });
-      return failBeforeLaunch("MODEL_PREFLIGHT_FAILED", preflight.message ?? `model preflight failed for ${prompt.model}`, preflight);
+      return failBeforeLaunch("MODEL_PREFLIGHT_FAILED", preflight.message ?? `model preflight failed for ${effectiveModel}`, preflight);
     }
   }
 
