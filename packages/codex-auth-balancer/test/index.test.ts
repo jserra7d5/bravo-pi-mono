@@ -512,7 +512,7 @@ test('balanced provider defaults to SSE so response headers ingest live usage', 
   }
 });
 
-test('provider re-asserts its api-handler override on session_start and turn_start (survives pi reload() resetApiProviders)', () => {
+test('provider re-asserts its api-handler override on session_start, turn_start, and session_before_compact (survives pi reload() resetApiProviders)', () => {
   // Regression: pi 0.79.8 reload() (print-mode + interactive TUI) calls
   // resetApiProviders(), wiping our `openai-codex-responses` override and
   // restoring only built-ins. After that, codex-balanced requests hit the
@@ -529,10 +529,12 @@ test('provider re-asserts its api-handler override on session_start and turn_sta
 
   codexBalancedProvider(mockPi as any);
 
-  // Initial load registers exactly once and subscribes to both lifecycle events.
+  // Initial load registers exactly once and subscribes to all three lifecycle
+  // events (session_start, turn_start, and the compaction pre-stream hook).
   assert.deepEqual(registrations, ['bravo-codex-balanced']);
   assert.ok(handlers.has('session_start'), 'subscribes to session_start');
   assert.ok(handlers.has('turn_start'), 'subscribes to turn_start');
+  assert.ok(handlers.has('session_before_compact'), 'subscribes to session_before_compact');
 
   // Simulate a reload() wipe followed by the next turn: turn_start must
   // re-register (reinstall the override) before the model is dispatched.
@@ -542,6 +544,17 @@ test('provider re-asserts its api-handler override on session_start and turn_sta
   // session_start (e.g. reload's re-emit) also re-asserts.
   handlers.get('session_start')!({ type: 'session_start' }, {});
   assert.equal(registrations.length, 3);
+
+  // Compaction runs after agent_end, before the next turn_start; if a reset
+  // landed in that gap, only session_before_compact can reinstall the override
+  // before the summarization stream. It must re-assert and must NOT return a
+  // truthy result (which would cancel/replace compaction).
+  const beforeCompactResult = handlers.get('session_before_compact')!(
+    { type: 'session_before_compact', preparation: {}, branchEntries: [], signal: {} },
+    {},
+  );
+  assert.equal(beforeCompactResult, undefined, 'session_before_compact handler returns nothing (no cancel/replace)');
+  assert.equal(registrations.length, 4);
   assert.ok(registrations.every((id) => id === 'bravo-codex-balanced'));
 });
 

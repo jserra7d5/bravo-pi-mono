@@ -363,4 +363,18 @@ export default function codexBalancedProvider(pi: ExtensionAPI) {
   // registry pi dispatches from — so this self-heals any reset, whenever it ran.
   pi.on('session_start', () => { registerBalancedProvider(pi); });
   pi.on('turn_start', () => { registerBalancedProvider(pi); });
+
+  // Compaction is the gap turn_start does NOT cover. Its summarization LLM call
+  // goes through the SAME agent.streamFn → streamSimple → getApiProvider()
+  // dispatch as a normal turn, so it equally needs the override present. But
+  // auto/threshold compaction runs AFTER agent_end and BEFORE the next turn's
+  // turn_start (agent-session checkAndCompact). If a reset lands in that gap,
+  // turns recover on the next turn_start while the compaction firing inside the
+  // gap dispatches to the built-in codex handler with our placeholder apiKey and
+  // throws "Turn prefix summarization failed: Failed to extract accountId from
+  // token". Both compact() and _runAutoCompaction() emit session_before_compact
+  // immediately before the summarization stream, so re-asserting here closes the
+  // gap. The handler returns undefined: the runner ignores a falsy result, so we
+  // never cancel compaction or clobber another extension's compaction result.
+  pi.on('session_before_compact', () => { registerBalancedProvider(pi); });
 }
