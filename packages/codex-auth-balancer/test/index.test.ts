@@ -512,7 +512,7 @@ test('balanced provider defaults to SSE so response headers ingest live usage', 
   }
 });
 
-test('provider re-asserts its api-handler override on session_start, turn_start, and session_before_compact (survives pi reload() resetApiProviders)', () => {
+test('provider re-asserts its api-handler override before every model-stream path (turn, compaction, branch summary) so it survives pi reload() resetApiProviders', () => {
   // Regression: pi 0.79.8 reload() (print-mode + interactive TUI) calls
   // resetApiProviders(), wiping our `openai-codex-responses` override and
   // restoring only built-ins. After that, codex-balanced requests hit the
@@ -529,12 +529,16 @@ test('provider re-asserts its api-handler override on session_start, turn_start,
 
   codexBalancedProvider(mockPi as any);
 
-  // Initial load registers exactly once and subscribes to all three lifecycle
-  // events (session_start, turn_start, and the compaction pre-stream hook).
+  // Initial load registers exactly once and subscribes to every lifecycle event
+  // that precedes a model-stream dispatch: turns (turn_start), (re)start
+  // (session_start), and the two non-turn stream paths (compaction +
+  // branch-summary), whose pre-stream events are session_before_compact and
+  // session_before_tree.
   assert.deepEqual(registrations, ['bravo-codex-balanced']);
   assert.ok(handlers.has('session_start'), 'subscribes to session_start');
   assert.ok(handlers.has('turn_start'), 'subscribes to turn_start');
   assert.ok(handlers.has('session_before_compact'), 'subscribes to session_before_compact');
+  assert.ok(handlers.has('session_before_tree'), 'subscribes to session_before_tree');
 
   // Simulate a reload() wipe followed by the next turn: turn_start must
   // re-register (reinstall the override) before the model is dispatched.
@@ -555,6 +559,16 @@ test('provider re-asserts its api-handler override on session_start, turn_start,
   );
   assert.equal(beforeCompactResult, undefined, 'session_before_compact handler returns nothing (no cancel/replace)');
   assert.equal(registrations.length, 4);
+
+  // Branch summarization (tree navigation / fork) runs outside any turn; only
+  // session_before_tree can reinstall the override before its summary stream.
+  // Same falsy-return contract: must not cancel/replace the tree operation.
+  const beforeTreeResult = handlers.get('session_before_tree')!(
+    { type: 'session_before_tree', preparation: {}, signal: {} },
+    {},
+  );
+  assert.equal(beforeTreeResult, undefined, 'session_before_tree handler returns nothing (no cancel/replace)');
+  assert.equal(registrations.length, 5);
   assert.ok(registrations.every((id) => id === 'bravo-codex-balanced'));
 });
 

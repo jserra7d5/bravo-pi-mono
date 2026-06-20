@@ -364,17 +364,23 @@ export default function codexBalancedProvider(pi: ExtensionAPI) {
   pi.on('session_start', () => { registerBalancedProvider(pi); });
   pi.on('turn_start', () => { registerBalancedProvider(pi); });
 
-  // Compaction is the gap turn_start does NOT cover. Its summarization LLM call
-  // goes through the SAME agent.streamFn → streamSimple → getApiProvider()
-  // dispatch as a normal turn, so it equally needs the override present. But
-  // auto/threshold compaction runs AFTER agent_end and BEFORE the next turn's
-  // turn_start (agent-session checkAndCompact). If a reset lands in that gap,
-  // turns recover on the next turn_start while the compaction firing inside the
-  // gap dispatches to the built-in codex handler with our placeholder apiKey and
-  // throws "Turn prefix summarization failed: Failed to extract accountId from
-  // token". Both compact() and _runAutoCompaction() emit session_before_compact
-  // immediately before the summarization stream, so re-asserting here closes the
-  // gap. The handler returns undefined: the runner ignores a falsy result, so we
-  // never cancel compaction or clobber another extension's compaction result.
+  // turn_start does NOT cover the two non-turn model-stream paths. Both issue
+  // their summarization LLM call through the SAME agent.streamFn → streamSimple →
+  // getApiProvider() dispatch as a normal turn, so they equally need the override
+  // present — but they run outside the turn lifecycle, so if a reset lands before
+  // them they hit the built-in codex handler with our placeholder apiKey and
+  // throw "Failed to extract accountId from token" (the lease path never runs).
+  // pi emits a dedicated session_before_* event immediately before each stream,
+  // so re-asserting on those closes both gaps:
+  //   - session_before_compact: compaction (compact() + _runAutoCompaction()).
+  //     Auto/threshold compaction fires AFTER agent_end and BEFORE the next
+  //     turn's turn_start (agent-session checkAndCompact), exactly the gap a
+  //     reset slips through while turns themselves recover on the next turn_start.
+  //   - session_before_tree: branch summarization on tree navigation / fork
+  //     (agent-session generateBranchSummary), which never runs inside a turn.
+  // Both are "session_before_*" events: runner.emit ignores a falsy handler
+  // result, so returning undefined never cancels the operation or clobbers
+  // another extension's {cancel}/{summary}/{compaction} result.
   pi.on('session_before_compact', () => { registerBalancedProvider(pi); });
+  pi.on('session_before_tree', () => { registerBalancedProvider(pi); });
 }
