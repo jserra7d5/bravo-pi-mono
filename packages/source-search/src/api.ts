@@ -3,6 +3,7 @@ import { basename, dirname, resolve } from "node:path";
 import { queryRepo } from "./live.js";
 import { resolveRepoPath } from "./workspace.js";
 import type { QueryResponse, TermBoost } from "./types.js";
+import { PROTOCOL_VERSION } from "./types.js";
 
 export type { QueryResponse, SearchHit, SearchSnippetWindow, TermBoost } from "./types.js";
 
@@ -13,6 +14,7 @@ export interface SourceSearchQueryOptions {
   limit?: number;
   boosts?: TermBoost[];
   excludeTerms?: string[];
+  signal?: AbortSignal;
 }
 
 export interface SourceSearchPolicyDecision {
@@ -81,15 +83,36 @@ function simpleMatch(pattern: string, path: string): boolean {
  */
 export async function rankedSearch(options: SourceSearchQueryOptions): Promise<QueryResponse> {
   const limit = Math.min(50, Math.max(1, Math.floor(options.limit ?? 10)));
-  const scope = await resolveRepoPath(options.cwd, options.path);
-  if (scope) return queryRepo(scope.repoRoot, options.query, limit, scope.pathPrefix, options.boosts, options.excludeTerms);
+  const errorResponse = (error: string, warnings?: string[]): QueryResponse => ({
+    protocolVersion: PROTOCOL_VERSION,
+    ok: false,
+    repoRoot: options.cwd,
+    query: options.query,
+    boosts: options.boosts,
+    excludeTerms: options.excludeTerms,
+    hits: [],
+    count: 0,
+    indexFreshness: "live",
+    warnings,
+    error,
+  });
 
-  const root = resolve(options.cwd, options.path ?? ".");
-  const exists = await stat(root).catch(() => null);
-  if (!exists || (!exists.isDirectory() && !exists.isFile())) return { protocolVersion: 1, ok: false, hits: [], count: 0, error: "No searchable directory found for ranked_search." };
-  const searchRoot = exists.isFile() ? dirname(root) : root;
-  const pathPrefix = exists.isFile() ? basename(root) : undefined;
-  return queryRepo(searchRoot, options.query, limit, pathPrefix, options.boosts, options.excludeTerms);
+  try {
+    if (options.signal?.aborted) return errorResponse("Search aborted.", ["search_aborted"]);
+    const scope = await resolveRepoPath(options.cwd, options.path);
+    if (scope) return await queryRepo(scope.repoRoot, options.query, limit, scope.pathPrefix, options.boosts, options.excludeTerms, { signal: options.signal });
+
+    const root = resolve(options.cwd, options.path ?? ".");
+    const exists = await stat(root).catch(() => null);
+    if (!exists || (!exists.isDirectory() && !exists.isFile())) return errorResponse("No searchable directory found for ranked_search.");
+    const searchRoot = exists.isFile() ? dirname(root) : root;
+    const pathPrefix = exists.isFile() ? basename(root) : undefined;
+    return await queryRepo(searchRoot, options.query, limit, pathPrefix, options.boosts, options.excludeTerms, { signal: options.signal });
+  } catch (caught) {
+    const aborted = options.signal?.aborted;
+    const message = caught instanceof Error ? caught.message : String(caught);
+    return errorResponse(aborted ? "Search aborted." : message, aborted ? ["search_aborted"] : undefined);
+  }
 }
 
 /** Conservative TypeScript-side guard for paths read outside live search. */

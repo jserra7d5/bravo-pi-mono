@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { realpath } from "node:fs/promises";
-import { join, resolve, relative } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { dirname, join, resolve, relative } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -17,7 +17,9 @@ export async function gitRoot(start: string): Promise<string | null> {
 
 export async function resolveRepoPath(cwd: string, inputPath?: string): Promise<{ repoRoot: string; pathPrefix?: string } | null> {
   const base = inputPath ? resolve(cwd, inputPath) : cwd;
-  const root = await gitRoot(base);
+  const baseStat = await stat(base).catch(() => null);
+  const gitDiscoveryBase = baseStat?.isFile() ? dirname(base) : base;
+  const root = await gitRoot(gitDiscoveryBase);
   if (!root) return null;
   const canonicalRoot = await realpath(root);
   const canonicalBase = await realpath(base).catch(() => null);

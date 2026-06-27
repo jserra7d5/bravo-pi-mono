@@ -1,11 +1,8 @@
-import { basename, dirname, resolve } from "node:path";
-import { stat } from "node:fs/promises";
 import { defineTool, type AgentToolResult, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { discoverSourceSearch, appendSourceSearchPrompt } from "../../src/discovery.js";
+import { rankedSearch } from "../../src/api.js";
 import { renderQueryResult } from "../../src/render.js";
-import { queryRepo } from "../../src/live.js";
-import { resolveRepoPath } from "../../src/workspace.js";
 import type { QueryResponse } from "../../src/types.js";
 
 const rankedSearchSchema = Type.Object({
@@ -44,26 +41,10 @@ export function buildSourceSearchTools(getCwd: CwdProvider = (ctx) => cwdOf(ctx)
     ],
     parameters: rankedSearchSchema,
     renderShell: "self",
-    async execute(_toolCallId: string, params: RankedSearchArgs, _signal, _onUpdate, ctx): Promise<AgentToolResult<QueryResponse>> {
-      const limit = Math.min(50, Math.max(1, Math.floor(params.limit ?? 10)));
+    async execute(_toolCallId: string, params: RankedSearchArgs, signal, _onUpdate, ctx): Promise<AgentToolResult<QueryResponse>> {
       const cwd = getCwd(ctx);
-      const scope = await resolveRepoPath(cwd, params.path);
-      if (scope) {
-        const result = await queryRepo(scope.repoRoot, params.query, limit, scope.pathPrefix, params.boosts, params.excludeTerms);
-        return response(renderQueryResult(result), result);
-      }
-
-      const root = params.path ? resolve(cwd, params.path) : cwd;
-      const exists = await stat(root).catch(() => null);
-      if (!exists || (!exists.isDirectory() && !exists.isFile())) {
-        const result: QueryResponse = { protocolVersion: 1, ok: false, hits: [], count: 0, error: "No searchable directory found for ranked_search." };
-        return response(renderQueryResult(result), result);
-      }
-
-      const searchRoot = exists.isFile() ? dirname(root) : root;
-      const pathPrefix = exists.isFile() ? basename(root) : undefined;
-      const fallbackResult = await queryRepo(searchRoot, params.query, limit, pathPrefix, params.boosts, params.excludeTerms).catch((error: unknown) => ({ protocolVersion: 1, ok: false, hits: [], count: 0, error: error instanceof Error ? error.message : String(error) }) satisfies QueryResponse);
-      return response(renderQueryResult(fallbackResult), fallbackResult);
+      const result = await rankedSearch({ cwd, query: params.query, path: params.path, limit: params.limit, boosts: params.boosts, excludeTerms: params.excludeTerms, signal });
+      return response(renderQueryResult(result), result);
     },
   })];
 }

@@ -101,6 +101,11 @@ test("renders no-match warnings", () => {
   assert.match(text, /lib: git unavailable/);
 });
 
+test("renders warning codes with successful hits", () => {
+  const text = renderQueryResult({ protocolVersion: 1, ok: true, query: "alpha", hits: [{ path: "src/a.ts", score: 1, line: 1, snippet: "alpha" }], count: 1, warnings: ["candidate_budget_exceeded"] });
+  assert.match(text, /Warnings: candidate_budget_exceeded/);
+});
+
 test("renders git checkout discovery prompt", () => {
   const text = renderDiscoveryPrompt({ kind: "repo", cwd: "/tmp/repo", repoRoot: "/tmp/repo" });
   assert.match(text, /ranked_search is available/);

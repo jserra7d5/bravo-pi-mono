@@ -1,33 +1,171 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, readFile, realpath, stat } from "node:fs/promises";
-import { basename, dirname, relative, resolve } from "node:path";
+import { access, readFile, realpath, readdir, stat } from "node:fs/promises";
+import { basename, resolve } from "node:path";
+import { setImmediate as yieldImmediate } from "node:timers/promises";
 import type { QueryResponse, TermBoost, SearchHit, SearchSnippetContext, SearchSnippetWindow } from "./types.js";
 import { PROTOCOL_VERSION } from "./types.js";
 
 const QUERY_SYNTAX_RE = /[:^~*()[\]{}"\\]|\b(?:AND|OR|NOT)\b|(?:^|\s)[+-]/;
 const TOKEN_RE = /[\p{L}\p{N}]+/gu;
-const MAX_FILE_BYTES = 1024 * 1024;
 const SECRET_OR_NOISE_RE = /(^|\/)(\.git(?:\/|$)|\.env(?:\.|$)|.*\.(?:pem|key|p12|pfx)$|id_rsa$|id_dsa$|id_ed25519$|.*secret.*|.*credential.*|.*token.*|dist|build|target|node_modules)(?:\/|$)?/i;
+const DENIED_DIR_NAMES = new Set([".git", "node_modules", "dist", "build", "target"]);
 
-function execGit(repo: string, args: string[], timeoutMs = 10_000): Promise<Buffer> {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn("git", ["-C", repo, ...args], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
-    const chunks: Buffer[] = [];
-    const errors: Buffer[] = [];
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error("git command timed out"));
-    }, timeoutMs);
-    child.stdout.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-    child.stderr.on("data", (chunk) => errors.push(Buffer.from(chunk)));
-    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+const DEFAULT_SEARCH_BUDGET = {
+  gitTimeoutMs: 10_000,
+  wallClockMs: 20_000,
+  maxCandidates: 100_000,
+  maxFilesRead: 25_000,
+  maxBytesRead: 128 * 1024 * 1024,
+  maxFileBytes: 1024 * 1024,
+  maxDepth: 2048,
+  maxReadErrorSamples: 5,
+  yieldEveryCandidates: 250,
+  yieldEveryMs: 25,
+};
+
+type WarningCode =
+  | "candidate_budget_exceeded"
+  | "file_read_budget_exceeded"
+  | "byte_read_budget_exceeded"
+  | "depth_budget_exceeded"
+  | "large_or_binary_files_skipped"
+  | "read_errors_omitted"
+  | "git_timeout"
+  | "git_error"
+  | "search_aborted";
+
+export type SearchBudget = Partial<typeof DEFAULT_SEARCH_BUDGET>;
+
+export interface QueryRepoOptions {
+  signal?: AbortSignal;
+  budgets?: SearchBudget;
+}
+
+interface QueryContext {
+  signal?: AbortSignal;
+  budgets: typeof DEFAULT_SEARCH_BUDGET;
+  warnings: string[];
+  warningCodes: Set<string>;
+  rootReal: string;
+  startedAt: number;
+  lastYieldAt: number;
+  filesRead: number;
+  bytesRead: number;
+  readErrorSamples: string[];
+}
+
+class SearchAbortError extends Error {
+  constructor(message = "Search aborted") {
+    super(message);
+    this.name = "SearchAbortError";
+  }
+}
+
+class GitListError extends Error {
+  constructor(readonly kind: "timeout" | "error", message: string) {
+    super(message);
+    this.name = "GitListError";
+  }
+}
+
+function addWarning(ctx: QueryContext, code: WarningCode, detail?: string): void {
+  if (ctx.warningCodes.has(code)) return;
+  ctx.warningCodes.add(code);
+  ctx.warnings.push(detail ? `${code}: ${detail}` : code);
+}
+
+function checkAbort(ctx: QueryContext): void {
+  if (ctx.signal?.aborted) throw new SearchAbortError();
+}
+
+function checkWallClock(ctx: QueryContext): boolean {
+  if (Date.now() - ctx.startedAt <= ctx.budgets.wallClockMs) return false;
+  addWarning(ctx, "candidate_budget_exceeded", "wall clock budget exhausted before all candidates were scored");
+  return true;
+}
+
+async function maybeYield(ctx: QueryContext, candidatesSeen: number): Promise<void> {
+  const now = Date.now();
+  if (candidatesSeen % ctx.budgets.yieldEveryCandidates === 0 || now - ctx.lastYieldAt >= ctx.budgets.yieldEveryMs) {
+    ctx.lastYieldAt = now;
+    await yieldImmediate();
+    checkAbort(ctx);
+  }
+}
+
+async function isLikelyGitRoot(root: string): Promise<boolean> {
+  return stat(resolve(root, ".git")).then(() => true, () => false);
+}
+
+function normalizeCandidatePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+async function* gitCandidateFiles(root: string, pathPrefix: string | undefined, ctx: QueryContext): AsyncGenerator<string> {
+  checkAbort(ctx);
+  const args = ["ls-files", "-z", "-co", "--exclude-standard", ...(pathPrefix ? ["--", `:(literal)${pathPrefix}`] : [])];
+  const child = spawn("git", ["-C", root, ...args], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+  let timedOut = false;
+  let closed = false;
+  let closeCode: number | null = null;
+  let childError: Error | undefined;
+  let stderr = "";
+  const closePromise = new Promise<void>((resolveClose) => {
     child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolvePromise(Buffer.concat(chunks));
-      else reject(new Error(Buffer.concat(errors).toString("utf8").trim() || `git exited ${code}`));
+      closed = true;
+      closeCode = code;
+      resolveClose();
+    });
+    child.on("error", (error) => {
+      childError = error;
+      resolveClose();
     });
   });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGKILL");
+  }, ctx.budgets.gitTimeoutMs);
+  const onAbort = () => {
+    child.kill("SIGKILL");
+  };
+  ctx.signal?.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    let remainder = "";
+    child.stderr?.on("data", (chunk) => {
+      if (stderr.length < 4096) stderr += Buffer.from(chunk).toString("utf8").slice(0, 4096 - stderr.length);
+    });
+    for await (const chunk of child.stdout) {
+      checkAbort(ctx);
+      if (checkWallClock(ctx)) return;
+      const text = remainder + Buffer.from(chunk).toString("utf8");
+      const parts = text.split("\0");
+      remainder = parts.pop() ?? "";
+      for (const part of parts) {
+        checkAbort(ctx);
+        if (checkWallClock(ctx)) return;
+        if (part) yield normalizeCandidatePath(part);
+      }
+    }
+    await closePromise;
+    if (ctx.signal?.aborted) throw new SearchAbortError();
+    if (timedOut) throw new GitListError("timeout", "git ls-files timed out");
+    if (childError) throw childError;
+    if (closeCode !== 0) throw new GitListError("error", stderr.trim() || `git exited ${closeCode}`);
+    if (remainder) {
+      checkAbort(ctx);
+      if (checkWallClock(ctx)) return;
+      yield normalizeCandidatePath(remainder);
+    }
+  } finally {
+    clearTimeout(timer);
+    ctx.signal?.removeEventListener("abort", onAbort);
+    if (!closed) {
+      child.kill("SIGKILL");
+      void closePromise.catch(() => undefined);
+    }
+  }
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -144,47 +282,106 @@ function simpleMatch(pattern: string, path: string): boolean {
   return simpleStarMatch(normalized, path);
 }
 
-async function walkFiles(root: string, base = root): Promise<string[]> {
-  const entries = await import("node:fs/promises").then((fs) => fs.readdir(root, { withFileTypes: true })).catch(() => []);
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (entry.name === ".git" || entry.name === "node_modules" || entry.name === "dist" || entry.name === "build" || entry.name === "target") continue;
-    const abs = resolve(root, entry.name);
-    if (entry.isDirectory()) files.push(...await walkFiles(abs, base));
-    else if (entry.isFile() || entry.isSymbolicLink()) files.push(relative(base, abs).replace(/\\/g, "/"));
-  }
-  return files;
+function isIgnored(path: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => simpleMatch(pattern, path));
 }
 
-async function candidateFiles(root: string, pathPrefix?: string): Promise<string[]> {
-  if (pathPrefix) {
-    const scoped = resolve(root, pathPrefix);
-    const scopedStat = await stat(scoped).catch(() => null);
-    if (!scopedStat) return [];
-    if (scopedStat.isFile()) return [pathPrefix.replace(/\\/g, "/")];
-    if (scopedStat.isDirectory()) return walkFiles(scoped, root);
-    return [];
+function depthOf(rel: string): number {
+  if (!rel) return 0;
+  return rel.split("/").filter(Boolean).length;
+}
+
+async function* walkFilesIterative(root: string, startRel: string | undefined, ignorePatterns: string[], ctx: QueryContext): AsyncGenerator<string> {
+  const start = startRel ? normalizeCandidatePath(startRel).replace(/\/$/, "") : "";
+  const startAbs = resolve(root, start || ".");
+  const startStat = await stat(startAbs).catch(() => null);
+  if (!startStat) return;
+  if (startStat.isFile()) {
+    if (!SECRET_OR_NOISE_RE.test(start.toLowerCase()) && !isIgnored(start, ignorePatterns)) yield start;
+    return;
   }
-  try {
-    const out = await execGit(root, ["ls-files", "-z", "-co", "--exclude-standard"]);
-    return out.toString("utf8").split("\0").filter(Boolean);
-  } catch {
-    return walkFiles(root);
+  if (!startStat.isDirectory()) return;
+
+  const queue: Array<{ abs: string; rel: string; depth: number }> = [{ abs: startAbs, rel: start, depth: depthOf(start) }];
+  for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
+    checkAbort(ctx);
+    if (checkWallClock(ctx)) return;
+    const current = queue[queueIndex]!;
+    if (current.depth > ctx.budgets.maxDepth) {
+      addWarning(ctx, "depth_budget_exceeded");
+      continue;
+    }
+    if (current.rel && (SECRET_OR_NOISE_RE.test(current.rel.toLowerCase()) || isIgnored(current.rel, ignorePatterns))) continue;
+    const entries = await readdir(current.abs, { withFileTypes: true }).catch((error: unknown) => {
+      sampleReadError(ctx, current.rel || ".", error);
+      return [];
+    });
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const rel = current.rel ? `${current.rel}/${entry.name}` : entry.name;
+      const lower = rel.toLowerCase();
+      if (DENIED_DIR_NAMES.has(entry.name) || SECRET_OR_NOISE_RE.test(lower) || isIgnored(rel, ignorePatterns)) continue;
+      const abs = resolve(current.abs, entry.name);
+      if (entry.isDirectory()) {
+        queue.push({ abs, rel, depth: current.depth + 1 });
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        yield rel;
+      }
+    }
   }
 }
 
-async function safeReadText(repo: string, rel: string): Promise<string | null> {
-  const relNormalized = rel.replace(/\\/g, "/");
-  if (SECRET_OR_NOISE_RE.test(relNormalized.toLowerCase())) return null;
-  const root = await realpath(repo);
-  const abs = resolve(root, relNormalized);
-  const real = await realpath(abs).catch(() => null);
-  if (!real || (real !== root && !real.startsWith(`${root}/`))) return null;
-  const meta = await stat(real).catch(() => null);
-  if (!meta?.isFile() || meta.size > MAX_FILE_BYTES) return null;
-  const buf = await readFile(real).catch(() => null);
-  if (!buf || buf.subarray(0, 8192).includes(0)) return null;
-  return buf.toString("utf8");
+async function* candidateFiles(root: string, pathPrefix: string | undefined, ignorePatterns: string[], ctx: QueryContext): AsyncGenerator<string> {
+  if (await isLikelyGitRoot(root)) {
+    try {
+      for await (const path of gitCandidateFiles(root, pathPrefix, ctx)) {
+        if (SECRET_OR_NOISE_RE.test(path.toLowerCase()) || isIgnored(path, ignorePatterns)) continue;
+        yield path;
+      }
+      return;
+    } catch (error) {
+      if (error instanceof SearchAbortError) throw error;
+      if (error instanceof GitListError && error.kind === "timeout") addWarning(ctx, "git_timeout");
+      else addWarning(ctx, "git_error");
+      return;
+    }
+  }
+  yield* walkFilesIterative(root, pathPrefix, ignorePatterns, ctx);
+}
+
+function sampleReadError(ctx: QueryContext, path: string, error: unknown): void {
+  if (ctx.readErrorSamples.length < ctx.budgets.maxReadErrorSamples) {
+    const message = error instanceof Error ? error.message.split("\n")[0] : String(error);
+    ctx.readErrorSamples.push(`${path}: ${message}`);
+  }
+  addWarning(ctx, "read_errors_omitted", ctx.readErrorSamples.join("; "));
+}
+
+type ReadResult = { kind: "ok"; body: string; bytes: number } | { kind: "skip"; reason: "secret" | "outside_root" | "not_file" | "large_or_binary" | "byte_budget" | "read_error" };
+
+async function safeReadText(rel: string, ctx: QueryContext): Promise<ReadResult> {
+  const relNormalized = normalizeCandidatePath(rel);
+  if (SECRET_OR_NOISE_RE.test(relNormalized.toLowerCase())) return { kind: "skip", reason: "secret" };
+  const abs = resolve(ctx.rootReal, relNormalized);
+  const real = await realpath(abs).catch((error: unknown) => {
+    sampleReadError(ctx, relNormalized, error);
+    return null;
+  });
+  if (!real || (real !== ctx.rootReal && !real.startsWith(`${ctx.rootReal}/`))) return { kind: "skip", reason: "outside_root" };
+  const meta = await stat(real).catch((error: unknown) => {
+    sampleReadError(ctx, relNormalized, error);
+    return null;
+  });
+  if (!meta?.isFile()) return { kind: "skip", reason: "not_file" };
+  if (meta.size > ctx.budgets.maxFileBytes) return { kind: "skip", reason: "large_or_binary" };
+  if (ctx.bytesRead + meta.size > ctx.budgets.maxBytesRead) return { kind: "skip", reason: "byte_budget" };
+  const buf = await readFile(real).catch((error: unknown) => {
+    sampleReadError(ctx, relNormalized, error);
+    return null;
+  });
+  if (!buf) return { kind: "skip", reason: "read_error" };
+  if (buf.subarray(0, 8192).includes(0)) return { kind: "skip", reason: "large_or_binary" };
+  return { kind: "ok", body: buf.toString("utf8"), bytes: buf.length };
 }
 
 function fileName(rel: string): string {
@@ -359,42 +556,139 @@ function scoreFile(path: string, body: string, queryTerms: string[], boosts?: Te
   return { score, matched };
 }
 
-export async function queryRepo(repo: string, query: string, limit: number, pathPrefix?: string, boosts?: TermBoost[], excludeTerms?: string[]): Promise<QueryResponse> {
-  const error = validate(query, boosts, excludeTerms);
-  if (error) return { protocolVersion: PROTOCOL_VERSION, ok: false, repoRoot: repo, query, boosts, excludeTerms, hits: [], count: 0, indexFreshness: "live", error };
-  const queryTerms = termsFromQuery(query);
-  const ignorePatterns = await readIgnorePatterns(repo);
-  const prefix = pathPrefix?.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
-  const files = (await candidateFiles(repo, prefix)).filter((path) => !ignorePatterns.some((pattern) => simpleMatch(pattern, path)));
-  const excludeNeedles = (excludeTerms ?? []).map((term) => term.toLowerCase());
-  const hits: SearchHit[] = [];
-  for (const path of files) {
-    if (!(await fileExists(resolve(repo, path)))) continue;
-    const body = await safeReadText(repo, path);
-    if (body == null) continue;
-    const haystack = `${path}\n${body}`.toLowerCase();
-    if (excludeNeedles.some((term) => containsPlainTerm(haystack, term))) continue;
-    const scored = scoreFile(path, body, queryTerms, boosts);
-    if (!scored.matched) continue;
-    hits.push({
-      path,
-      score: scored.score,
-      matchedFields: matchedFields(path, body, query),
-      ...bestSnippets(body, query),
-    });
+function hitCompare(a: SearchHit, b: SearchHit): number {
+  return b.score - a.score || a.path.localeCompare(b.path);
+}
+
+function isBetterHit(candidate: SearchHit, current: SearchHit): boolean {
+  return hitCompare(candidate, current) < 0;
+}
+
+function retainTopHit(hits: SearchHit[], hit: SearchHit, limit: number): void {
+  if (hits.length < limit) {
+    hits.push(hit);
+    hits.sort(hitCompare);
+    return;
   }
-  hits.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
-  const usesPhraseOrDownWeight = (boosts ?? []).some((boost) => boost.weight < 1 || isPhrase(boost.term)) || (excludeTerms ?? []).some(isPhrase);
+  const worst = hits[hits.length - 1]!;
+  if (!isBetterHit(hit, worst)) return;
+  hits[hits.length - 1] = hit;
+  hits.sort(hitCompare);
+}
+
+function baseResponse(repo: string, query: string, limit: number, boosts?: TermBoost[], excludeTerms?: string[], warnings: string[] = [], ok = true, error?: string): QueryResponse {
   return {
     protocolVersion: PROTOCOL_VERSION,
-    ok: true,
+    ok,
     repoRoot: repo,
     query,
     boosts,
     excludeTerms,
-    hits: hits.slice(0, limit),
-    count: Math.min(hits.length, limit),
+    hits: [],
+    count: 0,
     indexFreshness: "live",
-    warnings: usesPhraseOrDownWeight ? ["phrase controls or down-weight boosts are applied after collecting the live candidate set"] : [],
+    warnings,
+    error,
   };
+}
+
+export async function queryRepo(repo: string, query: string, limit: number, pathPrefix?: string, boosts?: TermBoost[], excludeTerms?: string[], options: QueryRepoOptions = {}): Promise<QueryResponse> {
+  const error = validate(query, boosts, excludeTerms);
+  if (error) return baseResponse(repo, query, limit, boosts, excludeTerms, [], false, error);
+
+  const topLimit = Math.min(50, Math.max(1, Math.floor(limit || 10)));
+  const rootReal = await realpath(repo).catch(() => repo);
+  const ctx: QueryContext = {
+    signal: options.signal,
+    budgets: { ...DEFAULT_SEARCH_BUDGET, ...(options.budgets ?? {}) },
+    warnings: [],
+    warningCodes: new Set(),
+    rootReal,
+    startedAt: Date.now(),
+    lastYieldAt: Date.now(),
+    filesRead: 0,
+    bytesRead: 0,
+    readErrorSamples: [],
+  };
+  const queryTerms = termsFromQuery(query);
+  const prefix = pathPrefix?.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+  const excludeNeedles = (excludeTerms ?? []).map((term) => term.toLowerCase());
+  const topHits: SearchHit[] = [];
+  let candidatesSeen = 0;
+
+  try {
+    checkAbort(ctx);
+    const ignorePatterns = await readIgnorePatterns(repo);
+    for await (const path of candidateFiles(repo, prefix, ignorePatterns, ctx)) {
+      checkAbort(ctx);
+      if (checkWallClock(ctx)) break;
+      if (candidatesSeen >= ctx.budgets.maxCandidates) {
+        addWarning(ctx, "candidate_budget_exceeded");
+        break;
+      }
+      candidatesSeen += 1;
+      await maybeYield(ctx, candidatesSeen);
+      const candidateLimitReached = candidatesSeen >= ctx.budgets.maxCandidates;
+      if (!(await fileExists(resolve(repo, path)))) {
+        if (candidateLimitReached) {
+          addWarning(ctx, "candidate_budget_exceeded");
+          break;
+        }
+        continue;
+      }
+      if (ctx.filesRead >= ctx.budgets.maxFilesRead) {
+        addWarning(ctx, "file_read_budget_exceeded");
+        break;
+      }
+      if (ctx.bytesRead >= ctx.budgets.maxBytesRead) {
+        addWarning(ctx, "byte_read_budget_exceeded");
+        break;
+      }
+      ctx.filesRead += 1;
+      const read = await safeReadText(path, ctx);
+      if (read.kind === "skip") {
+        if (read.reason === "large_or_binary") addWarning(ctx, "large_or_binary_files_skipped");
+        if (read.reason === "byte_budget") {
+          addWarning(ctx, "byte_read_budget_exceeded");
+          break;
+        }
+        if (candidateLimitReached) {
+          addWarning(ctx, "candidate_budget_exceeded");
+          break;
+        }
+        continue;
+      }
+      ctx.bytesRead += read.bytes;
+      const haystack = `${path}\n${read.body}`.toLowerCase();
+      if (!excludeNeedles.some((term) => containsPlainTerm(haystack, term))) {
+        const scored = scoreFile(path, read.body, queryTerms, boosts);
+        if (scored.matched) {
+          retainTopHit(topHits, {
+            path,
+            score: scored.score,
+            matchedFields: matchedFields(path, read.body, query),
+            ...bestSnippets(read.body, query),
+          }, topLimit);
+        }
+      }
+      if (candidateLimitReached) {
+        addWarning(ctx, "candidate_budget_exceeded");
+        break;
+      }
+    }
+  } catch (caught) {
+    if (!(caught instanceof SearchAbortError)) throw caught;
+    addWarning(ctx, "search_aborted");
+    const aborted = baseResponse(repo, query, topLimit, boosts, excludeTerms, ctx.warnings, topHits.length > 0, topHits.length > 0 ? undefined : "Search aborted.");
+    aborted.hits = topHits.sort(hitCompare);
+    aborted.count = aborted.hits.length;
+    return aborted;
+  }
+
+  const usesPhraseOrDownWeight = (boosts ?? []).some((boost) => boost.weight < 1 || isPhrase(boost.term)) || (excludeTerms ?? []).some(isPhrase);
+  const warnings = usesPhraseOrDownWeight ? [...ctx.warnings, "phrase controls or down-weight boosts are applied after collecting the live candidate set"] : ctx.warnings;
+  const response = baseResponse(repo, query, topLimit, boosts, excludeTerms, warnings);
+  response.hits = topHits.sort(hitCompare);
+  response.count = response.hits.length;
+  return response;
 }

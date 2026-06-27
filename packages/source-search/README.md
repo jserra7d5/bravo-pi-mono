@@ -35,11 +35,23 @@ Inside git, the live corpus comes from:
 git ls-files -z -co --exclude-standard
 ```
 
+Scoped searches use the same git-visible corpus with a pathspec:
+
+```bash
+git ls-files -z -co --exclude-standard -- <pathPrefix>
+```
+
 If `path` or the current directory is inside a git checkout, Source Search searches that checkout with the requested/current path as a prefix. It includes tracked and untracked git-visible files while excluding standard ignored files via `git ls-files -co --exclude-standard`.
 
-Outside git, Source Search walks the requested/current directory directly while skipping common noise and secret-bearing paths.
+Outside git, Source Search walks the requested/current directory directly with bounded iterative traversal while skipping common noise and secret-bearing paths before reading file content.
 
 Requested paths must exist. A missing `path` returns a clear no-searchable-directory error; it must not broaden to a parent folder or repo.
+
+## Diagnostics and degraded responses
+
+Search is live and bounded. Long or difficult searches may return partial results with compact warning codes in `warnings` and in rendered tool text, for example `candidate_budget_exceeded`, `file_read_budget_exceeded`, `byte_read_budget_exceeded`, `git_timeout`, `git_error`, `large_or_binary_files_skipped`, `read_errors_omitted`, or `search_aborted`.
+
+A response with `ok: true` and warnings can still contain useful ranked evidence, but it is degraded. In particular, no matches plus warnings is not proof of absence; broaden the search or confirm with `grep`/`read` where needed.
 
 ## Configuration policy
 

@@ -23,7 +23,15 @@ Inside a git checkout, the searchable corpus is discovered with:
 git ls-files -z -co --exclude-standard
 ```
 
-Outside git, Source Search walks the requested/current directory live while skipping common noise and secret-bearing paths. The corpus additionally respects `.agentignore`, `.piignore`, and `.bravo/source-search.json` `exclude` patterns at the active search root. No ignored-path allowlist is part of v1 live search.
+When search is scoped by requested/current path, the git command is pathspec-scoped rather than replaced with direct filesystem walking:
+
+```bash
+git ls-files -z -co --exclude-standard -- <pathPrefix>
+```
+
+Outside git, Source Search walks the requested/current directory live with iterative bounded traversal while skipping common noise and secret-bearing paths before content reads. The corpus additionally respects `.agentignore`, `.piignore`, and `.bravo/source-search.json` `exclude` patterns at the active search root. No ignored-path allowlist is part of v1 live search.
+
+Live execution is bounded: discovery/scoring may stop at candidate, file-read, byte-read, depth, wall-clock, or cancellation budgets; scoring keeps only the requested top ranked hits while preserving score-descending/path-ascending ordering for complete runs. The implementation yields periodically so long searches do not monopolize the event loop.
 
 ## Scope resolution
 
@@ -70,6 +78,8 @@ Preserve the `QueryResponse` / `SearchHit` shape:
 - `error`
 
 Each hit includes path, score, optional line/range fields, legacy `snippet`, structured `snippets`, and optional `matchedFields` using `filename`, `path`, and `content`.
+
+`warnings` remains a string array for v1 compatibility. Warning strings should begin with stable compact codes such as `git_timeout`, `git_error`, `candidate_budget_exceeded`, `file_read_budget_exceeded`, `byte_read_budget_exceeded`, `depth_budget_exceeded`, `large_or_binary_files_skipped`, `read_errors_omitted`, or `search_aborted`. Degraded partial searches with useful results may return `ok: true`; validation failures, missing paths, pre-result cancellation, and unrecoverable failures return `ok: false`. A no-hit response with warnings is not authoritative proof of absence.
 
 ## Prompting guidance
 
