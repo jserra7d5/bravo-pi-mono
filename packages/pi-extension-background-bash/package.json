@@ -17,6 +17,9 @@
     "@types/node": "latest",
     "typescript": "latest"
   },
+  "dependencies": {
+    "@bravo/render-clock": "*"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",

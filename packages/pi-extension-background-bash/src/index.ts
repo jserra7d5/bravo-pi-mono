@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { renderClock } from "@bravo/render-clock";
 import { buildBackgroundBashTools } from "./bash-tool.js";
 import { BackgroundRunner } from "./background-runner.js";
 import { configFromContext, readConfig } from "./config.js";
@@ -10,7 +11,7 @@ function cwdOf(ctx: unknown): string { return typeof (ctx as { cwd?: unknown } |
 function sessionIdOf(ctx: unknown): string | undefined { const v = (ctx as { sessionManager?: { getSessionId?: () => unknown } } | undefined)?.sessionManager?.getSessionId?.(); return typeof v === "string" ? v : undefined; }
 function runnerFor(ctx: unknown) { const cfg = configFromContext(ctx, cwdOf(ctx)); return new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg); }
 
-type BackgroundCounts = { running: number; blocked: number; failed: number; };
+type BackgroundCounts = { running: number; blocked: number; failed: number; timedOut: number; orphaned: number; };
 
 function sessionOwned<T extends { ownerSessionId?: string }>(records: T[], sessionId?: string): T[] {
   return records.filter((record) => sessionId ? record.ownerSessionId === sessionId : !record.ownerSessionId);
@@ -21,23 +22,55 @@ type RenderRequester = { requestRender?: () => void };
 type BackgroundWidgetMount = { counts: BackgroundCounts; signature: string; component?: BackgroundWidgetComponent };
 
 const backgroundWidgetMounts = new WeakMap<UiSetWidget, BackgroundWidgetMount>();
+const backgroundWidgetClockUnsubscribes = new WeakMap<UiSetWidget, () => void>();
+const backgroundWidgetUiIds = new WeakMap<UiSetWidget, number>();
+let nextBackgroundWidgetUiId = 1;
+
+function uiId(ui: UiSetWidget): number {
+  let id = backgroundWidgetUiIds.get(ui);
+  if (id === undefined) {
+    id = nextBackgroundWidgetUiId++;
+    backgroundWidgetUiIds.set(ui, id);
+  }
+  return id;
+}
+
+function unsubscribeBackgroundBashWidgetClock(ctx: unknown): void {
+  const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
+  if (!ui) return;
+  const unsubscribe = backgroundWidgetClockUnsubscribes.get(ui);
+  if (!unsubscribe) return;
+  backgroundWidgetClockUnsubscribes.delete(ui);
+  unsubscribe();
+}
+
+function subscribeBackgroundBashWidgetClock(ctx: unknown): void {
+  const ui = (ctx as { ui?: UiSetWidget } | undefined)?.ui;
+  if (!ui?.setWidget) return;
+  unsubscribeBackgroundBashWidgetClock(ctx);
+  const id = `background-bash:${sessionIdOf(ctx) ?? "no-session"}:${uiId(ui)}`;
+  const unsubscribe = renderClock.subscribe({ id, reconcile: () => updateBackgroundBashWidget(ctx) });
+  backgroundWidgetClockUnsubscribes.set(ui, unsubscribe);
+}
 
 function backgroundCounts(ctx: unknown): BackgroundCounts {
   const cfg = configFromContext(ctx, cwdOf(ctx));
-  const tasks = sessionOwned(new TaskRegistry(cfg.dataDir).list(false), sessionIdOf(ctx));
+  const tasks = sessionOwned(new TaskRegistry(cfg.dataDir).list(true), sessionIdOf(ctx));
   return {
     running: tasks.filter(t => t.status === "running" || t.status === "starting").length,
     blocked: tasks.filter(t => t.status === "blocked").length,
-    failed: tasks.filter(t => t.status === "failed" || t.status === "timed_out" || t.status === "orphaned").length,
+    failed: tasks.filter(t => t.status === "failed").length,
+    timedOut: tasks.filter(t => t.status === "timed_out").length,
+    orphaned: tasks.filter(t => t.status === "orphaned").length,
   };
 }
 
 function countsSignature(counts: BackgroundCounts): string {
-  return `${counts.running}/${counts.blocked}/${counts.failed}`;
+  return `${counts.running}/${counts.blocked}/${counts.failed}/${counts.timedOut}/${counts.orphaned}`;
 }
 
 function hasVisibleCounts(counts: BackgroundCounts): boolean {
-  return counts.running > 0 || counts.blocked > 0 || counts.failed > 0;
+  return counts.running > 0 || counts.blocked > 0 || counts.failed > 0 || counts.timedOut > 0 || counts.orphaned > 0;
 }
 
 function createBackgroundWidget(ui: UiSetWidget, mount: BackgroundWidgetMount, tui: unknown): BackgroundWidgetComponent {
@@ -130,8 +163,9 @@ export default async function backgroundBashExtension(pi: ExtensionAPI): Promise
   // Fail closed: only env/load-time config can enable registration and prompt guidance.
   const loadCfg = readConfig(undefined);
   const registered = loadCfg.enabled && typeof pi.registerTool === "function";
-  if (registered) for (const tool of buildBackgroundBashTools(pi as never)) pi.registerTool(tool as never);
-  if (registered) registerTaskCommands(pi as never);
+  const refreshBackgroundBashWidget = (ctx: unknown) => updateBackgroundBashWidget(ctx);
+  if (registered) for (const tool of buildBackgroundBashTools(pi as never, refreshBackgroundBashWidget)) pi.registerTool(tool as never);
+  if (registered) registerTaskCommands(pi as never, refreshBackgroundBashWidget);
 
   pi.on?.("before_agent_start", async (event: { systemPrompt: string }) => {
     // getActiveTools/getAllTools are action methods; Pi forbids calling them during
@@ -142,9 +176,9 @@ export default async function backgroundBashExtension(pi: ExtensionAPI): Promise
   });
 
   const onAny = pi.on as unknown as ((name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => unknown) | undefined;
-  onAny?.("session_start", async (_event: unknown, ctx: ExtensionContext) => { if (registered) { runnerFor(ctx).reconcile(sessionIdOf(ctx)); updateBackgroundBashWidget(ctx); } });
-  onAny?.("reload", async (_event: unknown, ctx: ExtensionContext) => { if (registered) { runnerFor(ctx).reconcile(sessionIdOf(ctx)); updateBackgroundBashWidget(ctx); } });
-  onAny?.("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => { if (registered) await runnerFor(ctx).shutdown(sessionIdOf(ctx)); });
+  onAny?.("session_start", async (_event: unknown, ctx: ExtensionContext) => { if (registered) { subscribeBackgroundBashWidgetClock(ctx); runnerFor(ctx).reconcile(sessionIdOf(ctx)); updateBackgroundBashWidget(ctx); } });
+  onAny?.("reload", async (_event: unknown, ctx: ExtensionContext) => { if (registered) { subscribeBackgroundBashWidgetClock(ctx); runnerFor(ctx).reconcile(sessionIdOf(ctx)); updateBackgroundBashWidget(ctx); } });
+  onAny?.("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => { if (registered) { unsubscribeBackgroundBashWidgetClock(ctx); await runnerFor(ctx).shutdown(sessionIdOf(ctx)); } });
 }
 
 export { buildBackgroundBashTools } from "./bash-tool.js";

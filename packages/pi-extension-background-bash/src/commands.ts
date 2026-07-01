@@ -11,7 +11,9 @@ function sessionOwned<T extends { ownerSessionId?: string }>(records: T[], sessi
 function resolveId(registry: TaskRegistry, raw: string | undefined, sessionId?: string) { if (!raw) return undefined; const needle = raw.replace(/^bg…/, ""); return sessionOwned(registry.list(true), sessionId).find(t => t.taskId === raw || t.taskId.endsWith(needle)); }
 async function tail(path: string, n: number) { const text = await readFile(path, "utf8").catch(() => ""); return text.split(/\r?\n/).slice(-Math.max(1, Math.min(200, n))).join("\n"); }
 
-export function registerTaskCommands(pi: { registerCommand?: (name: string, spec: { description?: string; handler: (args: string, ctx: unknown) => unknown }) => void }) {
+type BackgroundRefresh = (ctx: unknown) => void;
+
+export function registerTaskCommands(pi: { registerCommand?: (name: string, spec: { description?: string; handler: (args: string, ctx: unknown) => unknown }) => void }, refreshBackgroundBashWidget?: BackgroundRefresh) {
   pi.registerCommand?.("bash-tasks", { description: "List, show, tail, stop, or cleanup background bash tasks", handler: async (args: string, ctx: unknown) => {
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const sub = parts[0] ?? "list";
@@ -19,6 +21,8 @@ export function registerTaskCommands(pi: { registerCommand?: (name: string, spec
     const registry = new TaskRegistry(cfg.dataDir);
     const sessionId = sessionIdOf(ctx);
     if (sub === "list" || sub === "all" || !sub) {
+      new BackgroundRunner(registry, cfg).reconcile(sessionId);
+      refreshBackgroundBashWidget?.(ctx);
       notify(ctx, renderTaskList(sessionOwned(registry.list(sub === "all"), sessionId)).render(80)); return;
     }
     if (sub === "show") {
@@ -30,11 +34,13 @@ export function registerTaskCommands(pi: { registerCommand?: (name: string, spec
     if (sub === "stop") {
       const task = resolveId(registry, parts[1], sessionId); if (!task) { notify(ctx, ["Task not found in this session"]); return; }
       const stopped = await new BackgroundRunner(registry, cfg).stop(task.taskId);
+      refreshBackgroundBashWidget?.(ctx);
       notify(ctx, stopped ? renderTaskCard(stopped, false).render(80) : ["Task not found"]); return;
     }
     if (sub === "cleanup") {
       const tasks = sessionOwned(registry.list(true), sessionId); let removed = 0;
       for (const t of tasks) if (!["starting", "running", "blocked"].includes(t.status)) { registry.remove(t.taskId); removed++; }
+      refreshBackgroundBashWidget?.(ctx);
       notify(ctx, [`Cleaned up ${removed} completed background task${removed === 1 ? "" : "s"} for this session.`]); return;
     }
     notify(ctx, ["Usage: /bash-tasks [list|all|show <id>|tail <id> [lines]|stop <id>|cleanup]"]);
