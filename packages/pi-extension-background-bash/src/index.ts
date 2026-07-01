@@ -11,7 +11,7 @@ function cwdOf(ctx: unknown): string { return typeof (ctx as { cwd?: unknown } |
 function sessionIdOf(ctx: unknown): string | undefined { const v = (ctx as { sessionManager?: { getSessionId?: () => unknown } } | undefined)?.sessionManager?.getSessionId?.(); return typeof v === "string" ? v : undefined; }
 function runnerFor(ctx: unknown) { const cfg = configFromContext(ctx, cwdOf(ctx)); return new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg); }
 
-type BackgroundCounts = { running: number; blocked: number; failed: number; timedOut: number; orphaned: number; };
+type BackgroundCounts = { running: number; blocked: number; };
 
 function sessionOwned<T extends { ownerSessionId?: string }>(records: T[], sessionId?: string): T[] {
   return records.filter((record) => sessionId ? record.ownerSessionId === sessionId : !record.ownerSessionId);
@@ -55,22 +55,19 @@ function subscribeBackgroundBashWidgetClock(ctx: unknown): void {
 
 function backgroundCounts(ctx: unknown): BackgroundCounts {
   const cfg = configFromContext(ctx, cwdOf(ctx));
-  const tasks = sessionOwned(new TaskRegistry(cfg.dataDir).list(true), sessionIdOf(ctx));
+  const tasks = sessionOwned(new TaskRegistry(cfg.dataDir).list(false), sessionIdOf(ctx));
   return {
     running: tasks.filter(t => t.status === "running" || t.status === "starting").length,
     blocked: tasks.filter(t => t.status === "blocked").length,
-    failed: tasks.filter(t => t.status === "failed").length,
-    timedOut: tasks.filter(t => t.status === "timed_out").length,
-    orphaned: tasks.filter(t => t.status === "orphaned").length,
   };
 }
 
 function countsSignature(counts: BackgroundCounts): string {
-  return `${counts.running}/${counts.blocked}/${counts.failed}/${counts.timedOut}/${counts.orphaned}`;
+  return `${counts.running}/${counts.blocked}`;
 }
 
 function hasVisibleCounts(counts: BackgroundCounts): boolean {
-  return counts.running > 0 || counts.blocked > 0 || counts.failed > 0 || counts.timedOut > 0 || counts.orphaned > 0;
+  return counts.running > 0 || counts.blocked > 0;
 }
 
 function createBackgroundWidget(ui: UiSetWidget, mount: BackgroundWidgetMount, tui: unknown): BackgroundWidgetComponent {

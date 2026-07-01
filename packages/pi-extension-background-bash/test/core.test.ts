@@ -474,16 +474,20 @@ test("registered renderers normalize embedded newlines before chrome rendering",
   }
 });
 
-test("renderFooter labels failed, timed out, and orphaned counts honestly", () => {
+test("renderFooter only surfaces active background work", () => {
   const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
-  const full = strip(renderFooter({ running: 0, blocked: 0, failed: 1, timedOut: 2, orphaned: 3 }).render(80).join("\n"));
-  assert.match(full, /1 failed/);
-  assert.match(full, /2 timed out/);
-  assert.match(full, /3 orphaned/);
+  const full = strip(renderFooter({ running: 2, blocked: 1 }).render(80).join("\n"));
+  assert.match(full, /2 running/);
+  assert.match(full, /1 blocked/);
+  assert.doesNotMatch(full, /failed|timed out|orphaned/);
 
-  const orphanOnly = strip(renderFooter({ running: 0, blocked: 0, failed: 0, timedOut: 0, orphaned: 1 }).render(80).join("\n"));
-  assert.match(orphanOnly, /1 orphaned/);
-  assert.doesNotMatch(orphanOnly, /failed/);
+  const runningOnly = strip(renderFooter({ running: 1, blocked: 0 }).render(80).join("\n"));
+  assert.match(runningOnly, /1 running/);
+  assert.doesNotMatch(runningOnly, /blocked|failed|timed out|orphaned/);
+
+  const blockedOnly = strip(renderFooter({ running: 0, blocked: 1 }).render(80).join("\n"));
+  assert.match(blockedOnly, /1 blocked/);
+  assert.doesNotMatch(blockedOnly, /0 running|failed|timed out|orphaned/);
 });
 
 test("background bash widget suppresses render requests for unchanged polling counts", async () => {
@@ -665,7 +669,7 @@ test("background bash widget requests render when counts change and clears when 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("background bash widget refreshes from render-clock without no-op renders", async () => {
+test("background bash widget refreshes active-work counts from render-clock", async () => {
   let nowMs = 0;
   let tickTimer: (() => void) | undefined;
   const clock = __resetRenderClockForTest({
@@ -696,32 +700,52 @@ test("background bash widget refreshes from render-clock without no-op renders",
     await handlers.session_start?.({}, ctx);
     assert.equal(clock.subscriberCount(), 1);
     assert.ok(tickTimer, "render-clock should own the single timer");
+    assert.equal(calls.length, 0, "terminal-only history must not mount the persistent footer");
+
+    const runningDir = path.join(cfg.dataDir, "bg_running");
+    mkdirSync(runningDir, { recursive: true });
+    registry.upsert({ schemaVersion: 1, taskId: "bg_running", command: "sleep 10", cwd: root, status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(runningDir, "output.log"), metadataPath: path.join(runningDir, "metadata.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+    nowMs += 1000;
+    clock.tick("manual");
     assert.equal(calls.length, 1);
-    assert.ok(captured, "expected widget factory to be mounted");
+    assert.ok(captured, "expected widget factory to mount for active work");
 
     let renderRequests = 0;
-    captured!({ requestRender() { renderRequests += 1; } });
+    const component = captured!({ requestRender() { renderRequests += 1; } });
+    assert.match(component.render(80).join("\n"), /1 running/);
+    assert.doesNotMatch(component.render(80).join("\n"), /failed|timed out|orphaned/);
     nowMs += 1000;
     clock.tick("manual");
     assert.equal(calls.length, 1, "unchanged clock poll must not remount");
     assert.equal(renderRequests, 0, "unchanged clock poll must not request render");
 
-    mkdirSync(path.join(cfg.dataDir, "bg_timeout"), { recursive: true });
-    registry.upsert({ schemaVersion: 1, taskId: "bg_timeout", command: "sleep 1", cwd: root, status: "timed_out", createdAt: now, updatedAt: now, startedAt: now, endedAt: now, outputPath: path.join(cfg.dataDir, "bg_timeout", "output.log"), metadataPath: path.join(cfg.dataDir, "bg_timeout", "metadata.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
+    const timeoutDir = path.join(cfg.dataDir, "bg_timeout");
+    mkdirSync(timeoutDir, { recursive: true });
+    registry.upsert({ schemaVersion: 1, taskId: "bg_timeout", command: "sleep 1", cwd: root, status: "timed_out", createdAt: now, updatedAt: now, startedAt: now, endedAt: now, outputPath: path.join(timeoutDir, "output.log"), metadataPath: path.join(timeoutDir, "metadata.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
     nowMs += 1000;
     clock.tick("manual");
-    assert.equal(calls.length, 1, "changed counts update mounted component instead of remounting");
-    assert.equal(renderRequests, 1, "changed counts request render");
+    assert.equal(calls.length, 1, "terminal metadata must not remount the active-work footer");
+    assert.equal(renderRequests, 0, "terminal metadata must not request footer render");
 
-    registry.remove("bg_failed");
-    registry.remove("bg_timeout");
+    const blockedDir = path.join(cfg.dataDir, "bg_blocked");
+    mkdirSync(blockedDir, { recursive: true });
+    registry.upsert({ schemaVersion: 1, taskId: "bg_blocked", command: "cat", cwd: root, status: "blocked", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(blockedDir, "output.log"), metadataPath: path.join(blockedDir, "metadata.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
     nowMs += 1000;
     clock.tick("manual");
-    assert.equal(calls.length, 2, "zero counts clear once");
+    assert.equal(calls.length, 1, "changed active counts update mounted component instead of remounting");
+    assert.equal(renderRequests, 1, "changed active counts request render");
+    assert.match(component.render(80).join("\n"), /1 running/);
+    assert.match(component.render(80).join("\n"), /1 blocked/);
+
+    registry.upsert({ ...registry.get("bg_running")!, status: "exited", endedAt: now });
+    registry.upsert({ ...registry.get("bg_blocked")!, status: "failed", endedAt: now, exitCode: 1 });
+    nowMs += 1000;
+    clock.tick("manual");
+    assert.equal(calls.length, 2, "zero active counts clear once");
     assert.equal(calls[1], undefined);
     nowMs += 1000;
     clock.tick("manual");
-    assert.equal(calls.length, 2, "repeated zero counts do not clear again");
+    assert.equal(calls.length, 2, "repeated zero active counts do not clear again");
 
     await handlers.session_shutdown?.({}, ctx);
     assert.equal(clock.subscriberCount(), 0);
@@ -746,9 +770,6 @@ test("background bash widget dispose during clear keeps clock alive and later re
     const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data") }, root);
     const registry = new TaskRegistry(cfg.dataDir);
     const now = new Date().toISOString();
-    const failedDir = path.join(cfg.dataDir, "bg_failed");
-    mkdirSync(failedDir, { recursive: true });
-    registry.upsert({ schemaVersion: 1, taskId: "bg_failed", command: "false", cwd: root, status: "failed", createdAt: now, updatedAt: now, startedAt: now, endedAt: now, outputPath: path.join(failedDir, "output.log"), metadataPath: path.join(failedDir, "metadata.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
 
     type WidgetComponent = { dispose?: () => void; render(width: number): string[]; invalidate(): void };
     type WidgetFactory = (tui: unknown) => WidgetComponent;
@@ -776,12 +797,19 @@ test("background bash widget dispose during clear keeps clock alive and later re
     await extension({ registerTool: () => undefined, registerCommand: () => undefined, on: (n: string, h: Function) => { handlers[n] = h; } } as never);
     await handlers.session_start?.({}, ctx);
     assert.equal(clock.subscriberCount(), 1);
-    assert.equal(factoryMounts, 1);
+    assert.equal(factoryMounts, 0, "terminal/orphaned history must not mount the footer at session start");
 
-    registry.remove("bg_failed");
+    const initialDir = path.join(cfg.dataDir, "bg_initial");
+    mkdirSync(initialDir, { recursive: true });
+    registry.upsert({ schemaVersion: 1, taskId: "bg_initial", command: "sleep 10", cwd: root, status: "running", createdAt: now, updatedAt: now, startedAt: now, outputPath: path.join(initialDir, "output.log"), metadataPath: path.join(initialDir, "metadata.json"), outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: false });
     nowMs += 1000;
     clock.tick("manual");
-    assert.equal(calls.at(-1), undefined, "zero counts should clear the mounted widget");
+    assert.equal(factoryMounts, 1, "clock tick should mount for newly active work");
+
+    registry.upsert({ ...registry.get("bg_initial")!, status: "exited", endedAt: now, exitCode: 0 });
+    nowMs += 1000;
+    clock.tick("manual");
+    assert.equal(calls.at(-1), undefined, "zero active counts should clear the mounted widget");
     assert.equal(clock.subscriberCount(), 1, "component disposal during clear must not unsubscribe session clock");
 
     const runningDir = path.join(cfg.dataDir, "bg_running");
