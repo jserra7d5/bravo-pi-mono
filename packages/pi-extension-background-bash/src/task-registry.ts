@@ -2,10 +2,32 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { join } from "node:path";
 import type { BackgroundTaskRecord } from "./task-types.js";
 
-const ACTIVE_LIFECYCLE_STATUSES = new Set<BackgroundTaskRecord["status"]>(["starting", "running", "blocked", "failed", "timed_out", "orphaned"]);
+const ACTIVE_LIFECYCLE_STATUSES = new Set<BackgroundTaskRecord["status"]>(["starting", "running", "blocked", "orphaned"]);
 
 function isActiveLifecycle(record: BackgroundTaskRecord): boolean {
   return ACTIVE_LIFECYCLE_STATUSES.has(record.status);
+}
+
+function isTerminalMetadata(record: BackgroundTaskRecord): boolean {
+  return record.status === "exited" || record.status === "failed" || record.status === "timed_out" || record.status === "killed";
+}
+
+function shouldPreferMetadata(active: BackgroundTaskRecord, metadata: BackgroundTaskRecord): boolean {
+  if (isTerminalMetadata(metadata)) return true;
+  return metadata.updatedAt > active.updatedAt;
+}
+
+function activeStatusRank(status: BackgroundTaskRecord["status"]): number {
+  if (status === "starting") return 0;
+  if (status === "running") return 1;
+  if (status === "blocked") return 2;
+  return 3;
+}
+
+function shouldSuppressActiveMetadataOverwrite(incoming: BackgroundTaskRecord, metadata: BackgroundTaskRecord): boolean {
+  if (isTerminalMetadata(metadata)) return true;
+  if (metadata.updatedAt <= incoming.updatedAt) return false;
+  return metadata.status === incoming.status || activeStatusRank(metadata.status) > activeStatusRank(incoming.status);
 }
 
 export class TaskRegistry {
@@ -28,12 +50,16 @@ export class TaskRegistry {
   }
 
   list(includeCompleted = false): BackgroundTaskRecord[] {
-    const records = includeCompleted ? this.loadAllMetadataRecords() : [...this.records.values()];
+    const records = includeCompleted ? this.loadAllMetadataRecords() : this.currentActiveRecords();
     return records.filter((r) => includeCompleted || isActiveLifecycle(r)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
   get(taskId: string): BackgroundTaskRecord | undefined {
-    return this.records.get(taskId) ?? this.loadMetadataRecord(taskId);
+    const active = this.records.get(taskId);
+    const metadata = this.loadMetadataRecord(taskId);
+    if (!active) return metadata;
+    if (!metadata) return active;
+    return shouldPreferMetadata(active, metadata) ? metadata : active;
   }
 
   remove(taskId: string): boolean {
@@ -54,6 +80,14 @@ export class TaskRegistry {
   }
 
   upsert(record: BackgroundTaskRecord): void {
+    const existingMetadata = this.loadMetadataRecord(record.taskId);
+    if (isActiveLifecycle(record) && !isTerminalMetadata(record) && existingMetadata && shouldSuppressActiveMetadataOverwrite(record, existingMetadata)) {
+      if (isTerminalMetadata(existingMetadata)) this.records.delete(record.taskId);
+      else this.records.set(record.taskId, existingMetadata);
+      this.persist();
+      return;
+    }
+
     const updated = { ...record, updatedAt: new Date().toISOString() };
     if (isActiveLifecycle(updated)) this.records.set(updated.taskId, updated);
     else this.records.delete(updated.taskId);
@@ -69,8 +103,18 @@ export class TaskRegistry {
     catch { return undefined; }
   }
 
+  private currentActiveRecords(): BackgroundTaskRecord[] {
+    const active: BackgroundTaskRecord[] = [];
+    for (const record of this.records.values()) {
+      const metadata = this.loadMetadataRecord(record.taskId);
+      const resolved = metadata && shouldPreferMetadata(record, metadata) ? metadata : record;
+      if (isActiveLifecycle(resolved)) active.push(resolved);
+    }
+    return active;
+  }
+
   private loadAllMetadataRecords(): BackgroundTaskRecord[] {
-    const byId = new Map(this.records);
+    const byId = new Map(this.currentActiveRecords().map((r) => [r.taskId, r]));
     try {
       for (const entry of readdirSync(this.dataDir, { withFileTypes: true })) {
         if (!entry.isDirectory()) continue;
@@ -85,7 +129,7 @@ export class TaskRegistry {
 
   private persist(): void {
     const tmp = `${this.registryPath}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify([...this.records.values()].filter(isActiveLifecycle), null, 2));
+    writeFileSync(tmp, JSON.stringify(this.currentActiveRecords(), null, 2));
     renameSync(tmp, this.registryPath);
   }
 }

@@ -12,7 +12,7 @@ The registry file is an active-lifecycle index, not a full history table: it tra
 
 Prefer enabling this extension and relying on Pi tool override precedence. If precedence is ambiguous, explicitly remove the built-in `bash` from active tools and expose this extension's `bash`; use `--exclude-tools bash` only as a workaround.
 
-Model wake-up on completion is off by default. Pass `wake_on_completion: true` per call only when explicitly desired.
+Model wake-up on completion is off by default and is v1 per-call opt-in only. Pass `wake_on_completion: true` on a background `bash` call to request a bounded follow-up model wake when that task reaches `exited`, `failed`, `timed_out`, or `killed`. Legacy/config-level `notifyModelOnCompletion` is ignored for wake eligibility in v1; tasks must carry the v1 tool-argument wake markers in persisted metadata.
 
 ## Async subagent migration CLI
 

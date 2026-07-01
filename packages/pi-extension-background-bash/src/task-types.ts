@@ -8,6 +8,7 @@ export interface BackgroundTaskRecord {
   command: string;
   cwd: string;
   ownerSessionId?: string;
+  ownerSessionFile?: string;
   status: TaskStatus;
   createdAt: string;
   updatedAt: string;
@@ -28,6 +29,23 @@ export interface BackgroundTaskRecord {
   blockedReason?: string;
   stopReason?: StopReason;
   wakeOnCompletion: boolean;
+  wakePolicyVersion?: 1;
+  wakePolicySource?: "tool_arg_v1";
+  modelWakeState?: "not_requested" | "claim_acquired" | "routing_failed" | "send_attempted" | "accepted" | "send_failed";
+  modelWakeNotificationId?: string;
+  modelWakeClaimedAt?: string;
+  modelWakeAttemptedAt?: string;
+  modelWakeAcceptedAt?: string;
+  modelWakeDeliverySemantics?: "accepted" | "delivered";
+  modelWakeCanonicalTerminal?: {
+    status: "exited" | "failed" | "timed_out" | "killed";
+    exitCode?: number | null;
+    signal?: NodeJS.Signals | string | null;
+    stopReason?: StopReason;
+    endedAt: string;
+  };
+  modelWakeErrorCode?: string;
+  modelWakeError?: string;
 }
 
 export interface ToolResponse {

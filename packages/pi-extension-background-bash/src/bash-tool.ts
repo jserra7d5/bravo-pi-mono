@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { configFromContext } from "./config.js";
-import { BackgroundRunner } from "./background-runner.js";
+import { BackgroundRunner, runtimeId } from "./background-runner.js";
 import { TaskRegistry } from "./task-registry.js";
 import { executeForeground } from "./foreground.js";
 import type { ToolResponse } from "./task-types.js";
@@ -22,12 +22,31 @@ function fallbackTextResult(result: ToolResponse): TextRenderable {
 }
 function cwdOf(ctx: unknown): string { return typeof (ctx as { cwd?: unknown } | undefined)?.cwd === "string" ? (ctx as { cwd: string }).cwd : process.cwd(); }
 function sessionIdOf(ctx: unknown): string | undefined { const v = (ctx as { sessionManager?: { getSessionId?: () => unknown } } | undefined)?.sessionManager?.getSessionId?.(); return typeof v === "string" ? v : undefined; }
-function positiveSeconds(v: unknown, name: string): number | undefined { if (v === undefined) return undefined; if (typeof v !== "number" || !Number.isFinite(v) || v <= 0 || v > maxSeconds) throw new Error(`${name} must be a positive finite seconds value <= ${maxSeconds}`); return v; }
+function sessionFileOf(ctx: unknown): string | undefined { const v = (ctx as { sessionManager?: { getSessionFile?: () => unknown } } | undefined)?.sessionManager?.getSessionFile?.(); return typeof v === "string" ? v : undefined; }
+function positiveSeconds(v: unknown, name: string): number | undefined { if (v === undefined) return undefined; if (typeof v !== "number" || !Number.isFinite(v) || !Number.isInteger(v) || v <= 0 || v > maxSeconds) throw new Error(`${name} must be a positive integer seconds value <= ${maxSeconds}`); return v; }
 function positiveMs(v: unknown, name: string, max = 60_000): number | undefined { if (v === undefined) return undefined; if (typeof v !== "number" || !Number.isFinite(v) || v <= 0 || v > max) throw new Error(`${name} must be a positive finite millisecond value <= ${max}`); return v; }
 function sessionOwned<T extends { ownerSessionId?: string }>(records: T[], sessionId?: string): T[] { return records.filter((record) => sessionId ? record.ownerSessionId === sessionId : !record.ownerSessionId); }
 function sessionOwns(record: { ownerSessionId?: string }, sessionId?: string): boolean { return sessionId ? record.ownerSessionId === sessionId : !record.ownerSessionId; }
 
-export function buildBackgroundBashTools() {
+type PiSender = { sendMessage?: (message: unknown, options?: unknown) => unknown | Promise<unknown> };
+function wakeNotifierFor(pi: PiSender | undefined, ctx: unknown, ownerSessionId: string | undefined, ownerSessionFile: string | undefined) {
+  if (!pi?.sendMessage || !ownerSessionId) return undefined;
+  return {
+    ownerSessionId,
+    ownerRuntimeId: runtimeId,
+    ownerSessionFile,
+    currentSessionId: () => sessionIdOf(ctx),
+    currentSessionFile: () => sessionFileOf(ctx),
+    async send(message: { options?: unknown } & Record<string, unknown>) {
+      const { options, ...body } = message;
+      const result = pi.sendMessage!(body, options);
+      await Promise.resolve(result);
+      return { acceptedAt: new Date().toISOString(), deliverySemantics: "accepted" as const };
+    },
+  };
+}
+
+export function buildBackgroundBashTools(pi?: PiSender) {
   return [
     {
       name: "bash", label: "Bash", description: "Execute shell commands. Use run_in_background for long-running work. For background calls, timeout is the process max runtime, not a return timeout.", parameters: bashSchema,
@@ -38,8 +57,12 @@ export function buildBackgroundBashTools() {
         try { timeoutSeconds = positiveSeconds(params.timeout, "timeout"); } catch (err) { return text(err instanceof Error ? err.message : String(err), { code: "INVALID_INPUT" }, true); }
         if (timeoutSeconds !== undefined && timeoutSeconds < 30) return text("timeout with run_in_background=true is the background process maximum runtime, not a client wait timeout; use >=30s or omit it instead of using a tiny value to return quickly", { code: "INVALID_INPUT" }, true);
         const cfg = configFromContext(ctx, cwdOf(ctx));
-        const task = await new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg).start({ command: params.command, timeout: timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000, wakeOnCompletion: params.wake_on_completion === true, cwd: cwdOf(ctx), ownerSessionId: sessionIdOf(ctx) });
-        const summary = task.status === "failed" ? `Background command failed to start.\nTask: ${task.taskId}\nOutput: ${task.outputPath}` : `Background command started.\nTask: ${task.taskId}\nStatus: ${task.status}\nOutput: ${task.outputPath}\n\nUse read on the output path or background_task_status/list/stop for lifecycle control. Model wake-up notification delivery is not implemented; no model wake will be requested.`;
+        const ownerSessionId = sessionIdOf(ctx);
+        const ownerSessionFile = sessionFileOf(ctx);
+        const wakeOnCompletion = params.wake_on_completion === true;
+        const task = await new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg).start({ command: params.command, timeout: timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000, wakeOnCompletion, cwd: cwdOf(ctx), ownerSessionId, ownerSessionFile, wakeNotifier: wakeNotifierFor(pi, ctx, ownerSessionId, ownerSessionFile) });
+        const wakeLine = wakeOnCompletion ? "Wake on completion: enabled" : "Wake on completion: disabled\nCompletion will be recorded in task metadata/UI only; use background_task_status or read the output path when you need results.";
+        const summary = task.status === "failed" ? `Background command failed to start.\nTask: ${task.taskId}\nOutput: ${task.outputPath}` : `Background command started.\nTask: ${task.taskId}\nStatus: ${task.status}\nOutput: ${task.outputPath}\n${wakeLine}\n\nUse read on the output path or background_task_status/list/stop for lifecycle control.`;
         return text(summary, { task }, task.status === "failed");
       },
     },

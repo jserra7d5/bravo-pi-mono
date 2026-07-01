@@ -130,7 +130,7 @@ export default async function backgroundBashExtension(pi: ExtensionAPI): Promise
   // Fail closed: only env/load-time config can enable registration and prompt guidance.
   const loadCfg = readConfig(undefined);
   const registered = loadCfg.enabled && typeof pi.registerTool === "function";
-  if (registered) for (const tool of buildBackgroundBashTools()) pi.registerTool(tool as never);
+  if (registered) for (const tool of buildBackgroundBashTools(pi as never)) pi.registerTool(tool as never);
   if (registered) registerTaskCommands(pi as never);
 
   pi.on?.("before_agent_start", async (event: { systemPrompt: string }) => {
@@ -138,7 +138,7 @@ export default async function backgroundBashExtension(pi: ExtensionAPI): Promise
     // extension loading, so verify lazily from the event hook before advertising.
     const promptGuidanceVerified = registered ? await verifiedBashOverride(pi) : false;
     if (!registered || !promptGuidanceVerified) return { systemPrompt: event.systemPrompt };
-    return { systemPrompt: `${event.systemPrompt}\n\nBackground bash is available: use bash({ command, run_in_background: true }) for long-running work whose process you own: tests, builds, dev servers, scripts, package installs, migrations, and services. Do not append shell &. For background calls, timeout is the background process maximum runtime, not a client wait timeout; set it to the full expected workload budget or omit it when the default is appropriate, and never use timeout:1 just to return quickly. Use Monitor only when the command observes external evidence/state such as logs, CI/deploy status, health checks, queue depth, or file conditions. For one-shot \"wait until done\", use background bash, not Monitor. Read the returned output path or use background_task_* tools when needed. Stop tasks when done. Model wake-up notification delivery is not implemented; do not rely on background bash to wake the model.` };
+    return { systemPrompt: `${event.systemPrompt}\n\nBackground bash is available: use bash({ command, run_in_background: true }) for long-running work whose process you own: tests, builds, dev servers, scripts, package installs, migrations, and services. Do not append shell &. For background calls, timeout is the background process maximum runtime, not a client wait timeout; set it to the full expected workload budget or omit it when the default is appropriate, and never use timeout:1 just to return quickly. Use Monitor only when the command observes external evidence/state such as logs, CI/deploy status, health checks, queue depth, or file conditions. For one-shot \"wait until done\", use background bash, not Monitor. Read the returned output path or use background_task_* tools when needed. Stop tasks when done. Model wake-up notification delivery is per-call opt-in only with wake_on_completion:true; omit it for quiet-by-default background work.` };
   });
 
   const onAny = pi.on as unknown as ((name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => unknown) | undefined;
