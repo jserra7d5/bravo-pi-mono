@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startSubagent } from "../src/start.js";
-import { sendSubagentMessage } from "../src/message.js";
+import { sendSubagentMessage, waitForMessageAck } from "../src/message.js";
 import { createRunResult, readSubagentResult } from "../src/result.js";
 import { RunStore } from "../src/runStore.js";
 import { createRunEvent } from "../src/events.js";
@@ -12,6 +12,18 @@ import { createInitialStatus, readSubagentStatus, updateRunStatus } from "../src
 import { waitOnce, waitSubagents } from "../src/wait.js";
 import { finalizeTerminalRun } from "../src/lifecycle.js";
 import { assignDisplayName } from "../src/namePacks.js";
+import { awaitStableResult, hasTmux } from "../src/supervisor.js";
+import { withRunMutationLock } from "../src/runLock.js";
+
+function withEnv(name: string, value: string | undefined): () => void {
+  const previous = process.env[name];
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+  return () => {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  };
+}
 
 function workspace() {
   const root = mkdtempSync(join(tmpdir(), "async-subagents-core-"));
@@ -30,6 +42,93 @@ Test scout body.
     "utf8",
   );
   return { root, runRoot: join(root, ".subagents", "runs") };
+}
+
+function writeFakeClaudeBin(root: string): string {
+  const binDir = join(root, "bin");
+  mkdirSync(binDir, { recursive: true });
+  const claude = join(binDir, "claude");
+  writeFileSync(claude, `#!/usr/bin/env node
+const { spawn } = require('node:child_process');
+const { readFileSync } = require('node:fs');
+const mcpConfigPath = process.argv[process.argv.indexOf('--mcp-config') + 1];
+const config = JSON.parse(readFileSync(mcpConfigPath, 'utf8'));
+const server = config.mcpServers.async_subagents;
+const child = spawn(server.command, server.args, { stdio: ['pipe', 'pipe', 'inherit'] });
+let nextId = 1;
+let buffer = '';
+const pending = new Map();
+child.stdout.on('data', (chunk) => {
+  buffer += chunk.toString('utf8');
+  let index;
+  while ((index = buffer.indexOf('\\n')) >= 0) {
+    const line = buffer.slice(0, index);
+    buffer = buffer.slice(index + 1);
+    if (!line.trim()) continue;
+    const msg = JSON.parse(line);
+    if (msg.id && pending.has(msg.id)) pending.get(msg.id)(msg);
+  }
+});
+function request(method, params) {
+  const id = nextId++;
+  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\\n');
+  return new Promise((resolve) => pending.set(id, resolve));
+}
+(async () => {
+  await request('initialize', {});
+  const waitMs = Number(process.env.FAKE_CLAUDE_WAIT_MS || '0');
+  if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+  const read = await request('tools/call', { name: 'subagent_read_inbox', arguments: {} });
+  const parsed = JSON.parse(read.result.content[0].text);
+  for (const message of parsed.messages || []) {
+    await request('tools/call', { name: 'subagent_ack_inbox', arguments: { messageId: message.messageId, disposition: 'handled', summary: 'handled fake message' } });
+  }
+  const completeDelayMs = Number(process.env.FAKE_CLAUDE_COMPLETE_DELAY_MS || '0');
+  if (completeDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, completeDelayMs));
+  await request('tools/call', { name: 'subagent_complete', arguments: { summary: 'MCP completed', body: 'completed via fake claude mcp' } });
+  child.stdin.end();
+  setTimeout(() => process.exit(0), Number(process.env.FAKE_CLAUDE_EXIT_DELAY_MS || '50'));
+})().catch((error) => { console.error(error.stack || error.message); process.exit(1); });
+`, "utf8");
+  chmodSync(claude, 0o755);
+  return binDir;
+}
+
+function writeFakeTmuxBin(root: string): string {
+  const binDir = join(root, "fake-tmux");
+  mkdirSync(binDir, { recursive: true });
+  const tmux = join(binDir, "tmux");
+  writeFileSync(tmux, `#!/usr/bin/env node
+const { spawn } = require('node:child_process');
+const args = process.argv.slice(2);
+function finish(code, text = '') { if (text) process.stdout.write(text); process.exit(code); }
+function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+(async () => {
+  if (args[0] === '-V') return finish(0, 'tmux 3.4\\n');
+  const socketIndex = args.indexOf('-S');
+  const command = socketIndex >= 0 ? args[socketIndex + 2] : args[0];
+  const rest = socketIndex >= 0 ? args.slice(socketIndex + 3) : args.slice(1);
+  if (command === 'new-session') {
+    const shellCommand = rest.at(-1);
+    const child = spawn('bash', ['-lc', shellCommand], { detached: true, stdio: 'ignore' });
+    child.unref();
+    return finish(0);
+  }
+  if (command === 'display-message') {
+    await delay(Number(process.env.FAKE_TMUX_DISPLAY_DELAY_MS || '0'));
+    const template = rest.at(-1) || '';
+    if (template.includes('pane_pid')) return finish(0, String(process.pid) + '\\n');
+    return finish(0, '%1\\n');
+  }
+  if (command === 'capture-pane') return finish(0, '');
+  if (command === 'has-session') return finish(1);
+  if (command === 'kill-session') return finish(0);
+  if (command === 'load-buffer' || command === 'paste-buffer' || command === 'send-keys' || command === 'delete-buffer') return finish(0);
+  return finish(1, 'unsupported fake tmux command: ' + command + '\\n');
+})().catch((error) => { console.error(error.stack || error.message); process.exit(1); });
+`, "utf8");
+  chmodSync(tmux, 0o755);
+  return tmux;
 }
 
 function createStoredRun(store: RunStore, root: string, parentRunId: string) {
@@ -92,6 +191,210 @@ test("startSubagent drives a detached fake child lifecycle", async () => {
   const launch = JSON.parse(readFileSync(join(started.runDir, "logs", "launch.json"), "utf8"));
   assert.equal(launch.args.includes("--thinking"), false);
   assert.equal(Object.hasOwn(launch, "thinkingLevel"), false);
+});
+
+test("Claude start resolves requested skill directories before preparing Claude home", async () => {
+  const w = workspace();
+  mkdirSync(join(w.root, ".agents", "skills", "probe"), { recursive: true });
+  writeFileSync(join(w.root, ".agents", "skills", "probe", "SKILL.md"), "# Probe\n\nSkill sentinel.", "utf8");
+  writeFileSync(join(w.root, ".agents", "claude-scout.md"), `---
+description: Claude scout.
+harness: claude
+model: sonnet
+mode: interactive
+claude:
+  authHome: operator-home
+---
+Claude scout body.
+`, "utf8");
+
+  await assert.rejects(
+    () => startSubagent({ agent: "claude-scout", task: "Use skill", skills: ["probe"], cwd: w.root, runRoot: w.runRoot, parentRunId: "root_test" }),
+    /operator-home auth cannot guarantee run-local Claude skill visibility/,
+  );
+});
+
+test("Claude start fails closed when a requested skill has no installable directory", async () => {
+  const w = workspace();
+  writeFileSync(join(w.root, ".agents", "claude-scout.md"), `---
+description: Claude scout.
+harness: claude
+model: sonnet
+mode: interactive
+---
+Claude scout body.
+`, "utf8");
+
+  await assert.rejects(
+    () => startSubagent({ agent: "claude-scout", task: "Use missing skill", skills: ["missing-skill"], cwd: w.root, runRoot: w.runRoot, parentRunId: "root_test" }),
+    /Claude skill not found or missing SKILL.md: missing-skill/,
+  );
+});
+
+test("Claude interactive tmux lifecycle completes from MCP result", { skip: !(await hasTmux()) }, async () => {
+  const w = workspace();
+  const fakeBin = writeFakeClaudeBin(w.root);
+  writeFileSync(join(w.root, ".agents", "claude-scout.md"), `---
+description: Claude scout.
+harness: claude
+model: sonnet
+mode: interactive
+maxRunSeconds: 5
+claude:
+  authHome: operator-home
+---
+Claude scout body.
+`, "utf8");
+
+  const started = await startSubagent({
+    agent: "claude-scout",
+    task: "Complete through MCP",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FAKE_CLAUDE_EXIT_DELAY_MS: "500" },
+  });
+
+  assert.equal(started.state, "running");
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
+  assert.equal(waited.state, "ready");
+  assert.equal(waited.results[0]?.state, "completed");
+  assert.equal(waited.results[0]?.summary, "MCP completed");
+  assert.equal(store.readResult(started.runId)?.body, "completed via fake claude mcp");
+  assert.equal(store.readStatus(started.runId).harness, "claude");
+  assert.equal(store.readStatus(started.runId).launchHarness, "claude-tmux-interactive");
+  assert.equal(store.readStatus(started.runId).resultParser, "mcp-terminal");
+  assert.equal(store.readStatus(started.runId).claudeTransport, "mcp");
+});
+
+test("Claude tmux supervisor exit after MCP completion does not overwrite result", { skip: !(await hasTmux()) }, async () => {
+  const w = workspace();
+  const fakeBin = writeFakeClaudeBin(w.root);
+  writeFileSync(join(w.root, ".agents", "claude-scout.md"), `---
+description: Claude scout.
+harness: claude
+model: sonnet
+mode: interactive
+maxRunSeconds: 5
+claude:
+  authHome: operator-home
+---
+Claude scout body.
+`, "utf8");
+  const started = await startSubagent({ agent: "claude-scout", task: "Complete", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_test", env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FAKE_CLAUDE_EXIT_DELAY_MS: "0" } });
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
+  assert.equal(waited.results[0]?.state, "completed");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(store.readResult(started.runId)?.summary, "MCP completed");
+  assert.equal(store.readStatus(started.runId).state, "completed");
+});
+
+test("Claude parent message tmux nudge waits for MCP handled acknowledgement", { skip: !(await hasTmux()) }, async () => {
+  const w = workspace();
+  const fakeBin = writeFakeClaudeBin(w.root);
+  writeFileSync(join(w.root, ".agents", "claude-scout.md"), `---
+description: Claude scout.
+harness: claude
+model: sonnet
+mode: interactive
+maxRunSeconds: 5
+claude:
+  authHome: operator-home
+---
+Claude scout body.
+`, "utf8");
+  const started = await startSubagent({ agent: "claude-scout", task: "Read message", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_test", env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FAKE_CLAUDE_WAIT_MS: "500", FAKE_CLAUDE_EXIT_DELAY_MS: "100" } });
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const sent = sendSubagentMessage(store, { runId: started.runId, fromRunId: "root_test", body: "hello", requiresAck: true });
+  assert.equal(sent.liveDelivered, true);
+  const ack = await waitForMessageAck(store, { runId: started.runId, messageId: sent.messageId, timeoutMs: 5000, pollIntervalMs: 50 });
+  assert.ok(ack);
+  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
+  assert.equal(waited.results[0]?.state, "completed");
+});
+
+test("Claude tmux supervisor does not rewrite terminal MCP status during slow startup metadata capture", async () => {
+  const w = workspace();
+  const fakeBin = writeFakeClaudeBin(w.root);
+  const fakeTmux = writeFakeTmuxBin(w.root);
+  const restoreTmux = withEnv("ASYNC_SUBAGENTS_TMUX_BIN", fakeTmux);
+  try {
+    writeFileSync(join(w.root, ".agents", "claude-scout.md"), `---
+description: Claude scout.
+harness: claude
+model: sonnet
+mode: interactive
+maxRunSeconds: 5
+claude:
+  authHome: operator-home
+---
+Claude scout body.
+`, "utf8");
+    const started = await startSubagent({ agent: "claude-scout", task: "Complete before supervisor start write", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_test", env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FAKE_TMUX_DISPLAY_DELAY_MS: "300", FAKE_CLAUDE_EXIT_DELAY_MS: "0" } });
+    const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+    const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
+    assert.equal(waited.results[0]?.state, "completed");
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(store.readStatus(started.runId).state, "completed");
+    assert.equal(store.readResult(started.runId)?.summary, "MCP completed");
+  } finally {
+    restoreTmux();
+  }
+});
+
+test("Claude tmux result drain waits for the run mutation lock before treating result.json as stable", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const { runId, paths } = store.createRunDirectory({ cwd: w.root, parentRunId: "root_test", rootRunId: "root_test", rootSessionId: "root_test" });
+  store.writeStatus(createInitialStatus({ runId, parentRunId: "root_test", agentName: "claude-scout", agentSource: "project", definitionPath: join(w.root, ".agents", "claude-scout.md"), mode: "interactive", harness: "claude", launchHarness: "claude", cwd: w.root, state: "running" }));
+  const partial = createRunResult({ runId, parentRunId: "root_test", agentName: "claude-scout", state: "completed", summary: "partial result visible" });
+  let release!: () => void;
+  const holder = withRunMutationLock(paths.runDir, async () => {
+    store.writeResult(partial);
+    await new Promise<void>((resolve) => { release = resolve; });
+  });
+  while (!store.readResult(runId)) await new Promise((resolve) => setTimeout(resolve, 10));
+
+  let resolved = false;
+  const stable = awaitStableResult(store, paths.runDir, runId).then((result) => { resolved = true; return result; });
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  assert.equal(resolved, false);
+  release();
+  await holder;
+  assert.equal((await stable)?.summary, "partial result visible");
+  assert.equal(store.readStatus(runId).state, "completed");
+  assert.equal(store.readStatus(runId).resultReady, true);
+});
+
+test("Claude tmux supervisor defers dead-session failure long enough for in-flight MCP completion", async () => {
+  const w = workspace();
+  const fakeBin = writeFakeClaudeBin(w.root);
+  const fakeTmux = writeFakeTmuxBin(w.root);
+  const restoreTmux = withEnv("ASYNC_SUBAGENTS_TMUX_BIN", fakeTmux);
+  try {
+    writeFileSync(join(w.root, ".agents", "claude-scout.md"), `---
+description: Claude scout.
+harness: claude
+model: sonnet
+mode: interactive
+maxRunSeconds: 5
+claude:
+  authHome: operator-home
+---
+Claude scout body.
+`, "utf8");
+    const started = await startSubagent({ agent: "claude-scout", task: "Complete during tmux death grace", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_test", env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FAKE_CLAUDE_COMPLETE_DELAY_MS: "300", FAKE_CLAUDE_EXIT_DELAY_MS: "0" } });
+    const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+    const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
+    assert.equal(waited.results[0]?.state, "completed");
+    assert.equal(store.readResult(started.runId)?.summary, "MCP completed");
+    assert.equal(store.readStatus(started.runId).state, "completed");
+  } finally {
+    restoreTmux();
+  }
 });
 
 test("startSubagent assigns and persists generated display names separately from agent type", async () => {

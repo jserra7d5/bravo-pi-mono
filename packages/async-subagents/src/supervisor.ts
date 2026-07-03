@@ -1,15 +1,17 @@
-import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createRunEvent, createStartedEvent } from "./events.js";
 import { finalizeTerminalRun } from "./lifecycle.js";
 import { appendJsonl } from "./jsonl.js";
+import { isTerminalRunState } from "./schemas.js";
 import { createInboxMessage } from "./message.js";
 import { RunStore } from "./runStore.js";
+import { withRunMutationLock } from "./runLock.js";
 import { updateRunStatus } from "./status.js";
 import { nowIso } from "./time.js";
 import type { PiCommand } from "./piHarness.js";
-import type { RunResult, TerminalRunState } from "./types.js";
+import type { RunResult, RunStatus, TerminalRunState } from "./types.js";
 import { cleanupLaunch, syncBack } from "@bravo/codex-auth-balancer";
 
 export interface SupervisorFakeInput {
@@ -21,6 +23,16 @@ export interface SupervisorFakeInput {
   exitCode?: number;
 }
 
+export type SupervisorAdapter = "stdio" | "tmux";
+
+export interface TmuxSupervisorMetadata {
+  socket: string;
+  session: string;
+  pane: string;
+  panePid?: number;
+  transcriptPath: string;
+}
+
 export interface SupervisorInput {
   runId: string;
   runRoot: string;
@@ -28,6 +40,8 @@ export interface SupervisorInput {
   parentRunId: string;
   agentName: string;
   command: PiCommand;
+  transport?: "stdio" | "mcp";
+  supervisorAdapter?: SupervisorAdapter;
   effectiveMaxRunMs?: number;
   fake?: SupervisorFakeInput;
   codexAuthBalancer?: {
@@ -41,6 +55,121 @@ export interface SupervisorInput {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function tmuxMcpDrainMs(): number {
+  const parsed = Number(process.env.ASYNC_SUBAGENTS_TMUX_MCP_DRAIN_MS ?? "1000");
+  if (!Number.isFinite(parsed) || parsed < 0) return 1000;
+  return Math.min(5000, parsed);
+}
+
+export async function awaitStableResult(store: RunStore, runDir: string, runId: string): Promise<RunResult | undefined> {
+  if (!store.readResult(runId)) return undefined;
+  const settled = await withRunMutationLock(runDir, () => {
+    const result = store.readResult(runId);
+    if (!result) return undefined;
+    const status = store.readStatus(runId);
+    if (isTerminalRunState(status.state) && status.state === result.state && status.resultReady === true) return result;
+    return finalizeTerminalRun(store, { runId, parentRunId: result.parentRunId, agentName: result.agentName, state: result.state, writerRole: "child-runtime", summary: result.summary, body: result.body, effectiveMaxRunMs: result.effectiveMaxRunMs, timeout: result.timeout, error: result.error ?? null });
+  });
+  return settled.value;
+}
+
+async function waitForStableResult(store: RunStore, runDir: string, runId: string, timeoutMs: number, pollMs = 50): Promise<RunResult | undefined> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  let result = await awaitStableResult(store, runDir, runId);
+  while (!result && Date.now() < deadline) {
+    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+    result = await awaitStableResult(store, runDir, runId);
+  }
+  return result;
+}
+
+function execFilePromise(command: string, args: string[], options: { timeoutMs?: number; input?: string } = {}): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(command, args, { timeout: options.timeoutMs ?? 5_000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout, stderr }));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+    if (options.input !== undefined) {
+      child.stdin?.end(options.input);
+    }
+  });
+}
+
+function tmuxBin(): string {
+  return process.env.ASYNC_SUBAGENTS_TMUX_BIN || "tmux";
+}
+
+function tmuxArgs(meta: Pick<TmuxSupervisorMetadata, "socket">, args: string[]): string[] {
+  return ["-S", meta.socket, ...args];
+}
+
+export async function hasTmux(): Promise<boolean> {
+  try {
+    await execFilePromise(tmuxBin(), ["-V"], { timeoutMs: 2_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function tmuxSessionName(runId: string): string {
+  return `async-subagents-${runId.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function shellCommand(command: PiCommand): string {
+  const env = Object.entries(command.env ?? {}).map(([key, value]) => `${key}=${shellSingleQuote(value)}`);
+  return [...env, shellSingleQuote(command.command), ...command.args.map(shellSingleQuote)].join(" ");
+}
+
+export async function startTmux(input: { runId: string; paths: ReturnType<RunStore["pathsFor"]>; command: PiCommand }): Promise<TmuxSupervisorMetadata> {
+  const socket = join(input.paths.logsDir, "tmux.sock");
+  const session = tmuxSessionName(input.runId);
+  const transcriptPath = join(input.paths.logsDir, "tmux-transcript.log");
+  const target = `${session}:0.0`;
+  const fullCommand = `cd ${shellSingleQuote(input.command.cwd)} && ${shellCommand(input.command)}; code=$?; sleep 1; exit $code`;
+  await execFilePromise(tmuxBin(), tmuxArgs({ socket }, ["new-session", "-d", "-s", session, "-x", "120", "-y", "40", fullCommand]), { timeoutMs: 5_000 });
+  const pane = (await execFilePromise(tmuxBin(), tmuxArgs({ socket }, ["display-message", "-p", "-t", target, "#{pane_id}"]), { timeoutMs: 2_000 })).stdout.trim() || target;
+  const panePidText = (await execFilePromise(tmuxBin(), tmuxArgs({ socket }, ["display-message", "-p", "-t", pane, "#{pane_pid}"]), { timeoutMs: 2_000 })).stdout.trim();
+  const panePid = /^\d+$/.test(panePidText) ? Number(panePidText) : undefined;
+  return { socket, session, pane, panePid, transcriptPath };
+}
+
+export async function captureTmux(meta: TmuxSupervisorMetadata): Promise<string> {
+  return (await execFilePromise(tmuxBin(), tmuxArgs(meta, ["capture-pane", "-p", "-S", "-", "-t", meta.pane]), { timeoutMs: 2_000 })).stdout;
+}
+
+export async function sendTmux(meta: TmuxSupervisorMetadata, message: string): Promise<void> {
+  const bufferName = `async-subagents-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  await execFilePromise(tmuxBin(), tmuxArgs(meta, ["load-buffer", "-b", bufferName, "-"]), { timeoutMs: 2_000, input: message });
+  try {
+    await execFilePromise(tmuxBin(), tmuxArgs(meta, ["paste-buffer", "-d", "-b", bufferName, "-t", meta.pane]), { timeoutMs: 2_000 });
+    await execFilePromise(tmuxBin(), tmuxArgs(meta, ["send-keys", "-t", meta.pane, "Enter"]), { timeoutMs: 2_000 });
+  } catch (error) {
+    try { await execFilePromise(tmuxBin(), tmuxArgs(meta, ["delete-buffer", "-b", bufferName]), { timeoutMs: 1_000 }); } catch { /* best effort */ }
+    throw error;
+  }
+}
+
+export async function stopTmux(meta: TmuxSupervisorMetadata): Promise<void> {
+  try { await execFilePromise(tmuxBin(), tmuxArgs(meta, ["kill-session", "-t", meta.session]), { timeoutMs: 2_000 }); } catch { /* already gone */ }
+}
+
+export async function aliveTmux(meta: TmuxSupervisorMetadata): Promise<boolean> {
+  try {
+    await execFilePromise(tmuxBin(), tmuxArgs(meta, ["has-session", "-t", meta.session]), { timeoutMs: 1_000 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function summaryFromOutput(body: string, fallback: string): string {
@@ -138,37 +267,156 @@ export async function codexBalancerSyncBackAndCleanup(input: Pick<SupervisorInpu
 async function finalizeRun(input: SupervisorInput, output: { state: TerminalRunState; stdout?: string; stderr?: string; error?: RunResult["error"] }): Promise<RunResult> {
   await codexBalancerSyncBackAndCleanup(input);
   const store = new RunStore({ cwd: input.cwd, runRoot: input.runRoot });
-  const status = store.readStatus(input.runId);
+  const paths = store.pathsFor({ runId: input.runId });
   const body = output.stdout?.trim() || output.stderr?.trim() || undefined;
-  return finalizeTerminalRun(store, {
-    runId: input.runId,
-    parentRunId: input.parentRunId,
-    agentName: input.agentName,
-    state: output.state,
-    writerRole: "child-runtime",
-    startedAt: status.startedAt,
-    summary: summaryFromOutput(body ?? "", output.state === "completed" ? "Completed" : `Run ${output.state}`),
-    body,
-    effectiveMaxRunMs: input.effectiveMaxRunMs,
-    error: output.error ?? null,
+  const finalized = await withRunMutationLock(paths.runDir, () => {
+    const existingResult = store.readResult(input.runId);
+    if (existingResult) return existingResult;
+    const status = store.readStatus(input.runId);
+    return finalizeTerminalRun(store, {
+      runId: input.runId,
+      parentRunId: input.parentRunId,
+      agentName: input.agentName,
+      state: output.state,
+      writerRole: "child-runtime",
+      startedAt: status.startedAt,
+      summary: summaryFromOutput(body ?? "", output.state === "completed" ? "Completed" : `Run ${output.state}`),
+      body,
+      effectiveMaxRunMs: input.effectiveMaxRunMs,
+      error: output.error ?? null,
+    });
   });
+  return finalized.value;
+}
+
+async function runTmuxSupervisor(input: SupervisorInput): Promise<RunResult> {
+  const store = new RunStore({ cwd: input.cwd, runRoot: input.runRoot });
+  const paths = store.pathsFor({ runId: input.runId });
+  const startedAt = nowIso();
+  if (!(await hasTmux())) {
+    return finalizeRun(input, { state: "failed", stderr: "tmux is not available", error: { code: "TMUX_UNAVAILABLE", message: "tmux is not available" } });
+  }
+
+  let meta: TmuxSupervisorMetadata | undefined;
+  try {
+    meta = await startTmux({ runId: input.runId, paths, command: input.command });
+    const startedMutation = await withRunMutationLock(paths.runDir, () => {
+      const existingResult = store.readResult(input.runId);
+      if (existingResult) return existingResult;
+      const status = store.readStatus(input.runId);
+      if (isTerminalRunState(status.state)) return undefined;
+      store.writeStatus(updateRunStatus(status, {
+        state: "running",
+        writerRole: "child-runtime",
+        startedAt,
+        lastActivityAt: startedAt,
+        supervisorPid: process.pid,
+        pid: meta?.panePid,
+        childPid: meta?.panePid,
+        panePid: meta?.panePid,
+        processGroupId: meta?.panePid,
+        tmuxSocket: meta?.socket,
+        tmuxSession: meta?.session,
+        tmuxPane: meta?.pane,
+        transcriptPath: meta?.transcriptPath,
+        processHealth: "alive",
+        livenessState: "starting",
+        summary: meta?.panePid ? `Running Claude tmux pane ${meta.panePid}` : "Running Claude tmux session",
+      }));
+      store.appendEvent(input.runId, createStartedEvent({ sequence: store.readEvents(input.runId).records.length + 1, runId: input.runId, parentRunId: input.parentRunId, command: input.command.command }));
+      return undefined;
+    });
+    if (startedMutation.value) return startedMutation.value;
+    const completedDuringStart = await awaitStableResult(store, paths.runDir, input.runId);
+    if (completedDuringStart) return completedDuringStart;
+
+    const deadline = input.effectiveMaxRunMs && input.effectiveMaxRunMs > 0 ? Date.now() + input.effectiveMaxRunMs : undefined;
+    while (true) {
+      const existing = await awaitStableResult(store, paths.runDir, input.runId);
+      if (existing) return existing;
+      const alive = await aliveTmux(meta);
+      let transcript = "";
+      try {
+        transcript = await captureTmux(meta);
+        writeFileSync(meta.transcriptPath, transcript, "utf8");
+      } catch { /* capture best effort */ }
+      await withRunMutationLock(paths.runDir, () => {
+        if (store.readResult(input.runId)) return;
+        const current = store.readStatus(input.runId);
+        if (current.state === "running" || current.state === "queued") {
+          let bytes: number | undefined;
+          try { bytes = statSync(meta!.transcriptPath).size; } catch { bytes = transcript ? Buffer.byteLength(transcript) : undefined; }
+          store.writeStatus(updateRunStatus(current, { processHealth: alive ? "alive" : "dead", livenessState: alive ? "running" : "stale_transport", terminalOutputBytes: bytes, lastTerminalOutputAt: transcript ? nowIso() : current.lastTerminalOutputAt, summary: alive ? current.summary : "Claude tmux session exited without result" }));
+        }
+      });
+      const livenessResult = await awaitStableResult(store, paths.runDir, input.runId);
+      if (livenessResult) return livenessResult;
+      if (!alive) {
+        const drained = await waitForStableResult(store, paths.runDir, input.runId, input.transport === "mcp" ? tmuxMcpDrainMs() : 0);
+        if (drained) return drained;
+        const final = await withRunMutationLock(paths.runDir, () => {
+          const existingResult = store.readResult(input.runId);
+          if (existingResult) return existingResult;
+          return finalizeTerminalRun(store, { runId: input.runId, parentRunId: input.parentRunId, agentName: input.agentName, state: "failed", writerRole: "child-runtime", summary: "Claude tmux session exited without result", body: transcript.trim() || undefined, error: { code: "CLAUDE_EXITED_WITHOUT_RESULT", message: "Claude tmux session exited before subagent_complete" } });
+        });
+        return final.value;
+      }
+      if (deadline && Date.now() >= deadline) {
+        const final = await withRunMutationLock(paths.runDir, () => {
+          const existingResult = store.readResult(input.runId);
+          if (existingResult) return existingResult;
+          return finalizeTerminalRun(store, { runId: input.runId, parentRunId: input.parentRunId, agentName: input.agentName, state: "expired", writerRole: "child-runtime", summary: "Claude run expired", body: transcript.trim() || undefined, effectiveMaxRunMs: input.effectiveMaxRunMs, error: { code: "MAX_RUN_SECONDS_EXPIRED", message: "Claude tmux run exceeded maxRunSeconds" } });
+        });
+        return final.value;
+      }
+      await sleep(250);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const final = await withRunMutationLock(paths.runDir, () => {
+      const existingResult = store.readResult(input.runId);
+      if (existingResult) return existingResult;
+      return finalizeTerminalRun(store, { runId: input.runId, parentRunId: input.parentRunId, agentName: input.agentName, state: "failed", writerRole: "child-runtime", summary: "Claude tmux supervisor failed", body: message, error: { code: "TMUX_SUPERVISOR_FAILED", message } });
+    });
+    return final.value;
+  } finally {
+    if (meta) await stopTmux(meta);
+  }
 }
 
 export async function runSupervisor(input: SupervisorInput): Promise<RunResult> {
+  if (input.supervisorAdapter === "tmux") return runTmuxSupervisor(input);
   const store = new RunStore({ cwd: input.cwd, runRoot: input.runRoot });
-  const status = store.readStatus(input.runId);
   const paths = store.pathsFor({ runId: input.runId });
+  const mutateRun = async <T>(fn: () => T | Promise<T>): Promise<T> => (await withRunMutationLock(paths.runDir, fn)).value;
+  const mutateLiveStatus = async (fn: (current: RunStatus) => void): Promise<void> => {
+    await mutateRun(() => {
+      if (store.readResult(input.runId)) return;
+      const current = store.readStatus(input.runId);
+      if (isTerminalRunState(current.state)) return;
+      fn(current);
+    });
+  };
 
-  store.writeStatus(
-    updateRunStatus(status, {
-      state: "running",
-      writerRole: "child-runtime",
-      startedAt: nowIso(),
-      lastActivityAt: nowIso(),
-      summary: "Starting child process",
-    }),
-  );
-  store.appendEvent(input.runId, createStartedEvent({ sequence: 1, runId: input.runId, parentRunId: input.parentRunId, command: input.command.command }));
+  const initialResult = await mutateRun(() => {
+    const existingResult = store.readResult(input.runId);
+    if (existingResult) return existingResult;
+    const status = store.readStatus(input.runId);
+    if (isTerminalRunState(status.state)) return undefined;
+    const startedAt = nowIso();
+    store.writeStatus(
+      updateRunStatus(status, {
+        state: "running",
+        writerRole: "child-runtime",
+        startedAt,
+        lastActivityAt: startedAt,
+        summary: "Starting child process",
+      }),
+    );
+    store.appendEvent(input.runId, createStartedEvent({ sequence: store.readEvents(input.runId).records.length + 1, runId: input.runId, parentRunId: input.parentRunId, command: input.command.command }));
+    return undefined;
+  });
+  if (initialResult) return initialResult;
 
   if (input.fake?.mode === "immediate") {
     if (input.fake.delayMs) await sleep(input.fake.delayMs);
@@ -215,8 +463,9 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       detached: true,
     });
 
-    const started = store.readStatus(input.runId);
-    store.writeStatus(updateRunStatus(started, { pid: child.pid, processHealth: child.pid ? "alive" : "unknown", summary: child.pid ? `Running child process ${child.pid}` : "Running child process" }));
+    void mutateLiveStatus((started) => {
+      store.writeStatus(updateRunStatus(started, { pid: child.pid, processHealth: child.pid ? "alive" : "unknown", summary: child.pid ? `Running child process ${child.pid}` : "Running child process" }));
+    });
 
     child.stdout?.on("data", (chunk: Buffer) => {
       stdoutChunks.push(chunk);
@@ -267,10 +516,9 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       if (settled || supervisorCleanupState) return;
       supervisorCleanupState = { reason, signal };
       logSupervisorCleanup(`[async-subagents] supervisor cleanup: ${reason}; sending SIGTERM/SIGCONT to child process group ${child.pid ?? "unknown"}`);
-      try {
-        const current = store.readStatus(input.runId);
+      void mutateLiveStatus((current) => {
         store.writeStatus(updateRunStatus(current, { processHealth: "alive", summary: `Supervisor cleanup: ${reason}` }));
-      } catch { /* best-effort status update during fatal cleanup */ }
+      }).catch(() => undefined);
       killGroup("SIGTERM");
       killGroup("SIGCONT");
       supervisorCleanupState.forceTimer = setTimeout(() => {
@@ -336,18 +584,19 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       const warningDelayMs = remainingMs - warningLeadMs;
       if (warningDelayMs > 0) {
         softTimeout = setTimeout(() => {
-          const current = store.readStatus(input.runId);
-          const warningAt = nowIso();
-          const hardTimeoutAt = new Date(Date.now() + warningLeadMs).toISOString();
-          store.writeStatus(updateRunStatus(current, { timeout: { ...(current.timeout ?? {}), softWarningAt: warningAt, hardTimeoutAt } }));
-          const message = createInboxMessage({
-            toRunId: input.runId,
-            fromRunId: input.parentRunId,
-            type: "context",
-            requiresAck: false,
-            body: `Time budget warning: this run will be paused in about ${Math.ceil(warningLeadMs / 1000)} seconds. Checkpoint your current findings and, if you cannot finish before the deadline, emit a blocked event with a concise checkpoint and what parent input or continuation you need.`,
-          });
-          appendJsonl(join(paths.runDir, "inbox.jsonl"), message);
+          void mutateLiveStatus((current) => {
+            const warningAt = nowIso();
+            const hardTimeoutAt = new Date(Date.now() + warningLeadMs).toISOString();
+            store.writeStatus(updateRunStatus(current, { timeout: { ...(current.timeout ?? {}), softWarningAt: warningAt, hardTimeoutAt } }));
+            const message = createInboxMessage({
+              toRunId: input.runId,
+              fromRunId: input.parentRunId,
+              type: "context",
+              requiresAck: false,
+              body: `Time budget warning: this run will be paused in about ${Math.ceil(warningLeadMs / 1000)} seconds. Checkpoint your current findings and, if you cannot finish before the deadline, emit a blocked event with a concise checkpoint and what parent input or continuation you need.`,
+            });
+            appendJsonl(join(paths.runDir, "inbox.jsonl"), message);
+          }).catch(() => undefined);
         }, warningDelayMs);
       }
       timeout = setTimeout(pauseForBudget, remainingMs);
@@ -419,14 +668,16 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
         if (killGroup("SIGSTOP")) {
           accountActiveTime();
           clearBudgetTimers();
-          const current = store.readStatus(input.runId);
-          store.writeStatus(updateRunStatus(current, { state: "paused", processHealth: "alive", summary: String(command.reason ?? "Paused by parent"), timeout: { ...(current.timeout ?? {}), reason: String(command.reason ?? "Paused by parent") } }));
+          void mutateLiveStatus((current) => {
+            store.writeStatus(updateRunStatus(current, { state: "paused", processHealth: "alive", summary: String(command.reason ?? "Paused by parent"), timeout: { ...(current.timeout ?? {}), reason: String(command.reason ?? "Paused by parent") } }));
+          }).catch(() => undefined);
         }
       } else if (command.action === "resume" || command.action === "extend") {
         killGroup("SIGCONT");
         const additional = typeof command.additionalRunSeconds === "number" ? command.additionalRunSeconds : undefined;
-        const current = store.readStatus(input.runId);
-        store.writeStatus(updateRunStatus(current, { state: "running", processHealth: "alive", summary: "Continued by parent", needs: null, timeout: { ...(current.timeout ?? {}), additionalRunSeconds: additional } }));
+        void mutateLiveStatus((current) => {
+          store.writeStatus(updateRunStatus(current, { state: "running", processHealth: "alive", summary: "Continued by parent", needs: null, timeout: { ...(current.timeout ?? {}), additionalRunSeconds: additional } }));
+        }).catch(() => undefined);
         if (additional && additional > 0) installBudgetTimers(Math.ceil(additional * 1000), 0);
         else installBudgetTimers();
       }
@@ -447,16 +698,19 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       accountActiveTime();
       clearBudgetTimers();
       const paused = killGroup("SIGSTOP");
-      const current = store.readStatus(input.runId);
       if (!paused) {
-        const event = createRunEvent({ sequence: store.readEvents(input.runId).records.length + 1, runId: input.runId, parentRunId: input.parentRunId, type: "status", summary: "Time budget expired; pause failed", body: "Runtime budget expired, but the supervisor could not pause the process group. The run is being finalized as expired.", wake: true, data: { reason: "timeout", effectiveMaxRunMs: input.effectiveMaxRunMs, paused } });
-        store.appendEvent(input.runId, event);
+        void mutateLiveStatus(() => {
+          const event = createRunEvent({ sequence: store.readEvents(input.runId).records.length + 1, runId: input.runId, parentRunId: input.parentRunId, type: "status", summary: "Time budget expired; pause failed", body: "Runtime budget expired, but the supervisor could not pause the process group. The run is being finalized as expired.", wake: true, data: { reason: "timeout", effectiveMaxRunMs: input.effectiveMaxRunMs, paused } });
+          store.appendEvent(input.runId, event);
+        }).catch(() => undefined);
         settle("expired", { code: "MAX_RUN_SECONDS_EXPIRED", message: "Time budget expired and SIGSTOP failed", details: { effectiveMaxRunMs: input.effectiveMaxRunMs } });
         return;
       }
-      const event = createRunEvent({ sequence: store.readEvents(input.runId).records.length + 1, runId: input.runId, parentRunId: input.parentRunId, type: "status", summary: "Time budget expired; run paused", body: "Runtime budget expired. Continue this run if the result is still needed, or cancel it.", wake: true, data: { reason: "timeout", effectiveMaxRunMs: input.effectiveMaxRunMs, paused } });
-      store.appendEvent(input.runId, event);
-      store.writeStatus(updateRunStatus(current, { state: "paused", processHealth: "alive", summary: event.summary, needs: "runtime budget expired", lastActivityAt: event.createdAt, lastEventId: event.eventId, timeout: { ...(current.timeout ?? {}), pausedAt: nowIso(), hardTimeoutAt: nowIso(), reason: "time budget expired" } }));
+      void mutateLiveStatus((current) => {
+        const event = createRunEvent({ sequence: store.readEvents(input.runId).records.length + 1, runId: input.runId, parentRunId: input.parentRunId, type: "status", summary: "Time budget expired; run paused", body: "Runtime budget expired. Continue this run if the result is still needed, or cancel it.", wake: true, data: { reason: "timeout", effectiveMaxRunMs: input.effectiveMaxRunMs, paused } });
+        store.appendEvent(input.runId, event);
+        store.writeStatus(updateRunStatus(current, { state: "paused", processHealth: "alive", summary: event.summary, needs: "runtime budget expired", lastActivityAt: event.createdAt, lastEventId: event.eventId, timeout: { ...(current.timeout ?? {}), pausedAt: nowIso(), hardTimeoutAt: nowIso(), reason: "time budget expired" } }));
+      }).catch(() => undefined);
     };
     installBudgetTimers();
   });

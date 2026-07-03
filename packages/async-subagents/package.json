@@ -13,7 +13,8 @@
     "build": "tsc -p tsconfig.json",
     "precheck": "npm run build --workspace @bravo/codex-auth-balancer && npm run build --workspace @bravo/render-clock",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/test/*.test.js"
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "smoke:claude-harness": "npm run build && node --test dist/test/agentCatalog.test.js dist/test/agentDefinitions.test.js dist/test/claudeChildMcp.test.js dist/test/claudeHarness.test.js dist/test/coreRuntime.test.js dist/test/piWakeupDelivery.test.js dist/test/promptAssembly.test.js dist/test/renderers.test.js dist/test/runLock.test.js"
   },
   "dependencies": {
     "@bravo/codex-auth-balancer": "file:../codex-auth-balancer",

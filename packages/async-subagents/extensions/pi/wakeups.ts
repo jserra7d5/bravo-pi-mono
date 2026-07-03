@@ -162,7 +162,9 @@ function capEventBodyForWakeup(runId: string, body: string | undefined, maxChars
 
 function resultDelivery(runId: string, result: RunResult): WakeupDelivery {
   const summary = result.summary ?? result.error?.message ?? `Run ${result.state}`;
-  const body = capResultBodyForWakeup(runId, result.body);
+  const transcriptBackedErrorCodes = new Set(["CLAUDE_EXITED_WITHOUT_RESULT", "MAX_RUN_SECONDS_EXPIRED"]);
+  const suppressInlineBody = result.harness === "claude" && Boolean(result.transcriptPath) && transcriptBackedErrorCodes.has(String(result.error?.code ?? ""));
+  const body = capResultBodyForWakeup(runId, suppressInlineBody ? undefined : result.body);
   return {
     deliveryKey: resultDeliveryKey(runId, result),
     runId,
@@ -174,18 +176,36 @@ function resultDelivery(runId: string, result: RunResult): WakeupDelivery {
       summary,
       body: body.body,
       bodyAvailable: result.body !== undefined,
-      bodyTruncation: { included: result.body !== undefined, truncated: body.truncated, originalChars: body.originalChars, returnedChars: body.returnedChars, maxChars: body.maxChars },
+      bodyTruncation: { included: result.body !== undefined && !suppressInlineBody, truncated: body.truncated, originalChars: body.originalChars, returnedChars: body.returnedChars, maxChars: body.maxChars, suppressed: suppressInlineBody || undefined },
       result: redactedResult(result),
       next: body.truncated ? [{ tool: "subagent_result", args: { runId } }] : [],
     },
   };
 }
 
-function eventDelivery(event: RunEvent, status?: { agentName?: string; displayName?: string }): WakeupDelivery {
+function livenessNextActions(runId: string, state: string | undefined): Array<{ tool: string; args: Record<string, unknown> }> {
+  if (!state || !["ack_pending", "rate_limited", "comatose", "stale_transport", "orphaned_process"].includes(state)) return [];
+  const inspect = { tool: "subagent_status", args: { runIds: [runId], includeEvents: true, maxEvents: 10 } };
+  if (state === "comatose" || state === "stale_transport" || state === "orphaned_process") return [inspect, { tool: "subagent_interrupt", args: { runId, action: "cancel" } }];
+  return [inspect];
+}
+
+function eventDelivery(event: RunEvent, status?: { agentName?: string; displayName?: string } & Record<string, unknown>): WakeupDelivery {
   // Map the event type onto a run-state-ish string so wake-card glyph/badge selection works
   // (event types like "question" → "waiting_for_input").
-  const state = event.type === "question" ? "waiting_for_input" : event.type === "status" && event.data?.reason === "timeout" ? "paused" : event.type;
+  const state = event.type === "question"
+    ? "waiting_for_input"
+    : event.type === "status" && event.data?.reason === "timeout"
+      ? "paused"
+      : event.type === "liveness" && typeof event.data?.state === "string"
+        ? event.data.state
+        : event.type;
   const body = capEventBodyForWakeup(event.runId, event.body);
+  const next = event.type === "question" || event.type === "blocked"
+    ? [{ tool: "subagent_message", args: { runId: event.runId, type: "answer" } }]
+    : state === "paused"
+      ? [{ tool: "subagent_continue", args: { runId: event.runId, additionalRunSeconds: 900 } }, { tool: "subagent_interrupt", args: { runId: event.runId, action: "cancel" } }]
+      : livenessNextActions(event.runId, state);
   return {
     deliveryKey: eventDeliveryKey(event),
     runId: event.runId,
@@ -200,17 +220,17 @@ function eventDelivery(event: RunEvent, status?: { agentName?: string; displayNa
       bodyTruncation: { included: event.body !== undefined, truncated: body.truncated, originalChars: body.originalChars, returnedChars: body.returnedChars, maxChars: body.maxChars },
       event: redactedEvent(event),
       status,
-      next: event.type === "question" || event.type === "blocked" ? [{ tool: "subagent_message", args: { runId: event.runId, type: "answer" } }] : state === "paused" ? [{ tool: "subagent_continue", args: { runId: event.runId, additionalRunSeconds: 900 } }, { tool: "subagent_interrupt", args: { runId: event.runId, action: "cancel" } }] : [],
+      next,
     },
   };
 }
 
-function statusForRun(store: RunStore, runId: string): { agentName?: string; displayName?: string } | undefined {
+function statusForRun(store: RunStore, runId: string): ({ agentName?: string; displayName?: string } & Record<string, unknown>) | undefined {
   const summary = store.readRunSummary(runId);
-  if (summary) return { agentName: summary.agentName, displayName: summary.displayName };
+  if (summary) return { ...summary, agentName: summary.agentName, displayName: summary.displayName };
   try {
     const status = store.readStatus(runId);
-    return { agentName: status.agent?.name, displayName: status.displayName };
+    return { ...status, agentName: status.agent?.name, displayName: status.displayName };
   } catch {
     return undefined;
   }
@@ -219,7 +239,7 @@ function statusForRun(store: RunStore, runId: string): { agentName?: string; dis
 function isActionableModelWakeup(delivery: WakeupDelivery): boolean {
   if (delivery.message.result) return true;
   const eventType = delivery.message.event?.type;
-  return eventType === "question" || eventType === "blocked" || (delivery.message.state as string | undefined) === "paused";
+  return eventType === "question" || eventType === "blocked" || eventType === "liveness" || (delivery.message.state as string | undefined) === "paused";
 }
 
 export function isResultWakeupCurrent(store: RunStore, parentRunId: string, runId: string, result: RunResult): boolean {
@@ -234,6 +254,12 @@ export function isResultWakeupCurrent(store: RunStore, parentRunId: string, runI
   return true;
 }
 
+function isDeliverableAttentionEvent(event: RunEvent): boolean {
+  if (["result", "completed", "failed", "cancelled", "expired"].includes(event.type)) return false;
+  const timeoutAttention = event.type === "status" && event.wake === true && event.data?.reason === "timeout";
+  return isInterestingEvent(event.type, event.wake) || timeoutAttention;
+}
+
 function pendingForRun(store: RunStore, parentRunId: string, runId: string, notifyOn?: EventType[]): WakeupDelivery[] {
   const allowed = notifyOn ? new Set(notifyOn) : undefined;
   const deliveries: WakeupDelivery[] = [];
@@ -242,15 +268,15 @@ function pendingForRun(store: RunStore, parentRunId: string, runId: string, noti
     const result = store.readResult(runId);
     if (result && isResultWakeupCurrent(store, parentRunId, runId, result)) deliveries.push(resultDelivery(runId, result));
   }
+  if (deliveries.some((delivery) => delivery.message.result)) return deliveries;
   const shouldScanEvents = !allowed || [...allowed].some((type) => !["result", "completed", "failed", "cancelled", "expired"].includes(type));
   const status = shouldScanEvents ? statusForRun(store, runId) : undefined;
   const latestTimeoutWake = summary?.latestWakeEvent?.type === "status" && summary.latestWakeEvent.wake && summary.latestWakeEvent.data?.reason === "timeout" ? summary.latestWakeEvent : undefined;
   if (!shouldScanEvents && latestTimeoutWake) deliveries.push(eventDelivery(latestTimeoutWake, statusForRun(store, runId)));
   if (shouldScanEvents) {
     for (const event of store.readEvents(runId).records) {
-      if (["result", "completed", "failed", "cancelled", "expired"].includes(event.type)) continue;
       const timeoutAttention = event.type === "status" && event.wake && event.data?.reason === "timeout";
-      if (!(isInterestingEvent(event.type, event.wake) || timeoutAttention) || (allowed && !allowed.has(event.type) && !timeoutAttention)) continue;
+      if (!isDeliverableAttentionEvent(event) || (allowed && !allowed.has(event.type) && !timeoutAttention)) continue;
       deliveries.push(eventDelivery(event, status));
     }
   }
@@ -375,11 +401,23 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
     for (const delivery of pendingForRun(input.store, input.parentRunId, record.runId, subscription?.notifyOn)) {
       if (input.modelFollowUpOnly && !isActionableModelWakeup(delivery)) continue;
       if (state.delivered[delivery.deliveryKey] || state.handled[delivery.deliveryKey]) continue;
+      if (delivery.message.result) {
+        for (let i = deliveries.length - 1; i >= 0; i -= 1) {
+          if (deliveries[i].runId === delivery.runId && !deliveries[i].message.result) deliveries.splice(i, 1);
+        }
+      } else if (deliveries.some((item) => item.runId === delivery.runId && item.message.result)) {
+        continue;
+      }
       if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) continue;
       if (isWakeupKeyHandled(input.store, input.parentRunId, delivery.deliveryKey)) continue;
       deliveries.push(delivery);
       const deliveredAt = new Date(input.nowMs ?? Date.now()).toISOString();
       state.delivered[delivery.deliveryKey] = deliveredAt;
+      if (delivery.message.result) {
+        for (const event of input.store.readEvents(delivery.runId).records) {
+          if (isDeliverableAttentionEvent(event)) state.handled[eventDeliveryKey(event)] = deliveredAt;
+        }
+      }
       stateChanged = true;
       deliveredKeys.push(delivery.deliveryKey);
       if (deliveries.length >= (input.limit ?? 5)) break;
@@ -388,5 +426,6 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
   }
   if (stateChanged) writeDeliveryState(input.store, state);
   for (const key of deliveredKeys) releaseDeliveryClaim(input.store, key);
-  return deliveries;
+  const resultRunIds = new Set(deliveries.filter((delivery) => delivery.message.result).map((delivery) => delivery.runId));
+  return resultRunIds.size ? deliveries.filter((delivery) => delivery.message.result || !resultRunIds.has(delivery.runId)) : deliveries;
 }

@@ -266,7 +266,7 @@ async function waitForMessageAckFromParams(store: RunStore, params: Record<strin
   if (typeof params.runDir === "string" && params.runDir && typeof params.runId !== "string") {
     const startedAt = Date.now();
     while (Date.now() - startedAt < LIVE_ACK_TIMEOUT_MS) {
-      const event = readJsonl<any>(join(params.runDir, "events.jsonl")).records.find((candidate) => candidate.type === "message.received" && candidate.data?.messageId === messageId);
+      const event = readJsonl<any>(join(params.runDir, "events.jsonl")).records.find((candidate) => candidate.type === "message.handled" && candidate.data?.messageId === messageId);
       if (event?.eventId) return { eventId: event.eventId };
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
@@ -610,7 +610,7 @@ async function startTerminalContinuation(input: {
       schemaVersion: SCHEMA_VERSION,
       parentRunId: input.root.parentRunId,
       runId: result.runId,
-      notifyOn: notifyOn ?? ["question", "blocked", "result", "completed", "failed", "cancelled", "expired"],
+      notifyOn: notifyOn ?? ["question", "blocked", "liveness", "result", "completed", "failed", "cancelled", "expired"],
       createdAt: new Date().toISOString(),
     });
     await input.runtime.afterMutation?.(input.ctx, input.sessionCwd, input.root);
@@ -809,7 +809,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           schemaVersion: SCHEMA_VERSION,
           parentRunId: root.parentRunId,
           runId: result.runId,
-          notifyOn: notifyOn ?? ["question", "blocked", "result", "completed", "failed", "cancelled", "expired"],
+          notifyOn: notifyOn ?? ["question", "blocked", "liveness", "result", "completed", "failed", "cancelled", "expired"],
           createdAt: new Date().toISOString(),
         });
         await runtime.afterMutation?.(ctx, sessionCwd, root);
@@ -1012,8 +1012,41 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
               rootSessionId: status.rootSessionId,
               pid: status.pid,
               processHealth: status.processHealth,
+              harness: status.harness,
+              launchHarness: status.launchHarness,
+              resultParser: status.resultParser,
+              variant: status.variant,
               model: status.model,
+              requestedModel: status.requestedModel,
+              resolvedModel: status.resolvedModel,
               thinkingLevel: status.thinkingLevel,
+              effort: status.effort,
+              executionMode: status.executionMode,
+              claudeAuthHome: status.claudeAuthHome,
+              claudeMemoryIsolation: status.claudeMemoryIsolation,
+              claudeHomeDir: status.claudeHomeDir,
+              claudeSettingsPath: status.claudeSettingsPath,
+              claudeMcpConfigPath: status.claudeMcpConfigPath,
+              claudeShellHomeDir: status.claudeShellHomeDir,
+              claudeShellWrapperPath: status.claudeShellWrapperPath,
+              claudeTransport: status.claudeTransport,
+              claudeInstalledSkills: status.claudeInstalledSkills,
+              livenessState: status.livenessState,
+              lastTerminalOutputAt: status.lastTerminalOutputAt,
+              terminalOutputBytes: status.terminalOutputBytes,
+              lastMcpCallAt: status.lastMcpCallAt,
+              lastNudgeAt: status.lastNudgeAt,
+              pendingAckMessageIds: status.pendingAckMessageIds,
+              livenessReason: status.livenessReason,
+              supervisorPid: status.supervisorPid,
+              childPid: status.childPid,
+              panePid: status.panePid,
+              processGroupId: status.processGroupId,
+              tmuxSocket: status.tmuxSocket,
+              tmuxSession: status.tmuxSession,
+              tmuxPane: status.tmuxPane,
+              transcriptPath: status.transcriptPath,
+              resolvedSkills: status.resolvedSkills,
               contextPolicy: status.contextPolicy,
               sessionPolicy: status.sessionPolicy,
               piSessionPath: status.piSessionPath,

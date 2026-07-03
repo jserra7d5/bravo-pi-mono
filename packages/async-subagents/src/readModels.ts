@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isInterestingEvent } from "./schemas.js";
-import type { RunEvent, RunIndexRecord, RunMetrics, RunResult, RunState, RunStatus } from "./types.js";
+import type { AgentHarness, ClaudeEffort, ClaudeExecutionMode, ClaudeInstalledSkill, ClaudeLivenessState, LaunchHarness, ResultParser, RunEvent, RunIndexRecord, RunMetrics, RunResult, RunState, RunStatus } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 export interface RunSummaryReadModel {
@@ -17,6 +17,33 @@ export interface RunSummaryReadModel {
   agentName?: string;
   displayName?: string;
   namePack?: string;
+  harness?: AgentHarness;
+  launchHarness?: LaunchHarness;
+  resultParser?: ResultParser;
+  variant?: string;
+  model?: string;
+  requestedModel?: string;
+  resolvedModel?: string;
+  effort?: ClaudeEffort;
+  executionMode?: ClaudeExecutionMode;
+  claudeTransport?: "mcp" | "none";
+  claudeInstalledSkills?: ClaudeInstalledSkill[];
+  livenessState?: ClaudeLivenessState;
+  lastTerminalOutputAt?: string;
+  terminalOutputBytes?: number;
+  lastMcpCallAt?: string;
+  lastNudgeAt?: string;
+  pendingAckMessageIds?: string[];
+  livenessReason?: string | null;
+  tmuxSocket?: string;
+  tmuxSession?: string;
+  tmuxPane?: string;
+  panePid?: number;
+  supervisorPid?: number;
+  childPid?: number;
+  processGroupId?: number;
+  transcriptPath?: string;
+  resolvedSkills?: string[];
   state: RunState;
   summary?: string;
   needs?: string | null;
@@ -27,6 +54,7 @@ export interface RunSummaryReadModel {
   resultAgentName?: string;
   metrics?: RunMetrics;
   latestWakeEvent?: RunEvent;
+  hasWakeEvents?: boolean;
 }
 
 export interface RunIndexCache {
@@ -58,6 +86,33 @@ export function summaryFromStatus(status: RunStatus, runDir: string, previous?: 
     agentName: status.agent?.name,
     displayName: status.displayName,
     namePack: status.namePack,
+    harness: status.harness,
+    launchHarness: status.launchHarness,
+    resultParser: status.resultParser,
+    variant: status.variant,
+    model: status.model,
+    requestedModel: status.requestedModel,
+    resolvedModel: status.resolvedModel,
+    effort: status.effort,
+    executionMode: status.executionMode,
+    claudeTransport: status.claudeTransport,
+    claudeInstalledSkills: status.claudeInstalledSkills,
+    livenessState: status.livenessState,
+    lastTerminalOutputAt: status.lastTerminalOutputAt,
+    terminalOutputBytes: status.terminalOutputBytes,
+    lastMcpCallAt: status.lastMcpCallAt,
+    lastNudgeAt: status.lastNudgeAt,
+    pendingAckMessageIds: status.pendingAckMessageIds,
+    livenessReason: status.livenessReason,
+    tmuxSocket: status.tmuxSocket,
+    tmuxSession: status.tmuxSession,
+    tmuxPane: status.tmuxPane,
+    panePid: status.panePid,
+    supervisorPid: status.supervisorPid,
+    childPid: status.childPid,
+    processGroupId: status.processGroupId,
+    transcriptPath: status.transcriptPath,
+    resolvedSkills: status.resolvedSkills,
     state: status.state,
     summary: status.summary,
     needs: status.needs,
@@ -68,6 +123,7 @@ export function summaryFromStatus(status: RunStatus, runDir: string, previous?: 
     resultAgentName: previous?.resultAgentName,
     metrics: status.metrics ?? previous?.metrics,
     latestWakeEvent: previous?.latestWakeEvent,
+    hasWakeEvents: previous?.hasWakeEvents,
   };
 }
 
@@ -80,6 +136,7 @@ export function applyEventToSummary(summary: RunSummaryReadModel, event: RunEven
   };
   if (isInterestingEvent(event.type, event.wake) && !["result", "completed", "failed", "cancelled", "expired"].includes(event.type)) {
     next.latestWakeEvent = event;
+    next.hasWakeEvents = true;
   }
   return next;
 }
@@ -97,6 +154,15 @@ export function applyResultToSummary(summary: RunSummaryReadModel, result: RunRe
     resultSummary: result.summary,
     resultAgentName: result.agentName,
     metrics: result.metrics ?? summary.metrics,
+    resultParser: result.resultParser ?? summary.resultParser,
+    claudeInstalledSkills: result.claudeInstalledSkills ?? summary.claudeInstalledSkills,
+    livenessState: result.livenessState ?? summary.livenessState,
+    livenessReason: result.livenessReason ?? summary.livenessReason,
+    lastTerminalOutputAt: result.lastTerminalOutputAt ?? summary.lastTerminalOutputAt,
+    terminalOutputBytes: result.terminalOutputBytes ?? summary.terminalOutputBytes,
+    lastMcpCallAt: result.lastMcpCallAt ?? summary.lastMcpCallAt,
+    lastNudgeAt: result.lastNudgeAt ?? summary.lastNudgeAt,
+    pendingAckMessageIds: result.pendingAckMessageIds ?? summary.pendingAckMessageIds,
   };
 }
 

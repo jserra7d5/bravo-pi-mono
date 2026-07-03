@@ -22,6 +22,8 @@ export const EVENT_TYPES: EventType[] = [
   "progress",
   "status",
   "message.received",
+  "message.handled",
+  "message.rejected",
   "question",
   "blocked",
   "artifact",
@@ -31,6 +33,7 @@ export const EVENT_TYPES: EventType[] = [
   "cancelled",
   "expired",
   "heartbeat",
+  "liveness",
 ];
 
 export const INBOX_MESSAGE_TYPES: InboxMessageType[] = ["instruction", "answer", "cancel", "pause", "resume", "context"];
@@ -49,6 +52,6 @@ export function isTerminalRunState(state: RunState): state is TerminalRunState {
 
 export function isInterestingEvent(type: EventType, wake?: boolean, requested: EventType[] = []): boolean {
   if (requested.includes(type)) return true;
-  if (wake && type === "status") return true;
+  if (wake && (type === "status" || type === "liveness")) return true;
   return ["question", "blocked", "result", "completed", "failed", "cancelled", "expired"].includes(type);
 }

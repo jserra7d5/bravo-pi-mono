@@ -265,6 +265,7 @@ test("rebuildDerivedIndexes restores latest wake event metadata", () => {
 
   const summary = w.store.readRunSummary(runId);
   assert.equal(summary?.latestWakeEvent?.eventId, "evt_blocked");
+  assert.equal(summary?.hasWakeEvents, true);
 });
 
 test("corrupt summary falls back to canonical status", () => {
@@ -276,7 +277,7 @@ test("corrupt summary falls back to canonical status", () => {
   assert.equal(summary?.state, "running");
 });
 
-test("wakeup polling reads full result only for subscribed ready runs", () => {
+test("wakeup polling reads full result and scans only that run's events for terminal attention suppression", () => {
   const w = workspace();
   for (let i = 0; i < 200; i += 1) addRun(w.store, w.root, w.parentRunId, "completed");
   const readyRunId = addRun(w.store, w.root, w.parentRunId, "completed");
@@ -304,6 +305,50 @@ test("wakeup polling reads full result only for subscribed ready runs", () => {
   assert.equal(deliveries[0].message.body, "full body");
   assert.equal(deliveries[0].message.bodyAvailable, true);
   assert.equal(deliveries[0].message.result?.body, undefined);
-  assert.equal(readEvents, 0);
+  assert.equal(readEvents, 1);
   assert.equal(readResults, 1);
+});
+
+test("Claude observability metadata survives status summary and watcher rows", () => {
+  const w = workspace();
+  const runId = addRun(w.store, w.root, w.parentRunId, "running");
+  const status = w.store.readStatus(runId);
+  w.store.writeStatus({
+    ...status,
+    harness: "claude",
+    launchHarness: "claude-tmux-interactive",
+    resultParser: "mcp-terminal",
+    model: "claude-sonnet",
+    requestedModel: "sonnet",
+    resolvedModel: "claude-sonnet",
+    effort: "high",
+    executionMode: "dangerous-auth",
+    claudeTransport: "mcp",
+    livenessState: "rate_limited",
+    livenessReason: "rate limit until later",
+    terminalOutputBytes: 1234,
+    lastTerminalOutputAt: "2026-01-01T00:00:00.000Z",
+    lastMcpCallAt: "2026-01-01T00:01:00.000Z",
+    lastNudgeAt: "2026-01-01T00:02:00.000Z",
+    pendingAckMessageIds: ["msg_1"],
+    tmuxSocket: "/very/long/tmux/socket/path.sock",
+    tmuxSession: "session",
+    tmuxPane: "%1",
+    supervisorPid: 11,
+    childPid: 12,
+    panePid: 13,
+    processGroupId: 13,
+    transcriptPath: "/tmp/transcript.log",
+    resolvedSkills: ["long-skill"],
+  });
+  const summary = w.store.readRunSummary(runId);
+  assert.equal(summary?.harness, "claude");
+  assert.equal(summary?.launchHarness, "claude-tmux-interactive");
+  assert.equal(summary?.resultParser, "mcp-terminal");
+  assert.equal(summary?.livenessState, "rate_limited");
+  assert.deepEqual(summary?.pendingAckMessageIds, ["msg_1"]);
+  const row = readWatcherSnapshot(w.store, { parentRunId: w.parentRunId }).rows.find((item) => item.runId === runId);
+  assert.equal(row?.harness, "claude");
+  assert.equal(row?.livenessReason, "rate limit until later");
+  assert.equal(row?.tmuxSocket, "/very/long/tmux/socket/path.sock");
 });

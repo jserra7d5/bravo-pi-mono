@@ -1,6 +1,6 @@
 import { durationMs, nowIso } from "./time.js";
 import { RunStore } from "./runStore.js";
-import type { ArtifactRef, ContextPolicy, RunMetrics, RunResult, SessionPolicy, TerminalRunState, ThinkingLevel } from "./types.js";
+import type { AgentHarness, ArtifactRef, ClaudeAuthHome, ClaudeEffort, ClaudeExecutionMode, ClaudeInstalledSkill, ClaudeLivenessState, ClaudeMemoryIsolation, ContextPolicy, HarnessBoundaryProvenance, LaunchHarness, ResultParser, RunMetrics, RunResult, SessionPolicy, TerminalRunState, ThinkingLevel } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 export function createRunResult(input: {
@@ -9,9 +9,16 @@ export function createRunResult(input: {
   agentName: string;
   displayName?: string;
   namePack?: string;
+  harness?: AgentHarness;
+  launchHarness?: LaunchHarness;
+  resultParser?: ResultParser;
   variant?: string;
   model?: string;
+  requestedModel?: string;
+  resolvedModel?: string;
   thinkingLevel?: ThinkingLevel;
+  effort?: ClaudeEffort;
+  executionMode?: ClaudeExecutionMode;
   contextPolicy?: ContextPolicy;
   sessionPolicy?: SessionPolicy;
   piSessionPath?: string;
@@ -24,6 +31,34 @@ export function createRunResult(input: {
   forkSourceLeafId?: string;
   forkFallback?: RunResult["forkFallback"];
   fastTrack?: RunResult["fastTrack"];
+  resolvedSkills?: string[];
+  notInheritedAcrossHarness?: HarnessBoundaryProvenance[];
+  excludedAcrossHarness?: HarnessBoundaryProvenance[];
+  inheritedAcrossHarness?: HarnessBoundaryProvenance[];
+  claudeHomeDir?: string;
+  claudeSettingsPath?: string;
+  claudeMcpConfigPath?: string;
+  claudeAuthHome?: ClaudeAuthHome;
+  claudeMemoryIsolation?: ClaudeMemoryIsolation;
+  claudeShellHomeDir?: string;
+  claudeShellWrapperPath?: string;
+  claudeTransport?: "mcp" | "none";
+  claudeInstalledSkills?: ClaudeInstalledSkill[];
+  livenessState?: ClaudeLivenessState;
+  lastTerminalOutputAt?: string;
+  terminalOutputBytes?: number;
+  lastMcpCallAt?: string;
+  lastNudgeAt?: string;
+  pendingAckMessageIds?: string[];
+  livenessReason?: string | null;
+  supervisorPid?: number;
+  childPid?: number;
+  panePid?: number;
+  processGroupId?: number;
+  tmuxSocket?: string;
+  tmuxSession?: string;
+  tmuxPane?: string;
+  transcriptPath?: string;
   state: TerminalRunState;
   startedAt?: string;
   summary?: string;
@@ -42,9 +77,16 @@ export function createRunResult(input: {
     agentName: input.agentName,
     displayName: input.displayName,
     namePack: input.namePack,
+    harness: input.harness,
+    launchHarness: input.launchHarness,
+    resultParser: input.resultParser,
     variant: input.variant,
     model: input.model,
+    requestedModel: input.requestedModel,
+    resolvedModel: input.resolvedModel,
     thinkingLevel: input.thinkingLevel,
+    effort: input.effort,
+    executionMode: input.executionMode,
     contextPolicy: input.contextPolicy ?? "fresh",
     sessionPolicy: input.sessionPolicy ?? "record",
     piSessionPath: input.piSessionPath,
@@ -57,6 +99,34 @@ export function createRunResult(input: {
     forkSourceLeafId: input.forkSourceLeafId,
     forkFallback: input.forkFallback ?? null,
     fastTrack: input.fastTrack,
+    resolvedSkills: input.resolvedSkills,
+    notInheritedAcrossHarness: input.notInheritedAcrossHarness,
+    excludedAcrossHarness: input.excludedAcrossHarness,
+    inheritedAcrossHarness: input.inheritedAcrossHarness,
+    claudeHomeDir: input.claudeHomeDir,
+    claudeSettingsPath: input.claudeSettingsPath,
+    claudeMcpConfigPath: input.claudeMcpConfigPath,
+    claudeAuthHome: input.claudeAuthHome,
+    claudeMemoryIsolation: input.claudeMemoryIsolation,
+    claudeShellHomeDir: input.claudeShellHomeDir,
+    claudeShellWrapperPath: input.claudeShellWrapperPath,
+    claudeTransport: input.claudeTransport,
+    claudeInstalledSkills: input.claudeInstalledSkills,
+    livenessState: input.livenessState,
+    lastTerminalOutputAt: input.lastTerminalOutputAt,
+    terminalOutputBytes: input.terminalOutputBytes,
+    lastMcpCallAt: input.lastMcpCallAt,
+    lastNudgeAt: input.lastNudgeAt,
+    pendingAckMessageIds: input.pendingAckMessageIds,
+    livenessReason: input.livenessReason,
+    supervisorPid: input.supervisorPid,
+    childPid: input.childPid,
+    panePid: input.panePid,
+    processGroupId: input.processGroupId,
+    tmuxSocket: input.tmuxSocket,
+    tmuxSession: input.tmuxSession,
+    tmuxPane: input.tmuxPane,
+    transcriptPath: input.transcriptPath,
     state: input.state,
     success: input.state === "completed",
     createdAt,

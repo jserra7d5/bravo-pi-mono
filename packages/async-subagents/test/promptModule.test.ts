@@ -19,6 +19,10 @@ test("async subagents prompt module establishes neutral lifecycle rules", () => 
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /Async Subagent Catalog/);
   assert.doesNotMatch(ASYNC_SUBAGENTS_PROMPT_MODULE, /\b(worker|reviewer|fast-worker)\b/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /critical-path implementation\/planning\/review/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /Claude variants run Claude Code children/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /durable inbox entries plus a terminal nudge/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /effort/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /best-effort non-bare memory isolation/);
 });
 
 test("appendAsyncSubagentsPrompt appends once", () => {

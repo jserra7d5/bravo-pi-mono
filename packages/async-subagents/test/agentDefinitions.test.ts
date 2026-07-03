@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
-import { discoverAgentDefinitions, parseAgentDefinitionFile } from "../src/agentDefinitions.js";
+import { applyAgentVariant, discoverAgentDefinitions, parseAgentDefinitionFile } from "../src/agentDefinitions.js";
 
 function workspace() {
   const root = mkdtempSync(join(tmpdir(), "async-subagents-agents-"));
@@ -57,6 +57,22 @@ Snake body.
 `);
   const definition = parseAgentDefinitionFile(path, "user");
   assert.equal(definition.thinkingLevel, "medium");
+});
+
+test("built-in worker, reviewer, and scout expose Claude variants", () => {
+  const w = workspace();
+  const definitions = discoverAgentDefinitions({ cwd: w.root, userHome: w.userHome, env: { ...process.env, ASYNC_SUBAGENTS_HOME: w.userHome } });
+  for (const name of ["worker", "reviewer", "scout"]) {
+    const definition = definitions.get(name);
+    assert.ok(definition, `missing built-in ${name}`);
+    const claude = applyAgentVariant(definition, "claude");
+    assert.equal(claude.harness, "claude", name);
+    assert.equal(claude.mode, "interactive", name);
+    assert.equal(claude.model, "claude-sonnet-5", name);
+    assert.deepEqual(claude.tools, [], name);
+    assert.deepEqual(claude.extensions, [], name);
+    assert.equal(claude.thinkingLevel, undefined, name);
+  }
 });
 
 test("agent parser accepts nested variants", () => {
@@ -141,4 +157,121 @@ Worker body.
 `);
   assert.throws(() => parseAgentDefinitionFile(path, "project"), /explicit approval/);
   assert.equal(parseAgentDefinitionFile(path, "project", { allowProjectPathCapabilities: true }).skills[0], "./local-skill");
+});
+
+test("Claude variant does not inherit Pi-only execution fields across harness boundary", async () => {
+  const { applyAgentVariant } = await import("../src/agentDefinitions.js");
+  const w = workspace();
+  const path = join(w.userHome, "agents", "worker.md");
+  writeFileSync(path, `---
+description: Worker
+harnessNeutral: true
+tools: [read, bash]
+extensions: [pi-ext]
+thinkingLevel: high
+includes: [pi-runtime]
+variants:
+  claude:
+    harness: claude
+    model: claude-sonnet-5
+    effort: high
+    mode: interactive
+---
+
+Worker body.
+`);
+  const base = parseAgentDefinitionFile(path, "user");
+  const claude = applyAgentVariant(base, "claude");
+  assert.equal(claude.harness, "claude");
+  assert.deepEqual(claude.tools, []);
+  assert.deepEqual(claude.extensions, []);
+  assert.equal(claude.thinkingLevel, undefined);
+  assert.deepEqual(claude.includes, []);
+  assert.equal(claude.mode, "interactive");
+  assert.match(JSON.stringify(claude.notInheritedAcrossHarness), /thinkingLevel/);
+  assert.match(JSON.stringify(claude.excludedAcrossHarness), /includes/);
+  assert.match(JSON.stringify(claude.inheritedAcrossHarness), /body/);
+});
+
+test("Claude variant fails closed when crossing from non-neutral Pi base body", async () => {
+  const { applyAgentVariant } = await import("../src/agentDefinitions.js");
+  const w = workspace();
+  const path = join(w.userHome, "agents", "worker.md");
+  writeFileSync(path, `---
+description: Worker
+variants:
+  claude:
+    harness: claude
+---
+
+Pi-only body.
+`);
+  const base = parseAgentDefinitionFile(path, "user");
+  assert.throws(() => applyAgentVariant(base, "claude"), /harnessNeutral/);
+});
+
+test("Claude variant rejects explicit Pi-only fields", () => {
+  const w = workspace();
+  const path = join(w.userHome, "agents", "bad-claude.md");
+  writeFileSync(path, `---
+description: Bad
+variants:
+  claude:
+    harness: claude
+    tools: []
+---
+
+Bad body.
+`);
+  assert.throws(() => parseAgentDefinitionFile(path, "user"), /tools is Pi-only/);
+});
+
+test("agent parser rejects unknown top-level fields", () => {
+  const w = workspace();
+  const path = join(w.userHome, "agents", "unknown.md");
+  writeFileSync(path, `---
+description: Bad
+surprise: true
+---
+
+Bad body.
+`);
+  assert.throws(() => parseAgentDefinitionFile(path, "user"), /unknown top-level field surprise/);
+});
+
+test("agent parser rejects unsupported extra MCP frontmatter fields", () => {
+  const w = workspace();
+  const top = join(w.userHome, "agents", "bad-mcp-top.md");
+  writeFileSync(top, `---
+description: Bad
+extraMcpServers: [local]
+---
+
+Bad body.
+`);
+  assert.throws(() => parseAgentDefinitionFile(top, "user"), (err: unknown) => err instanceof Error && (err as { code?: unknown }).code === "EXTRA_MCP_UNSUPPORTED");
+
+  const variant = join(w.userHome, "agents", "bad-mcp-variant.md");
+  writeFileSync(variant, `---
+description: Bad
+variants:
+  claude:
+    harness: claude
+    mcpServers: [local]
+---
+
+Bad body.
+`);
+  assert.throws(() => parseAgentDefinitionFile(variant, "user"), (err: unknown) => err instanceof Error && (err as { code?: unknown }).code === "EXTRA_MCP_UNSUPPORTED");
+
+  const nested = join(w.userHome, "agents", "bad-mcp-claude.md");
+  writeFileSync(nested, `---
+description: Bad
+claude:
+  mcpConfig: [local]
+---
+
+Bad body.
+`);
+  assert.throws(() => parseAgentDefinitionFile(nested, "user"), (err: unknown) => err instanceof Error && (err as { code?: unknown }).code === "EXTRA_MCP_UNSUPPORTED");
 });

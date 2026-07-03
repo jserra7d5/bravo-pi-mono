@@ -43,7 +43,7 @@ export interface WakeupMessage {
   event?: RunEvent;
   task?: { taskId: string; title?: string; status?: string };
   result?: RunResult;
-  status?: { agentName?: string; displayName?: string };
+  status?: { agentName?: string; displayName?: string } & Partial<RunStatus>;
   next?: Array<{ tool: string; args: Record<string, unknown> }>;
 }
 
@@ -297,11 +297,17 @@ export function stateGlyph(state: string | undefined, resultReady = false): Stat
     case "active": return { g: "◐", color: ANSI.cyan, label: "active" };
     case "done": return { g: "✓", color: ANSI.green, label: "done" };
     case "running": return { g: "◐", color: ANSI.cyan, label: "working" };
+    case "starting":
     case "queued":
     case "created": return { g: "○", color: ANSI.gray, label: "starting" };
-    case "idle": return { g: "○", color: ANSI.gray, label: "idle" };
+    case "idle": return { g: "◌", color: ANSI.gray, label: "idle" };
     case "waiting_for_input":
     case "question": return { g: "?", color: ANSI.amber, label: "needs you" };
+    case "ack_pending": return { g: "!", color: ANSI.amber, label: "ack pending" };
+    case "rate_limited": return { g: "⏳", color: ANSI.amber, label: "rate limited" };
+    case "comatose": return { g: "!", color: ANSI.red, label: "comatose" };
+    case "stale_transport": return { g: "◌", color: ANSI.amber, label: "stale tmux" };
+    case "orphaned_process": return { g: "!", color: ANSI.red, label: "orphaned" };
     case "blocked": return { g: "◌", color: ANSI.gray, label: "blocked" };
     case "paused": return { g: "⏸", color: ANSI.gray, label: "paused" };
     case "stalled": return { g: "◌", color: ANSI.amber, label: "stalled" };
@@ -390,7 +396,7 @@ function capName(name: string, cells = NAME_CAP_CELLS): string {
 }
 
 function isUrgentState(state: string | undefined): boolean {
-  return state === "waiting_for_input" || state === "blocked";
+  return state === "waiting_for_input" || state === "blocked" || state === "ack_pending" || state === "rate_limited" || state === "comatose" || state === "stale_transport" || state === "orphaned_process";
 }
 
 function isDoneState(state: string | undefined): boolean {
@@ -730,18 +736,19 @@ export function renderWidgetCard(input: WidgetCardInput): string[] {
 }
 
 export function widgetRowFromSummary(row: RunSummaryRow, now = Date.now()): WidgetRowInput {
-  const summaryText = preview(row.needs ?? row.summary ?? row.event?.summary ?? row.result?.summary, 96);
+  const displayState = row.harness === "claude" && row.livenessState ? row.livenessState : row.state;
+  const summaryText = preview(row.livenessReason ?? row.needs ?? row.summary ?? row.event?.summary ?? row.result?.summary, 96);
   const age = (() => {
     if (typeof row.result?.durationMs === "number") return compactDuration(row.result.durationMs);
     return since(row.lastActivityAt ?? row.updatedAt, now);
   })();
   return {
     displayName: row.displayName ?? row.agentName,
-    role: row.agentName,
-    state: row.state,
+    role: row.harness === "claude" ? `${row.agentName}/claude` : row.agentName,
+    state: displayState,
     summary: summaryText,
     age,
-    urgent: isUrgentState(row.state),
+    urgent: isUrgentState(displayState),
     done: isDoneState(row.state),
     resultReady: row.resultReady,
   };
@@ -777,9 +784,7 @@ const DEFAULT_CARD_WIDTH = 72;
 
 function cardWidth(opts?: { width?: number }): number {
   if (opts?.width && opts.width > 20) return Math.min(96, Math.floor(opts.width));
-  const term = typeof process !== "undefined" ? process.stdout?.columns : undefined;
-  const raw = typeof term === "number" && term > 0 ? term : DEFAULT_CARD_WIDTH;
-  return Math.max(32, Math.min(96, raw));
+  return DEFAULT_CARD_WIDTH;
 }
 
 export interface LaunchCardInput {
@@ -795,6 +800,18 @@ export interface LaunchCardInput {
   tools?: string[];
   budget?: string;
   context?: string;
+  harness?: string;
+  launchHarness?: string;
+  effort?: string;
+  executionMode?: string;
+  transport?: string;
+  resultParser?: string;
+}
+
+function compactMeta(parts: Array<[string, string | undefined]>): string | undefined {
+  const values = parts.filter((item): item is [string, string] => Boolean(item[1]));
+  if (!values.length) return undefined;
+  return values.map(([k, v]) => `${ANSI.dim}${k}${ANSI.reset} ${ANSI.white}${v}${ANSI.reset}`).join(`${ANSI.gray} · ${ANSI.reset}`);
 }
 
 export function renderLaunchCard(input: LaunchCardInput): string[] {
@@ -808,7 +825,7 @@ export function renderLaunchCard(input: LaunchCardInput): string[] {
   if (input.task) out.push(ch.row(label("task") + ANSI.white + input.task + ANSI.reset));
   if (input.model) {
     const modelLine = ANSI.white + input.model + ANSI.reset
-      + (input.thinking ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}thinking${ANSI.reset} ${ANSI.cyan}${input.thinking}${ANSI.reset}` : "")
+      + (input.harness === "claude" && input.effort ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}effort${ANSI.reset} ${ANSI.cyan}${input.effort}${ANSI.reset}` : input.thinking ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}thinking${ANSI.reset} ${ANSI.cyan}${input.thinking}${ANSI.reset}` : "")
       + (input.fastTrack?.applied ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}speed${ANSI.reset} ${ANSI.gold}fast${ANSI.reset}` : "");
     const modelContent = label("model") + modelLine;
     out.push(ch.row(modelContent));
@@ -817,9 +834,13 @@ export function renderLaunchCard(input: LaunchCardInput): string[] {
   if (input.skills?.length) {
     out.push(ch.row(label("skills") + input.skills.map((s) => ANSI.cyan + s + ANSI.reset).join(ANSI.gray + " · " + ANSI.reset)));
   }
-  if (input.tools?.length) {
+  if (input.tools?.length && input.harness !== "claude") {
     out.push(ch.row(label("tools") + input.tools.map((t) => ANSI.white + t + ANSI.reset).join(ANSI.gray + " · " + ANSI.reset)));
   }
+  const primaryRuntime = compactMeta([["harness", input.harness], ["launch", input.launchHarness]]);
+  const secondaryRuntime = compactMeta([["parser", input.resultParser], ["exec", input.executionMode], ["transport", input.transport]]);
+  if (primaryRuntime) out.push(ch.row(label("runtime") + primaryRuntime));
+  if (secondaryRuntime) out.push(ch.row(label(primaryRuntime ? "" : "runtime") + secondaryRuntime));
   if (input.budget) out.push(ch.row(label("budget") + ANSI.white + input.budget + ANSI.reset));
   if (input.context) out.push(ch.row(label("context") + ANSI.white + input.context + ANSI.reset));
   out.push(ch.bot());
@@ -839,6 +860,14 @@ export interface ResultCardInput {
   model?: string;
   thinking?: string;
   fastTrack?: { applied?: boolean };
+  harness?: string;
+  launchHarness?: string;
+  effort?: string;
+  executionMode?: string;
+  transport?: string;
+  livenessState?: string;
+  livenessReason?: string;
+  resultParser?: string;
 }
 
 export function renderResultCard(input: ResultCardInput): string[] {
@@ -851,12 +880,17 @@ export function renderResultCard(input: ResultCardInput): string[] {
   const out: string[] = [ch.topTitled(titleContent, badge)];
   if (input.model) {
     const modelLine = ANSI.white + input.model + ANSI.reset
-      + (input.thinking ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}thinking${ANSI.reset} ${ANSI.cyan}${input.thinking}${ANSI.reset}` : "")
+      + (input.harness === "claude" && input.effort ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}effort${ANSI.reset} ${ANSI.cyan}${input.effort}${ANSI.reset}` : input.thinking ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}thinking${ANSI.reset} ${ANSI.cyan}${input.thinking}${ANSI.reset}` : "")
       + (input.fastTrack?.applied ? `  ${ANSI.gray}·${ANSI.reset}  ${ANSI.dim}speed${ANSI.reset} ${ANSI.gold}fast${ANSI.reset}` : "");
     const modelContent = ANSI.dim + "model     " + ANSI.reset + modelLine;
     out.push(ch.row(modelContent));
     if (input.fastTrack?.applied && visWidth(modelContent) > width - 4) out.push(ch.row(ANSI.dim + "speed     " + ANSI.reset + ANSI.gold + "fast" + ANSI.reset));
   }
+  const primaryRuntime = compactMeta([["harness", input.harness], ["launch", input.launchHarness]]);
+  const secondaryRuntime = compactMeta([["parser", input.resultParser], ["live", input.livenessState], ["exec", input.executionMode], ["transport", input.transport]]);
+  if (primaryRuntime) out.push(ch.row(ANSI.dim + "runtime   " + ANSI.reset + primaryRuntime));
+  if (secondaryRuntime) out.push(ch.row(ANSI.dim + (primaryRuntime ? "          " : "runtime   ") + ANSI.reset + secondaryRuntime));
+  if (input.livenessReason) out.push(ch.row(ANSI.dim + "liveness  " + ANSI.reset + ANSI.white + input.livenessReason + ANSI.reset));
   if (input.summary) {
     out.push(ch.row(ANSI.dim + "summary" + ANSI.reset));
     for (const line of input.summary.split("\n")) out.push(ch.row(ANSI.white + line + ANSI.reset));
@@ -965,6 +999,11 @@ function deriveWakeBadge(kind: string): string {
     case "cancelled": return "cancelled";
     case "expired": return "expired";
     case "paused": return "paused";
+    case "ack_pending": return "ack pending";
+    case "rate_limited": return "rate limited";
+    case "comatose": return "comatose";
+    case "stale_transport": return "stale tmux";
+    case "orphaned_process": return "orphaned";
     default: return kind;
   }
 }
@@ -1084,8 +1123,14 @@ function renderStartResultCard(details: Record<string, unknown>, width?: number)
   if (!agentName) return undefined;
   const displayName = typeof details.displayName === "string" && details.displayName ? details.displayName : (runId ?? agentName);
   const variant = typeof details.variant === "string" ? details.variant : undefined;
-  const model = typeof details.model === "string" ? details.model : undefined;
+  const model = typeof details.resolvedModel === "string" ? details.resolvedModel : typeof details.model === "string" ? details.model : undefined;
   const thinking = typeof details.thinkingLevel === "string" ? details.thinkingLevel : undefined;
+  const harness = typeof details.harness === "string" ? details.harness : undefined;
+  const launchHarness = typeof details.launchHarness === "string" ? details.launchHarness : undefined;
+  const effort = typeof details.effort === "string" ? details.effort : undefined;
+  const executionMode = typeof details.executionMode === "string" ? details.executionMode : undefined;
+  const transport = typeof details.claudeTransport === "string" ? details.claudeTransport : undefined;
+  const resultParser = typeof details.resultParser === "string" ? details.resultParser : undefined;
   const fastTrack = typeof details.fastTrack === "object" && details.fastTrack ? details.fastTrack as { applied?: boolean } : undefined;
   const contextPolicy = typeof details.contextPolicy === "string" ? details.contextPolicy : undefined;
   const state = typeof details.state === "string" ? details.state : "queued";
@@ -1100,11 +1145,17 @@ function renderStartResultCard(details: Record<string, unknown>, width?: number)
   return renderLaunchCard({
     width,
     displayName,
-    role: variant ? `${agentName}/${variant}` : agentName,
+    role: harness === "claude" ? `${agentName}/claude` : variant ? `${agentName}/${variant}` : agentName,
     state,
     model,
     thinking,
     fastTrack,
+    harness,
+    launchHarness,
+    effort,
+    executionMode,
+    transport,
+    resultParser,
     skills: skills?.length ? skills : undefined,
     tools: tools?.length ? tools : undefined,
     budget,
@@ -1120,8 +1171,16 @@ function renderTerminalResultCardFromDetails(result: Record<string, unknown>, wi
   const state = typeof result.state === "string" ? result.state : "completed";
   const durationMs = typeof result.durationMs === "number" ? result.durationMs : undefined;
   const summary = typeof result.summary === "string" ? result.summary : undefined;
-  const model = typeof result.model === "string" ? result.model : undefined;
+  const model = typeof result.resolvedModel === "string" ? result.resolvedModel : typeof result.model === "string" ? result.model : undefined;
   const thinking = typeof result.thinkingLevel === "string" ? result.thinkingLevel : undefined;
+  const harness = typeof result.harness === "string" ? result.harness : undefined;
+  const launchHarness = typeof result.launchHarness === "string" ? result.launchHarness : undefined;
+  const effort = typeof result.effort === "string" ? result.effort : undefined;
+  const executionMode = typeof result.executionMode === "string" ? result.executionMode : undefined;
+  const transport = typeof result.claudeTransport === "string" ? result.claudeTransport : undefined;
+  const resultParser = typeof result.resultParser === "string" ? result.resultParser : undefined;
+  const livenessState = typeof result.livenessState === "string" ? result.livenessState : undefined;
+  const livenessReason = typeof result.livenessReason === "string" ? result.livenessReason : undefined;
   const fastTrack = typeof result.fastTrack === "object" && result.fastTrack ? result.fastTrack as { applied?: boolean } : undefined;
   const body = typeof result.body === "string" && result.body.trim() ? result.body : undefined;
   const metrics = (() => {
@@ -1140,7 +1199,7 @@ function renderTerminalResultCardFromDetails(result: Record<string, unknown>, wi
   return renderResultCard({
     width,
     displayName,
-    role: variant ? `${agentName}/${variant}` : agentName,
+    role: harness === "claude" ? `${agentName}/claude` : variant ? `${agentName}/${variant}` : agentName,
     state,
     duration: durationMs !== undefined ? compactDuration(durationMs) : undefined,
     summary,
@@ -1148,6 +1207,14 @@ function renderTerminalResultCardFromDetails(result: Record<string, unknown>, wi
     model,
     thinking,
     fastTrack,
+    harness,
+    launchHarness,
+    effort,
+    executionMode,
+    transport,
+    resultParser,
+    livenessState,
+    livenessReason,
     metrics,
     artifacts,
   });
@@ -1226,15 +1293,19 @@ function wakeCardInputFor(message: WakeupMessage, _options?: RenderOptions): Wak
     if (message.bodyAvailable) return hasResult ? "Full child body available via subagent_result if you need recovery, artifacts, metadata, or a reread." : "Child event body available in wakeup details.";
     return undefined;
   })();
-  const kind = deriveWakeKind(message.state, hasResult);
   const agentName = result?.agentName ?? status?.agentName ?? message.title;
   const displayName = result?.displayName ?? status?.displayName ?? agentName;
+  const harness = result?.harness ?? status?.harness;
+  const live = result?.livenessState ?? status?.livenessState;
+  const state = harness === "claude" && live && !hasResult ? live : message.state;
+  const kind = deriveWakeKind(state, hasResult);
+  const decoratedHeadline = [headline, harness === "claude" ? `Harness: claude${live ? ` · ${live}` : ""}` : undefined].filter(Boolean).join(" · ") || undefined;
   return {
     displayName,
-    role: agentName,
+    role: harness === "claude" ? `${agentName}/claude` : agentName,
     kind,
     badge: deriveWakeBadge(kind),
-    headline,
+    headline: decoratedHeadline,
     body,
   };
 }

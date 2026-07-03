@@ -323,8 +323,8 @@ Validated in this repo:
 - default bounded child creates a non-empty Pi session file using Codex OAuth;
 - `context: fork` creates a generated branched Pi session and the child sees
   inherited parent context as reference material;
-- child-control consumes inbox messages and emits `message.received` for
-  required acknowledgement;
+- child-control consumes inbox messages and emits `message.received`; required
+  acknowledgement succeeds only after `message.handled`;
 - pause, continue, and cancel work through durable status/result files;
 - terminal wake-ups use `terminal:<runId>:<result.createdAt>` and are lease
   claimed, delivered, and handled without deleting `result.json`;

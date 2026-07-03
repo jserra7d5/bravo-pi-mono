@@ -469,11 +469,17 @@ test("renderSubagentToolResultComponent renders a result card from terminal resu
       state: "completed",
       success: true,
       durationMs: 12000,
+      harness: "claude",
+      launchHarness: "claude-tmux-interactive",
+      resultParser: "mcp-terminal",
+      claudeTransport: "mcp",
     },
   });
   const rendered = comp.render(72).map(stripAnsi).join("\n");
   assert.ok(rendered.includes("@Fives"));
   assert.ok(rendered.includes("done"));
+  assert.ok(rendered.includes("launch claude-tmux-interactive"));
+  assert.ok(rendered.includes("parser mcp-terminal"));
 });
 
 test("renderSubagentToolResultComponent launch card surfaces agent-definition detail", () => {
@@ -486,7 +492,11 @@ test("renderSubagentToolResultComponent launch card surfaces agent-definition de
       started: true,
       state: "queued",
       model: "claude-opus-4-7",
-      thinkingLevel: "high",
+      harness: "claude",
+      launchHarness: "claude-tmux-interactive",
+      resultParser: "mcp-terminal",
+      claudeTransport: "mcp",
+      effort: "high",
       skills: ["reading-code", "debugging-helpers"],
       tools: ["read", "grep", "bash"],
       maxRunSeconds: 30 * 60,
@@ -498,9 +508,11 @@ test("renderSubagentToolResultComponent launch card surfaces agent-definition de
   assert.ok(rendered.includes("@taro"));
   assert.ok(rendered.includes("researcher"));
   assert.ok(rendered.includes("claude-opus-4-7"));
-  assert.ok(rendered.includes("thinking high"));
+  assert.ok(rendered.includes("effort high"));
+  assert.ok(rendered.includes("launch claude-tmux-interactive"));
+  assert.ok(rendered.includes("parser mcp-terminal"));
   assert.ok(rendered.includes("reading-code"));
-  assert.ok(rendered.includes("read"));
+  assert.equal(rendered.includes("grep"), false);
   assert.ok(rendered.includes("30m max"));
   assert.ok(rendered.includes("depth 4"));
   assert.ok(rendered.includes("fresh session"));
@@ -755,4 +767,77 @@ test("renderWidgetCard renders task section with priority and overflow", () => {
   assert.ok(text.includes("T-002 Second Task"), "prioritizes active task");
   assert.ok(text.includes("T-003 Third Task"), "includes ready task");
   assert.ok(text.includes("T-001 First Task"));
+});
+
+test("Claude liveness glyphs and cards expose compact observability metadata", () => {
+  assert.equal(stateGlyph("rate_limited").label, "rate limited");
+  assert.equal(stateGlyph("comatose").color, "\x1b[38;2;220;88;88m");
+  assert.equal(stateGlyph("ack_pending").label, "ack pending");
+  assert.equal(stateGlyph("stale_transport").label, "stale tmux");
+  assert.equal(stateGlyph("orphaned_process").label, "orphaned");
+
+  for (const width of [120, 80, 60, 44]) {
+    const launch = renderLaunchCard({
+      width,
+      displayName: "Alexandria-Cassandra-Longname",
+      role: "worker/claude",
+      state: "starting",
+      model: "claude-sonnet-very-long-variant-name-that-must-truncate",
+      harness: "claude",
+      launchHarness: "claude-tmux-interactive",
+      effort: "high",
+      executionMode: "dangerous-auth",
+      transport: "mcp",
+      resultParser: "mcp-terminal",
+      skills: ["very-long-skill-name-that-must-not-break-the-card"],
+      tools: ["thinking", "shell"],
+    }).join("\n");
+    assert.ok(renderLaunchCard({ width, displayName: "x", role: "worker/claude", harness: "claude" }).every((line) => visWidth(line) <= Math.max(32, Math.min(96, width))));
+    assert.match(stripAnsi(launch), /harness claude/);
+    if (width >= 80) assert.match(stripAnsi(launch), /launch claude-tmux-interactive/);
+    if (width >= 120) assert.match(stripAnsi(launch), /parser mcp-terminal/);
+    assert.doesNotMatch(stripAnsi(launch), /tools/);
+
+    const result = renderResultCard({
+      width,
+      displayName: "Alexandria-Cassandra-Longname",
+      role: "worker/claude",
+      state: "completed",
+      model: "claude-sonnet-very-long-variant-name-that-must-truncate",
+      harness: "claude",
+      launchHarness: "claude-tmux-interactive",
+      effort: "high",
+      executionMode: "dangerous-auth",
+      transport: "mcp",
+      resultParser: "mcp-terminal",
+      livenessState: "ack_pending",
+      livenessReason: "Parent message awaiting durable ack",
+      summary: "done",
+    }).join("\n");
+    assert.match(stripAnsi(result), /runtime/);
+    if (width >= 80) {
+      assert.match(stripAnsi(result), /launch claude-tmux-interactive/);
+      assert.match(stripAnsi(result), /ack_p/);
+    }
+    if (width >= 120) assert.match(stripAnsi(result), /parser mcp-terminal/);
+  }
+});
+
+test("widget row prefers Claude harness and liveness read-model fields", () => {
+  const row: RunSummaryRow = {
+    runId: "r1",
+    runDir: "/tmp/r1",
+    agentName: "worker",
+    displayName: "Mira-long-display-name",
+    harness: "claude",
+    state: "running",
+    livenessState: "comatose",
+    livenessReason: "no terminal output after nudge",
+    resultReady: false,
+    updatedAt: new Date().toISOString(),
+  };
+  const text = stripAnsi(formatRunRow(row));
+  assert.match(text, /worker\/claude/);
+  assert.match(text, /comatose/);
+  assert.match(text, /no terminal output/);
 });
