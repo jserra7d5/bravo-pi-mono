@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { __resetRenderClockForTest, renderClock } from "@bravo/render-clock";
 import asyncSubagentsPiExtension from "../extensions/pi/index.js";
-import { clearLiveWidget, deriveHerdrAsyncSubagentsState, hasTimeDependentLiveWidgetItem, readHerdrAsyncSubagentsState, renderLiveWidget, updateLiveWidget, type LiveWidgetSnapshot } from "../extensions/pi/liveWidget.js";
+import { clearLiveWidget, deriveAsyncSubagentsActivityState, hasTimeDependentLiveWidgetItem, readAsyncSubagentsActivityState, renderLiveWidget, updateLiveWidget, type LiveWidgetSnapshot } from "../extensions/pi/liveWidget.js";
 import { markWakeupHandled } from "../extensions/pi/wakeups.js";
 import { visWidth } from "../extensions/pi/renderers.js";
 import { RunStore } from "../src/runStore.js";
@@ -79,7 +79,7 @@ function addRun(input: { store: RunStore; root: string; parentRunId: string; dis
   return runId;
 }
 
-test("Herdr async state derivation treats nonterminal children as active and blocked rows as blocked", () => {
+test("async activity state derivation treats nonterminal children as active and blocked rows as blocked", () => {
   const snapshot: LiveWidgetSnapshot = {
     rows: [
       { runId: "run_active", runDir: "/tmp/run_active", agentName: "scout", state: "running", summary: "working", resultReady: false, updatedAt: new Date().toISOString() },
@@ -94,17 +94,15 @@ test("Herdr async state derivation treats nonterminal children as active and blo
     visibleTasks: [],
   };
 
-  assert.deepEqual(deriveHerdrAsyncSubagentsState({ rows: snapshot.rows, rootSessionId: "root", parentRunId: "parent" }), {
+  assert.deepEqual(deriveAsyncSubagentsActivityState({ rows: snapshot.rows }), {
     active: true,
     blocked: true,
     activeCount: 2,
     message: "needs input",
-    rootSessionId: "root",
-    parentRunId: "parent",
   });
 });
 
-test("Herdr async state derivation keeps only current terminal result-ready rows active", () => {
+test("async activity state derivation keeps only current terminal result-ready rows active", () => {
   const now = new Date().toISOString();
   const snapshot: LiveWidgetSnapshot = {
     rows: [
@@ -119,7 +117,7 @@ test("Herdr async state derivation keeps only current terminal result-ready rows
     visibleTasks: [],
   };
 
-  assert.equal(deriveHerdrAsyncSubagentsState({ rows: snapshot.rows }).activeCount, 1);
+  assert.equal(deriveAsyncSubagentsActivityState({ rows: snapshot.rows }).activeCount, 1);
 });
 
 function setRunResultReady(input: { store: RunStore; runId: string; resultReady: boolean; updatedAt?: string }) {
@@ -142,7 +140,7 @@ function writeRunResult(input: { store: RunStore; runId: string; parentRunId: st
   }));
 }
 
-test("Herdr async state keeps old uncollected terminal result-ready rows active", () => {
+test("async activity state keeps old uncollected terminal result-ready rows active", () => {
   const w = workspace();
   const old = isoAgo(10 * 60_000);
   const oldReadyRunId = addRun({ ...w, displayName: "Done", state: "completed", summary: "ready", updatedAt: old });
@@ -151,27 +149,25 @@ test("Herdr async state keeps old uncollected terminal result-ready rows active"
   setRunResultReady({ store: w.store, runId: oldReadyRunId, resultReady: true, updatedAt: old });
   setRunResultReady({ store: w.store, runId: oldCollectedRunId, resultReady: false, updatedAt: old });
 
-  const state = readHerdrAsyncSubagentsState({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+  const state = readAsyncSubagentsActivityState({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
   assert.equal(state.active, true);
   assert.equal(state.blocked, false);
   assert.equal(state.activeCount, 1);
-  assert.equal(state.rootSessionId, w.parentRunId);
-  assert.equal(state.parentRunId, w.parentRunId);
 });
 
-test("Herdr async state does not keep handled terminal results active", () => {
+test("async activity state does not keep handled terminal results active", () => {
   const w = workspace();
   const runId = addRun({ ...w, displayName: "Done", state: "completed", summary: "done" });
   writeRunResult({ store: w.store, runId, parentRunId: w.parentRunId, summary: "done" });
   setRunResultReady({ store: w.store, runId, resultReady: true });
   markWakeupHandled(w.store, w.parentRunId, runId);
 
-  const state = readHerdrAsyncSubagentsState({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
+  const state = readAsyncSubagentsActivityState({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId });
   assert.equal(state.active, false);
   assert.equal(state.activeCount, 0);
 });
 
-test("Herdr async state reconciles dead process-owned rows before deriving active state", () => {
+test("async activity state reconciles dead process-owned rows before deriving active state", () => {
   const w = workspace();
   const old = isoAgo(10 * 60_000);
   const runId = addRun({
@@ -184,7 +180,7 @@ test("Herdr async state reconciles dead process-owned rows before deriving activ
     processHealth: "alive",
   });
 
-  const state = readHerdrAsyncSubagentsState({
+  const state = readAsyncSubagentsActivityState({
     store: w.store,
     parentRunId: w.parentRunId,
     rootSessionId: w.parentRunId,
@@ -735,109 +731,6 @@ test("live widget row dimensions stay stable across age boundary cutoffs", () =>
   }
 });
 
-test("Herdr event emit retries the same state after a transient emit failure", async () => {
-  const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
-  let clockNow = baseNow;
-  __resetRenderClockForTest({
-    now: () => clockNow,
-    setInterval: () => ({ unref() {} }),
-    clearInterval() {},
-  });
-
-  const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown | Promise<unknown>>();
-  const herdrEvents: unknown[] = [];
-  let herdrEmitCount = 0;
-  const pi = {
-    events: { emit(name: string, payload: unknown) {
-      if (name !== "herdr:async-subagents-state") return;
-      herdrEmitCount += 1;
-      if (herdrEmitCount === 2) throw new Error("transient Herdr bridge failure");
-      herdrEvents.push(payload);
-    } },
-    on(name: string, handler: (event: unknown, ctx: unknown) => unknown | Promise<unknown>) { handlers.set(name, handler); },
-    registerCommand() {},
-    registerMessageRenderer() {},
-    registerTool() {},
-    sendMessage() {},
-    appendEntry() {},
-  };
-  asyncSubagentsPiExtension(pi as never);
-
-  const w = workspace();
-  const ctx = {
-    cwd: w.root,
-    hasUI: false,
-    sessionManager: { getSessionId: () => w.parentRunId, getBranch: () => [] },
-    ui: { setStatus() {}, setWidget() {}, notify() {} },
-  };
-
-  await withFakeNow(baseNow, () => handlers.get("session_start")?.({}, ctx) as Promise<unknown>);
-  assert.deepEqual(herdrEvents, [{ active: false, blocked: false, activeCount: 0 }], "failed normal state emit should not be cached as delivered");
-
-  clockNow = baseNow + 2_000;
-  await withFakeNow(clockNow, () => {
-    renderClock.tick("manual");
-  });
-  assert.equal(herdrEvents.length, 2);
-  assert.equal((herdrEvents.at(-1) as { active?: unknown }).active, false);
-  assert.equal((herdrEvents.at(-1) as { rootSessionId?: unknown }).rootSessionId, readRootSession({ cwd: w.root })?.rootSessionId);
-
-  await handlers.get("session_shutdown")?.({}, ctx);
-  assert.equal(renderClock.subscriberCount(), 0);
-});
-
-test("Herdr active async state is emitted as a heartbeat on each poll tick", async () => {
-  const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
-  let clockNow = baseNow;
-  __resetRenderClockForTest({
-    now: () => clockNow,
-    setInterval: () => ({ unref() {} }),
-    clearInterval() {},
-  });
-
-  const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown | Promise<unknown>>();
-  const herdrEvents: unknown[] = [];
-  const pi = {
-    events: { emit(name: string, payload: unknown) { if (name === "herdr:async-subagents-state") herdrEvents.push(payload); } },
-    on(name: string, handler: (event: unknown, ctx: unknown) => unknown | Promise<unknown>) { handlers.set(name, handler); },
-    registerCommand() {},
-    registerMessageRenderer() {},
-    registerTool() {},
-    sendMessage() {},
-    appendEntry() {},
-  };
-  asyncSubagentsPiExtension(pi as never);
-
-  const w = workspace();
-  const ctx = {
-    cwd: w.root,
-    hasUI: false,
-    sessionManager: { getSessionId: () => w.parentRunId, getBranch: () => [] },
-    ui: { setStatus() {}, setWidget() {}, notify() {} },
-  };
-
-  await withFakeNow(baseNow, () => handlers.get("session_start")?.({}, ctx) as Promise<unknown>);
-  const identity = readRootSession({ cwd: w.root });
-  assert.ok(identity, "expected session_start to create a root session");
-  addRun({ store: w.store, root: w.root, parentRunId: identity.parentRunId, displayName: "Rex", state: "running", summary: "working" });
-
-  clockNow = baseNow + 2_000;
-  await withFakeNow(clockNow, () => {
-    renderClock.tick("manual");
-  });
-  clockNow = baseNow + 4_000;
-  await withFakeNow(clockNow, () => {
-    renderClock.tick("manual");
-  });
-
-  const activeEvents = herdrEvents.filter((event) => (event as { active?: unknown }).active === true);
-  assert.equal(activeEvents.length, 2);
-  assert.deepEqual(activeEvents.map((event) => (event as { activeCount?: unknown }).activeCount), [1, 1]);
-
-  await handlers.get("session_shutdown")?.({}, ctx);
-  assert.equal(renderClock.subscriberCount(), 0);
-});
-
 test("visual render-clock subscriber unsubscribes when time-dependent rows expire while polling stays subscribed", async () => {
   const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
   let clockNow = baseNow;
@@ -848,9 +741,7 @@ test("visual render-clock subscriber unsubscribes when time-dependent rows expir
   });
 
   const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown | Promise<unknown>>();
-  const herdrEvents: unknown[] = [];
   const pi = {
-    events: { emit(name: string, payload: unknown) { if (name === "herdr:async-subagents-state") herdrEvents.push(payload); } },
     on(name: string, handler: (event: unknown, ctx: unknown) => unknown | Promise<unknown>) { handlers.set(name, handler); },
     registerCommand() {},
     registerMessageRenderer() {},
@@ -869,8 +760,6 @@ test("visual render-clock subscriber unsubscribes when time-dependent rows expir
   };
 
   await withFakeNow(baseNow, () => handlers.get("session_start")?.({}, ctx) as Promise<unknown>);
-  assert.equal((herdrEvents.at(-1) as { active?: unknown; activeCount?: unknown }).active, false);
-  assert.equal((herdrEvents.at(-1) as { active?: unknown; activeCount?: unknown }).activeCount, 0);
   const identity = readRootSession({ cwd: w.root });
   assert.ok(identity, "expected session_start to create a root session");
   addRun({ store: w.store, root: w.root, parentRunId: identity.parentRunId, displayName: "Done", state: "completed", summary: "done", updatedAt: new Date(baseNow - 10_000).toISOString() });
@@ -880,8 +769,6 @@ test("visual render-clock subscriber unsubscribes when time-dependent rows expir
   await withFakeNow(clockNow, () => {
     renderClock.tick("manual");
   });
-  assert.equal((herdrEvents.at(-1) as { active?: unknown; activeCount?: unknown }).active, true);
-  assert.equal((herdrEvents.at(-1) as { active?: unknown; activeCount?: unknown }).activeCount, 1);
   assert.equal(renderClock.subscriberCount(), 3, "poll, lease, and visual subscribers should all be active");
 
   clockNow = baseNow + 52_000;
@@ -891,7 +778,6 @@ test("visual render-clock subscriber unsubscribes when time-dependent rows expir
   assert.equal(renderClock.subscriberCount(), 2, "visual subscriber should unsubscribe after terminal row expires");
 
   await handlers.get("session_shutdown")?.({}, ctx);
-  assert.deepEqual(herdrEvents.at(-1), { active: false, blocked: false, activeCount: 0 });
   assert.equal(renderClock.subscriberCount(), 0, "session shutdown should unsubscribe the poll and lease subscribers");
 });
 

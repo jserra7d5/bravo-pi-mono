@@ -43,6 +43,34 @@ injectable process-liveness probe) to `cancelled`/`failed` so they age out on
 resume; rows with unknown/unsignalable or missing pids are kept. The root-session
 lease is a non-render clock subscriber.
 
+### Herdr presentation overlay
+
+When the parent Pi process is running inside a Herdr-managed pane,
+async-subagents reports a short-lived Herdr metadata overlay with
+`pane.report_metadata`. This changes the visible status text under the Herdr
+pane title while child subagents are active, without taking lifecycle authority
+from Herdr's official Pi integration:
+
+- source: `bravo:async-subagents`
+- guarded to Pi panes with `agent = "pi"` and `applies_to_source = "herdr:pi"`
+- active text: `async working (N subagent[s])`
+- blocked text: `async blocked (N subagent[s])`
+- inactive state clears only the async-subagents metadata fields
+
+The overlay is display-only: async-subagents does **not** call
+`pane.report_agent`, does not change Herdr waits/rollups, and does not compete
+with `source = "herdr:pi"` for semantic `idle`/`working`/`blocked` authority.
+It is refreshed on the existing 2 s non-visual poll cadence with a 7 s TTL, so
+Herdr automatically drops the label if the parent Pi process exits before an
+inactive clear can be sent.
+
+The aggregate feeding that presentation is derived from canonical active/recent
+run summaries, not from the visual widget window, so old uncollected terminal
+results remain visible as active until handled. Before reporting it applies the
+same non-visual guards used by the widget path: dead process-owned rows are
+reconciled to terminal state, and terminal `resultReady` rows are kept active
+only while their wakeup is current.
+
 Inside each **child** Pi session the child-control extension is also a
 `@bravo/render-clock` subscriber rather than owning its own `setInterval`: its
 inbox poll (`async-child-inbox-poll`, 1 s) is a non-render subscriber that runs

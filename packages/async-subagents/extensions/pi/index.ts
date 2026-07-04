@@ -10,7 +10,8 @@ import { createRootSession, readRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import type { RootSessionIdentity, RunIndexRecord } from "../../src/types.js";
 import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from "./compactionReminder.js";
-import { clearLiveWidget, hasTimeDependentLiveWidgetItem, readHerdrAsyncSubagentsState, updateLiveWidget, type HerdrAsyncSubagentsState } from "./liveWidget.js";
+import { clearLiveWidget, hasTimeDependentLiveWidgetItem, readAsyncSubagentsActivityState, updateLiveWidget, type AsyncSubagentsActivityState } from "./liveWidget.js";
+import { reportHerdrAsyncSubagentsMetadata } from "./herdrMetadata.js";
 import { renderDiscoveredAgentCatalog } from "./agentCatalog.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
@@ -27,7 +28,10 @@ let leaseTimer: (() => void) | undefined;
 let currentCtx: ExtensionContext | undefined;
 let compactionInProgress = false;
 let manualCompactionWakeupCooldownUntil = 0;
-let lastHerdrStateSignature: string | undefined;
+let lastHerdrMetadataSignature: string | undefined;
+let herdrMetadataReportInFlight = false;
+let pendingHerdrMetadataReport: { state: AsyncSubagentsActivityState; signature: string } | undefined;
+let herdrMetadataReporter: (state: AsyncSubagentsActivityState) => Promise<boolean> = reportHerdrAsyncSubagentsMetadata;
 
 const MANUAL_COMPACTION_WAKEUP_COOLDOWN_MS = 5_000;
 
@@ -87,11 +91,11 @@ function refreshUi(ctx: ExtensionContext): void {
   if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, tasksEnabled: enabled });
 }
 
-function refreshHerdrState(pi: ExtensionAPI, ctx: ExtensionContext): void {
+function refreshHerdrPresentation(_pi: ExtensionAPI, ctx: ExtensionContext): void {
   const cwd = cwdOf(ctx);
   const identity = ensureRoot(cwd, piSessionIdOf(ctx));
   const store = new RunStore({ cwd });
-  emitCurrentHerdrAsyncSubagentsState(pi, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
+  reportCurrentAsyncSubagentsPresentation({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
 }
 
 function wakeupEnvelope(wakeup: WakeupMessage): string {
@@ -173,7 +177,7 @@ function tickAsyncTasksPoll(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const records = store.listActiveOrRecentRuns({ parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
   const enabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
   setTasksStatusBadge(ctx, enabled);
-  emitCurrentHerdrAsyncSubagentsState(pi, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId }, records);
+  reportCurrentAsyncSubagentsPresentation({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId }, records);
   if (Date.now() >= manualCompactionWakeupCooldownUntil) {
     pollAndSendWakeups(pi, store, identity, records, { triggerTurn: true, tasksEnabled: enabled });
   }
@@ -275,32 +279,64 @@ function setTasksStatusBadge(ctx: ExtensionContext | ExtensionCommandContext, en
   setStatusIfChanged(ui, "tasks", `tasks:${enabled ? "on" : "off"}`);
 }
 
-type PiEventEmitter = { events?: { emit?: (name: string, payload: unknown) => unknown } };
-
-function emitHerdrAsyncSubagentsState(pi: ExtensionAPI, payload: HerdrAsyncSubagentsState, options: { force?: boolean } = {}): void {
-  const emit = (pi as PiEventEmitter).events?.emit;
-  if (typeof emit !== "function") return;
-  const signature = JSON.stringify(payload);
-  if (!options.force && signature === lastHerdrStateSignature) return;
-  try {
-    emit.call((pi as PiEventEmitter).events, "herdr:async-subagents-state", payload);
-    lastHerdrStateSignature = signature;
-  } catch {
-    // Herdr's event bridge is opportunistic; async-subagents must keep working
-    // if an older or incompatible Pi event implementation rejects the emit.
-  }
+function drainHerdrMetadataReports(): void {
+  if (herdrMetadataReportInFlight || !pendingHerdrMetadataReport) return;
+  const report = pendingHerdrMetadataReport;
+  pendingHerdrMetadataReport = undefined;
+  herdrMetadataReportInFlight = true;
+  let drainAgain = false;
+  void herdrMetadataReporter(report.state)
+    .then((delivered) => {
+      if (delivered) {
+        lastHerdrMetadataSignature = report.signature;
+        drainAgain = pendingHerdrMetadataReport !== undefined;
+      } else if (pendingHerdrMetadataReport) {
+        drainAgain = true;
+      } else {
+        pendingHerdrMetadataReport = report;
+      }
+    })
+    .finally(() => {
+      herdrMetadataReportInFlight = false;
+      if (drainAgain) drainHerdrMetadataReports();
+    });
 }
 
-function emitCurrentHerdrAsyncSubagentsState(pi: ExtensionAPI, input: { store: RunStore; parentRunId?: string; rootSessionId?: string }, records?: RunIndexRecord[]): void {
-  const state = readHerdrAsyncSubagentsState({ ...input, records });
-  // Herdr treats active async state as a lease with a stale-state TTL. Keep active
-  // states refreshed on the existing poll cadence; inactive states can still be
-  // de-duped because they clear Herdr's overlay rather than extend a lease.
-  emitHerdrAsyncSubagentsState(pi, state, { force: state.active });
+function reportHerdrMetadataState(state: AsyncSubagentsActivityState, options: { force?: boolean } = {}): void {
+  const signature = JSON.stringify(state);
+  // Active metadata is a lease and must be refreshed on the poll cadence so its
+  // TTL stays alive. Inactive clears can be de-duped after one successful send.
+  if (!options.force && signature === lastHerdrMetadataSignature) return;
+  pendingHerdrMetadataReport = { state, signature };
+  drainHerdrMetadataReports();
 }
 
-function emitInactiveHerdrAsyncSubagentsState(pi: ExtensionAPI): void {
-  emitHerdrAsyncSubagentsState(pi, { active: false, blocked: false, activeCount: 0 }, { force: true });
+function reportCurrentAsyncSubagentsPresentation(input: { store: RunStore; parentRunId?: string; rootSessionId?: string }, records?: RunIndexRecord[]): void {
+  const state = readAsyncSubagentsActivityState({ ...input, records });
+  reportHerdrMetadataState(state, { force: state.active });
+}
+
+function reportInactiveAsyncSubagentsPresentation(): void {
+  reportHerdrMetadataState({ active: false, blocked: false, activeCount: 0 }, { force: true });
+}
+
+export function __setHerdrMetadataReporterForTest(reporter: (state: AsyncSubagentsActivityState) => Promise<boolean>): () => void {
+  const previous = herdrMetadataReporter;
+  herdrMetadataReporter = reporter;
+  return () => {
+    herdrMetadataReporter = previous;
+  };
+}
+
+export function __resetHerdrMetadataSchedulerForTest(): void {
+  lastHerdrMetadataSignature = undefined;
+  herdrMetadataReportInFlight = false;
+  pendingHerdrMetadataReport = undefined;
+  herdrMetadataReporter = reportHerdrAsyncSubagentsMetadata;
+}
+
+export function __reportHerdrMetadataStateForTest(state: AsyncSubagentsActivityState, options: { force?: boolean } = {}): void {
+  reportHerdrMetadataState(state, options);
 }
 
 // Test-only seam export for the status badge value-gating invariant.
@@ -472,8 +508,8 @@ function stopTimers(pi?: ExtensionAPI, ctx?: ExtensionContext): void {
     clearLiveWidget(ctx);
   }
   currentCtx = undefined;
-  if (pi) emitInactiveHerdrAsyncSubagentsState(pi);
-  lastHerdrStateSignature = undefined;
+  if (pi) reportInactiveAsyncSubagentsPresentation();
+  lastHerdrMetadataSignature = undefined;
 }
 
 export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
@@ -490,7 +526,7 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
     afterMutation(ctx) {
       if (ctx) {
         refreshUi(ctx as ExtensionContext);
-        refreshHerdrState(pi, ctx as ExtensionContext);
+        refreshHerdrPresentation(pi, ctx as ExtensionContext);
       }
     },
   };
