@@ -786,6 +786,58 @@ test("Herdr event emit retries the same state after a transient emit failure", a
   assert.equal(renderClock.subscriberCount(), 0);
 });
 
+test("Herdr active async state is emitted as a heartbeat on each poll tick", async () => {
+  const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
+  let clockNow = baseNow;
+  __resetRenderClockForTest({
+    now: () => clockNow,
+    setInterval: () => ({ unref() {} }),
+    clearInterval() {},
+  });
+
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown | Promise<unknown>>();
+  const herdrEvents: unknown[] = [];
+  const pi = {
+    events: { emit(name: string, payload: unknown) { if (name === "herdr:async-subagents-state") herdrEvents.push(payload); } },
+    on(name: string, handler: (event: unknown, ctx: unknown) => unknown | Promise<unknown>) { handlers.set(name, handler); },
+    registerCommand() {},
+    registerMessageRenderer() {},
+    registerTool() {},
+    sendMessage() {},
+    appendEntry() {},
+  };
+  asyncSubagentsPiExtension(pi as never);
+
+  const w = workspace();
+  const ctx = {
+    cwd: w.root,
+    hasUI: false,
+    sessionManager: { getSessionId: () => w.parentRunId, getBranch: () => [] },
+    ui: { setStatus() {}, setWidget() {}, notify() {} },
+  };
+
+  await withFakeNow(baseNow, () => handlers.get("session_start")?.({}, ctx) as Promise<unknown>);
+  const identity = readRootSession({ cwd: w.root });
+  assert.ok(identity, "expected session_start to create a root session");
+  addRun({ store: w.store, root: w.root, parentRunId: identity.parentRunId, displayName: "Rex", state: "running", summary: "working" });
+
+  clockNow = baseNow + 2_000;
+  await withFakeNow(clockNow, () => {
+    renderClock.tick("manual");
+  });
+  clockNow = baseNow + 4_000;
+  await withFakeNow(clockNow, () => {
+    renderClock.tick("manual");
+  });
+
+  const activeEvents = herdrEvents.filter((event) => (event as { active?: unknown }).active === true);
+  assert.equal(activeEvents.length, 2);
+  assert.deepEqual(activeEvents.map((event) => (event as { activeCount?: unknown }).activeCount), [1, 1]);
+
+  await handlers.get("session_shutdown")?.({}, ctx);
+  assert.equal(renderClock.subscriberCount(), 0);
+});
+
 test("visual render-clock subscriber unsubscribes when time-dependent rows expire while polling stays subscribed", async () => {
   const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
   let clockNow = baseNow;

@@ -292,7 +292,11 @@ function emitHerdrAsyncSubagentsState(pi: ExtensionAPI, payload: HerdrAsyncSubag
 }
 
 function emitCurrentHerdrAsyncSubagentsState(pi: ExtensionAPI, input: { store: RunStore; parentRunId?: string; rootSessionId?: string }, records?: RunIndexRecord[]): void {
-  emitHerdrAsyncSubagentsState(pi, readHerdrAsyncSubagentsState({ ...input, records }));
+  const state = readHerdrAsyncSubagentsState({ ...input, records });
+  // Herdr treats active async state as a lease with a stale-state TTL. Keep active
+  // states refreshed on the existing poll cadence; inactive states can still be
+  // de-duped because they clear Herdr's overlay rather than extend a lease.
+  emitHerdrAsyncSubagentsState(pi, state, { force: state.active });
 }
 
 function emitInactiveHerdrAsyncSubagentsState(pi: ExtensionAPI): void {
