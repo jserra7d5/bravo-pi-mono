@@ -18,6 +18,15 @@ export interface LiveWidgetSnapshot {
   visibleTasks: TaskRecord[];
 }
 
+export interface HerdrAsyncSubagentsState {
+  active: boolean;
+  blocked: boolean;
+  activeCount: number;
+  message?: string;
+  rootSessionId?: string;
+  parentRunId?: string;
+}
+
 export type PidProbeResult = "alive" | "dead" | "unknown";
 export type PidProber = (pid: number) => PidProbeResult;
 
@@ -44,6 +53,41 @@ const TERMINAL_STATES = new Set(["completed", "failed", "cancelled", "expired"])
 
 function isTerminal(row: RunSummaryRow): boolean {
   return TERMINAL_STATES.has(row.state);
+}
+
+function rowKeepsHerdrActive(row: RunSummaryRow): boolean {
+  return !isTerminal(row) || row.resultReady;
+}
+
+export function deriveHerdrAsyncSubagentsState(input: { rows: RunSummaryRow[]; rootSessionId?: string; parentRunId?: string }): HerdrAsyncSubagentsState {
+  const activeRows = input.rows.filter(rowKeepsHerdrActive);
+  const blockedRows = activeRows.filter((row) => row.state === "waiting_for_input" || row.state === "blocked");
+  const activeCount = activeRows.length;
+  const firstBlocked = blockedRows[0];
+  const message = firstBlocked?.summary || firstBlocked?.needs || (activeCount > 0 ? `${activeCount} async subagent${activeCount === 1 ? "" : "s"} active` : undefined);
+  return {
+    active: activeCount > 0,
+    blocked: blockedRows.length > 0,
+    activeCount,
+    ...(message ? { message } : {}),
+    ...(input.rootSessionId ? { rootSessionId: input.rootSessionId } : {}),
+    ...(input.parentRunId ? { parentRunId: input.parentRunId } : {}),
+  };
+}
+
+export function readHerdrAsyncSubagentsState(input: Pick<LiveWidgetInput, "store" | "parentRunId" | "rootSessionId" | "records" | "terminalCompletedVisibleMs" | "pidProber" | "renderNow">): HerdrAsyncSubagentsState {
+  const now = input.renderNow ?? Date.now();
+  const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
+  const records = input.records ?? input.store.listActiveOrRecentRuns({ parentRunId: input.parentRunId, rootSessionId: input.rootSessionId });
+  const snapshot = readWatcherSnapshot(input.store, {
+    parentRunId: input.parentRunId,
+    rootSessionId: input.rootSessionId,
+    records,
+  });
+  const rows = snapshot.rows
+    .map((row) => reconcileDeadProcessOwnedLiveRow(input, row, now, terminalCompletedVisibleMs))
+    .map((row) => rowWithCurrentResultReady(input, row));
+  return deriveHerdrAsyncSubagentsState({ rows, rootSessionId: input.rootSessionId, parentRunId: input.parentRunId });
 }
 
 function visibleState(state: string, updatedAt: string, now: number, terminalCompletedVisibleMs: number): boolean {

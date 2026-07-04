@@ -10,7 +10,7 @@ import { createRootSession, readRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import type { RootSessionIdentity, RunIndexRecord } from "../../src/types.js";
 import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from "./compactionReminder.js";
-import { clearLiveWidget, hasTimeDependentLiveWidgetItem, updateLiveWidget } from "./liveWidget.js";
+import { clearLiveWidget, hasTimeDependentLiveWidgetItem, readHerdrAsyncSubagentsState, updateLiveWidget, type HerdrAsyncSubagentsState } from "./liveWidget.js";
 import { renderDiscoveredAgentCatalog } from "./agentCatalog.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
@@ -27,6 +27,7 @@ let leaseTimer: (() => void) | undefined;
 let currentCtx: ExtensionContext | undefined;
 let compactionInProgress = false;
 let manualCompactionWakeupCooldownUntil = 0;
+let lastHerdrStateSignature: string | undefined;
 
 const MANUAL_COMPACTION_WAKEUP_COOLDOWN_MS = 5_000;
 
@@ -84,6 +85,13 @@ function refreshUi(ctx: ExtensionContext): void {
   const enabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
   setTasksStatusBadge(ctx, enabled);
   if (ctx.hasUI) updateLiveWidget(ctx, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, tasksEnabled: enabled });
+}
+
+function refreshHerdrState(pi: ExtensionAPI, ctx: ExtensionContext): void {
+  const cwd = cwdOf(ctx);
+  const identity = ensureRoot(cwd, piSessionIdOf(ctx));
+  const store = new RunStore({ cwd });
+  emitCurrentHerdrAsyncSubagentsState(pi, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
 }
 
 function wakeupEnvelope(wakeup: WakeupMessage): string {
@@ -165,6 +173,7 @@ function tickAsyncTasksPoll(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const records = store.listActiveOrRecentRuns({ parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId });
   const enabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
   setTasksStatusBadge(ctx, enabled);
+  emitCurrentHerdrAsyncSubagentsState(pi, { store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId }, records);
   if (Date.now() >= manualCompactionWakeupCooldownUntil) {
     pollAndSendWakeups(pi, store, identity, records, { triggerTurn: true, tasksEnabled: enabled });
   }
@@ -264,6 +273,30 @@ function setStatusIfChanged(ui: StatusUi | undefined, key: string, value: string
 function setTasksStatusBadge(ctx: ExtensionContext | ExtensionCommandContext, enabled: boolean): void {
   const ui = (ctx as { ui?: StatusUi }).ui;
   setStatusIfChanged(ui, "tasks", `tasks:${enabled ? "on" : "off"}`);
+}
+
+type PiEventEmitter = { events?: { emit?: (name: string, payload: unknown) => unknown } };
+
+function emitHerdrAsyncSubagentsState(pi: ExtensionAPI, payload: HerdrAsyncSubagentsState, options: { force?: boolean } = {}): void {
+  const emit = (pi as PiEventEmitter).events?.emit;
+  if (typeof emit !== "function") return;
+  const signature = JSON.stringify(payload);
+  if (!options.force && signature === lastHerdrStateSignature) return;
+  try {
+    emit.call((pi as PiEventEmitter).events, "herdr:async-subagents-state", payload);
+    lastHerdrStateSignature = signature;
+  } catch {
+    // Herdr's event bridge is opportunistic; async-subagents must keep working
+    // if an older or incompatible Pi event implementation rejects the emit.
+  }
+}
+
+function emitCurrentHerdrAsyncSubagentsState(pi: ExtensionAPI, input: { store: RunStore; parentRunId?: string; rootSessionId?: string }, records?: RunIndexRecord[]): void {
+  emitHerdrAsyncSubagentsState(pi, readHerdrAsyncSubagentsState({ ...input, records }));
+}
+
+function emitInactiveHerdrAsyncSubagentsState(pi: ExtensionAPI): void {
+  emitHerdrAsyncSubagentsState(pi, { active: false, blocked: false, activeCount: 0 }, { force: true });
 }
 
 // Test-only seam export for the status badge value-gating invariant.
@@ -424,7 +457,7 @@ function startTimers(pi: ExtensionAPI, ctx: ExtensionContext): void {
   });
 }
 
-function stopTimers(ctx?: ExtensionContext): void {
+function stopTimers(pi?: ExtensionAPI, ctx?: ExtensionContext): void {
   leaseTimer?.();
   pollClockUnsubscribe?.();
   visualClockUnsubscribe?.();
@@ -435,6 +468,8 @@ function stopTimers(ctx?: ExtensionContext): void {
     clearLiveWidget(ctx);
   }
   currentCtx = undefined;
+  if (pi) emitInactiveHerdrAsyncSubagentsState(pi);
+  lastHerdrStateSignature = undefined;
 }
 
 export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
@@ -449,7 +484,10 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
       return tasksEnabled(cwd, rootSessionId);
     },
     afterMutation(ctx) {
-      if (ctx) refreshUi(ctx as ExtensionContext);
+      if (ctx) {
+        refreshUi(ctx as ExtensionContext);
+        refreshHerdrState(pi, ctx as ExtensionContext);
+      }
     },
   };
 
@@ -474,7 +512,7 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", async (_event, ctx) => {
-    stopTimers();
+    stopTimers(pi);
     await restoreTaskRuntimeMode(ctx);
     startTimers(pi, ctx);
   });
@@ -482,7 +520,7 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   pi.on("session_tree", async (_event, ctx) => restoreTaskRuntimeMode(ctx));
 
   pi.on("session_shutdown", async () => {
-    stopTimers(currentCtx);
+    stopTimers(pi, currentCtx);
   });
 
   pi.on("session_compact", async (event, ctx) => {
