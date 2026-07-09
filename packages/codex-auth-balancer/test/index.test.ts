@@ -456,6 +456,22 @@ test('balanced provider mirrors installed openai-codex models with public provid
   assert.ok(models.every(model => model.api === 'openai-codex-responses'));
 });
 
+test('balanced provider exposes supplemental gpt-5.6 Codex models with current context and native Pi effort metadata', () => {
+  const models = getBalancedCodexModels();
+  const ids = models.map(model => model.id);
+  for (const id of [
+    'bravo-codex-balanced/gpt-5.6-sol',
+    'bravo-codex-balanced/gpt-5.6-terra',
+    'bravo-codex-balanced/gpt-5.6-luna',
+  ]) {
+    assert.equal(ids.filter(modelId => modelId === id).length, 1, `${id} should appear exactly once`);
+    const model = models.find(model => model.id === id);
+    assert.ok(model, `${id} missing`);
+    assert.equal(model.contextWindow, 372000);
+    assert.equal(model.thinkingLevelMap?.xhigh, 'xhigh');
+  }
+});
+
 test('balanced provider defaults to SSE so response headers ingest live usage', async () => {
   const root = await tmp();
   const oldHome = process.env.CODEX_AUTH_BALANCER_HOME;
