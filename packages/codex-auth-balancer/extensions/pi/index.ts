@@ -39,15 +39,12 @@ const API = 'openai-codex-responses' as const;
 const DEFAULT_EXPECTED_RUNTIME_MS = 10 * 60_000;
 const DEFAULT_TTL_SAFETY_BUFFER_MS = 60_000;
 
-const SUPPLEMENTAL_CODEX_MODELS = [
-  { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
-  { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra' },
-  { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
-] as const;
-
-const DEFAULT_CODEX_BASE_URL = 'https://chatgpt.com/backend-api';
-const GPT_5_6_CONTEXT_WINDOW = 372000;
-const GPT_5_6_THINKING_LEVEL_MAP = { minimal: 'low' } as const;
+const GPT_5_6_CODEX_MODEL_IDS = new Set([
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
+]);
+const GPT_5_6_CODEX_CONTEXT_WINDOW = 372000;
 
 function publicModelId(model: Model<typeof API>): string {
   return model.id.startsWith(`${PROVIDER}/`) ? model.id : `${PROVIDER}/${model.id}`;
@@ -425,32 +422,17 @@ async function runBalanced(
   }
 }
 
-function supplementalCodexModels(models: Model<typeof API>[]): Model<typeof API>[] {
-  const existingIds = new Set(models.map(model => upstreamModelId(model)));
-  const template = models.find(model => upstreamModelId(model) === 'gpt-5.5') ?? models.find(model => upstreamModelId(model) === 'gpt-5.4') ?? models[0];
-  if (!template) return [];
-
-  return SUPPLEMENTAL_CODEX_MODELS
-    .filter(model => !existingIds.has(model.id))
-    .map(model => ({
-      ...template,
-      id: model.id,
-      name: model.name,
-      provider: UPSTREAM_PROVIDER,
-      api: API,
-      baseUrl: template.baseUrl || DEFAULT_CODEX_BASE_URL,
-      reasoning: true,
-      thinkingLevelMap: { ...template.thinkingLevelMap, ...GPT_5_6_THINKING_LEVEL_MAP },
-      input: template.input ?? ['text', 'image'],
-      contextWindow: GPT_5_6_CONTEXT_WINDOW,
-      maxTokens: template.maxTokens ?? 128000,
-      cost: template.cost ?? { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
-    }));
+export function mapBalancedCodexModels(models: Model<typeof API>[]): Model<typeof API>[] {
+  return models.map((upstream) => {
+    const corrected = GPT_5_6_CODEX_MODEL_IDS.has(upstreamModelId(upstream))
+      ? { ...upstream, contextWindow: GPT_5_6_CODEX_CONTEXT_WINDOW }
+      : upstream;
+    return publicModel(corrected);
+  });
 }
 
 export function getBalancedCodexModels(): Model<typeof API>[] {
-  const upstreamModels = getModels('openai-codex').map((model) => model as Model<typeof API>);
-  return [...upstreamModels, ...supplementalCodexModels(upstreamModels)].map(publicModel);
+  return mapBalancedCodexModels(getModels('openai-codex').map((model) => model as Model<typeof API>));
 }
 
 export function registerBalancedProvider(pi: ExtensionAPI): void {

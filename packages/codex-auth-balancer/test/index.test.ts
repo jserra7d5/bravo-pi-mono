@@ -8,7 +8,8 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { cleanupLaunch, finishTokenLease, getDbStatus, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, isProcessAlive, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, shouldStealRefreshLock, startTokenLease, syncBack, unbrickSlot } from '../src/index.js';
-import codexBalancedProvider, { getBalancedCodexModels } from '../extensions/pi/index.js';
+import codexBalancedProvider, { getBalancedCodexModels, mapBalancedCodexModels } from '../extensions/pi/index.js';
+import { getModels } from '@earendil-works/pi-ai';
 import { openaiCodexOAuthProvider } from '@earendil-works/pi-ai/oauth';
 
 const exec = promisify(execFile);
@@ -448,27 +449,45 @@ test('syncBack does NOT regress to an older or claimless child on conflict', asy
   }
 });
 
-test('balanced provider mirrors installed openai-codex models with public provider id', () => {
-  const models = getBalancedCodexModels();
-  assert.ok(models.length > 0);
-  assert.ok(models.every(model => model.provider === 'bravo-codex-balanced'));
-  assert.ok(models.every(model => model.id.startsWith('bravo-codex-balanced/')));
-  assert.ok(models.every(model => model.api === 'openai-codex-responses'));
+test('balanced provider mirrors the installed openai-codex catalog exactly', () => {
+  const native = getModels('openai-codex');
+  const balanced = getBalancedCodexModels();
+  assert.ok(native.length > 0);
+  assert.deepEqual(
+    balanced.map(model => model.id),
+    native.map(model => `bravo-codex-balanced/${model.id}`),
+  );
 });
 
-test('balanced provider exposes supplemental gpt-5.6 Codex models with current context and native Pi effort metadata', () => {
-  const models = getBalancedCodexModels();
-  const ids = models.map(model => model.id);
-  for (const id of [
-    'bravo-codex-balanced/gpt-5.6-sol',
-    'bravo-codex-balanced/gpt-5.6-terra',
-    'bravo-codex-balanced/gpt-5.6-luna',
-  ]) {
-    assert.equal(ids.filter(modelId => modelId === id).length, 1, `${id} should appear exactly once`);
-    const model = models.find(model => model.id === id);
-    assert.ok(model, `${id} missing`);
-    assert.equal(model.contextWindow, 372000);
-    assert.equal(model.thinkingLevelMap?.xhigh, 'xhigh');
+test('balanced catalog transform corrects only native Codex GPT-5.6 context metadata', () => {
+  const native = [
+    { id: 'gpt-5.5', name: 'GPT-5.5', contextWindow: 272000, maxTokens: 128000, cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 } },
+    { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', contextWindow: 272000, maxTokens: 128000, cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 } },
+    { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', contextWindow: 272000, maxTokens: 128000, cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 } },
+    { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', contextWindow: 272000, maxTokens: 128000, cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 } },
+    { id: 'gpt-5.6-experimental', name: 'GPT-5.6 Experimental', contextWindow: 272000, maxTokens: 64000, cost: { input: 3, output: 18, cacheRead: 0.3, cacheWrite: 0 } },
+  ].map(model => ({
+    ...model,
+    provider: 'openai-codex',
+    api: 'openai-codex-responses',
+    baseUrl: 'https://chatgpt.com/backend-api',
+    reasoning: true,
+    thinkingLevelMap: { xhigh: 'xhigh', minimal: 'low' },
+    input: ['text', 'image'],
+  })) as any;
+
+  const correctedIds = new Set(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
+  const balanced = mapBalancedCodexModels(native);
+  assert.deepEqual(balanced.map(model => model.id), native.map((model: any) => `bravo-codex-balanced/${model.id}`));
+  for (const [index, model] of balanced.entries()) {
+    const upstream = native[index]!;
+    assert.deepEqual(model, {
+      ...upstream,
+      id: `bravo-codex-balanced/${upstream.id}`,
+      provider: 'bravo-codex-balanced',
+      api: 'openai-codex-responses',
+      contextWindow: correctedIds.has(upstream.id) ? 372000 : upstream.contextWindow,
+    });
   }
 });
 
