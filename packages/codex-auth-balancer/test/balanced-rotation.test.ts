@@ -59,6 +59,253 @@ async function collect(stream: AsyncIterable<any>) {
   return events;
 }
 
+test('temporary sanitizer hides standalone OpenAI reasoning comment markers but preserves replay signatures', async () => {
+  const signature = JSON.stringify({ summary: [{ text: '**Planning**\n\n<!-- -->' }], encrypted_content: 'opaque' });
+  const thinkingMessage = (thinking: string) => fakeMsg({
+    content: [{ type: 'thinking', thinking, thinkingSignature: signature }],
+  });
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => ({
+      schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose,
+      lease_id: 'lease-1', access_token: 'tok_slot1_xxxxxxxx', slot: '1', label: '1',
+      expires_at: 0, reservation_id: 'res-1', launch_id: 'launch-1',
+    } as any),
+    finishLease: async () => ({} as any),
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }],
+    ingestUsage: async () => ({} as any),
+    createUpstream: ((_model: any, _context: any, options: any) => (async function* () {
+      await options.onResponse?.({ status: 200, headers: {} }, _model);
+      yield { type: 'thinking_start', contentIndex: 0, partial: thinkingMessage('') };
+      yield { type: 'thinking_delta', contentIndex: 0, delta: '**Planning**\n\n<!--', partial: thinkingMessage('**Planning**\n\n<!--') };
+      yield { type: 'thinking_delta', contentIndex: 0, delta: ' -->', partial: thinkingMessage('**Planning**\n\n<!-- -->') };
+      yield { type: 'thinking_end', contentIndex: 0, content: '**Planning**\n\n<!-- -->', partial: thinkingMessage('**Planning**\n\n<!-- -->') };
+      yield { type: 'done', reason: 'stop', message: thinkingMessage('**Planning**\n\n<!-- -->') };
+    })()) as any,
+    sleep: async () => {}, rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+  };
+
+  const events = await collect(createBalancedStreamRunner(deps)(MODEL, { messages: [] } as any, { sessionId: 's1' } as any));
+  const thinkingEvents = events.filter(event => event.type === 'thinking_delta' || event.type === 'thinking_end');
+  const done = events.find(event => event.type === 'done');
+  const finalBlock = done.message.content[0];
+
+  assert.ok(thinkingEvents.every(event => {
+    const text = event.type === 'thinking_delta' ? event.delta : event.content;
+    return !text.includes('<!--') && !text.includes('-->');
+  }), 'no complete or partial marker may reach the streamed reasoning consumer');
+  assert.equal(finalBlock.thinking, '**Planning**\n\n');
+  assert.equal(finalBlock.thinkingSignature, signature, 'signed replay payload remains byte-for-byte intact');
+  assert.match(finalBlock.thinkingSignature, /<!-- -->/, 'the sanitizer only changes visible reasoning');
+});
+
+test('temporary sanitizer suppresses a split standalone marker after a single newline', async () => {
+  const thinkingMessage = (thinking: string) => fakeMsg({ content: [{ type: 'thinking', thinking }] });
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => ({
+      schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose,
+      lease_id: 'lease-1', access_token: 'tok_slot1_xxxxxxxx', slot: '1', label: '1',
+      expires_at: 0, reservation_id: 'res-1', launch_id: 'launch-1',
+    } as any),
+    finishLease: async () => ({} as any),
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }],
+    ingestUsage: async () => ({} as any),
+    createUpstream: (() => (async function* () {
+      yield { type: 'thinking_start', contentIndex: 0, partial: thinkingMessage('') };
+      yield { type: 'thinking_delta', contentIndex: 0, delta: 'Plan\n<!--', partial: thinkingMessage('Plan\n<!--') };
+      yield { type: 'thinking_delta', contentIndex: 0, delta: ' -->', partial: thinkingMessage('Plan\n<!-- -->') };
+      yield { type: 'thinking_end', contentIndex: 0, content: 'Plan\n<!-- -->', partial: thinkingMessage('Plan\n<!-- -->') };
+      yield { type: 'done', reason: 'stop', message: thinkingMessage('Plan\n<!-- -->') };
+    })()) as any,
+    sleep: async () => {}, rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+  };
+
+  const events = await collect(createBalancedStreamRunner(deps)(MODEL, { messages: [] } as any, { sessionId: 's1' } as any));
+  const deltas = events.filter(event => event.type === 'thinking_delta').map(event => event.delta);
+  assert.deepEqual(deltas, ['Plan\n', '']);
+  assert.ok(deltas.every(delta => !delta.includes('<!--') && !delta.includes('-->')));
+  assert.equal(events.find(event => event.type === 'thinking_end').content, 'Plan\n');
+  assert.equal(events.find(event => event.type === 'done').message.content[0].thinking, 'Plan\n');
+});
+
+test('temporary sanitizer flushes every incomplete marker prefix at stream end', async () => {
+  for (let length = 1; length < '<!-- -->'.length; length++) {
+    const reasoning = `Plan\n${'<!-- -->'.slice(0, length)}`;
+    const message = fakeMsg({ content: [{ type: 'thinking', thinking: reasoning }] });
+    const deps: Partial<BalancedRunnerDeps> = {
+      startLease: async (input: any) => ({
+        schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose,
+        lease_id: 'lease-1', access_token: 'tok_slot1_xxxxxxxx', slot: '1', label: '1',
+        expires_at: 0, reservation_id: 'res-1', launch_id: 'launch-1',
+      } as any),
+      finishLease: async () => ({} as any),
+      listSlots: async () => [{ slot: '1', primaryRemaining: 80 }],
+      ingestUsage: async () => ({} as any),
+      createUpstream: (() => (async function* () {
+        yield { type: 'thinking_start', contentIndex: 0, partial: fakeMsg({ content: [{ type: 'thinking', thinking: '' }] }) };
+        yield { type: 'thinking_delta', contentIndex: 0, delta: reasoning, partial: message };
+        yield { type: 'thinking_end', contentIndex: 0, content: reasoning, partial: message };
+        yield { type: 'done', reason: 'stop', message };
+      })()) as any,
+      sleep: async () => {}, rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+    };
+
+    const events = await collect(createBalancedStreamRunner(deps)(MODEL, { messages: [] } as any, { sessionId: 's1' } as any));
+    const deltas = events.filter(event => event.type === 'thinking_delta').map(event => event.delta).join('');
+    assert.equal(deltas, reasoning, `prefix length ${length} must flush`);
+    assert.equal(events.find(event => event.type === 'thinking_end').content, reasoning);
+    assert.equal(events.find(event => event.type === 'done').message.content[0].thinking, reasoning);
+  }
+});
+
+test('temporary sanitizer flushes buffered legitimate bytes on terminal events without thinking_end', async () => {
+  for (const terminal of ['done', 'error'] as const) {
+    const reasoning = 'Plan\n<!--';
+    const thinkingMessage = (thinking: string) => fakeMsg({
+      content: [{ type: 'thinking', thinking }],
+      ...(terminal === 'error' ? { stopReason: 'error', errorMessage: 'upstream failed' } : {}),
+    });
+    const deps: Partial<BalancedRunnerDeps> = {
+      startLease: async (input: any) => ({
+        schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose,
+        lease_id: 'lease-1', access_token: 'tok_slot1_xxxxxxxx', slot: '1', label: '1',
+        expires_at: 0, reservation_id: 'res-1', launch_id: 'launch-1',
+      } as any),
+      finishLease: async () => ({} as any),
+      listSlots: async () => [{ slot: '1', primaryRemaining: 80 }],
+      ingestUsage: async () => ({} as any),
+      createUpstream: (() => (async function* () {
+        yield { type: 'thinking_start', contentIndex: 0, partial: thinkingMessage('') };
+        yield { type: 'thinking_delta', contentIndex: 0, delta: reasoning, partial: thinkingMessage(reasoning) };
+        if (terminal === 'done') yield { type: 'done', reason: 'stop', message: thinkingMessage(reasoning) };
+        else yield { type: 'error', reason: 'error', error: thinkingMessage(reasoning) };
+      })()) as any,
+      sleep: async () => {}, rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+    };
+
+    const events = await collect(createBalancedStreamRunner(deps)(MODEL, { messages: [] } as any, { sessionId: 's1' } as any));
+    assert.equal(events.filter(event => event.type === 'thinking_delta').map(event => event.delta).join(''), reasoning);
+    assert.equal(events.find(event => event.type === terminal)[terminal === 'done' ? 'message' : 'error'].content[0].thinking, reasoning);
+  }
+});
+
+test('temporary sanitizer preserves buffered bytes through locally synthesized terminal errors', async () => {
+  for (const mode of ['abort', 'throw', 'eof'] as const) {
+    const controller = new AbortController();
+    const reasoning = 'Plan\n<!--';
+    const thinkingMessage = (thinking: string) => fakeMsg({ content: [{ type: 'thinking', thinking }] });
+    const deps: Partial<BalancedRunnerDeps> = {
+      startLease: async (input: any) => ({
+        schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose,
+        lease_id: 'lease-1', access_token: 'tok_slot1_xxxxxxxx', slot: '1', label: '1',
+        expires_at: 0, reservation_id: 'res-1', launch_id: 'launch-1',
+      } as any),
+      finishLease: async () => ({} as any),
+      listSlots: async () => [{ slot: '1', primaryRemaining: 80 }],
+      ingestUsage: async () => ({} as any),
+      createUpstream: (() => (async function* () {
+        yield { type: 'start', partial: thinkingMessage('') };
+        yield { type: 'thinking_start', contentIndex: 0, partial: thinkingMessage('') };
+        yield { type: 'thinking_delta', contentIndex: 0, delta: reasoning, partial: thinkingMessage(reasoning) };
+        if (mode === 'abort') {
+          controller.abort();
+          yield { type: 'done', reason: 'stop', message: thinkingMessage(reasoning) };
+        } else if (mode === 'throw') {
+          throw new Error('iterator failed');
+        }
+      })()) as any,
+      sleep: async () => {}, rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+    };
+
+    const events = await collect(createBalancedStreamRunner(deps)(
+      MODEL,
+      { messages: [] } as any,
+      { sessionId: 's1', signal: controller.signal } as any,
+    ));
+    const terminal = events.find(event => event.type === 'error');
+    assert.equal(events.filter(event => event.type === 'thinking_delta').map(event => event.delta).join(''), reasoning, mode);
+    assert.equal(terminal.error.content[0].thinking, reasoning, mode);
+    assert.equal(terminal.reason, mode === 'abort' ? 'aborted' : 'error', mode);
+  }
+});
+
+test('temporary sanitizer buffers only the active thinking block', async () => {
+  const first = { type: 'thinking', thinking: 'Legitimate suffix <!--' };
+  const second = { type: 'thinking', thinking: '<!--' };
+  const partial = fakeMsg({ content: [first, second] });
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => ({
+      schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose,
+      lease_id: 'lease-1', access_token: 'tok_slot1_xxxxxxxx', slot: '1', label: '1',
+      expires_at: 0, reservation_id: 'res-1', launch_id: 'launch-1',
+    } as any),
+    finishLease: async () => ({} as any),
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }],
+    ingestUsage: async () => ({} as any),
+    createUpstream: (() => (async function* () {
+      yield { type: 'thinking_start', contentIndex: 1, partial: fakeMsg({ content: [first, { type: 'thinking', thinking: '' }] }) };
+      yield { type: 'thinking_delta', contentIndex: 1, delta: '<!--', partial };
+      yield { type: 'thinking_end', contentIndex: 1, content: '<!--', partial };
+      yield { type: 'done', reason: 'stop', message: partial };
+    })()) as any,
+    sleep: async () => {}, rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+  };
+
+  const events = await collect(createBalancedStreamRunner(deps)(MODEL, { messages: [] } as any, { sessionId: 's1' } as any));
+  const deltaEvent = events.find(event => event.type === 'thinking_delta' && event.contentIndex === 1 && event.delta === '');
+  assert.equal(deltaEvent.partial.content[0].thinking, first.thinking);
+  assert.equal(events.filter(event => event.type === 'thinking_delta').map(event => event.delta).join(''), '<!--');
+});
+
+test('temporary sanitizer suppresses a marker-only reasoning stream', async () => {
+  const thinkingMessage = (thinking: string) => fakeMsg({ content: [{ type: 'thinking', thinking }] });
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => ({
+      schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose,
+      lease_id: 'lease-1', access_token: 'tok_slot1_xxxxxxxx', slot: '1', label: '1',
+      expires_at: 0, reservation_id: 'res-1', launch_id: 'launch-1',
+    } as any),
+    finishLease: async () => ({} as any),
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }],
+    ingestUsage: async () => ({} as any),
+    createUpstream: (() => (async function* () {
+      yield { type: 'thinking_start', contentIndex: 0, partial: thinkingMessage('') };
+      yield { type: 'thinking_delta', contentIndex: 0, delta: '<!--', partial: thinkingMessage('<!--') };
+      yield { type: 'thinking_delta', contentIndex: 0, delta: ' -->', partial: thinkingMessage('<!-- -->') };
+      yield { type: 'thinking_end', contentIndex: 0, content: '<!-- -->', partial: thinkingMessage('<!-- -->') };
+      yield { type: 'done', reason: 'stop', message: thinkingMessage('<!-- -->') };
+    })()) as any,
+    sleep: async () => {}, rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+  };
+
+  const events = await collect(createBalancedStreamRunner(deps)(MODEL, { messages: [] } as any, { sessionId: 's1' } as any));
+  assert.ok(events.filter(event => event.type === 'thinking_delta').every(event => event.delta === ''));
+  assert.equal(events.find(event => event.type === 'thinking_end').content, '');
+  assert.equal(events.find(event => event.type === 'done').message.content[0].thinking, '');
+});
+
+test('temporary sanitizer preserves non-marker reasoning bytes exactly', async () => {
+  const reasoning = 'Investigate literal `<!-- -->` output.  \r\n\r\n\r\nKeep spacing.\t';
+  const message = fakeMsg({ content: [{ type: 'thinking', thinking: reasoning }] });
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => ({
+      schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose,
+      lease_id: 'lease-1', access_token: 'tok_slot1_xxxxxxxx', slot: '1', label: '1',
+      expires_at: 0, reservation_id: 'res-1', launch_id: 'launch-1',
+    } as any),
+    finishLease: async () => ({} as any),
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }],
+    ingestUsage: async () => ({} as any),
+    createUpstream: (() => (async function* () {
+      yield { type: 'done', reason: 'stop', message };
+    })()) as any,
+    sleep: async () => {}, rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+  };
+
+  const events = await collect(createBalancedStreamRunner(deps)(MODEL, { messages: [] } as any, { sessionId: 's1' } as any));
+  const done = events.find(event => event.type === 'done');
+  assert.equal(done.message.content[0].thinking, reasoning);
+});
+
 test('rotate-on-429: a 429 on slot 1 silently rotates to slot 2 and forwards its success', async () => {
   const { deps, rec } = makeDeps(slot => (slot === '1' ? 'rate-limit' : 'ok'));
   const run = createBalancedStreamRunner(deps);

@@ -61,15 +61,100 @@ function publicModel(model: Model<typeof API>): Model<typeof API> {
   return { ...model, id: publicModelId(model), provider: PROVIDER, api: API };
 }
 
-function restoreMessage(message: AssistantMessage, model: Model<typeof API>): AssistantMessage {
-  return { ...message, api: API, provider: PROVIDER, model: publicModelId(model), errorMessage: message.errorMessage ? redactedErrorMessage(message.errorMessage) : message.errorMessage };
+const EMPTY_REASONING_COMMENT = '<!-- -->';
+
+function sanitizeVisibleReasoning(text: string, bufferIncompleteMarker: boolean): string {
+  let visible = '';
+  let lineStart = 0;
+
+  while (lineStart < text.length) {
+    const lf = text.indexOf('\n', lineStart);
+    const cr = text.indexOf('\r', lineStart);
+    const lineEnd = lf < 0 ? cr : cr < 0 ? lf : Math.min(lf, cr);
+    if (lineEnd < 0) {
+      const trailingLine = text.slice(lineStart);
+      if (trailingLine !== EMPTY_REASONING_COMMENT && !(bufferIncompleteMarker && EMPTY_REASONING_COMMENT.startsWith(trailingLine))) {
+        visible += trailingLine;
+      }
+      break;
+    }
+
+    const line = text.slice(lineStart, lineEnd);
+    const newline = text[lineEnd] === '\r' && text[lineEnd + 1] === '\n' ? '\r\n' : text[lineEnd];
+    if (line !== EMPTY_REASONING_COMMENT) visible += line + newline;
+    lineStart = lineEnd + newline.length;
+  }
+
+  return visible;
 }
 
-function restoreEvent(event: AssistantMessageEvent, model: Model<typeof API>): AssistantMessageEvent {
+function restoreMessage(message: AssistantMessage, model: Model<typeof API>, bufferedContentIndex?: number): AssistantMessage {
+  return {
+    ...message,
+    api: API,
+    provider: PROVIDER,
+    model: publicModelId(model),
+    errorMessage: message.errorMessage ? redactedErrorMessage(message.errorMessage) : message.errorMessage,
+    content: message.content.map((block, index) => block.type === 'thinking'
+      ? { ...block, thinking: sanitizeVisibleReasoning(block.thinking, index === bufferedContentIndex) }
+      : block),
+  };
+}
+
+function thinkingTextAt(message: AssistantMessage, contentIndex: number): string {
+  const block = message.content[contentIndex];
+  return block?.type === 'thinking' ? block.thinking : '';
+}
+
+function flushVisibleThinking(message: AssistantMessage, visibleThinking: Map<number, string>): AssistantMessageEvent[] {
+  const events: AssistantMessageEvent[] = [];
+  for (const [contentIndex, previous] of visibleThinking) {
+    const current = thinkingTextAt(message, contentIndex);
+    const delta = current.startsWith(previous) ? current.slice(previous.length) : '';
+    if (delta) events.push({ type: 'thinking_delta', contentIndex, delta, partial: message });
+  }
+  visibleThinking.clear();
+  return events;
+}
+
+function restoreEvents(
+  event: AssistantMessageEvent,
+  model: Model<typeof API>,
+  visibleThinking: Map<number, string>,
+): AssistantMessageEvent[] {
   switch (event.type) {
-    case 'done': return { ...event, message: restoreMessage(event.message, model) };
-    case 'error': return { ...event, error: restoreMessage(event.error, model) };
-    default: return { ...event, partial: restoreMessage(event.partial, model) } as AssistantMessageEvent;
+    case 'done': {
+      const message = restoreMessage(event.message, model);
+      return [...flushVisibleThinking(message, visibleThinking), { ...event, message }];
+    }
+    case 'error': {
+      const error = restoreMessage(event.error, model);
+      return [...flushVisibleThinking(error, visibleThinking), { ...event, error }];
+    }
+    case 'thinking_start': {
+      const partial = restoreMessage(event.partial, model);
+      visibleThinking.set(event.contentIndex, thinkingTextAt(partial, event.contentIndex));
+      return [{ ...event, partial }];
+    }
+    case 'thinking_delta': {
+      const partial = restoreMessage(event.partial, model, event.contentIndex);
+      const current = thinkingTextAt(partial, event.contentIndex);
+      const previous = visibleThinking.get(event.contentIndex) ?? '';
+      visibleThinking.set(event.contentIndex, current);
+      return [{ ...event, delta: current.startsWith(previous) ? current.slice(previous.length) : '', partial }];
+    }
+    case 'thinking_end': {
+      const partial = restoreMessage(event.partial, model);
+      const content = thinkingTextAt(partial, event.contentIndex);
+      const previous = visibleThinking.get(event.contentIndex) ?? '';
+      visibleThinking.set(event.contentIndex, content);
+      const flush = content.startsWith(previous) ? content.slice(previous.length) : '';
+      return [
+        ...(flush ? [{ type: 'thinking_delta' as const, contentIndex: event.contentIndex, delta: flush, partial }] : []),
+        { ...event, content, partial },
+      ];
+    }
+    default: return [{ ...event, partial: restoreMessage(event.partial, model) } as AssistantMessageEvent];
   }
 }
 
@@ -159,6 +244,8 @@ async function runBalanced(
   let lastLeaseError: unknown;
   let lastAuthError: AssistantMessageEvent | undefined;
   let activeFinish: (() => Promise<void>) | undefined;
+  let lastUpstreamPartial: AssistantMessage | undefined;
+  const visibleThinking = new Map<number, string>();
 
   // Keep the process-shared cooldown bounded: drop entries that have expired (and
   // thereby any slots that no longer exist once their cooldown lapses).
@@ -166,21 +253,26 @@ async function runBalanced(
 
   const buildErrorMessage = (error: unknown, aborted: boolean): AssistantMessage => ({
     role: 'assistant',
-    content: [],
+    content: lastUpstreamPartial?.content ?? [],
     api: API,
     provider: PROVIDER,
     model: publicModelId(model),
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    usage: lastUpstreamPartial?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     stopReason: aborted ? 'aborted' : 'error',
     errorMessage: redactedErrorMessage(error),
-    timestamp: deps.now(),
+    timestamp: lastUpstreamPartial?.timestamp ?? deps.now(),
+    responseId: lastUpstreamPartial?.responseId,
   });
-  const forwardTerminal = (event: AssistantMessageEvent) => { pushedTerminal = true; stream.push(restoreEvent(event, model)); };
+  const forwardTerminal = (event: AssistantMessageEvent) => {
+    pushedTerminal = true;
+    for (const restored of restoreEvents(event, model, visibleThinking)) stream.push(restored);
+  };
   const forwardError = (error: unknown, aborted = false) => {
     if (pushedTerminal) return;
     pushedTerminal = true;
     const message = buildErrorMessage(error, aborted);
-    stream.push({ type: 'error', reason: aborted ? 'aborted' : 'error', error: message });
+    const terminal: AssistantMessageEvent = { type: 'error', reason: aborted ? 'aborted' : 'error', error: message };
+    for (const restored of restoreEvents(terminal, model, visibleThinking)) stream.push(restored);
   };
 
   const onAbort = () => { void activeFinish?.().catch(() => undefined); };
@@ -251,13 +343,14 @@ async function runBalanced(
     try {
       for await (const event of deps.createUpstream(upstreamModel, context, upstreamOptions)) {
         if (signal?.aborted) break; // stop forwarding content/done once the caller aborted
+        if ('partial' in event) lastUpstreamPartial = event.partial;
         if (event.type === 'done') {
           await finishLease('completed');
           forwardTerminal(event);
           return { outcome: 'done', slot: lease.slot };
         }
         if (event.type === 'error') { terminalError = event; break; }
-        stream.push(restoreEvent(event, model));
+        for (const restored of restoreEvents(event, model, visibleThinking)) stream.push(restored);
         contentPushed = true;
       }
     } catch (iterError) {
