@@ -41,8 +41,9 @@ export function classifyOAuthRefreshError(message: string): OAuthErrorKind {
 // the reservation event log or written to stderr.
 const JWT_RE = /[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
 const BEARER_RE = /Bearer\s+\S+/gi;
+const OPENAI_KEY_RE = /\bsk-[A-Za-z0-9_-]+/g;
 
-/** Redact JWT-shaped tokens and Bearer headers from free text before persisting/logging. */
+/** Redact JWT-shaped tokens, Bearer headers, and OpenAI-style keys from free text before persisting/logging. */
 export function redactSecretsInText(text: string): string {
-  return text.replace(JWT_RE, '[REDACTED_TOKEN]').replace(BEARER_RE, 'Bearer [REDACTED]');
+  return text.replace(JWT_RE, '[REDACTED_TOKEN]').replace(BEARER_RE, 'Bearer [REDACTED]').replace(OPENAI_KEY_RE, 'sk-[REDACTED]');
 }

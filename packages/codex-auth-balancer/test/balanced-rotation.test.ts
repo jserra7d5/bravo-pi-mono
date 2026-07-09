@@ -1,5 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { streamSimpleOpenAICodexResponses } from '@earendil-works/pi-ai';
 import { createBalancedStreamRunner, type BalancedRunnerDeps } from '../extensions/pi/index.js';
 
 const MODEL = { id: 'bravo-codex-balanced/gpt-5.5', provider: 'bravo-codex-balanced', api: 'openai-codex-responses', baseUrl: 'https://x' } as any;
@@ -18,10 +23,10 @@ function fakeMsg(extra: Record<string, unknown> = {}) {
   } as any;
 }
 
-type Recorder = { leaseCalls: Array<string | undefined>; finished: Array<{ lease_id: string; status: string }>; sleeps: number[] };
+type Recorder = { leaseCalls: Array<string | undefined>; finished: Array<{ lease_id: string; status: string }>; sleeps: number[]; upstreamOptions?: any[] };
 
 function makeDeps(behavior: (slot: string) => 'rate-limit' | 'ok'): { deps: Partial<BalancedRunnerDeps>; rec: Recorder } {
-  const rec: Recorder = { leaseCalls: [], finished: [], sleeps: [] };
+  const rec: Recorder = { leaseCalls: [], finished: [], sleeps: [], upstreamOptions: [] };
   const deps: Partial<BalancedRunnerDeps> = {
     startLease: async (input: any) => {
       rec.leaseCalls.push(input.preferred_slot);
@@ -36,6 +41,7 @@ function makeDeps(behavior: (slot: string) => 'rate-limit' | 'ok'): { deps: Part
     listSlots: async () => [{ slot: '1', primaryRemaining: 80 }, { slot: '2', primaryRemaining: 90 }],
     ingestUsage: async () => ({} as any),
     createUpstream: ((_model: any, _context: any, options: any) => (async function* () {
+      rec.upstreamOptions?.push(options);
       const slot = String(options.apiKey).includes('slot1') ? '1' : '2';
       if (behavior(slot) === 'rate-limit') {
         await options.onResponse?.({ status: 429, headers: {} }, _model);
@@ -315,10 +321,81 @@ test('rotate-on-429: a 429 on slot 1 silently rotates to slot 2 and forwards its
   assert.ok(types.includes('done'), 'user should receive slot 2 success');
   assert.ok(!types.includes('error'), 'the slot-1 429 error must be suppressed, not shown');
   assert.deepEqual(rec.leaseCalls, [undefined, '2'], 'auto-select first, then force the other slot');
+  assert.equal(rec.upstreamOptions?.length, 2, 'one host-streamer call per leased slot');
+  assert.ok(rec.upstreamOptions?.every(options => options.maxRetries === 0), 'hidden same-slot retries are disabled at the host streamer boundary');
   assert.deepEqual(rec.finished, [
     { lease_id: 'lease-1', status: 'failed' },
     { lease_id: 'lease-2', status: 'completed' },
   ]);
+});
+
+test('Pi 0.74 streamer makes exactly one wire request per leased slot despite rejecting observers', async () => {
+  const piAiRoot = dirname(dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-ai'))));
+  assert.equal(JSON.parse(readFileSync(join(piAiRoot, 'package.json'), 'utf8')).version, '0.74.1', 'test must exercise the pinned old runtime');
+
+  const wireByToken = new Map<string, number>();
+  const server = createServer((request, response) => {
+    const token = String(request.headers.authorization ?? '').replace(/^Bearer /, '');
+    wireByToken.set(token, (wireByToken.get(token) ?? 0) + 1);
+    request.resume();
+    request.once('end', () => {
+      if (token.includes('slot-1')) {
+        response.writeHead(429, { 'content-type': 'application/json', 'retry-after-ms': '0' });
+        response.end('{"detail":"Rate limit exceeded"}');
+      } else {
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.end('data: {"type":"response.done","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0}}}}\n\n');
+      }
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const token = (slot: string) => {
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    return `${encode({ alg: 'none' })}.${encode({ 'https://api.openai.com/auth': { chatgpt_account_id: slot }, marker: `slot-${slot}` })}.x-slot-${slot}`;
+  };
+  const slotTokens = { '1': token('1'), '2': token('2') };
+  const finished: Array<{ lease_id: string; status: string }> = [];
+  const leaseCalls: Array<string | undefined> = [];
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => {
+      leaseCalls.push(input.preferred_slot);
+      const slot = (input.preferred_slot ?? '1') as '1' | '2';
+      return { schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose, lease_id: `lease-${slot}`, access_token: slotTokens[slot], slot, label: slot, expires_at: 0, reservation_id: `res-${slot}`, launch_id: `launch-${slot}` } as any;
+    },
+    finishLease: async (input: any) => { finished.push({ lease_id: input.lease_id, status: input.status }); return {} as any; },
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }, { slot: '2', primaryRemaining: 90 }],
+    ingestUsage: async () => { throw new Error('usage observer rejected with Bearer secret-token'); },
+    createUpstream: streamSimpleOpenAICodexResponses as any,
+    sleep: async () => {}, rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+  };
+
+  try {
+    const model = { ...MODEL, baseUrl: `http://127.0.0.1:${address.port}`, contextWindow: 128000, maxTokens: 4096, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } as any;
+    const events = await Promise.race([
+      collect(createBalancedStreamRunner(deps)(model, { messages: [{ role: 'user', content: 'hello', timestamp: 0 }] } as any, {
+        sessionId: 'offline-old-streamer',
+        onResponse: () => { throw new Error('caller observer rejected with sk-secret-value'); },
+      } as any)),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('old-runtime streamer test timed out')), 5000)),
+    ]);
+    assert.equal(events.at(-1)?.type, 'done', `observer failures cannot alter successful terminal behavior: ${JSON.stringify(events.at(-1))}`);
+    assert.deepEqual(leaseCalls, [undefined, '2']);
+    assert.deepEqual(finished, [
+      { lease_id: 'lease-1', status: 'failed' },
+      { lease_id: 'lease-2', status: 'completed' },
+    ]);
+    assert.equal(wireByToken.get(slotTokens['1']), 1, '429 slot must not retry inside the old streamer');
+    assert.equal(wireByToken.get(slotTokens['2']), 1, 'successful slot gets one wire request');
+    assert.equal([...wireByToken.values()].reduce((sum, count) => sum + count, 0), 2);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 test('rotate-on-429: when both slots 429 it backs off, exhausts, and surfaces one error', async () => {
@@ -360,6 +437,38 @@ test('rotate-on-429: an abort mid-stream does not forward a late done', async ()
   assert.equal(types.filter(t => t === 'error').length, 1, 'exactly one terminal event');
   assert.equal(events.find(e => e.type === 'error').reason, 'aborted');
   assert.deepEqual(rec.finished, [{ lease_id: 'lease-1', status: 'aborted' }], 'lease finished once, as aborted');
+});
+
+test('external abort waits for the single in-flight lease finalization before terminating the stream', async () => {
+  const ac = new AbortController();
+  let resolveFinish!: () => void;
+  const finishGate = new Promise<void>((resolve) => { resolveFinish = resolve; });
+  let finishCalls = 0;
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => ({ schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose, lease_id: 'lease-1', access_token: 'tok_slot1_xxxxxxxx', slot: '1', label: '1', expires_at: 0, reservation_id: 'res-1', launch_id: 'launch-1' } as any),
+    finishLease: async () => { finishCalls++; await finishGate; },
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }],
+    ingestUsage: async () => ({} as any),
+    createUpstream: ((_m: any, _c: any) => (async function* () {
+      ac.abort();
+      await new Promise((resolve) => setImmediate(resolve));
+      yield { type: 'done', reason: 'stop', message: fakeMsg() };
+    })()) as any,
+    sleep: async () => {}, rand: () => 0.5, now: () => 1000, cooldown: new Map(),
+  };
+
+  let streamSettled = false;
+  const collecting = collect(createBalancedStreamRunner(deps)(MODEL, { messages: [] } as any, { sessionId: 's1', signal: ac.signal } as any))
+    .then((events) => { streamSettled = true; return events; });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(finishCalls, 1, 'abort paths share one lease-finalization call');
+  assert.equal(streamSettled, false, 'terminal event waits for durable lease finalization');
+  resolveFinish();
+  const events = await collecting;
+  assert.equal(finishCalls, 1);
+  assert.equal(events.at(-1)?.type, 'error');
+  assert.equal((events.at(-1) as any).reason, 'aborted');
 });
 
 test('rotate-on-429: a forwarded upstream error has tokens/secrets redacted', async () => {

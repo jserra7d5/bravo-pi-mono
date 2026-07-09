@@ -1,15 +1,15 @@
-import {
-  createAssistantMessageEventStream,
-  getModels,
-  streamSimpleOpenAICodexResponses,
-  type AssistantMessage,
-  type AssistantMessageEvent,
-  type AssistantMessageEventStream,
-  type Context,
-  type Model,
-  type SimpleStreamOptions,
+import type {
+  AssistantMessage,
+  AssistantMessageEvent,
+  AssistantMessageEventStream,
+  Context,
+  Model,
+  SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, join, parse } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   finishTokenLease,
   ingestLiveUsage,
@@ -45,6 +45,176 @@ const GPT_5_6_CODEX_MODEL_IDS = new Set([
   'gpt-5.6-luna',
 ]);
 const GPT_5_6_CODEX_CONTEXT_WINDOW = 372000;
+const PI_CODING_AGENT_PACKAGE = '@earendil-works/pi-coding-agent';
+const PI_AI_PACKAGE = '@earendil-works/pi-ai';
+
+type PiAiRuntimeModule = {
+  createAssistantMessageEventStream?: () => AssistantMessageEventStream;
+  getModels?: (provider: string) => Model<typeof API>[];
+  streamSimpleOpenAICodexResponses?: (model: Model<typeof API>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
+};
+export type HostingPiAiRuntime = {
+  packageRoot: string;
+  modulePath: string;
+  models: Model<typeof API>[];
+  createEventStream: () => AssistantMessageEventStream;
+  streamSimpleOpenAICodexResponses: NonNullable<PiAiRuntimeModule['streamSimpleOpenAICodexResponses']>;
+};
+type RuntimeImporter = (specifier: string) => Promise<PiAiRuntimeModule>;
+type ModuleResolver = (specifier: string, entrypoint: string) => string;
+
+function packageMetadataAt(directory: string): { name?: string; version?: string } | undefined {
+  try {
+    const value = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8')) as { name?: unknown; version?: unknown };
+    return {
+      name: typeof value.name === 'string' ? value.name : undefined,
+      version: typeof value.version === 'string' ? value.version : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function packageRootOwning(path: string, expectedName: string): string | undefined {
+  if (!existsSync(path)) return undefined;
+  let current = dirname(realpathSync(path));
+  const root = parse(current).root;
+  while (true) {
+    if (packageMetadataAt(current)?.name === expectedName) return current;
+    if (current === root) return undefined;
+    current = dirname(current);
+  }
+}
+
+/** Find the package owning the real running entrypoint without assuming an npm prefix. */
+export function resolveHostingPiPackageRoot(entrypoint = process.argv[1]): string | undefined {
+  return entrypoint ? packageRootOwning(entrypoint, PI_CODING_AGENT_PACKAGE) : undefined;
+}
+
+function packageExportPath(packageRoot: string, subpath: '.' | './compat'): string | undefined {
+  const packageJson = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as {
+    main?: unknown;
+    exports?: unknown;
+  };
+  const selectImport = (value: unknown): string | undefined => {
+    if (typeof value === 'string') return value;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const conditions = value as Record<string, unknown>;
+    return selectImport(conditions.import) ?? selectImport(conditions.default);
+  };
+  const exports = packageJson.exports;
+  const exported = exports && typeof exports === 'object' && !Array.isArray(exports)
+    ? selectImport((exports as Record<string, unknown>)[subpath])
+    : subpath === '.' ? selectImport(exports) : undefined;
+  const relativePath = exported ?? (subpath === '.' && typeof packageJson.main === 'string' ? packageJson.main : undefined);
+  if (!relativePath) return undefined;
+  const resolved = join(packageRoot, relativePath);
+  return existsSync(resolved) ? realpathSync(resolved) : undefined;
+}
+
+function dependencyPackageRootFromHost(hostRoot: string): string | undefined {
+  let current = hostRoot;
+  const root = parse(current).root;
+  while (true) {
+    const candidate = join(current, 'node_modules', '@earendil-works', 'pi-ai');
+    if (packageMetadataAt(candidate)?.name === PI_AI_PACKAGE) return realpathSync(candidate);
+    if (current === root) return undefined;
+    current = dirname(current);
+  }
+}
+
+function defaultModuleResolver(specifier: string, entrypoint: string): string {
+  const hostRoot = resolveHostingPiPackageRoot(entrypoint);
+  const packageRoot = hostRoot ? dependencyPackageRootFromHost(hostRoot) : undefined;
+  if (!packageRoot) throw new Error(`${PI_AI_PACKAGE} is absent from the hosting Pi package graph`);
+  const subpath = specifier === `${PI_AI_PACKAGE}/compat` ? './compat' : '.';
+  const resolved = packageExportPath(packageRoot, subpath);
+  if (!resolved) throw new Error(`${specifier} has no loadable public import export`);
+  return resolved;
+}
+
+function isPiAiCompatVersion(version: string | undefined): boolean {
+  const match = /^(\d+)\.(\d+)/.exec(version ?? '');
+  return !!match && (Number(match[1]) > 0 || Number(match[2]) >= 80);
+}
+
+/**
+ * Resolve and load pi-ai from the package graph of the Pi CLI that is actually
+ * hosting this extension. This handles nested and npm-hoisted dependencies as
+ * well as local/global bin symlinks and npx installs because resolution starts
+ * at the real CLI entrypoint rather than this extension's package.
+ *
+ * Pi 0.80+ moved the legacy catalog/stream API to the public `compat` export;
+ * older Pi exposes the same API from the package root. Both the catalog and
+ * streamer are intentionally read from that one selected module. A recognized
+ * Pi host fails closed if either half is unavailable.
+ */
+export async function loadHostingPiAiRuntime(options: {
+  entrypoint?: string;
+  importModule?: RuntimeImporter;
+  resolveModule?: ModuleResolver;
+  localModule?: PiAiRuntimeModule;
+  localModulePath?: string;
+} = {}): Promise<HostingPiAiRuntime> {
+  const entrypoint = options.entrypoint ?? process.argv[1];
+  const hostRoot = resolveHostingPiPackageRoot(entrypoint);
+  const importer = options.importModule ?? ((specifier) => import(specifier));
+
+  let packageRoot: string;
+  let modulePath: string;
+  let runtime: PiAiRuntimeModule;
+  if (!hostRoot) {
+    modulePath = options.localModulePath ?? import.meta.resolve(PI_AI_PACKAGE);
+    runtime = options.localModule ?? await importer(modulePath);
+    const localPath = modulePath.startsWith('file:') ? fileURLToPath(modulePath) : modulePath;
+    packageRoot = packageRootOwning(localPath, PI_AI_PACKAGE) ?? dirname(localPath);
+  } else {
+    if (!entrypoint) throw new Error('hosting Pi entrypoint is unavailable');
+    const resolver = options.resolveModule ?? defaultModuleResolver;
+    let rootEntry: string;
+    try {
+      rootEntry = resolver(PI_AI_PACKAGE, entrypoint);
+    } catch (error) {
+      throw new Error(`hosting Pi installation cannot resolve ${PI_AI_PACKAGE} from ${realpathSync(entrypoint)}: ${String(error)}`);
+    }
+    packageRoot = packageRootOwning(rootEntry, PI_AI_PACKAGE) ?? '';
+    if (!packageRoot) throw new Error(`resolved hosting Pi module is not owned by ${PI_AI_PACKAGE}: ${rootEntry}`);
+    const metadata = packageMetadataAt(packageRoot);
+    try {
+      modulePath = isPiAiCompatVersion(metadata?.version) ? resolver(`${PI_AI_PACKAGE}/compat`, entrypoint) : rootEntry;
+    } catch (error) {
+      throw new Error(`hosting Pi ${metadata?.version ?? 'unknown'} runtime export cannot be resolved: ${String(error)}`);
+    }
+    if (packageRootOwning(modulePath, PI_AI_PACKAGE) !== packageRoot) {
+      throw new Error(`hosting Pi catalog and streamer did not resolve from one ${PI_AI_PACKAGE} package: ${modulePath}`);
+    }
+    runtime = await importer(pathToFileURL(modulePath).href);
+  }
+
+  if (typeof runtime.getModels !== 'function' || typeof runtime.streamSimpleOpenAICodexResponses !== 'function') {
+    throw new Error(`selected ${PI_AI_PACKAGE} runtime does not provide both the Codex catalog and streamer: ${modulePath}`);
+  }
+  if (typeof runtime.createAssistantMessageEventStream !== 'function') {
+    throw new Error(`selected ${PI_AI_PACKAGE} runtime has no assistant event stream implementation: ${modulePath}`);
+  }
+  const models = runtime.getModels(UPSTREAM_PROVIDER);
+  if (!Array.isArray(models)) throw new Error(`selected ${PI_AI_PACKAGE} runtime returned an invalid Codex catalog: ${modulePath}`);
+  return {
+    packageRoot,
+    modulePath,
+    models,
+    createEventStream: runtime.createAssistantMessageEventStream,
+    streamSimpleOpenAICodexResponses: runtime.streamSimpleOpenAICodexResponses,
+  };
+}
+
+/** Backward-compatible test seam for callers that only need the selected catalog. */
+export async function loadOpenAICodexCatalog(options: Parameters<typeof loadHostingPiAiRuntime>[0] = {}): Promise<Model<typeof API>[]> {
+  return (await loadHostingPiAiRuntime(options)).models;
+}
+
+const hostingPiAiRuntime = await loadHostingPiAiRuntime();
+const hostingOpenAICodexCatalog = hostingPiAiRuntime.models;
 
 function publicModelId(model: Model<typeof API>): string {
   return model.id.startsWith(`${PROVIDER}/`) ? model.id : `${PROVIDER}/${model.id}`;
@@ -208,7 +378,7 @@ function defaultRunnerDeps(): BalancedRunnerDeps {
     startLease: startTokenLease,
     finishLease: finishTokenLease,
     listSlots: async (stateRoot?: string) => (await loadAccounts(stateRoot)).map(a => ({ slot: a.slot, primaryRemaining: a.usage?.primary?.remainingPercent })),
-    createUpstream: (model, context, options) => streamSimpleOpenAICodexResponses(model, context, options),
+    createUpstream: (model, context, options) => hostingPiAiRuntime.streamSimpleOpenAICodexResponses(model, context, options),
     ingestUsage: ingestLiveUsage,
     markBroken: (slot, code, message) => { try { writeBrokenSnapshot(resolveStateRoot(), slot, code, message); } catch { /* ignore */ } },
     cooldown: sharedCooldown,
@@ -222,7 +392,7 @@ function defaultRunnerDeps(): BalancedRunnerDeps {
 export function createBalancedStreamRunner(overrides: Partial<BalancedRunnerDeps> = {}): (model: Model<typeof API>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream {
   const deps: BalancedRunnerDeps = { ...defaultRunnerDeps(), ...overrides };
   return (model, context, options) => {
-    const stream = createAssistantMessageEventStream();
+    const stream = hostingPiAiRuntime.createEventStream();
     void runBalanced(deps, stream, model, context, options);
     return stream;
   };
@@ -298,16 +468,18 @@ async function runBalanced(
       return { outcome: 'lease-failed', slot: forcedSlot ?? '(none)' };
     }
 
-    let finished = false;
-    const finishLease = async (status: TokenLeaseFinishStatus) => {
-      if (finished) return;
-      finished = true;
+    let finishPromise: Promise<void> | undefined;
+    const finishLease = (status: TokenLeaseFinishStatus): Promise<void> => {
+      if (finishPromise) return finishPromise;
       if (activeFinish === abortFinish) activeFinish = undefined;
-      try {
-        await deps.finishLease({ lease_id: lease.lease_id, reservation_id: lease.reservation_id, launch_id: lease.launch_id, status });
-      } catch (finishError) {
-        process.stderr.write(`[codex-balanced-provider] lease finish failed: ${redactedErrorMessage(finishError)}\n`);
-      }
+      finishPromise = (async () => {
+        try {
+          await deps.finishLease({ lease_id: lease.lease_id, reservation_id: lease.reservation_id, launch_id: lease.launch_id, status });
+        } catch (finishError) {
+          process.stderr.write(`[codex-balanced-provider] lease finish failed: ${redactedErrorMessage(finishError)}\n`);
+        }
+      })();
+      return finishPromise;
     };
     const abortFinish = () => finishLease('aborted');
     activeFinish = abortFinish;
@@ -320,6 +492,8 @@ async function runBalanced(
     }
 
     let sawRateLimitStatus = false;
+    const slotAbort = new AbortController();
+    const upstreamSignal = signal ? AbortSignal.any([signal, slotAbort.signal]) : slotAbort.signal;
     const upstreamModel = { ...model, id: upstreamModelId(model), provider: UPSTREAM_PROVIDER, api: API };
     const upstreamOptions = {
       ...options,
@@ -328,10 +502,34 @@ async function runBalanced(
       // rate-limit headers. Preserve an explicit caller transport for opt-in use.
       transport: options?.transport ?? 'sse',
       apiKey: lease.access_token,
-      onResponse: async (response: { status: number; headers: Record<string, string> }, responseModel: Model<typeof API>) => {
-        if (response.status === 429) sawRateLimitStatus = true;
-        await (options as any)?.onResponse?.(response, responseModel);
-        void deps.ingestUsage({ slot: lease.slot, reservation_id: lease.reservation_id, launch_id: lease.launch_id, headers: response.headers }).catch(() => undefined);
+      signal: upstreamSignal,
+      // One leased slot gets one wire attempt. Newer host streamers honor this;
+      // aborting on the first 429 also stops retry loops in older host versions.
+      maxRetries: 0,
+      onResponse: (response: { status: number; headers: Record<string, string> }, responseModel: Model<typeof API>) => {
+        // This callback is inside host streamer retry logic. Establish the slot
+        // state and abort that streamer's local signal before invoking any
+        // caller code, so a throwing/slow observer cannot permit another wire
+        // request on the same lease.
+        if (response.status === 429) {
+          sawRateLimitStatus = true;
+          slotAbort.abort();
+        }
+        const observe = (label: string, action: () => unknown) => {
+          void Promise.resolve().then(action).catch((error) => {
+            process.stderr.write(`[codex-balanced-provider] ${label} failed: ${redactedErrorMessage(error)}\n`);
+          });
+        };
+        observe('usage ingestion', () => deps.ingestUsage({
+          slot: lease.slot,
+          reservation_id: lease.reservation_id,
+          launch_id: lease.launch_id,
+          headers: response.headers,
+        }));
+        const callerOnResponse = (options as any)?.onResponse;
+        if (typeof callerOnResponse === 'function') {
+          observe('caller onResponse', () => callerOnResponse(response, responseModel));
+        }
       },
     } as SimpleStreamOptions;
 
@@ -354,7 +552,7 @@ async function runBalanced(
       terminalError = { type: 'error', reason: 'error', error: buildErrorMessage(iterError, signal?.aborted === true) };
     }
 
-    const aborted = signal?.aborted === true || (terminalError?.type === 'error' && terminalError.reason === 'aborted');
+    const aborted = signal?.aborted === true || (!sawRateLimitStatus && terminalError?.type === 'error' && terminalError.reason === 'aborted');
     if (aborted) {
       await finishLease('aborted');
       forwardTerminal(terminalError ?? { type: 'error', reason: 'aborted', error: buildErrorMessage(new Error('Request was aborted'), true) });
@@ -431,8 +629,8 @@ export function mapBalancedCodexModels(models: Model<typeof API>[]): Model<typeo
   });
 }
 
-export function getBalancedCodexModels(): Model<typeof API>[] {
-  return mapBalancedCodexModels(getModels('openai-codex').map((model) => model as Model<typeof API>));
+export function getBalancedCodexModels(models: Model<typeof API>[] = hostingOpenAICodexCatalog): Model<typeof API>[] {
+  return mapBalancedCodexModels(models);
 }
 
 export function registerBalancedProvider(pi: ExtensionAPI): void {

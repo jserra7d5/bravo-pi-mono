@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { atomicWriteJson } from "./jsonl.js";
 import type { ContextPolicy, SessionPolicy, ThinkingLevel } from "./types.js";
@@ -78,13 +78,42 @@ export function inheritedExtensionPathsFromEnv(env: NodeJS.ProcessEnv = process.
   return parseInheritedExtensionPaths(env[inheritedExtensionsEnv]);
 }
 
+const CODEX_AUTH_BALANCER_PACKAGE = "@bravo/codex-auth-balancer";
+
+function packageIdentityForExtension(extension: string): string | undefined {
+  if (!existsSync(extension)) return undefined;
+  const realExtension = realpathSync(extension);
+  let current = statSync(realExtension).isDirectory() ? realExtension : dirname(realExtension);
+  while (true) {
+    const packageJson = join(current, "package.json");
+    if (existsSync(packageJson)) {
+      try {
+        const name = (JSON.parse(readFileSync(packageJson, "utf8")) as { name?: unknown }).name;
+        if (name !== CODEX_AUTH_BALANCER_PACKAGE) return undefined;
+        const packageRelativePath = relative(current, realExtension).replaceAll("\\", "/").replace(/^dist\//, "");
+        return /^extensions\/pi(?:\/index\.(?:[cm]?[jt]s))?$/.test(packageRelativePath)
+          ? `${CODEX_AUTH_BALANCER_PACKAGE}/extensions/pi`
+          : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
 function dedupeExtensionsByRealpath(extensions: string[]): string[] {
   const seen = new Set<string>();
+  const seenPackageIdentities = new Set<string>();
   const result: string[] = [];
   for (const extension of extensions) {
     const key = existsSync(extension) ? `real:${realpathSync(extension)}` : `literal:${extension}`;
-    if (seen.has(key)) continue;
+    const packageIdentity = packageIdentityForExtension(extension);
+    if (seen.has(key) || (packageIdentity && seenPackageIdentities.has(packageIdentity))) continue;
     seen.add(key);
+    if (packageIdentity) seenPackageIdentities.add(packageIdentity);
     result.push(extension);
   }
   return result;

@@ -7,8 +7,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { cleanupLaunch, finishTokenLease, getDbStatus, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, isProcessAlive, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, shouldStealRefreshLock, startTokenLease, syncBack, unbrickSlot } from '../src/index.js';
-import codexBalancedProvider, { getBalancedCodexModels, mapBalancedCodexModels } from '../extensions/pi/index.js';
+import codexBalancedProvider, { getBalancedCodexModels, loadHostingPiAiRuntime, mapBalancedCodexModels, resolveHostingPiPackageRoot } from '../extensions/pi/index.js';
 import { getModels } from '@earendil-works/pi-ai';
 import { openaiCodexOAuthProvider } from '@earendil-works/pi-ai/oauth';
 
@@ -447,6 +448,116 @@ test('syncBack does NOT regress to an older or claimless child on conflict', asy
     assert.equal(r.ok, false);
     assert.equal(JSON.parse(await fs.readFile(path.join(root, 'accounts', 's1', 'auth.json'), 'utf8')).access_token, canonClaim);
   }
+});
+
+async function writePiHostFixture(layout: 'nested' | 'hoisted', version: string) {
+  const install = await tmp();
+  const host = layout === 'nested'
+    ? path.join(install, 'pi-host')
+    : path.join(install, 'node_modules', '@earendil-works', 'pi-coding-agent');
+  const aiRoot = layout === 'nested'
+    ? path.join(host, 'node_modules', '@earendil-works', 'pi-ai')
+    : path.join(install, 'node_modules', '@earendil-works', 'pi-ai');
+  const cli = path.join(host, 'dist', 'cli.js');
+  const modern = Number(version.split('.')[1]) >= 80;
+  const moduleRelative = modern ? 'dist/compat.js' : 'dist/index.js';
+  const modulePath = path.join(aiRoot, moduleRelative);
+  await writeJson(path.join(host, 'package.json'), { name: '@earendil-works/pi-coding-agent', version });
+  await fs.mkdir(path.dirname(cli), { recursive: true });
+  await fs.writeFile(cli, '// faithful fake Pi CLI entrypoint\n');
+  await writeJson(path.join(aiRoot, 'package.json'), {
+    name: '@earendil-works/pi-ai', version, type: 'module', main: './dist/index.js',
+    exports: modern ? { '.': './dist/index.js', './compat': './dist/compat.js' } : { '.': './dist/index.js' },
+  });
+  await fs.mkdir(path.dirname(modulePath), { recursive: true });
+  await fs.writeFile(modulePath, `
+const model = { id: 'fixture-${layout}', provider: 'openai-codex', api: 'openai-codex-responses' };
+export const getModels = provider => provider === 'openai-codex' ? [model] : [];
+export const streamSimpleOpenAICodexResponses = () => ({ runtime: '${layout}-${version}' });
+export const createAssistantMessageEventStream = () => ({ runtime: '${layout}-${version}' });
+`);
+  if (modern) {
+    await fs.mkdir(path.join(aiRoot, 'dist'), { recursive: true });
+    await fs.writeFile(path.join(aiRoot, 'dist', 'index.js'), 'export const modernRootMustNotBeUsed = true;\n');
+  }
+  return { install, host, cli, aiRoot, modulePath };
+}
+
+for (const fixture of [
+  { layout: 'nested' as const, version: '0.80.5' },
+  { layout: 'hoisted' as const, version: '0.80.5' },
+  { layout: 'nested' as const, version: '0.79.9' },
+  { layout: 'hoisted' as const, version: '0.79.9' },
+]) {
+  test(`host runtime resolution supports ${fixture.layout} Pi ${fixture.version} pi-ai`, async () => {
+    const built = await writePiHostFixture(fixture.layout, fixture.version);
+    const runtime = await loadHostingPiAiRuntime({ entrypoint: built.cli });
+    assert.equal(resolveHostingPiPackageRoot(built.cli), built.host);
+    assert.equal(runtime.packageRoot, built.aiRoot);
+    assert.equal(runtime.modulePath, built.modulePath);
+    assert.equal(runtime.models[0]?.id, `fixture-${fixture.layout}`);
+    assert.equal((runtime.streamSimpleOpenAICodexResponses({} as any, {} as any, {}) as any).runtime, `${fixture.layout}-${fixture.version}`);
+  });
+}
+
+test('host runtime resolution follows a symlinked global-style Pi bin to its real entrypoint', async () => {
+  const fixture = await writePiHostFixture('nested', '0.80.5');
+  const bin = path.join(path.dirname(fixture.host), 'bin', 'pi');
+  await fs.mkdir(path.dirname(bin), { recursive: true });
+  await fs.symlink(fixture.cli, bin);
+  const runtime = await loadHostingPiAiRuntime({ entrypoint: bin });
+  assert.equal(resolveHostingPiPackageRoot(bin), fixture.host);
+  assert.equal(runtime.packageRoot, fixture.aiRoot);
+  assert.equal(runtime.models[0]?.id, 'fixture-nested');
+});
+
+test('host runtime resolution follows an npx-cache-style bin symlink and hoisted dependency graph', async () => {
+  const fixture = await writePiHostFixture('hoisted', '0.80.5');
+  const npxBin = path.join(fixture.install, 'node_modules', '.bin', 'pi');
+  await fs.mkdir(path.dirname(npxBin), { recursive: true });
+  await fs.symlink(fixture.cli, npxBin);
+  const runtime = await loadHostingPiAiRuntime({ entrypoint: npxBin });
+  assert.equal(resolveHostingPiPackageRoot(npxBin), fixture.host);
+  assert.equal(runtime.packageRoot, fixture.aiRoot);
+  assert.equal(runtime.models[0]?.id, 'fixture-hoisted');
+});
+
+test('recognized Pi host fails closed when its pi-ai runtime lacks the streamer', async () => {
+  const fixture = await writePiHostFixture('nested', '0.80.5');
+  await fs.writeFile(fixture.modulePath, `
+export const getModels = () => [{ id: 'catalog-only' }];
+export const createAssistantMessageEventStream = () => ({});
+`);
+  await assert.rejects(() => loadHostingPiAiRuntime({ entrypoint: fixture.cli }), /both the Codex catalog and streamer/);
+});
+
+test('non-Pi consumers retain an injected local runtime seam', async () => {
+  const model = { id: 'local-only' } as any;
+  const stream = (() => ({})) as any;
+  const runtime = await loadHostingPiAiRuntime({
+    entrypoint: path.join(await tmp(), 'test.js'),
+    localModulePath: import.meta.url,
+    localModule: {
+      getModels: () => [model],
+      streamSimpleOpenAICodexResponses: stream,
+      createAssistantMessageEventStream: () => ({}) as any,
+    },
+  });
+  assert.deepEqual(runtime.models, [model]);
+  assert.equal(runtime.streamSimpleOpenAICodexResponses, stream);
+});
+
+test('repo-local Pi loads the extension using its own older host catalog', async () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
+  const localPi = path.join(repoRoot, 'node_modules', '.bin', 'pi');
+  const extension = path.join(repoRoot, 'packages', 'codex-auth-balancer', 'dist', 'extensions', 'pi', 'index.js');
+  const { stdout, stderr } = await exec(localPi, [
+    '--no-context-files', '--no-skills', '--no-prompt-templates', '--no-extensions',
+    '-e', extension, '--list-models', 'bravo-codex-balanced',
+  ], { timeout: 15_000 });
+  const output = `${stdout}\n${stderr}`;
+  assert.match(output, /bravo-codex-balanced\/gpt-5\.5\s/);
+  assert.doesNotMatch(output, /^bravo-codex-balanced\s+bravo-codex-balanced\/gpt-5\.6-/m);
 });
 
 test('balanced provider mirrors the installed openai-codex catalog exactly', () => {

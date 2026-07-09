@@ -137,10 +137,6 @@ function writeLauncherFailure(store: RunStore, input: SupervisorInput, message: 
   });
 }
 
-function childModelSearchTerm(model: string): string {
-  return model.includes("/") ? model.split("/").at(-1) || model : model;
-}
-
 function extensionArgs(args: string[]): string[] {
   const values: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -202,12 +198,66 @@ function resolveBalancedProviderExtensionPath(): string | undefined {
   }
 }
 
-function modelListed(output: string, model: string): boolean {
-  const [provider, modelId] = model.includes("/") ? model.split(/\/(.+)/) as [string, string] : [undefined, model];
-  return output.split(/\r?\n/).some((line) => {
-    if (!line.includes(modelId)) return false;
-    return provider ? line.includes(provider) : true;
-  });
+const PI_MODEL_HEADER = ["provider", "model", "context", "max-out", "thinking", "images"] as const;
+const ANSI_ESCAPE = /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
+const TOKEN_COUNT = /^\d+(?:\.\d+)?(?:[KMGTP])?$/i;
+const YES_NO = /^(?:yes|no)$/;
+
+export interface PiModelTableRow {
+  provider: string;
+  model: string;
+  context: string;
+  maxOut: string;
+  thinking: "yes" | "no";
+  images: "yes" | "no";
+}
+
+/** Parse only rows authorized by an exact Pi six-column model-table header. */
+export function parsePiModelTable(stream: string): PiModelTableRow[] {
+  const rows: PiModelTableRow[] = [];
+  let sawHeader = false;
+  for (const rawLine of stream.replace(ANSI_ESCAPE, "").split(/\r?\n/)) {
+    const columns = rawLine.trim().split(/\s+/);
+    if (columns.length === PI_MODEL_HEADER.length && columns.every((column, index) => column === PI_MODEL_HEADER[index])) {
+      sawHeader = true;
+      continue;
+    }
+    if (!sawHeader || columns.length !== PI_MODEL_HEADER.length) continue;
+    const [provider, model, context, maxOut, thinking, images] = columns;
+    if (!provider || !model || !context || !maxOut || !thinking || !images) continue;
+    if (!TOKEN_COUNT.test(context) || !TOKEN_COUNT.test(maxOut) || !YES_NO.test(thinking) || !YES_NO.test(images)) continue;
+    rows.push({ provider, model, context, maxOut, thinking: thinking as "yes" | "no", images: images as "yes" | "no" });
+  }
+  return rows;
+}
+
+function modelListed(stdout: string, stderr: string, requested: string): boolean {
+  const identities = new Map<string, PiModelTableRow>();
+  // Streams authorize their own rows. In particular, a stdout header cannot
+  // turn arbitrary stderr prose into a model row (or vice versa).
+  for (const row of [...parsePiModelTable(stdout), ...parsePiModelTable(stderr)]) {
+    const modelId = row.model.startsWith(`${row.provider}/`) ? row.model.slice(row.provider.length + 1) : row.model;
+    identities.set(`${row.provider}\u0000${modelId}`, { ...row, model: modelId });
+  }
+  const slash = requested.indexOf("/");
+  if (slash < 0) return [...identities.values()].filter((row) => row.model === requested).length === 1;
+  if (slash === 0 || slash === requested.length - 1) return false;
+  const provider = requested.slice(0, slash);
+  const model = requested.slice(slash + 1);
+  return identities.has(`${provider}\u0000${model}`);
+}
+
+export interface SubprocessTerminationDiagnostics {
+  timedOut?: boolean;
+  strategy?: "posix-process-group" | "windows-taskkill";
+  termSent?: boolean;
+  killSent?: boolean;
+  taskkillExitCode?: number | null;
+  taskkillTimedOut?: boolean;
+  directChildFallback?: boolean;
+  outputTruncated?: boolean;
+  hardDeadlineReached?: boolean;
+  errors?: string[];
 }
 
 export interface ModelPreflightResult {
@@ -218,6 +268,7 @@ export interface ModelPreflightResult {
   exitCode?: number | null;
   signal?: NodeJS.Signals | null;
   message?: string;
+  termination?: SubprocessTerminationDiagnostics;
 }
 
 function providerExtensionHint(model: string): string {
@@ -229,6 +280,181 @@ function providerExtensionHint(model: string): string {
   ].join(" ");
 }
 
+const PREFLIGHT_OUTPUT_LIMIT = 1024 * 1024;
+const PREFLIGHT_TERM_GRACE_MS = 250;
+const PREFLIGHT_HARD_SETTLEMENT_GRACE_MS = 750;
+const TASKKILL_TIMEOUT_MS = 500;
+
+export function windowsTaskkillArgs(pid: number): string[] {
+  return ["/PID", String(pid), "/T", "/F"];
+}
+
+function appendBounded(chunks: Buffer[], chunk: Buffer, captured: { bytes: number }, diagnostics: SubprocessTerminationDiagnostics): void {
+  const remaining = PREFLIGHT_OUTPUT_LIMIT - captured.bytes;
+  if (remaining <= 0) {
+    diagnostics.outputTruncated = true;
+    return;
+  }
+  chunks.push(chunk.length <= remaining ? chunk : chunk.subarray(0, remaining));
+  captured.bytes += Math.min(chunk.length, remaining);
+  if (chunk.length > remaining) diagnostics.outputTruncated = true;
+}
+
+function destroyAndUnrefStdio(child: ReturnType<typeof spawn>): void {
+  for (const stream of [child.stdout, child.stderr]) {
+    stream?.removeAllListeners();
+    stream?.destroy();
+    (stream as NodeJS.ReadableStream & { unref?: () => void } | null)?.unref?.();
+  }
+  child.unref();
+}
+
+function runBoundedPreflight(command: PiCommand, args: string[], timeoutMs: number): Promise<Omit<ModelPreflightResult, "ok" | "message"> & { timedOut: boolean; failureMessage?: string }> {
+  return new Promise((resolve) => {
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    const stdoutCapture = { bytes: 0 };
+    const stderrCapture = { bytes: 0 };
+    const diagnostics: SubprocessTerminationDiagnostics = {};
+    let settled = false;
+    let exitCode: number | null | undefined;
+    let exitSignal: NodeJS.Signals | null | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    let taskkillTimer: NodeJS.Timeout | undefined;
+    let groupPollTimer: NodeJS.Timeout | undefined;
+    let childClosed = false;
+    let treeTerminationDone = false;
+    let failureMessage: string | undefined;
+    const renderedCommand = [command.command, ...args].join(" ");
+    const child = spawn(command.command, args, {
+      cwd: command.cwd,
+      env: { ...process.env, ...command.env },
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+
+    const clearTimers = () => {
+      clearTimeout(timeoutTimer);
+      clearTimeout(hardDeadline);
+      if (killTimer) clearTimeout(killTimer);
+      if (taskkillTimer) clearTimeout(taskkillTimer);
+      if (groupPollTimer) clearTimeout(groupPollTimer);
+    };
+    const snapshot = () => ({
+      command: renderedCommand,
+      stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+      stderr: Buffer.concat(stderrChunks).toString("utf8"),
+      exitCode,
+      signal: exitSignal,
+      timedOut: diagnostics.timedOut === true,
+      failureMessage,
+      termination: Object.keys(diagnostics).length > 0 ? diagnostics : undefined,
+    });
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      resolve(snapshot());
+    };
+    const settleIfTerminationComplete = () => {
+      if (!diagnostics.timedOut || (childClosed && treeTerminationDone)) settle();
+    };
+    const recordError = (error: unknown) => {
+      (diagnostics.errors ??= []).push(error instanceof Error ? error.message : String(error));
+    };
+    const directChildFallback = () => {
+      diagnostics.directChildFallback = true;
+      try { child.kill("SIGKILL"); } catch (error) { recordError(error); }
+    };
+    const terminateWindowsTree = () => {
+      diagnostics.strategy = "windows-taskkill";
+      if (child.pid === undefined) return directChildFallback();
+      let taskkillSettled = false;
+      const taskkill = spawn("taskkill", windowsTaskkillArgs(child.pid), { stdio: "ignore", windowsHide: true });
+      const finishTaskkill = (code?: number | null) => {
+        if (taskkillSettled) return;
+        taskkillSettled = true;
+        if (taskkillTimer) clearTimeout(taskkillTimer);
+        if (code !== undefined) diagnostics.taskkillExitCode = code;
+        if (code !== 0) directChildFallback();
+        treeTerminationDone = true;
+        settleIfTerminationComplete();
+      };
+      taskkill.once("error", (error) => { recordError(error); finishTaskkill(); });
+      taskkill.once("close", finishTaskkill);
+      taskkillTimer = setTimeout(() => {
+        diagnostics.taskkillTimedOut = true;
+        try { taskkill.kill("SIGKILL"); } catch (error) { recordError(error); }
+        finishTaskkill();
+      }, TASKKILL_TIMEOUT_MS);
+    };
+    const terminatePosixGroup = (signal: NodeJS.Signals) => {
+      diagnostics.strategy = "posix-process-group";
+      if (signal === "SIGTERM") diagnostics.termSent = true;
+      else diagnostics.killSent = true;
+      try {
+        if (child.pid === undefined) throw new Error("preflight child pid is unavailable");
+        process.kill(-child.pid, signal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") recordError(error);
+        try { child.kill(signal); } catch (fallbackError) {
+          if ((fallbackError as NodeJS.ErrnoException).code !== "ESRCH") recordError(fallbackError);
+        }
+      }
+    };
+    const waitForPosixGroupExit = () => {
+      if (settled) return;
+      try {
+        if (child.pid === undefined) throw new Error("preflight child pid is unavailable");
+        process.kill(-child.pid, 0);
+        groupPollTimer = setTimeout(waitForPosixGroupExit, 25);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") recordError(error);
+        treeTerminationDone = true;
+        settleIfTerminationComplete();
+      }
+    };
+
+    child.stdout?.on("data", (chunk: Buffer) => appendBounded(stdoutChunks, chunk, stdoutCapture, diagnostics));
+    child.stderr?.on("data", (chunk: Buffer) => appendBounded(stderrChunks, chunk, stderrCapture, diagnostics));
+    child.once("error", (error) => { failureMessage = error.message; recordError(error); settle(); });
+    child.once("exit", (code, signal) => { exitCode = code; exitSignal = signal; });
+    child.once("close", (code, signal) => {
+      exitCode = code;
+      exitSignal = signal;
+      childClosed = true;
+      settleIfTerminationComplete();
+    });
+
+    const timeoutTimer = setTimeout(() => {
+      if (settled) return;
+      diagnostics.timedOut = true;
+      if (process.platform === "win32") terminateWindowsTree();
+      else {
+        terminatePosixGroup("SIGTERM");
+        killTimer = setTimeout(() => {
+          if (!settled) {
+            terminatePosixGroup("SIGKILL");
+            waitForPosixGroupExit();
+          }
+        }, PREFLIGHT_TERM_GRACE_MS);
+      }
+    }, timeoutMs);
+    // `close` waits for all inherited pipe handles, not merely the direct child.
+    // This deadline is deliberately absolute: even a descendant which escaped
+    // tree termination cannot retain this launcher's stdio or promise forever.
+    const hardDeadline = setTimeout(() => {
+      if (settled) return;
+      diagnostics.timedOut = true;
+      diagnostics.hardDeadlineReached = true;
+      if (process.platform === "win32") directChildFallback();
+      else if (!diagnostics.killSent) terminatePosixGroup("SIGKILL");
+      destroyAndUnrefStdio(child);
+      settle();
+    }, timeoutMs + PREFLIGHT_TERM_GRACE_MS + PREFLIGHT_HARD_SETTLEMENT_GRACE_MS);
+  });
+}
+
 export async function preflightPiModelAvailability(command: PiCommand, model: string, timeoutMs = 15_000): Promise<ModelPreflightResult> {
   const extensions = extensionArgs(command.args);
   const args = [
@@ -238,44 +464,16 @@ export async function preflightPiModelAvailability(command: PiCommand, model: st
     "--no-extensions",
     ...extensions.flatMap((extension) => ["-e", extension]),
     "--list-models",
-    childModelSearchTerm(model),
+    model,
   ];
-  const renderedCommand = [command.command, ...args].join(" ");
-
-  return new Promise((resolve) => {
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let settled = false;
-    const child = spawn(command.command, args, {
-      cwd: command.cwd,
-      env: { ...process.env, ...command.env },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try { child.kill("SIGTERM"); } catch { /* already exited */ }
-      resolve({ ok: false, command: renderedCommand, stdout: Buffer.concat(stdoutChunks).toString("utf8"), stderr: Buffer.concat(stderrChunks).toString("utf8"), message: `model preflight timed out after ${timeoutMs}ms` });
-    }, timeoutMs);
-
-    child.stdout?.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolve({ ok: false, command: renderedCommand, stdout: Buffer.concat(stdoutChunks).toString("utf8"), stderr: Buffer.concat(stderrChunks).toString("utf8"), message: error.message });
-    });
-    child.once("close", (exitCode, signal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
-      const ok = exitCode === 0 && modelListed(`${stdout}\n${stderr}`, model);
-      resolve({ ok, command: renderedCommand, stdout, stderr, exitCode, signal, message: ok ? undefined : providerExtensionHint(model) });
-    });
-  });
+  const result = await runBoundedPreflight(command, args, timeoutMs);
+  const ok = !result.timedOut && result.exitCode === 0 && modelListed(result.stdout ?? "", result.stderr ?? "", model);
+  const { timedOut, failureMessage, ...publicResult } = result;
+  return {
+    ...publicResult,
+    ok,
+    message: timedOut ? `model preflight timed out after ${timeoutMs}ms` : ok ? undefined : failureMessage ?? providerExtensionHint(model),
+  };
 }
 
 function delay(ms: number): Promise<void> {

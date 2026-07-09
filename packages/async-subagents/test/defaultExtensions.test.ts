@@ -112,6 +112,29 @@ Scout body.
   assert.equal(extensions[0], extension);
 });
 
+test("buildPiCommand dedupes codex-auth-balancer source and dist provider identities only", () => {
+  const root = tempRoot();
+  const sourcePackage = join(root, "source-balancer");
+  const installedPackage = join(root, "installed-balancer");
+  for (const packageRoot of [sourcePackage, installedPackage]) {
+    mkdirSync(packageRoot, { recursive: true });
+    writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "@bravo/codex-auth-balancer" }));
+  }
+  const sourceProvider = makeFile(join(sourcePackage, "extensions", "pi", "index.ts"));
+  const distProvider = makeFile(join(installedPackage, "dist", "extensions", "pi", "index.js"));
+  const hypotheticalEntrypoint = makeFile(join(installedPackage, "dist", "extensions", "telemetry", "index.js"));
+  const unrelatedA = makeFile(join(root, "unrelated-a", "index.ts"));
+  const unrelatedB = makeFile(join(root, "unrelated-b", "index.ts"));
+
+  const command = buildPiCommand({
+    systemPath: "/run/artifacts/system.md", taskPath: "/run/artifacts/task.md", runDir: "/run", cwd: "/repo",
+    sessionPolicy: "record", userBuiltinTools: [], skills: [], defaultExtensionPaths: [sourceProvider, unrelatedA],
+    extensions: [distProvider, hypotheticalEntrypoint, unrelatedB], runtimeExtensionPaths: [],
+  });
+  const extensions = command.args.flatMap((arg, index, args) => arg === "-e" ? [args[index + 1]] : []).filter(Boolean);
+  assert.deepEqual(extensions, [sourceProvider, unrelatedA, hypotheticalEntrypoint, unrelatedB]);
+});
+
 test("buildPiCommand places default extensions before agent extensions and dedupes realpaths", () => {
   const root = tempRoot();
   const defaultExtension = makeFile(join(root, "default.ts"));

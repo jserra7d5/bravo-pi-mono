@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startSubagent } from "../src/start.js";
+import { parsePiModelTable, preflightPiModelAvailability, startSubagent, windowsTaskkillArgs } from "../src/start.js";
 import { sendSubagentMessage, waitForMessageAck } from "../src/message.js";
 import { createRunResult, readSubagentResult } from "../src/result.js";
 import { RunStore } from "../src/runStore.js";
@@ -156,6 +156,20 @@ async function waitForStatusState(store: RunStore, runId: string, state: string,
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   assert.equal(store.readStatus(runId).state, state);
+}
+
+async function waitForPidExit(pid: number, timeoutMs = 1500): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return false;
 }
 
 test("startSubagent drives a detached fake child lifecycle", async () => {
@@ -594,6 +608,226 @@ Gemini scout body.
   assert.ok(existsSync(join(started.runDir, "logs", "model-preflight.json")));
 });
 
+test("parsePiModelTable strips ANSI and accepts only exact valid six-column tables", () => {
+  const parsed = parsePiModelTable([
+    "warning provider model context max-out thinking images",
+    "\u001b[1mprovider model context max-out thinking images\u001b[0m",
+    "openai-codex gpt-good 272K 128K yes no",
+    "openai-codex malformed unknown 128K yes no",
+    "openai-codex too-many 272K 128K yes no trailing",
+  ].join("\n"));
+  assert.deepEqual(parsed.map(row => [row.provider, row.model]), [["openai-codex", "gpt-good"]]);
+});
+
+test("Windows taskkill command contract is an injection-safe PID argument array (not process-tree proof)", () => {
+  assert.deepEqual(windowsTaskkillArgs(1234), ["/PID", "1234", "/T", "/F"]);
+});
+
+test("model preflight rejects native Luna when the balanced provider row is absent", async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi-native-luna.js");
+  writeFileSync(piBin, `#!/usr/bin/env node
+if (!process.argv.includes("bravo-codex-balanced/gpt-5.6-luna")) process.exit(91);
+console.log("provider               model           context  max-out  thinking  images");
+console.log("openai-codex            gpt-5.6-luna    372K     128K     yes       yes");
+`, "utf8");
+  chmodSync(piBin, 0o755);
+
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-5.6-luna", 5000);
+  assert.equal(result.ok, false);
+  assert.match(result.stdout ?? "", /openai-codex/);
+});
+
+test("model preflight accepts an exact fully-qualified provider/model stdout row", async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi-balanced-luna.js");
+  writeFileSync(piBin, `#!/usr/bin/env node
+console.log("provider model context max-out thinking images");
+console.log("bravo-codex-balanced bravo-codex-balanced/gpt-5.6-luna 372K 128K yes yes");
+`, "utf8");
+  chmodSync(piBin, 0o755);
+
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-5.6-luna", 5000);
+  assert.equal(result.ok, true);
+});
+
+test("model preflight accepts an exact structured row from older Pi stderr output", async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi-balanced-stderr.js");
+  writeFileSync(piBin, `#!/usr/bin/env node
+console.error("provider model context max-out thinking images");
+console.error("bravo-codex-balanced bravo-codex-balanced/gpt-5.6-luna 372K 128K yes yes");
+`, "utf8");
+  chmodSync(piBin, 0o755);
+
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-5.6-luna", 5000);
+  assert.equal(result.ok, true);
+});
+
+test("model preflight accepts one exact unqualified model id", async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi-unqualified.js");
+  writeFileSync(piBin, `#!/usr/bin/env node
+console.log("provider model context max-out thinking images");
+console.log("one gpt-exact 128K 32K yes no");
+console.log("two gpt-exact-longer 128K 32K yes no");
+`, "utf8");
+  chmodSync(piBin, 0o755);
+
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "gpt-exact", 5000);
+  assert.equal(result.ok, true);
+});
+
+test("model preflight rejects an ambiguous unqualified exact model id", async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi-ambiguous.js");
+  writeFileSync(piBin, `#!/usr/bin/env node
+console.log("provider model context max-out thinking images");
+console.log("one shared-model 128K 32K yes no");
+console.log("two shared-model 128K 32K yes no");
+`, "utf8");
+  chmodSync(piBin, 0o755);
+
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "shared-model", 5000);
+  assert.equal(result.ok, false);
+});
+
+test("model preflight kills a SIGTERM-resistant parent and grandchild process group with inherited pipes", { skip: process.platform === "win32" }, async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi-resistant.js");
+  const ready = join(w.root, "grandchild-ready.json");
+  writeFileSync(piBin, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+process.on("SIGTERM", () => {});
+const script = \`
+  const { writeFileSync } = require("node:fs");
+  process.on("SIGTERM", () => {});
+  writeFileSync(process.env.READY, JSON.stringify({ pid: process.pid }));
+  if (process.send) process.send("ready");
+  setInterval(() => {}, 1000);
+\`;
+const grandchild = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "inherit", "inherit", "ipc"], env: process.env });
+grandchild.once("message", () => {
+  console.log("provider model context max-out thinking images");
+  console.log("one never 128K 32K yes no");
+});
+setInterval(() => {}, 1000);
+`, "utf8");
+  chmodSync(piBin, 0o755);
+
+  const startedAt = Date.now();
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: { READY: ready } }, "never", 1000);
+  const elapsed = Date.now() - startedAt;
+  assert.equal(result.ok, false);
+  assert.equal(result.signal, "SIGKILL");
+  assert.match(result.message ?? "", /timed out after 1000ms/);
+  assert.equal(result.termination?.strategy, "posix-process-group");
+  assert.equal(result.termination?.termSent, true);
+  assert.equal(result.termination?.killSent, true);
+  assert.ok(elapsed >= 1250 && elapsed < 2500, `expected bounded escalation, got ${elapsed}ms`);
+  const grandchildPid = JSON.parse(readFileSync(ready, "utf8")).pid as number;
+  assert.equal(await waitForPidExit(grandchildPid), true, "grandchild must be reaped after process-group termination");
+});
+
+test("model preflight still escalates the owned group after the direct child closes on SIGTERM", { skip: process.platform === "win32" }, async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi-parent-exits.js");
+  const ready = join(w.root, "ignored-stdio-grandchild.json");
+  writeFileSync(piBin, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const script = \
+  'const {writeFileSync}=require("node:fs");' +
+  'process.on("SIGTERM",()=>{});' +
+  'writeFileSync(process.env.READY,JSON.stringify({pid:process.pid}));' +
+  'setInterval(()=>{},1000);';
+spawn(process.execPath, ["-e", script], { stdio: "ignore", env: process.env });
+setInterval(() => {}, 1000);
+`, "utf8");
+  chmodSync(piBin, 0o755);
+
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: { READY: ready } }, "never", 750);
+  assert.equal(result.ok, false);
+  assert.equal(result.signal, "SIGTERM", "direct child may exit on TERM while the group still requires KILL");
+  assert.equal(result.termination?.termSent, true);
+  assert.equal(result.termination?.killSent, true);
+  const grandchildPid = JSON.parse(readFileSync(ready, "utf8")).pid as number;
+  assert.equal(await waitForPidExit(grandchildPid), true, "SIGTERM-resistant non-pipe descendant must be reaped before return");
+});
+
+test("model preflight has an absolute settlement deadline when an escaped descendant retains stdout", { skip: process.platform === "win32" }, async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi-escaped-pipe.js");
+  const pidFile = join(w.root, "escaped-pid");
+  writeFileSync(piBin, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"], {
+  detached: true, stdio: ["ignore", "inherit", "inherit"],
+});
+writeFileSync(process.env.PID_FILE, String(child.pid));
+setInterval(() => {}, 1000);
+`, "utf8");
+  chmodSync(piBin, 0o755);
+
+  let escapedPid: number | undefined;
+  try {
+    const startedAt = Date.now();
+    const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: { PID_FILE: pidFile } }, "never", 300);
+    const elapsed = Date.now() - startedAt;
+    assert.equal(result.ok, false);
+    assert.equal(result.termination?.hardDeadlineReached, true);
+    assert.ok(elapsed >= 1250 && elapsed < 2200, `hard deadline must settle despite inherited pipe, got ${elapsed}ms`);
+    escapedPid = Number(readFileSync(pidFile, "utf8"));
+    assert.doesNotThrow(() => process.kill(escapedPid!, 0), "fixture proves the descendant escaped the preflight process group");
+  } finally {
+    if (escapedPid) {
+      try { process.kill(-escapedPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+});
+
+test("model preflight bounds captured output", async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi-noisy.js");
+  writeFileSync(piBin, `#!/usr/bin/env node
+process.stdout.write("x".repeat(2 * 1024 * 1024));
+`, "utf8");
+  chmodSync(piBin, 0o755);
+
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "never", 5000);
+  assert.equal(result.ok, false);
+  assert.equal(Buffer.byteLength(result.stdout ?? ""), 1024 * 1024);
+  assert.equal(result.termination?.outputTruncated, true);
+});
+
+test("model preflight does not authorize a stderr row with a stdout header", async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi-split-stream.js");
+  writeFileSync(piBin, `#!/usr/bin/env node
+console.log("provider model context max-out thinking images");
+console.error("bravo-codex-balanced bravo-codex-balanced/gpt-5.6-luna 372K 128K yes yes");
+`, "utf8");
+  chmodSync(piBin, 0o755);
+
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-5.6-luna", 5000);
+  assert.equal(result.ok, false);
+});
+
+test("model preflight ignores stderr warnings mentioning the requested model", async () => {
+  const w = workspace();
+  const piBin = join(w.root, "fake-pi-warning.js");
+  writeFileSync(piBin, `#!/usr/bin/env node
+console.error('Warning: No models match pattern "bravo-codex-balanced/gpt-5.6-luna"');
+console.log('No models matching "bravo-codex-balanced/gpt-5.6-luna"');
+`, "utf8");
+  chmodSync(piBin, 0o755);
+
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-5.6-luna", 5000);
+  assert.equal(result.ok, false);
+  assert.match(result.stderr ?? "", /bravo-codex-balanced\/gpt-5\.6-luna/);
+});
+
 test("model preflight uses the selected variant extension set", async () => {
   const w = workspace();
   const extensionPath = "provider-index";
@@ -606,8 +840,8 @@ if (process.argv.includes("--list-models")) {
     console.error('No models matching "gemini-3.5-flash"');
     process.exit(0);
   }
-  console.error("provider                 model");
-  console.error("antigravity-code-assist  gemini-3.5-flash");
+  console.log("provider model context max-out thinking images");
+  console.log("antigravity-code-assist gemini-3.5-flash 128K 32K yes yes");
   process.exit(0);
 }
 console.log("Variant child completed");
