@@ -1,0 +1,8 @@
+import fs from "node:fs";
+import path from "node:path";
+import { Exit, WorkspaceError } from "./errors.js";
+export type ExecutableName = "ttyd" | "tmux" | "tailscale" | "pi";
+const STANDARD_DIRS = ["/home/linuxbrew/.linuxbrew/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] as const;
+function usable(candidate: string): string | undefined { try { const resolved = fs.realpathSync(candidate); fs.accessSync(resolved, fs.constants.X_OK); return fs.statSync(resolved).isFile() ? path.resolve(candidate) : undefined; } catch { return; } }
+export function discoverExecutable(name: ExecutableName, ambientPath = process.env.PATH ?? ""): string | undefined { for (const directory of [...new Set([...ambientPath.split(path.delimiter), ...STANDARD_DIRS].filter(Boolean).map(item => path.resolve(item)))]) { const found = usable(path.join(directory, name)); if (found) return found; } }
+export function discoverRequiredExecutables(ambientPath = process.env.PATH ?? ""): { ttyd: string; tmux: string; tailscale: string; pi?: string } { const ttyd = discoverExecutable("ttyd", ambientPath), tmux = discoverExecutable("tmux", ambientPath), tailscale = discoverExecutable("tailscale", ambientPath), pi = discoverExecutable("pi", ambientPath); const missing = [["ttyd", ttyd], ["tmux", tmux], ["tailscale", tailscale]].filter(([, value]) => !value).map(([name]) => name); if (missing.length) throw new WorkspaceError("DEPENDENCY_DISCOVERY_FAILED", `Cannot resolve required executable(s): ${missing.join(", ")}`, Exit.DEPENDENCY); return { ttyd: ttyd!, tmux: tmux!, tailscale: tailscale!, ...(pi ? { pi } : {}) }; }
