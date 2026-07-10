@@ -31,9 +31,14 @@ export interface BackgroundTaskRecord {
   wakeOnCompletion: boolean;
   wakePolicyVersion?: 1;
   wakePolicySource?: "tool_arg_v1";
-  modelWakeState?: "not_requested" | "claim_acquired" | "routing_failed" | "send_attempted" | "accepted" | "send_failed";
+  // v1 writes claim_acquired -> dispatch_requested -> dispatched_to_host or
+  // dispatch_sync_failed. Older states remain readable evidence only.
+  modelWakeState?: "not_requested" | "claim_acquired" | "routing_failed" | "dispatch_requested" | "dispatched_to_host" | "dispatch_sync_failed" | "send_attempted" | "accepted" | "send_failed";
   modelWakeNotificationId?: string;
   modelWakeClaimedAt?: string;
+  modelWakeDispatchRequestedAt?: string;
+  modelWakeHostApiInvokedAt?: string;
+  modelWakeDispatchResult?: "host_api_invoked";
   modelWakeAttemptedAt?: string;
   modelWakeAcceptedAt?: string;
   modelWakeDeliverySemantics?: "accepted" | "delivered";

@@ -8,10 +8,11 @@ import path from "node:path";
 import test from "node:test";
 import pkg from "../package.json" with { type: "json" };
 import { __resetRenderClockForTest } from "@bravo/render-clock";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension, { BackgroundRunner, buildBackgroundBashTools, clearBackgroundBashWidget, TaskRegistry, updateBackgroundBashWidget } from "../src/index.js";
 import { readConfig } from "../src/config.js";
 import { runtimeId } from "../src/background-runner.js";
-import { buildWakeMessage, type BackgroundBashWakeMessage } from "../src/notifications.js";
+import { buildWakeMessage, InvalidWakeRouteError, isWakeEligible, validateWakeRouting, type BackgroundBashWakeMessage } from "../src/notifications.js";
 import { renderFooter, visWidth } from "../src/ui.js";
 import type { BackgroundTaskRecord } from "../src/task-types.js";
 
@@ -80,6 +81,23 @@ test("output cap limits persisted bytes and stops appending", async () => {
     assert.equal(rec.outputBytes, 32);
     assert.equal(rec.status, "killed");
     assert.equal(readFileSync(rec.outputPath, "utf8").includes("output cap"), true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("foreground delegate preserves output, failure, abort, and bounded large output behavior", async () => {
+  const root = await tmp();
+  try {
+    const bash = buildBackgroundBashTools()[0];
+    const ok = await bash.execute("id", { command: "printf fg-ok" }, undefined, undefined, { cwd: root });
+    assert.equal(ok.content[0]?.type === "text" ? ok.content[0].text : undefined, "fg-ok");
+    await assert.rejects(() => bash.execute("id", { command: "exit 7" }, undefined, undefined, { cwd: root }), /Command exited with code 7/);
+    const abort = new AbortController();
+    const pending = bash.execute("id", { command: "sleep 10" }, abort.signal, undefined, { cwd: root });
+    setTimeout(() => abort.abort(), 50);
+    await assert.rejects(() => pending, /aborted|abort/i);
+    const large = await bash.execute("id", { command: "node -e \"process.stdout.write('x'.repeat(200000))\"" }, undefined, undefined, { cwd: root });
+    const largeText = large.content[0]?.type === "text" ? large.content[0].text : "";
+    assert.ok(largeText.length < 200000, "foreground delegate should retain Pi's output bound");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -879,81 +897,188 @@ test("bash background timeout is validated as process max runtime seconds", asyn
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("wake opt-in sends one bounded accepted completion message", async () => {
+test("ExtensionAPI sendMessage and wake notifier are synchronous void", () => {
+  const host: Pick<ExtensionAPI, "sendMessage"> = { sendMessage() {} };
+  const result: void = host.sendMessage({ customType: "compile-check", content: "ok", display: false });
+  assert.equal(result, undefined);
+});
+
+test("wake admission rejects invalid routes before task allocation", async () => {
   const root = await tmp();
   try {
-    const sent: Array<{ message: BackgroundBashWakeMessage; options: unknown }> = [];
-    const tools = buildBackgroundBashTools({ sendMessage: (message: unknown, options: unknown) => sent.push({ message: message as BackgroundBashWakeMessage, options }) });
-    const bash = tools[0];
-    const ctx = { cwd: root, config: { backgroundBash: { enabled: true, dataDir: path.join(root, "data") } }, sessionManager: { getSessionId: () => "s1", getSessionFile: () => path.join(root, "session.json") } };
-    const res = await bash.execute("id", { command: "printf 'hello <wake> & done'", run_in_background: true, wake_on_completion: true }, undefined, undefined, ctx);
+    const cases: Array<{ name: string; pi?: Parameters<typeof buildBackgroundBashTools>[0]; ctx: unknown; params?: Record<string, unknown>; routeCode: string }> = [
+      { name: "foreground", pi: { sendMessage() {} }, ctx: { cwd: root, sessionManager: { getSessionId: () => "s1" } }, params: { command: "true", wake_on_completion: true }, routeCode: "BACKGROUND_REQUIRED" },
+      { name: "no sender", ctx: { cwd: root, sessionManager: { getSessionId: () => "s1" } }, routeCode: "NO_NOTIFIER" },
+      { name: "missing owner", pi: { sendMessage() {} }, ctx: { cwd: root, sessionManager: { getSessionId: () => "" } }, routeCode: "MISSING_OWNER_SESSION" },
+    ];
+    for (const c of cases) {
+      const dataDir = path.join(root, c.name);
+      const ctx = { ...(c.ctx as object), config: { backgroundBash: { enabled: true, dataDir } } };
+      const result = await buildBackgroundBashTools(c.pi)[0].execute("id", c.params ?? { command: "true", run_in_background: true, wake_on_completion: true }, undefined, undefined, ctx) as { isError?: boolean; details: { code?: string; routeCode?: string } };
+      assert.equal(result.isError, true, c.name);
+      assert.equal(result.details.code, "INVALID_WAKE_ROUTE", c.name);
+      assert.equal(result.details.routeCode, c.routeCode, c.name);
+      assert.deepEqual(new TaskRegistry(dataDir).list(true), [], `${c.name} must not allocate a task`);
+    }
+
+    const partialDir = path.join(root, "runner-partial");
+    const cfg = readConfig({ enabled: true, dataDir: partialDir }, root);
+    const partialNotifier = { ownerSessionId: "s1", ownerRuntimeId: runtimeId, currentSessionId: () => "s1", currentSessionFile: () => undefined, send() {} };
+    await assert.rejects(() => new BackgroundRunner(new TaskRegistry(partialDir), cfg).start({ command: "true", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", ownerSessionFile: path.join(root, "session.json"), wakeNotifier: partialNotifier }), (error: unknown) => error instanceof InvalidWakeRouteError && error.code === "SESSION_FILE_PRESENCE_MISMATCH");
+    const mismatchNotifier = { ...partialNotifier, ownerRuntimeId: "other-runtime" };
+    await assert.rejects(() => new BackgroundRunner(new TaskRegistry(partialDir), cfg).start({ command: "true", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: mismatchNotifier }), (error: unknown) => error instanceof InvalidWakeRouteError && error.code === "RUNTIME_MISMATCH");
+    const nonCallableNotifier = { ...partialNotifier, send: undefined } as unknown as typeof partialNotifier;
+    await assert.rejects(() => new BackgroundRunner(new TaskRegistry(partialDir), cfg).start({ command: "true", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: nonCallableNotifier }), (error: unknown) => error instanceof InvalidWakeRouteError && error.code === "SEND_NOT_CALLABLE");
+    assert.equal(validateWakeRouting({ ownerSessionId: " s1", ownerRuntimeId: runtimeId }, partialNotifier).ok, false, "nonempty route identities must still match exactly");
+    assert.equal(validateWakeRouting({ ownerSessionId: "s1", ownerRuntimeId: runtimeId, ownerSessionFile: " session.json" }, { ...partialNotifier, ownerSessionFile: "session.json", currentSessionFile: () => "session.json" }).ok, false, "session file identity must match exactly");
+    assert.deepEqual(new TaskRegistry(partialDir).list(true), []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("1000 fast real background commands finish without missed close events", { timeout: 60_000 }, async () => {
+  const root = await tmp();
+  try {
+    let sends = 0;
+    const allRecords: BackgroundTaskRecord[] = [];
+    for (let group = 0; group < 10; group++) {
+      const dataDir = path.join(root, `data-${group}`);
+      const tools = buildBackgroundBashTools({ sendMessage() { sends++; } });
+      const ctx = { cwd: root, config: { backgroundBash: { enabled: true, dataDir } }, sessionManager: { getSessionId: () => "s1" } };
+      const tasks = await Promise.all(Array.from({ length: 100 }, async (_, i) => {
+        const result = await tools[0].execute("id", { command: "exit 0", run_in_background: true, wake_on_completion: i < 50 }, undefined, undefined, ctx) as { details: { task: BackgroundTaskRecord } };
+        return result.details.task;
+      }));
+      await waitFor(() => tasks.every(task => new TaskRegistry(dataDir).get(task.taskId)?.status === "exited"), 10_000);
+      allRecords.push(...tasks.map(task => new TaskRegistry(dataDir).get(task.taskId)!));
+    }
+    await waitFor(() => sends === 500, 10_000);
+    assert.equal(allRecords.filter(record => record.status === "exited" && record.exitCode === 0).length, 1000);
+    assert.equal(allRecords.filter(record => record.modelWakeState === "dispatched_to_host").length, 500);
+    assert.equal(allRecords.filter(record => record.wakeOnCompletion === false && record.modelWakeState === undefined).length, 500);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("timeout request remains active until managed shell close", async () => {
+  const root = await tmp();
+  try {
+    const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data"), defaultMaxOutputBytes: 10000 }, root);
+    const runner = new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg);
+    const command = `exec node -e "process.on('SIGTERM',()=>{console.log('term-seen');setTimeout(()=>process.exit(0),350)});setInterval(()=>{},50)"`;
+    const task = await runner.start({ command, cwd: root, timeout: 100 });
+    await waitFor(() => new TaskRegistry(cfg.dataDir).get(task.taskId)?.stopReason === "timeout");
+    const duringGrace = new TaskRegistry(cfg.dataDir).get(task.taskId)!;
+    assert.equal(["running", "blocked"].includes(duringGrace.status), true, "timeout signal must not persist terminal status while child is alive");
+    assert.equal(duringGrace.endedAt, undefined);
+    await waitFor(() => new TaskRegistry(cfg.dataDir).get(task.taskId)?.status === "timed_out");
+    assert.match(readFileSync(task.outputPath, "utf8"), /term-seen/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("output-cap request remains active until managed shell close", async () => {
+  const root = await tmp();
+  try {
+    const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data"), defaultMaxOutputBytes: 32 }, root);
+    const runner = new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg);
+    const command = `exec node -e "process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),300));process.stdout.write('x'.repeat(1000));setInterval(()=>{},50)"`;
+    const task = await runner.start({ command, cwd: root });
+    await waitFor(() => new TaskRegistry(cfg.dataDir).get(task.taskId)?.stopReason === "output_cap");
+    const duringGrace = new TaskRegistry(cfg.dataDir).get(task.taskId)!;
+    assert.equal(duringGrace.status, "running");
+    assert.equal(duringGrace.endedAt, undefined);
+    await waitFor(() => new TaskRegistry(cfg.dataDir).get(task.taskId)?.status === "killed");
+    assert.equal(new TaskRegistry(cfg.dataDir).get(task.taskId)?.outputBytes, 32);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("wake opt-in invokes the void host API exactly once after terminal metadata", async () => {
+  const root = await tmp();
+  try {
+    const sent: Array<{ message: Omit<BackgroundBashWakeMessage, "options">; options: unknown; statusAtSend?: string }> = [];
+    const dataDir = path.join(root, "data");
+    const tools = buildBackgroundBashTools({ sendMessage(message, options) {
+      const taskId = (message.details as { taskId: string }).taskId;
+      sent.push({ message: message as unknown as Omit<BackgroundBashWakeMessage, "options">, options, statusAtSend: new TaskRegistry(dataDir).get(taskId)?.status });
+    } });
+    const ctx = { cwd: root, config: { backgroundBash: { enabled: true, dataDir } }, sessionManager: { getSessionId: () => "s1", getSessionFile: () => path.join(root, "session.json") } };
+    const res = await tools[0].execute("id", { command: "printf 'secret-output-control-☃'", run_in_background: true, wake_on_completion: true }, undefined, undefined, ctx);
     const task = (res.details as { task: BackgroundTaskRecord }).task;
-    await waitFor(() => new TaskRegistry(path.join(root, "data")).get(task.taskId)?.modelWakeState === "accepted");
+    await waitFor(() => new TaskRegistry(dataDir).get(task.taskId)?.modelWakeState === "dispatched_to_host");
     assert.equal(sent.length, 1);
+    assert.equal(sent[0]!.statusAtSend, "exited");
     assert.deepEqual(sent[0]!.options, { triggerTurn: true, deliverAs: "followUp" });
-    assert.equal(sent[0]!.message.customType, "background-bash-notification");
-    assert.match(sent[0]!.message.content, /NOT USER INPUT|not_user_input/);
-    assert.match(sent[0]!.message.content, /hello &lt;wake&gt; &amp; done/);
-    const rec = new TaskRegistry(path.join(root, "data")).get(task.taskId)!;
-    assert.equal(rec.wakePolicyVersion, 1);
-    assert.equal(rec.wakePolicySource, "tool_arg_v1");
-    assert.equal(rec.modelWakeDeliverySemantics, "accepted");
-    assert.ok(rec.modelWakeAcceptedAt);
+    assert.deepEqual(Object.keys(sent[0]!.message.details).sort(), ["exitCode", "outputBytes", "outputPath", "status", "taskId"]);
+    assert.deepEqual(sent[0]!.message.details, { taskId: task.taskId, status: "exited", outputPath: task.outputPath, outputBytes: Buffer.byteLength("secret-output-control-☃"), exitCode: 0 });
+    assert.doesNotMatch(sent[0]!.message.content, /secret-output-control|☃|<command>|<output_tail>|<summary>|<started_at>|<completed_at>|<timestamp>/i);
+    const rec = new TaskRegistry(dataDir).get(task.taskId)!;
+    assert.equal(rec.modelWakeDispatchResult, "host_api_invoked");
+    assert.ok(rec.modelWakeDispatchRequestedAt);
+    assert.ok(rec.modelWakeHostApiInvokedAt);
     assert.equal(rec.modelWakeCanonicalTerminal?.status, "exited");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("tool wake notifier awaits async sendMessage resolution and records async rejection", async () => {
+test("synchronous host throw records dispatch_sync_failed without a second invocation", async () => {
   const root = await tmp();
   try {
-    let resolveSend!: () => void;
-    const sendGate = new Promise<void>((resolve) => { resolveSend = resolve; });
-    const sent: unknown[] = [];
-    const tools = buildBackgroundBashTools({ sendMessage: async (message: unknown) => { sent.push(message); await sendGate; } });
-    const ctx = { cwd: root, config: { backgroundBash: { enabled: true, dataDir: path.join(root, "data") } }, sessionManager: { getSessionId: () => "s1" } };
+    let calls = 0;
+    const dataDir = path.join(root, "data");
+    const tools = buildBackgroundBashTools({ sendMessage() { calls++; throw new Error("sync host failure"); } });
+    const ctx = { cwd: root, config: { backgroundBash: { enabled: true, dataDir } }, sessionManager: { getSessionId: () => "s1" } };
     const res = await tools[0].execute("id", { command: "true", run_in_background: true, wake_on_completion: true }, undefined, undefined, ctx);
     const task = (res.details as { task: BackgroundTaskRecord }).task;
-    await waitFor(() => new TaskRegistry(path.join(root, "data")).get(task.taskId)?.modelWakeState === "send_attempted");
-    assert.equal(sent.length, 1);
-    assert.equal(new TaskRegistry(path.join(root, "data")).get(task.taskId)?.modelWakeAcceptedAt, undefined);
-    resolveSend();
-    await waitFor(() => new TaskRegistry(path.join(root, "data")).get(task.taskId)?.modelWakeState === "accepted");
-
-    const rejectingTools = buildBackgroundBashTools({ sendMessage: async () => { await new Promise(r => setTimeout(r, 10)); throw new Error("async send rejected"); } });
-    const rejectCtx = { cwd: root, config: { backgroundBash: { enabled: true, dataDir: path.join(root, "data2") } }, sessionManager: { getSessionId: () => "s1" } };
-    const rejectRes = await rejectingTools[0].execute("id", { command: "true", run_in_background: true, wake_on_completion: true }, undefined, undefined, rejectCtx);
-    const rejectTask = (rejectRes.details as { task: BackgroundTaskRecord }).task;
-    await waitFor(() => new TaskRegistry(path.join(root, "data2")).get(rejectTask.taskId)?.modelWakeState === "send_failed");
-    assert.equal(new TaskRegistry(path.join(root, "data2")).get(rejectTask.taskId)?.modelWakeErrorCode, "SEND_FAILED");
+    await waitFor(() => new TaskRegistry(dataDir).get(task.taskId)?.modelWakeState === "dispatch_sync_failed");
+    assert.equal(calls, 1);
+    assert.equal(new TaskRegistry(dataDir).get(task.taskId)?.modelWakeErrorCode, "DISPATCH_SYNC_FAILED");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("wake opt-in reports failure, timeout, send rejection, and duplicate suppression", async () => {
+test("post-send persistence failure stays dispatch_requested and is never mislabeled or resent", async () => {
+  const root = await tmp();
+  try {
+    const dataDir = path.join(root, "data");
+    const cfg = readConfig({ enabled: true, dataDir }, root);
+    const registry = new TaskRegistry(dataDir);
+    const originalUpsert = registry.upsert.bind(registry);
+    registry.upsert = ((record: BackgroundTaskRecord) => {
+      if (record.modelWakeState === "dispatched_to_host") throw new Error("post-send metadata fault");
+      return originalUpsert(record);
+    }) as typeof registry.upsert;
+    let calls = 0;
+    const notifier = { ownerSessionId: "s1", ownerRuntimeId: runtimeId, currentSessionId: () => "s1", currentSessionFile: () => undefined, send: () => { calls++; } };
+    const warnings: string[] = [];
+    const oldWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    try {
+      const task = await new BackgroundRunner(registry, cfg).start({ command: "true", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: notifier });
+      await waitFor(() => new TaskRegistry(dataDir).get(task.taskId)?.modelWakeState === "dispatch_requested");
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const persisted = new TaskRegistry(dataDir).get(task.taskId)!;
+      assert.equal(calls, 1);
+      assert.equal(persisted.modelWakeState, "dispatch_requested");
+      assert.notEqual(persisted.modelWakeErrorCode, "DISPATCH_SYNC_FAILED");
+      assert.match(warnings.join("\n"), /post-dispatch persistence failed/);
+    } finally { console.warn = oldWarn; }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("wake opt-in reports failure and timeout once with applicable metadata", async () => {
   const root = await tmp();
   try {
     const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data"), defaultMaxRuntimeMs: 200 }, root);
     const sends: BackgroundBashWakeMessage[] = [];
-    const notifier = { ownerSessionId: "s1", ownerRuntimeId: runtimeId, currentSessionId: () => "s1", currentSessionFile: () => undefined, send: async (m: BackgroundBashWakeMessage) => { sends.push(m); return { acceptedAt: new Date().toISOString(), deliverySemantics: "accepted" as const }; } };
+    const notifier = { ownerSessionId: "s1", ownerRuntimeId: runtimeId, currentSessionId: () => "s1", currentSessionFile: () => undefined, send: (m: BackgroundBashWakeMessage) => { sends.push(m); } };
     const runner = new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg);
     const fail = await runner.start({ command: "exit 7", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: notifier });
     const timeout = await runner.start({ command: "sleep 2", cwd: root, timeout: 100, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: notifier });
-    await waitFor(() => new TaskRegistry(cfg.dataDir).get(fail.taskId)?.modelWakeState === "accepted");
-    await waitFor(() => new TaskRegistry(cfg.dataDir).get(timeout.taskId)?.modelWakeState === "accepted");
-    assert.equal(new TaskRegistry(cfg.dataDir).get(fail.taskId)?.modelWakeCanonicalTerminal?.status, "failed");
-    assert.match(sends.find(m => m.details.taskId === fail.taskId)!.content, /exit code 7/);
-    assert.equal(new TaskRegistry(cfg.dataDir).get(timeout.taskId)?.modelWakeCanonicalTerminal?.status, "timed_out");
-    assert.match(sends.find(m => m.details.taskId === timeout.taskId)!.content, /timed out/);
-
-    const rejecting = { ...notifier, send: async () => { throw new Error("boom"); } };
-    const rejected = await runner.start({ command: "true", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: rejecting });
-    await waitFor(() => new TaskRegistry(cfg.dataDir).get(rejected.taskId)?.modelWakeState === "send_failed");
-    assert.equal(new TaskRegistry(cfg.dataDir).get(rejected.taskId)?.modelWakeErrorCode, "SEND_FAILED");
-
-    const staleThrowing = { ...notifier, send: async () => { throw new Error("stale extension context for replaced session"); } };
-    const stale = await runner.start({ command: "true", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: staleThrowing });
-    await waitFor(() => new TaskRegistry(cfg.dataDir).get(stale.taskId)?.modelWakeState === "routing_failed");
-    assert.equal(new TaskRegistry(cfg.dataDir).get(stale.taskId)?.modelWakeErrorCode, "STALE_SESSION_HANDLE");
-    assert.equal(sends.filter(m => m.details.taskId === fail.taskId).length, 1, "duplicate finalizers must not resend claimed task");
+    await waitFor(() => new TaskRegistry(cfg.dataDir).get(fail.taskId)?.modelWakeState === "dispatched_to_host");
+    await waitFor(() => new TaskRegistry(cfg.dataDir).get(timeout.taskId)?.modelWakeState === "dispatched_to_host");
+    const failureMessage = sends.find(m => m.details.taskId === fail.taskId)!;
+    assert.equal(failureMessage.details.status, "failed");
+    assert.equal(failureMessage.details.exitCode, 7);
+    const timeoutMessage = sends.find(m => m.details.taskId === timeout.taskId)!;
+    assert.equal(timeoutMessage.details.status, "timed_out");
+    assert.equal(timeoutMessage.details.stopReason, "timeout");
+    assert.equal(sends.filter(m => m.details.taskId === fail.taskId).length, 1, "duplicate child events must not resend claimed task");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -970,14 +1095,11 @@ test("wake disabled, legacy config/metadata, missing notifier, stale and cross-s
     assert.equal(new TaskRegistry(path.join(root, "data")).get(quietTask.taskId)?.wakePolicyVersion, undefined);
 
     const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data") }, root);
-    const noNotifier = await new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg).start({ command: "true", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1" });
-    await waitFor(() => new TaskRegistry(cfg.dataDir).get(noNotifier.taskId)?.modelWakeState === "routing_failed");
-    assert.equal(new TaskRegistry(cfg.dataDir).get(noNotifier.taskId)?.modelWakeErrorCode, "NO_NOTIFIER");
+    await assert.rejects(() => new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg).start({ command: "true", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1" }), (error: unknown) => error instanceof InvalidWakeRouteError && error.code === "NO_NOTIFIER");
+    assert.deepEqual(new TaskRegistry(cfg.dataDir).list(true).map(t => t.taskId), [quietTask.taskId], "runner preflight must not allocate another task");
 
-    const staleNotifier = { ownerSessionId: "s1", ownerRuntimeId: runtimeId, currentSessionId: () => "s2", currentSessionFile: () => undefined, send: async () => { throw new Error("must not send"); } };
-    const stale = await new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg).start({ command: "true", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: staleNotifier });
-    await waitFor(() => new TaskRegistry(cfg.dataDir).get(stale.taskId)?.modelWakeState === "routing_failed");
-    assert.equal(new TaskRegistry(cfg.dataDir).get(stale.taskId)?.modelWakeErrorCode, "SESSION_MISMATCH");
+    const staleNotifier = { ownerSessionId: "s1", ownerRuntimeId: runtimeId, currentSessionId: () => "s2", currentSessionFile: () => undefined, send: () => { throw new Error("must not send"); } };
+    await assert.rejects(() => new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg).start({ command: "true", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: staleNotifier }), (error: unknown) => error instanceof InvalidWakeRouteError && error.code === "SESSION_MISMATCH");
 
     const now = new Date().toISOString();
     const legacyDir = path.join(cfg.dataDir, "legacy"); mkdirSync(legacyDir, { recursive: true });
@@ -988,12 +1110,34 @@ test("wake disabled, legacy config/metadata, missing notifier, stale and cross-s
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("legacy v2/v3 wake records remain readable evidence and are never eligible", () => {
+  const now = new Date().toISOString();
+  const base = { taskId: "legacy", command: "true", cwd: "/tmp", status: "exited", createdAt: now, updatedAt: now, startedAt: now, endedAt: now, outputPath: "/tmp/out.log", metadataPath: "/tmp/meta.json", outputBytes: 0, maxOutputBytes: 1000, wakeOnCompletion: true, wakePolicyVersion: 1, wakePolicySource: "tool_arg_v1" };
+  for (const schemaVersion of [2, 3]) assert.equal(isWakeEligible({ ...base, schemaVersion } as unknown as BackgroundTaskRecord), false);
+});
+
+test("stop and natural exit race claims and dispatches once", async () => {
+  const root = await tmp();
+  try {
+    const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data") }, root);
+    const sent: BackgroundBashWakeMessage[] = [];
+    const notifier = { ownerSessionId: "s1", ownerRuntimeId: runtimeId, currentSessionId: () => "s1", currentSessionFile: () => undefined, send: (message: BackgroundBashWakeMessage) => { sent.push(message); } };
+    const runner = new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg);
+    const task = await runner.start({ command: "sleep 0.08", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: notifier });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await Promise.all([runner.stop(task.taskId, "SIGTERM", 100), runner.stop(task.taskId, "SIGTERM", 100)]);
+    await waitFor(() => ["dispatched_to_host", "dispatch_sync_failed"].includes(new TaskRegistry(cfg.dataDir).get(task.taskId)?.modelWakeState ?? ""));
+    assert.equal(sent.length, 1);
+    assert.equal(existsSync(path.join(cfg.dataDir, task.taskId, "model-wake.claim")), true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("shutdown stop suppresses wake for wake-enabled owned task", async () => {
   const root = await tmp();
   try {
     const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data") }, root);
     const sent: BackgroundBashWakeMessage[] = [];
-    const notifier = { ownerSessionId: "s1", ownerRuntimeId: runtimeId, currentSessionId: () => "s1", currentSessionFile: () => undefined, send: async (m: BackgroundBashWakeMessage) => { sent.push(m); return { acceptedAt: new Date().toISOString(), deliverySemantics: "accepted" as const }; } };
+    const notifier = { ownerSessionId: "s1", ownerRuntimeId: runtimeId, currentSessionId: () => "s1", currentSessionFile: () => undefined, send: (m: BackgroundBashWakeMessage) => { sent.push(m); } };
     const registry = new TaskRegistry(cfg.dataDir);
     const runner = new BackgroundRunner(registry, cfg);
     const task = await runner.start({ command: "sleep 10", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: notifier });
@@ -1011,19 +1155,19 @@ test("shutdown stop suppresses wake for wake-enabled owned task", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("manual stop wake, reload lost wake, timeout validation, and tail escaping bounds", async () => {
+test("manual stop wake, reload lost wake, timeout validation, and metadata-only payload", async () => {
   const root = await tmp();
   try {
     const cfg = readConfig({ enabled: true, dataDir: path.join(root, "data") }, root);
     const sent: BackgroundBashWakeMessage[] = [];
-    const notifier = { ownerSessionId: "s1", ownerRuntimeId: runtimeId, currentSessionId: () => "s1", currentSessionFile: () => undefined, send: async (m: BackgroundBashWakeMessage) => { sent.push(m); return { acceptedAt: new Date().toISOString(), deliverySemantics: "accepted" as const }; } };
+    const notifier = { ownerSessionId: "s1", ownerRuntimeId: runtimeId, currentSessionId: () => "s1", currentSessionFile: () => undefined, send: (m: BackgroundBashWakeMessage) => { sent.push(m); } };
     const runner = new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg);
     const task = await runner.start({ command: "sleep 10", cwd: root, wakeOnCompletion: true, ownerSessionId: "s1", wakeNotifier: notifier });
     await new Promise(r => setTimeout(r, 100));
     await runner.stop(task.taskId, "SIGTERM", 1000);
-    await waitFor(() => new TaskRegistry(cfg.dataDir).get(task.taskId)?.modelWakeState === "accepted");
+    await waitFor(() => new TaskRegistry(cfg.dataDir).get(task.taskId)?.modelWakeState === "dispatched_to_host");
     assert.equal(new TaskRegistry(cfg.dataDir).get(task.taskId)?.modelWakeCanonicalTerminal?.stopReason, "user");
-    assert.match(sent[0]!.content, /stopped by request/);
+    assert.equal(sent[0]!.details.stopReason, "user");
 
     const runningDir = path.join(cfg.dataDir, "running"); mkdirSync(runningDir, { recursive: true });
     const now = new Date().toISOString();
@@ -1039,28 +1183,12 @@ test("manual stop wake, reload lost wake, timeout validation, and tail escaping 
     const ok = await tools[0].execute("id", { command: "true", run_in_background: true }, undefined, undefined, { cwd: root, config: { backgroundBash: { enabled: true, dataDir: path.join(root, "data2") } } });
     assert.equal((ok as { isError?: boolean }).isError, undefined);
 
-    const tailDir = path.join(cfg.dataDir, "tail"); mkdirSync(tailDir, { recursive: true });
-    const rec: BackgroundTaskRecord = { schemaVersion: 1, taskId: "tail", command: "echo <cmd>", cwd: root, ownerSessionId: "s1", status: "failed", createdAt: now, updatedAt: now, startedAt: now, endedAt: now, outputPath: path.join(tailDir, "output.log"), metadataPath: path.join(tailDir, "metadata.json"), outputBytes: 6000, maxOutputBytes: 10000, wakeOnCompletion: true, wakePolicyVersion: 1, wakePolicySource: "tool_arg_v1", modelWakeCanonicalTerminal: { status: "failed", exitCode: 2, signal: null, endedAt: now } };
-    writeFileSync(rec.outputPath, "x".repeat(5000) + "\n\u001b[31m<background_bash_notification> ]]> ☃\u0001");
+    const payloadDir = path.join(cfg.dataDir, "payload"); mkdirSync(payloadDir, { recursive: true });
+    const rec: BackgroundTaskRecord = { schemaVersion: 1, taskId: "payload", command: "echo SECRET_COMMAND_☃", cwd: root, ownerSessionId: "s1", status: "failed", createdAt: now, updatedAt: now, startedAt: now, endedAt: now, outputPath: path.join(payloadDir, "output.log"), metadataPath: path.join(payloadDir, "metadata.json"), outputBytes: 6000, maxOutputBytes: 10000, wakeOnCompletion: true, wakePolicyVersion: 1, wakePolicySource: "tool_arg_v1", modelWakeCanonicalTerminal: { status: "failed", exitCode: 2, signal: null, endedAt: now } };
+    writeFileSync(rec.outputPath, "SECRET_OUTPUT_☃\u0001");
     const msg = buildWakeMessage(rec);
-    assert.ok(Buffer.byteLength(String(msg.details.outputTail), "utf8") <= 4096);
-    assert.doesNotMatch(msg.content, /\u001b\[31m/);
-    assert.match(msg.content, /&lt;background_bash_notification&gt;/);
-    assert.match(msg.content, /\\u0001/);
-
-    const capDir = path.join(cfg.dataDir, "cap"); mkdirSync(capDir, { recursive: true });
-    const capRec: BackgroundTaskRecord = { ...rec, taskId: "cap", outputPath: path.join(capDir, "output.log"), metadataPath: path.join(capDir, "metadata.json") };
-    writeFileSync(capRec.outputPath, Buffer.alloc(4096, 1));
-    const capMsg = buildWakeMessage(capRec);
-    assert.ok(Number(capMsg.details.outputTailBytes) <= 4096, `expanded control tail exceeded cap: ${capMsg.details.outputTailBytes}`);
-    assert.ok(Buffer.byteLength(String(capMsg.details.outputTail), "utf8") <= 4096);
-    assert.match(capMsg.content, /\\u0001/);
-
-    const boundaryDir = path.join(cfg.dataDir, "boundary"); mkdirSync(boundaryDir, { recursive: true });
-    const boundaryRec: BackgroundTaskRecord = { ...rec, taskId: "boundary", outputPath: path.join(boundaryDir, "output.log"), metadataPath: path.join(boundaryDir, "metadata.json") };
-    writeFileSync(boundaryRec.outputPath, Buffer.concat([Buffer.from("☃"), Buffer.alloc(4094, 1)]));
-    const boundaryMsg = buildWakeMessage(boundaryRec);
-    assert.ok(Number(boundaryMsg.details.outputTailBytes) <= 4096);
-    assert.doesNotThrow(() => Buffer.from(String(boundaryMsg.details.outputTail), "utf8").toString("utf8"));
+    assert.deepEqual(Object.keys(msg.details).sort(), ["exitCode", "outputBytes", "outputPath", "status", "taskId"]);
+    assert.deepEqual(msg.details, { taskId: "payload", status: "failed", outputPath: rec.outputPath, outputBytes: 6000, exitCode: 2 });
+    assert.doesNotMatch(JSON.stringify(msg), /SECRET_COMMAND|SECRET_OUTPUT|☃/i);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

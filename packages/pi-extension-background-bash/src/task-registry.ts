@@ -79,6 +79,7 @@ export class TaskRegistry {
     return this.withMutationLock(() => {
       this.load();
       const record = this.records.get(taskId) ?? this.loadMetadataRecord(taskId);
+      if (!record || record.schemaVersion !== 1 || !isTerminalMetadata(record)) return false;
       const deletedActive = this.records.delete(taskId);
       const taskDir = join(this.dataDir, taskId);
       let deletedArtifact = false;

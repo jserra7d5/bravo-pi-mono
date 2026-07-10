@@ -39,7 +39,7 @@ export function registerTaskCommands(pi: { registerCommand?: (name: string, spec
     }
     if (sub === "cleanup") {
       const tasks = sessionOwned(registry.list(true), sessionId); let removed = 0;
-      for (const t of tasks) if (!["starting", "running", "blocked"].includes(t.status)) { registry.remove(t.taskId); removed++; }
+      for (const t of tasks) if (["exited", "failed", "timed_out", "killed"].includes(t.status) && registry.remove(t.taskId)) removed++;
       refreshBackgroundBashWidget?.(ctx);
       notify(ctx, [`Cleaned up ${removed} completed background task${removed === 1 ? "" : "s"} for this session.`]); return;
     }

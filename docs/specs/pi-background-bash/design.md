@@ -6,9 +6,9 @@ Related: `debates/pi-background-bash-2026-05-31/*`
 
 ## Summary
 
-Add an opt-in Pi extension package that overrides the model-facing `bash` tool with a Claude-Code-like `run_in_background` mode. The extension preserves one canonical shell tool for agents while adding managed background task tracking, output files, notifications, status/stop controls, and lifecycle cleanup.
+Add an opt-in Pi extension package that overrides the model-facing `bash` tool with a Claude-Code-like `run_in_background` mode. The extension preserves one canonical shell tool for agents while adding schema-v1 background task tracking, output files, status/stop controls, lifecycle cleanup, and explicit per-call best-effort model wake.
 
-This is intentionally an extension, not Pi core behavior. The default Pi `bash` remains synchronous unless a user explicitly enables this package.
+This is intentionally an extension, not Pi core behavior. The default Pi `bash` remains synchronous unless a user explicitly enables this package. The implementation is a session task tracker around a managed shell child, not a durable process supervisor: managed-child `close` is the terminal boundary, and detached descendants that outlive it are outside lifecycle accounting.
 
 ## Background
 
@@ -38,7 +38,7 @@ Pi extension constraints from the debate:
 - Provide durable background task metadata, output logs, status, stop, and cleanup.
 - Make task output readable through Pi's normal file read tool.
 - Add concise prompt guidance, TUI affordances, and slash commands for user/operator control.
-- Fail safely for interactive prompts, runaway logs, stalled tasks, and process leaks.
+- Fail safely for the implemented interactive-prompt patterns, runaway logs, max runtime, and unverified persisted process evidence.
 
 ## Non-goals
 
@@ -60,8 +60,8 @@ The extension should match these Claude Code UX properties:
 4. Output is redirected to a durable file and can be read later with the normal read tool.
 5. Completion produces a structured UI notification and persisted task event by default; model-waking notifications are opt-in.
 6. Users can list and stop background tasks.
-7. Runtime owns and cleans up non-persistent tasks on shutdown.
-8. Watchdogs detect likely interactive prompts, stalled/noisy logs, excessive output, and max runtime.
+7. Runtime requests termination of verified in-memory session tasks on shutdown; it does not promise a bounded global wait.
+8. Watchdogs detect the current interactive-prompt patterns, excessive output, and max runtime.
 
 Intentional differences:
 
@@ -93,7 +93,7 @@ Runtime components:
 - **Task registry**: persists task metadata and reconstructs task state after reload/session start.
 - **Notification emitter**: sends XML-like task events through Pi messaging/UI channels.
 - **Task control tools/commands**: list, status, stop, and optionally bounded output tail.
-- **TUI integration**: formatted tool cards, status widget/footer, and `/tasks` command with progressive disclosure.
+- **TUI integration**: formatted tool cards, status widget/footer, and `/bash-tasks` command with progressive disclosure.
 
 ### Recommended direction
 
@@ -165,12 +165,12 @@ Task: bg_20260531_abcdef
 Status: running
 Output: ~/.pi/background-bash/bg_20260531_abcdef/output.log
 
-Use read on the output path or /tasks for status. Completion will be reported in the UI; model wake-up is opt-in.
+Use read on the output path or /bash-tasks for status. Completion will be reported in the UI; model wake-up is opt-in.
 ```
 
 The same fields may appear in `details` for renderers/session state, but callers must always receive a standard tool result content block.
 
-`timeout` in background mode means maximum runtime before the extension terminates the process group, not foreground wait time.
+`timeout` in background mode means maximum runtime before the extension requests termination, not foreground wait time. The timeout reason is persisted immediately, but the task stays active until the managed shell child emits `close` and its output streams have drained.
 
 ### `background_task_list`
 
@@ -204,18 +204,9 @@ type BackgroundTaskStopInput = {
 
 Stops the task's process group. Default behavior is SIGTERM followed by SIGKILL after a short grace period.
 
-### Optional `background_task_output`
+### Output access
 
-Prefer normal file read for logs. Add this tool only if the normal read tool cannot safely support tail/offset access:
-
-```ts
-type BackgroundTaskOutputInput = {
-  taskId: string;
-  offset?: number;
-  limit?: number;
-  tail?: boolean;
-};
-```
+No additional output tool or wake coalescing layer is added in this scope. Use the normal read tool with bounded `offset`/`limit` requests; `/bash-tasks tail` remains a bounded human TUI command.
 
 ## Foreground Delegation Strategy
 
@@ -249,8 +240,9 @@ For `run_in_background: true`:
 5. Redirect stdout/stderr directly to files, not through unbounded memory buffers.
 6. Record pid, pgid/process handle, command, cwd, environment policy, timestamps, output paths, owner session, and configured limits.
 7. Return immediately.
-8. Monitor process exit and update registry status.
-9. Emit one terminal notification on completion, failure, timeout, killed, or watchdog stop.
+8. Attach `spawn`, `error`, `exit`, `close`, stdout, and stderr handlers synchronously before awaiting spawn readiness or unrefing the child.
+9. Timeout, output-cap, and user-stop paths record the reason and signal the process tree without writing terminal status while the managed shell child is alive.
+10. Attempt finalization exactly once on managed-child `close`, after stdout/stderr drain, and optionally dispatch one wake. If terminal metadata persistence fails, the error is contained and diagnosed, but durable metadata can remain stale/active; this bounded patch does not add a retrying supervisor. Detached descendants that outlive shell close are not supervised and do not delay finalization.
 
 Statuses:
 
@@ -265,79 +257,68 @@ Statuses:
 
 ## Task Registry and Persistence
 
-Persist active lifecycle registry state in extension-owned storage, with a file mirror in each task root for inspectability. The registry is intentionally a hot-path index for starting/running/blocked/attention-needed tasks, not the complete historical source of truth.
+Persist active lifecycle registry state in extension-owned storage, with a file mirror in each task root for inspectability. The registry is an active-lifecycle index for schema-v1 `starting`, `running`, `blocked`, and `orphaned` records, not the complete historical source of truth.
 
 Task metadata fields:
 
 ```ts
 type BackgroundTaskRecord = {
+  schemaVersion: 1;
   taskId: string;
   command: string;
   cwd: string;
-  shell: string;
+  ownerSessionId?: string;
+  ownerSessionFile?: string;
+  ownerRuntimeId?: string;
   pid?: number;
   pgid?: number;
-  processStartTime?: string;
-  processCommandLine?: string;
   status: TaskStatus;
   exitCode?: number | null;
   signal?: string | null;
+  stopReason?: "timeout" | "output_cap" | "interactive_prompt" | "user" | "shutdown";
   outputPath: string;
-  stderrPath?: string;
   metadataPath: string;
-  startedAt: string;
+  outputBytes: number;
+  maxOutputBytes: number;
+  maxRuntimeMs?: number;
+  createdAt: string;
   updatedAt: string;
-  completedAt?: string;
-  ownerSessionId: string;
-  extensionVersion: string;
-  persistent: boolean;
-  limits: {
-    maxRuntimeMs?: number;
-    maxOutputBytes: number;
-    idleTimeoutMs?: number;
-  };
+  startedAt?: string;
+  endedAt?: string;
+  wakeOnCompletion: boolean;
+  wakePolicyVersion?: 1;
+  wakePolicySource?: "tool_arg_v1";
 };
 ```
 
 Persistence policy:
 
-- Default tasks are session-owned and non-persistent.
-- Quiet terminal tasks (`exited`, `killed`, `unknown`) are removed from the active registry when metadata is updated; attention-needed lifecycle states such as `failed`, `timed_out`, and `orphaned` remain in the active index until cleanup/review.
+- Tasks are session-owned when the host supplies a session id; persistence is task metadata/log retention, not process supervision across reload.
+- Successfully persisted terminal tasks (`exited`, `failed`, `timed_out`, and `killed`) leave the active index. A terminal persistence fault can leave stale active metadata and emits a diagnostic; `orphaned` evidence remains active/uncertain and cleanup does not delete it.
 - Per-task `metadata.json` and logs remain inspectable until cleanup, even after a task leaves the active registry.
 - Listing without `includeCompleted` reads only the active lifecycle index; listing with completed tasks may scan per-task metadata directories.
 - Stop/status for a process-terminal task reads its metadata but must not re-add it to the active registry as orphaned or running.
-- On reload, reconcile registry with live PIDs and output files.
-- On full session shutdown, terminate non-persistent running tasks.
-- Persistent tasks may be added later behind an explicit schema option or config flag.
-- If a process cannot be confidently reattached after restart, mark it `unknown` or `orphaned` and surface a cleanup warning.
-- Never treat a PID match alone as proof of ownership. Reconciliation must validate process start time/birth time and command line where the platform exposes them; otherwise disable stop/kill controls for that record.
+- On reload, reconcile existing registry evidence conservatively; uncertain active records become orphaned and ambiguous wake claims are not replayed.
+- On full session shutdown, request termination of owned non-persistent running tasks; terminal metadata still waits for managed-child close.
+- There is no persistent-task mode or reattachment path in this scope.
+- If a live JS child handle is unavailable after reload, mark active schema-v1 evidence `orphaned`; never infer ownership from a persisted PID or issue a destructive stop through it.
+- Old schema-v2/v3 records may be read for inspection only; lifecycle control, cleanup, and wake do not migrate or act on them.
 
-## Notifications XML
+## Model wake notification
 
-Use a structured XML-like message envelope for durable agent-visible events:
+Model wake is an expensive, best-effort separate turn. It can reprocess context that preceded task completion. Use it only when the model will otherwise be idle and one terminal event warrants resuming work. Parallel jobs should omit per-task wakes or use one faithful barrier task; servers, watchers, and services should omit wake.
 
-```xml
-<background_bash_notification>
-  <task_id>bg_20260531_abcdef</task_id>
-  <status>exited</status>
-  <exit_code>0</exit_code>
-  <command>npm run dev</command>
-  <output_path>~/.pi/background-bash/bg_20260531_abcdef/output.log</output_path>
-  <started_at>2026-05-31T12:00:00.000Z</started_at>
-  <completed_at>2026-05-31T12:03:25.000Z</completed_at>
-  <summary>Background command completed successfully.</summary>
-</background_bash_notification>
-```
+Admission policy:
 
-Notification policy:
+- `wake_on_completion: true` is valid only with `run_in_background: true`.
+- Admission runs in both the tool and runner before task-id/directory allocation or process spawn.
+- The host `sendMessage` API must be callable; owner, notifier, and current session ids must be nonempty and equal; owner/notifier runtime ids must be nonempty and equal; session files must be absent everywhere or present everywhere and equal.
+- Invalid routes return `INVALID_WAKE_ROUTE` with a specific route code and create no task/process.
+- Config-level `notifyModelOnCompletion`, omission, and legacy schema-v2/v3 records never opt in or retroactively wake. Only schema-v1 `tool_arg_v1` policy markers are eligible.
 
-- Emit on terminal state only by default.
-- Default completion behavior is UI-only plus persisted task metadata. Do not call `sendUserMessage`, `sendMessage({ triggerTurn: true })`, or equivalent model-waking behavior by default.
-- Model-visible completion notifications require explicit opt-in, for example a future `wake_on_completion: true` parameter or config setting.
-- Do not emit continuous output chunks into the conversation.
-- Include output path and a short tail excerpt only if bounded and useful.
-- Avoid recursive wake loops; waking the agent must be configurable and default off/conservative.
-- UI notifications may be richer than model-visible messages.
+Dispatch ordering is terminal metadata, atomic claim file, route revalidation, durable `dispatch_requested`, then one synchronous void `sendMessage` call with `{ triggerTurn: true, deliverAs: "followUp" }`. A normal return is followed by a best-effort write of `dispatched_to_host` and `host_api_invoked`; a synchronous throw from `sendMessage` records `dispatch_sync_failed`. If the post-send write fails, durable `dispatch_requested` remains deliberately ambiguous and is never relabeled or retried. These states do not claim accepted, enqueued, delivered, or turn-completed semantics. Ambiguous `claim_acquired` or `dispatch_requested` evidence is never replayed after reconcile/reload.
+
+The payload is a strict metadata allowlist: task id, terminal status, output path, output byte count, and applicable exit code, signal, or stop reason. It contains no command, output/tail, summary, timestamps, or other task metadata/secrets. Continuous output is never emitted into conversation context.
 
 ## Output File and Read Integration
 
@@ -347,7 +328,7 @@ The primary output integration is ordinary file reading:
 - Mention that the agent can use the normal read tool on that path.
 - Store logs and metadata outside active source worktrees by default, under Pi-owned state such as `~/.pi/background-bash`.
 - Workspace/repo-local storage is an explicit opt-in only via `dataDir`; if used, add/document ignore entries such as `.gitignore` and source-search exclusions.
-- Enforce maximum output bytes per task. On hard output cap overflow, stop the task by default; optional rotation must still enforce a cumulative cap.
+- Enforce maximum output bytes per task. On hard output cap overflow, stop appending and request task termination; no rotation path is added.
 - Write clear sentinel lines for lifecycle events:
   - task started
   - watchdog warning
@@ -365,7 +346,8 @@ The extension must append/replace `bash` prompt metadata with concise rules:
 - Use `run_in_background: true` for servers, watchers, long builds, long tests, scripts that continue producing output, or commands expected to run longer than a short foreground timeout.
 - Do not use shell `&` for backgrounding; use `run_in_background` so Pi can track, notify, and clean up the task.
 - For foreground commands, omit `run_in_background`.
-- Background commands return a task id and output path immediately; read the output path or use `/tasks`/task tools for status.
+- Background commands return a task id and output path immediately; read the output path in bounded offset/limit requests or use `/bash-tasks`/task tools for status.
+- Wake is an expensive best-effort separate turn that may reprocess prior context. Use it only when otherwise idle and one terminal event warrants resume; omit per-task wakes for parallel jobs (or use one faithful barrier), servers, watchers, and services.
 - If a command asks for input, credentials, confirmation, or an interactive TTY, stop it and ask the user.
 - Stop background tasks when they are no longer needed.
 
@@ -387,7 +369,7 @@ Rendering requirements:
   - shortened output path;
   - exit code/signal for terminal tasks;
   - warning badges for prompt-detected, timeout, output-cap, orphaned, or failed states.
-- Detail-only data belongs behind `/tasks show`, `/tasks tail`, normal `read`, or expanded tool views:
+- Detail-only data belongs behind `/bash-tasks show`, `/bash-tasks tail`, normal `read`, or expanded tool views:
   - full command;
   - full paths;
   - pid/pgid;
@@ -398,7 +380,7 @@ Rendering requirements:
 
 Add user-facing commands:
 
-### `/tasks`
+### `/bash-tasks`
 
 Shows all active and recent background bash tasks:
 
@@ -410,12 +392,12 @@ bg_...123456          exited     00:38    0     npm test
 
 Supported subcommands:
 
-- `/tasks` list active/recent tasks.
-- `/tasks all` include completed retained tasks.
-- `/tasks show <taskId>` show metadata and output path.
-- `/tasks tail <taskId> [lines]` bounded tail view.
-- `/tasks stop <taskId>` terminate a task.
-- `/tasks cleanup` remove completed task metadata/logs according to retention policy.
+- `/bash-tasks` list active/recent tasks.
+- `/bash-tasks all` include completed retained tasks.
+- `/bash-tasks show <taskId>` show metadata and output path.
+- `/bash-tasks tail <taskId> [lines]` bounded tail view.
+- `/bash-tasks stop <taskId>` terminate a task.
+- `/bash-tasks cleanup` remove completed task metadata/logs according to retention policy.
 
 ### Status/widget/footer
 
@@ -436,32 +418,24 @@ Widget/status semantics:
 
 ## Lifecycle, Reload, and Shutdown Policy
 
-### Session start
+### Session start and extension reload
 
-- Load persisted registry.
-- Reconcile each non-terminal task:
-  - if pid/process group is live and ownership is validated by pid, start time/birth time, and command line where available, mark `running`;
-  - if output/exit files indicate completion, mark terminal;
-  - otherwise mark `unknown` or `orphaned` and disable destructive controls.
-- Surface a bounded warning for unknown/orphaned tasks.
-
-### Extension reload
-
-- Treat reload as a soft lifecycle event.
-- Do not eagerly kill tasks on simple extension reload if they can be reconciled immediately after reload.
-- Rebuild in-memory watchers from persisted task records.
+- Load the active schema-v1 registry.
+- In-process children still present in the runner map remain managed.
+- Other `starting`/`running`/`blocked` records become `orphaned`; wake-enabled records additionally persist `WAKE_HANDLE_LOST_AFTER_RELOAD` and are never replayed.
+- No PID reattachment, process-disappearance inference, or old-schema migration occurs.
 
 ### Session shutdown
 
-- Terminate non-persistent running tasks owned by the session.
-- On Unix, send SIGTERM then SIGKILL to the process group after a grace period.
-- On Windows, use `taskkill /F /T /PID <pid>` or a documented equivalent process-tree strategy.
-- Update registry and append lifecycle marker to output log.
+- For session-owned active children with verified in-memory handles, record `shutdown`, append a marker, send SIGTERM, and schedule SIGKILL after the existing grace period.
+- Do not wake for shutdown stops.
+- Do not claim a bounded global shutdown wait: terminal metadata is written later on managed-child `close` if the runtime remains alive.
+- Active records without verified handles become `orphaned`; cleanup does not delete them.
 
 ### Pi process crash/restart
 
 - Best-effort reconciliation on next start.
-- Processes may continue without a live JS handle; classify as `orphaned` unless ownership can be verified.
+- Processes may continue without a live JS handle; classify them as `orphaned`. The current minimal scope makes no process-group-disappearance or descendant-liveness claim.
 - Never kill arbitrary PIDs solely because a stale registry record names them; validate command/cwd/start time where possible.
 
 ## Security and Interactive Prompt Watchdog
@@ -476,17 +450,18 @@ Security posture:
 - Avoid logging secrets from environment/config beyond what the command itself outputs.
 - Respect Pi's existing permission model for command execution and file access.
 
-Watchdogs:
+Implemented watchdog/lifecycle limits:
 
-- **Interactive prompt detection**: scan recent output for patterns such as password prompts, `Are you sure?`, `Press any key`, package manager confirmations, login prompts, MFA/device-code prompts, and TTY errors.
-- **Idle timeout**: optionally warn or stop tasks with no output for a configured duration.
-- **Max runtime**: stop tasks after `timeout`/configured TTL.
-- **Max output size**: stop by default at a hard cap; optional rotation/truncation must enforce a cumulative cap.
-- **Spawn failure**: fail fast and return a foreground-style error result.
+- **Interactive prompt detection**: scan output for the current bounded pattern set and mark the task blocked without sending input.
+- **Max runtime**: request stop after `timeout`/configured TTL, retaining active status until close.
+- **Max output size**: stop appending at the hard cap and request stop, retaining active status until close.
+- **Spawn failure**: persist failure after the managed child closes (or synchronous spawn throws).
 
-`wake_on_completion` is optional and dangerous. It should default to false, require clear prompt guidance, and never be enabled implicitly by config migration.
+Idle detection, output rotation, and richer prompt handling are not part of this minimal patch.
 
-When a likely interactive prompt is detected, default to marking the task `blocked` and notifying the UI with a bounded tail and guidance. Depending on config, stop the task automatically or require explicit `/tasks stop`. Do not type into the process, auto-answer `yes`, or clone Claude's permission prompt UX.
+`wake_on_completion` is optional and expensive. It defaults to false, is per-call tool-argument opt-in only, and is never enabled by config or migration.
+
+When a likely interactive prompt is detected, default to marking the task `blocked` and notifying the UI with a bounded tail and guidance. Depending on config, stop the task automatically or require explicit `/bash-tasks stop`. Do not type into the process, auto-answer `yes`, or clone Claude's permission prompt UX.
 
 ## Configuration
 
@@ -511,7 +486,7 @@ Defaults:
 - `defaultMaxRuntimeMs`: unset or conservative package default.
 - `defaultMaxOutputBytes`: bounded.
 - `shutdownPolicy`: `kill-session-tasks`.
-- `notifyModelOnCompletion`: false or conservative if wake loops are a concern.
+- `notifyModelOnCompletion`: legacy compatibility field only; it never enables wake.
 - `notifyUiOnCompletion`: true.
 
 ## Implementation Phases
@@ -537,14 +512,14 @@ Defaults:
 ### Phase 3: Controls and UI
 
 - Add task list/status/stop tools.
-- Add `/tasks` command and compact status widget/footer.
+- Add `/bash-tasks` command and compact status widget/footer.
 - Add bounded output/tail command if normal read is insufficient.
 
 ### Phase 4: Notifications and watchdogs
 
-- Emit XML-like completion notifications.
-- Add max runtime, max output, idle, and interactive prompt watchdogs.
-- Add conservative wake/noise controls.
+- Emit metadata-only XML-like completion notifications on explicit per-call wake opt-in.
+- Add max runtime, max output, and the current interactive prompt watchdog.
+- Keep wake explicit, best-effort, and quiet by default.
 
 ### Phase 5: Hardening and rollout
 
@@ -566,7 +541,7 @@ This phase builds a standalone, manually invoked migration CLI; the extension mu
 - Update role/tool configuration so subagents that should use background bash load this extension and resolve `bash` to the override.
 - For explicit allowlists, replace built-in `bash` references with the extension-backed `bash` slot and add auxiliary task tools/commands where needed.
 - For `--exclude-tools`/`--no-builtin-tools` usage, sequence changes so the extension `bash` remains available and the built-in is not exposed in parallel.
-- Update prompt fragments to say: use `bash` with `run_in_background: true` for long-running commands; do not use `&`; use output paths and `/tasks` for monitoring.
+- Update prompt fragments to say: use `bash` with `run_in_background: true` for long-running commands; do not use `&`; use output paths and `/bash-tasks` for monitoring.
 - Run a canary subset of async subagent roles before bulk migration.
 
 ## Test Plan
@@ -597,10 +572,10 @@ Task controls:
 
 Lifecycle:
 
-- Extension reload preserves/reconciles running tasks.
-- Session shutdown kills non-persistent tasks.
+- Extension reload retains verified in-memory children and marks other active records orphaned without wake replay.
+- Session shutdown requests termination of verified session children; terminal metadata waits for child close.
 - Restart with stale PID does not kill unrelated processes.
-- Orphaned/unknown tasks are surfaced safely.
+- Orphaned/unknown tasks are surfaced and not deleted by cleanup.
 
 Watchdogs/security:
 
@@ -613,7 +588,7 @@ Prompt/model behavior:
 
 - Agent selects `run_in_background` for servers/watchers/long tests.
 - Agent avoids shell `&`.
-- Agent reads output file or uses `/tasks` after starting a background task.
+- Agent reads output file or uses `/bash-tasks` after starting a background task.
 
 Activation/migration behavior:
 
@@ -663,7 +638,7 @@ Migration sequence:
    - replace "no background bash; use tmux" style guidance where appropriate;
    - add `run_in_background: true` guidance for servers/watchers/long builds;
    - tell agents not to use shell `&`;
-   - tell agents to read returned output paths and use `/tasks`/task tools for status and stop.
+   - tell agents to read returned output paths and use `/bash-tasks`/task tools for status and stop.
 8. **Canary**: migrate a small set of low-risk subagent profiles first and run smoke tests.
 9. **Bulk migrate selected profiles**: apply the same transformation only to operator-selected profiles.
 10. **Rollback**: provide a command or documented steps to restore backups and disable the extension.

@@ -1,10 +1,12 @@
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { configFromContext } from "./config.js";
 import { BackgroundRunner, runtimeId } from "./background-runner.js";
 import { TaskRegistry } from "./task-registry.js";
 import { executeForeground } from "./foreground.js";
 import type { ToolResponse } from "./task-types.js";
+import { validateWakeRouting, type BackgroundWakeNotifier } from "./notifications.js";
 import { renderTaskCard, renderTaskList, truncAnsi, type TextRenderable } from "./ui.js";
 
 const maxSeconds = 24 * 60 * 60;
@@ -28,20 +30,19 @@ function positiveMs(v: unknown, name: string, max = 60_000): number | undefined 
 function sessionOwned<T extends { ownerSessionId?: string }>(records: T[], sessionId?: string): T[] { return records.filter((record) => sessionId ? record.ownerSessionId === sessionId : !record.ownerSessionId); }
 function sessionOwns(record: { ownerSessionId?: string }, sessionId?: string): boolean { return sessionId ? record.ownerSessionId === sessionId : !record.ownerSessionId; }
 
-type PiSender = { sendMessage?: (message: unknown, options?: unknown) => unknown | Promise<unknown> };
-function wakeNotifierFor(pi: PiSender | undefined, ctx: unknown, ownerSessionId: string | undefined, ownerSessionFile: string | undefined) {
-  if (!pi?.sendMessage || !ownerSessionId) return undefined;
+type PiSender = { sendMessage?: ExtensionAPI["sendMessage"] };
+function wakeNotifierFor(pi: PiSender | undefined, ctx: unknown, ownerSessionId: string | undefined, ownerSessionFile: string | undefined): BackgroundWakeNotifier | undefined {
+  const sendMessage = pi?.sendMessage;
+  if (typeof sendMessage !== "function") return undefined;
   return {
     ownerSessionId,
     ownerRuntimeId: runtimeId,
     ownerSessionFile,
     currentSessionId: () => sessionIdOf(ctx),
     currentSessionFile: () => sessionFileOf(ctx),
-    async send(message: { options?: unknown } & Record<string, unknown>) {
+    send(message) {
       const { options, ...body } = message;
-      const result = pi.sendMessage!(body, options);
-      await Promise.resolve(result);
-      return { acceptedAt: new Date().toISOString(), deliverySemantics: "accepted" as const };
+      sendMessage(body, options);
     },
   };
 }
@@ -54,6 +55,8 @@ export function buildBackgroundBashTools(pi?: PiSender, refreshBackgroundBashWid
       name: "bash", label: "Bash", description: "Execute shell commands. Use run_in_background for long-running work. For background calls, timeout is the process max runtime, not a return timeout.", parameters: bashSchema,
       async execute(id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: unknown, ctx: unknown) {
         if (typeof params.command !== "string" || !params.command.trim()) return text("command is required", { code: "INVALID_INPUT" }, true);
+        const wakeOnCompletion = params.wake_on_completion === true;
+        if (wakeOnCompletion && params.run_in_background !== true) return text("wake_on_completion requires run_in_background: true", { code: "INVALID_WAKE_ROUTE", routeCode: "BACKGROUND_REQUIRED" }, true);
         if (!params.run_in_background) return executeForeground(id, params, signal, onUpdate, ctx);
         let timeoutSeconds: number | undefined;
         try { timeoutSeconds = positiveSeconds(params.timeout, "timeout"); } catch (err) { return text(err instanceof Error ? err.message : String(err), { code: "INVALID_INPUT" }, true); }
@@ -61,8 +64,12 @@ export function buildBackgroundBashTools(pi?: PiSender, refreshBackgroundBashWid
         const cfg = configFromContext(ctx, cwdOf(ctx));
         const ownerSessionId = sessionIdOf(ctx);
         const ownerSessionFile = sessionFileOf(ctx);
-        const wakeOnCompletion = params.wake_on_completion === true;
-        const task = await new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg).start({ command: params.command, timeout: timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000, wakeOnCompletion, cwd: cwdOf(ctx), ownerSessionId, ownerSessionFile, wakeNotifier: wakeNotifierFor(pi, ctx, ownerSessionId, ownerSessionFile) });
+        const wakeNotifier = wakeNotifierFor(pi, ctx, ownerSessionId, ownerSessionFile);
+        if (wakeOnCompletion) {
+          const route = validateWakeRouting({ ownerSessionId, ownerSessionFile, ownerRuntimeId: runtimeId }, wakeNotifier);
+          if (!route.ok) return text(`Invalid wake route (${route.code}): ${route.message}`, { code: "INVALID_WAKE_ROUTE", routeCode: route.code }, true);
+        }
+        const task = await new BackgroundRunner(new TaskRegistry(cfg.dataDir), cfg).start({ command: params.command, timeout: timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000, wakeOnCompletion, cwd: cwdOf(ctx), ownerSessionId, ownerSessionFile, wakeNotifier });
         refreshBackgroundBashWidget?.(ctx);
         const wakeLine = wakeOnCompletion ? "Wake on completion: enabled" : "Wake on completion: disabled\nCompletion will be recorded in task metadata/UI only; use background_task_status or read the output path when you need results.";
         const summary = task.status === "failed" ? `Background command failed to start.\nTask: ${task.taskId}\nOutput: ${task.outputPath}` : `Background command started.\nTask: ${task.taskId}\nStatus: ${task.status}\nOutput: ${task.outputPath}\n${wakeLine}\n\nUse read on the output path or background_task_status/list/stop for lifecycle control.`;
