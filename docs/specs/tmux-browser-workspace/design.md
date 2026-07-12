@@ -1,25 +1,25 @@
 # Browser workspace MVP
 
-Status: implemented local MVP (2026-07-09).
-
-The package owns only a disposable presentation path:
+Status: minimal workspace-tabs increment implemented (2026-07-12).
 
 ```text
-Tailnet browser → operator-owned Tailscale Serve mapping → 127.0.0.1 ttyd → exact tmux session → shell/Pi
+Tailnet browser → operator-owned Tailscale Serve mapping → 127.0.0.1 workspace UI → loopback ttyd → exact tmux session → shell/Pi
 ```
 
-## Boundaries
+## Behavior and ownership
 
-- Strict JSON config records dynamic absolute executable paths and one tmux socket/session identity.
-- `start` adopts that exact live session or creates it only when the tmux socket namespace is empty.
-- ttyd binds loopback, is readiness-checked, and runs in an owned process group cleaned on launcher shutdown. tmux is intentionally retained across browser reload and launcher restart.
-- Tailscale is read-only: the package inspects Serve/Funnel state and never applies or removes mappings.
-- There is no daemon, systemd renderer, proof state machine, receipt, oracle, JSONL parser, or attestation layer.
+- A left vertical tab stack is browser-owned. localStorage retains opaque identities, display names, ordering, and active selection.
+- Creating a tab creates one tmux session with that opaque identity in the configured private socket namespace. Opening a live tab always attaches that exact session.
+- The server exposes no session catalog or arbitrary tmux discovery. A browser can only ask about an identity it already holds or submit a newly generated identity.
+- A missing/dead identity is displayed as stale. It is not recreated or redirected. Forget removes browser metadata only.
+- Switching, reload, browser close, forgetting, launcher shutdown, and launcher restart never kill tmux.
+- ttyd and the workspace UI bind loopback only. ttyd runs in an owned process group cleaned on launcher shutdown.
+- Tailscale remains read-only: the package inspects Serve/Funnel state and never applies or removes mappings.
 
-## Current limitations
+## Deliberate exclusions
 
-The foreground launcher is not reboot-persistent and cannot clean up after its own SIGKILL. Tailnet ACL and the existing Serve mapping remain operator responsibilities. ttyd grants shell-equivalent authority, so access must remain private. The explicit live smoke is manual because it launches Pi and can spend a model turn.
+There is no daemon or reboot persistence, cross-device metadata sync, server catalog, UI session killing, reorder/group/pin, auth/collaboration change, or arbitrary tmux discovery. Tailnet ACL and the existing Serve mapping remain operator responsibilities. ttyd grants shell-equivalent authority, so access must remain private.
 
 ## Verification
 
-One local real-browser smoke proves Chromium input traverses ttyd into the exact tmux session, writes an exact file, and browser reload preserves tmux identity. The manual Tailnet smoke launches Pi, sends `hello`, and checks that terminal output advances in the remote browser.
+Build/typecheck are automated. Manual browser verification creates two named tabs, demonstrates distinct exact tmux sessions, switches and reloads, checks localStorage restoration, kills one session from within tmux to verify honest stale display, and verifies forgetting does not kill a live session. The Tailnet smoke remains explicit because it launches Pi and can spend a model turn.

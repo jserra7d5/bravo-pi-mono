@@ -1,29 +1,38 @@
 # @bravo/browser-workspace
 
-A deliberately small private browser terminal: Chromium → existing Tailscale Serve mapping → loopback ttyd → one exact tmux session.
+A deliberately small private browser terminal: Chromium → existing Tailscale Serve mapping → loopback workspace UI/ttyd → exact tmux sessions.
 
 ```sh
 npm run build
 node dist/src/cli.js config init
-node dist/src/cli.js start                 # foreground; creates or adopts the exact session
+node dist/src/cli.js start
 node dist/src/cli.js status --json
 node dist/src/cli.js ingress inspect --json
 ```
 
-`config init` discovers absolute `ttyd`, `tmux`, and `tailscale` paths (and Pi when available). Configuration is strict, mode 0600, and defaults to `~/.config/bravo-browser-workspace/config.json`. Edit `workspace`, ports, and names there. `start --require-existing-tmux` refuses to create a session.
+`config init` discovers absolute `ttyd`, `tmux`, and `tailscale` paths (and Pi when available). Configuration is strict, mode 0600, and defaults to `~/.config/bravo-browser-workspace/config.json`. Edit `workspace`, ports, and the private tmux socket namespace there.
 
-`start` binds ttyd only to `127.0.0.1`, waits for HTTP readiness, and cleans up ttyd's process group on SIGINT/SIGTERM. It deliberately leaves tmux alive. This foreground MVP is **not reboot-persistent**; run it under a managed background process if needed.
+`start` serves a left-hand workspace tab stack. Create tabs with **New workspace**, use **✎** to rename one, and use **×** to forget its browser metadata. Identities, names, order, and active selection live in that browser's localStorage. Each tab has an opaque, stable tmux session identity. Returning to a live tab attaches that exact session. A dead session is marked stale and is never silently replaced or redirected. Forgetting, switching, reload, browser close, and launcher shutdown never kill tmux sessions.
 
-The package never changes Tailscale state. `ingress inspect` and `status` only read it. The mapping is shared state; review it separately and keep Funnel disabled.
+The compact sidebar drop zone streams regular files to `~/tmp-agent-drops/YYYY-MM-DD/` (or the constrained root set in `BRAVO_BROWSER_WORKSPACE_DROP_ROOT` before launch). Names are sanitized, collisions get numeric suffixes, failed partial files are removed, and each file is limited to 100 MiB. The browser stores only the three latest successful upload paths in localStorage; copy copies the full desktop-local path.
 
-## Tests and explicit live smoke
+The UI and its internal ttyd bind only to `127.0.0.1`. ttyd's process group is cleaned on SIGINT/SIGTERM. The package never changes Tailscale state: `ingress inspect` and `status` only read it. Review the operator-owned Serve mapping separately and keep Funnel disabled.
 
-`npm test` includes one real local Playwright smoke (skipped only when its installed executable prerequisites are absent): Chromium types through ttyd into tmux, writes an exact file, then reloads while tmux identity remains unchanged.
+This foreground increment is **not reboot-persistent** and browser metadata does not sync between devices. It intentionally has no server catalog or arbitrary tmux discovery, UI session killing, reorder/group/pin, or collaboration/auth changes.
 
-After an operator starts the service and reviews Tailnet access, they may explicitly run:
+## Validation and manual browser check
 
 ```sh
-npm run smoke:live -- 'https://host.tailnet.ts.net:8443/'
+npm run check
+npm run build
 ```
 
-That script launches configured Pi in the browser terminal, types `hello`, and waits for subsequent browser-visible terminal output. It creates no receipts or attestations. It may consume a paid model turn. Do not run it automatically.
+Then start the service and open the configured operator-owned Tailnet URL (or `http://127.0.0.1:7681/` locally):
+
+```sh
+node dist/src/cli.js start
+```
+
+Create two tabs, give them distinct names, run `echo $TMUX` in each, switch between them, rename one with **✎**, and reload the page. Confirm names/order/selection remain and each terminal returns to its own output. In one terminal run `tmux kill-session`; switch away and back and confirm its tab says `(stale)` rather than opening another session. Click **×** and confirm only the tab metadata is forgotten. Close/reopen the browser and restart the launcher to confirm live tmux sessions remain attachable.
+
+The explicit paid live smoke remains available with `npm run smoke:live -- URL`; do not run it automatically.

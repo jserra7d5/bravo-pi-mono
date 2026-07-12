@@ -7,10 +7,10 @@ import { abortableSleep, fetchBounded, processGroupMembers, readProcessIdentity,
 export async function assertPortFree(port: number): Promise<void> { await new Promise<void>((resolve, reject) => { const server = net.createServer(); server.once("error", () => reject(new WorkspaceError("PORT_OCCUPIED", `Port ${port} is occupied`, Exit.CONFLICT))); server.listen(port, "127.0.0.1", () => server.close(error => error ? reject(error) : resolve())); }); }
 export class TtydSupervisor {
   private child?: ChildProcess; private identity?: ProcessIdentity; private stopping = false; private exit?: { code: number | null; signal: NodeJS.Signals | null }; private spawnError?: NodeJS.ErrnoException;
-  constructor(readonly config: C, readonly env = process.env) {}
+  constructor(readonly config: C, readonly env = process.env, readonly sessionFromUrl = false) {}
   async start(portChecked = false): Promise<number> {
     if (!portChecked) await assertPortFree(this.config.listenPort);
-    const command = buildTtyd(this.config); this.child = spawn(command.executable, command.args, { env: this.env, detached: true, stdio: "ignore", shell: false });
+    const command = buildTtyd(this.config, this.sessionFromUrl); this.child = spawn(command.executable, command.args, { env: this.env, detached: true, stdio: "ignore", shell: false });
     this.child.once("error", error => { this.spawnError = error; }); this.child.once("exit", (code, signal) => { this.exit = { code, signal }; });
     const end = Date.now() + 10_000;
     while (Date.now() < end) {
