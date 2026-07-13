@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { buildSubagentTools } from "../extensions/pi/tools.js";
@@ -13,6 +13,7 @@ import { RunStore } from "../src/runStore.js";
 import { TaskStore } from "../src/taskStore.js";
 import { startSubagent } from "../src/start.js";
 import { createInitialStatus } from "../src/status.js";
+import { withRunMutationLock } from "../src/runLock.js";
 import { NAME_PACKS } from "../src/namePacks.js";
 import type { RootSessionIdentity } from "../src/types.js";
 
@@ -262,9 +263,9 @@ test("subagent_continue queues resume control even when required ack fails", asy
   const w = workspace();
   const store = new RunStore({ cwd: w.root });
   const status = store.readStatus(w.runId);
-  store.writeStatus({ ...status, state: "paused", pid: process.pid, processHealth: "alive", thinkingLevel: "low" });
+  store.writeStatus({ ...status, state: "paused", pid: process.pid, processHealth: "alive", thinkingLevel: "low", allowedFiles: ["src/original.ts"] });
   const built = tools(w.identity);
-  const result = await built.subagent_continue.execute("call", { runId: w.runId, thinkingLevel: "high" }, undefined, undefined, { cwd: w.root });
+  const result = await built.subagent_continue.execute("call", { runId: w.runId, thinkingLevel: "high", body: "Finish the implementation", files: ["src/new.ts", "src/original.ts", "src/new.ts"] }, undefined, undefined, { cwd: w.root });
 
   assert.equal(result.isError, true);
   assert.equal(result.details.state, "paused");
@@ -272,7 +273,68 @@ test("subagent_continue queues resume control even when required ack fails", asy
   assert.equal(result.details.thinkingLevel, "high");
   assert.equal(store.readStatus(w.runId).state, "paused");
   assert.equal(store.readStatus(w.runId).thinkingLevel, "low");
-  assert.equal(store.readInbox(w.runId).records.at(-1)?.thinkingLevel, "high");
+  assert.deepEqual(store.readStatus(w.runId).allowedFiles, ["src/original.ts", "src/new.ts"]);
+  const inboxMessage = store.readInbox(w.runId).records.at(-1);
+  assert.equal(inboxMessage?.thinkingLevel, "high");
+  assert.match(inboxMessage?.body ?? "", /Finish the implementation/);
+  assert.match(inboxMessage?.body ?? "", /Authoritative Write-Scope Amendment/);
+  assert.match(inboxMessage?.body ?? "", /Write only these files:\n- src\/original\.ts\n- src\/new\.ts/);
+  assert.match(inboxMessage?.body ?? "", /contract and prompt enforcement, not OS sandboxing/);
+});
+
+test("paused scope widening re-reads status under the run mutation lock", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const status = store.readStatus(w.runId);
+  store.writeStatus({ ...status, state: "paused", allowedFiles: ["src/base.ts"] });
+  const built = tools(w.identity);
+  const runDir = store.pathsFor({ runId: w.runId }).runDir;
+  let release!: () => void;
+  let locked!: () => void;
+  const entered = new Promise<void>((resolve) => { locked = resolve; });
+  const holder = withRunMutationLock(runDir, async () => {
+    const current = store.readStatus(w.runId);
+    store.writeStatus({ ...current, allowedFiles: ["src/base.ts", "src/concurrent.ts"] });
+    locked();
+    await new Promise<void>((resolve) => { release = resolve; });
+  });
+  await entered;
+
+  const first = built.subagent_continue.execute("first", { runId: w.runId, files: ["src/first.ts"], requiresAck: false }, undefined, undefined, { cwd: w.root });
+  const second = built.subagent_continue.execute("second", { runId: w.runId, files: ["src/second.ts"], requiresAck: false }, undefined, undefined, { cwd: w.root });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  release();
+  await holder;
+  await Promise.all([first, second]);
+
+  const persistedFiles = store.readStatus(w.runId).allowedFiles ?? [];
+  assert.equal(persistedFiles[0], "src/base.ts");
+  assert.equal(persistedFiles[1], "src/concurrent.ts");
+  assert.deepEqual(new Set(persistedFiles), new Set(["src/base.ts", "src/concurrent.ts", "src/first.ts", "src/second.ts"]));
+  const amendments = store.readInbox(w.runId).records.map((message) => {
+    assert.equal(message.type, "instruction");
+    assert.match(message.body, /Authoritative Write-Scope Amendment/);
+    return [...message.body.matchAll(/^- (.+)$/gm)].map((match) => match[1]);
+  });
+  assert.equal(amendments.length, 2);
+  assert.ok(amendments[0]?.every((file) => amendments[1]?.includes(file)));
+  assert.deepEqual(amendments[1], persistedFiles);
+});
+
+test("unscoped paused runs reject file widening without resuming or mutating", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const status = store.readStatus(w.runId);
+  store.writeStatus({ ...status, state: "paused" });
+  const built = tools(w.identity);
+
+  const result = await built.subagent_continue.execute("call", { runId: w.runId, files: ["src/additional.ts"], requiresAck: false }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "SCOPE_UNSPECIFIED");
+  assert.equal(store.readStatus(w.runId).allowedFiles, undefined);
+  assert.equal(store.readInbox(w.runId).records.length, 0);
+  assert.equal(existsSync(join(store.pathsFor({ runId: w.runId }).runDir, "control.jsonl")), false);
 });
 
 test("subagent_continue creates an async terminal continuation using the original Pi session", async () => {
@@ -287,6 +349,7 @@ test("subagent_continue creates an async terminal continuation using the origina
     piSessionPath: originalSession,
     requestedPiSessionPath: join(store.pathsFor({ runId: w.runId }).runDir, "pi-session", "session.jsonl"),
     thinkingLevel: "low",
+    allowedFiles: ["src/original.ts", "src/shared.ts"],
   });
   store.writeResult(createRunResult({
     runId: w.runId,
@@ -309,7 +372,7 @@ test("subagent_continue creates an async terminal continuation using the origina
     },
   });
   const byName = Object.fromEntries(built.map((tool) => [tool.name, tool]));
-  const result = await byName.subagent_continue.execute("call", { runId: w.runId, body: "Add the retry loop" }, undefined, undefined, { cwd: w.root });
+  const result = await byName.subagent_continue.execute("call", { runId: w.runId, body: "Add the retry loop", files: ["src/shared.ts", "src/retry.ts", "src/retry.ts"] }, undefined, undefined, { cwd: w.root });
 
   assert.equal(result.isError, undefined);
   assert.equal(result.details.continuedFromRunId, w.runId);
@@ -317,6 +380,7 @@ test("subagent_continue creates an async terminal continuation using the origina
   assert.equal(result.details.continuationSequence, 1);
   assert.equal(result.details.continuationOfPiSessionPath, originalSession);
   assert.equal(Object.hasOwn(calls[0] as Record<string, unknown>, "startMode"), false);
+  assert.deepEqual((calls[0] as { files?: string[] }).files, ["src/original.ts", "src/shared.ts", "src/retry.ts"]);
 
   const newRunId = result.details.runId as string;
   assert.notEqual(newRunId, w.runId);
@@ -326,11 +390,44 @@ test("subagent_continue creates an async terminal continuation using the origina
   assert.equal(continuation.continuationSequence, 1);
   assert.equal(continuation.continuationOfPiSessionPath, originalSession);
   assert.equal(continuation.piSessionPath, originalSession);
+  assert.deepEqual(continuation.allowedFiles, ["src/original.ts", "src/shared.ts", "src/retry.ts"]);
   assert.equal(store.readResult(newRunId)?.continuedFromRunId, w.runId);
+  const continuationTask = readFileSync(join(store.pathsFor({ runId: newRunId }).artifactsDir, "task.md"), "utf8");
+  assert.match(continuationTask, /# Allowed Files\n\n- src\/original\.ts\n- src\/shared\.ts\n- src\/retry\.ts/);
 
   const launch = JSON.parse(readFileSync(join(store.pathsFor({ runId: newRunId }).runDir, "logs", "launch.json"), "utf8"));
   assert.deepEqual(launch.args.slice(launch.args.indexOf("--session"), launch.args.indexOf("--session") + 2), ["--session", originalSession]);
   assert.equal(launch.continuation.continuedFromRunId, w.runId);
+
+  const second = await byName.subagent_continue.execute("second", { runId: newRunId, body: "Continue again" }, undefined, undefined, { cwd: w.root });
+  assert.equal(second.isError, undefined);
+  assert.deepEqual(store.readStatus(second.details.runId as string).allowedFiles, ["src/original.ts", "src/shared.ts", "src/retry.ts"]);
+});
+
+test("unscoped terminal runs reject file widening before launch", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const originalSession = join(w.root, "unscoped-child-session.jsonl");
+  const original = store.readStatus(w.runId);
+  store.writeStatus({ ...original, state: "completed", resultReady: true, piSessionPath: originalSession });
+  store.writeResult(createRunResult({ runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", piSessionPath: originalSession }));
+  let launches = 0;
+  const built = buildSubagentTools({
+    getRootIdentity() { return w.identity; },
+    startSubagent(input) { launches += 1; return startSubagent({ ...input, fake: { mode: "immediate", body: "Done" } }); },
+  });
+  const byName = Object.fromEntries(built.map((tool) => [tool.name, tool]));
+
+  const result = await byName.subagent_continue.execute("call", { runId: w.runId, files: ["src/new.ts"] }, undefined, undefined, { cwd: w.root });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "SCOPE_UNSPECIFIED");
+  assert.equal(launches, 0);
+
+  const withoutFiles = await byName.subagent_continue.execute("without-files", { runId: w.runId, body: "Continue unscoped" }, undefined, undefined, { cwd: w.root });
+  assert.equal(withoutFiles.isError, undefined);
+  assert.equal(launches, 1);
+  assert.equal(store.readStatus(withoutFiles.details.runId as string).allowedFiles, undefined);
 });
 
 test("subagent_continue rejects concurrent terminal continuation starts for the same session", async () => {
@@ -460,13 +557,50 @@ test("subagent_continue returns a structured error for terminal runs without a r
   assert.equal(result.details.code, "TERMINAL_CONTINUATION_SESSION_UNAVAILABLE");
 });
 
+test("start and continue reject invalid allowed-file paths and empty start scope remains unknown", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const started = await startSubagent({
+    agent: "scout",
+    task: "No explicit scope",
+    cwd: w.root,
+    runRoot: store.runRoot,
+    parentRunId: w.identity.parentRunId,
+    files: [],
+    fake: { mode: "immediate", body: "Done" },
+  });
+  assert.equal(store.readStatus(started.runId).allowedFiles, undefined);
+  await assert.rejects(
+    () => startSubagent({ agent: "scout", task: "Bad scope", cwd: w.root, runRoot: store.runRoot, parentRunId: w.identity.parentRunId, files: ["  "] }),
+    (error: any) => error?.code === "INVALID_ALLOWED_FILE",
+  );
+
+  const original = store.readStatus(w.runId);
+  store.writeStatus({ ...original, state: "paused" });
+  const built = tools(w.identity);
+  for (const file of ["", "  ", "src/a.ts\nsrc/b.ts", "src/a.ts\rnope"]) {
+    const result = await built.subagent_continue.execute("invalid", { runId: w.runId, files: [file] }, undefined, undefined, { cwd: w.root });
+    assert.equal(result.isError, true);
+    assert.equal(result.details.code, "INVALID_ALLOWED_FILE");
+  }
+  assert.equal(store.readStatus(w.runId).allowedFiles, undefined);
+
+  const startResult = await built.subagent_start.execute("invalid-start", { agent: "scout", task: "Bad", files: ["src/a.ts\nnope"] }, undefined, undefined, { cwd: w.root });
+  assert.equal(startResult.isError, true);
+  assert.equal(startResult.details.code, "INVALID_ALLOWED_FILE");
+});
+
 test("Pi tool schemas expose thinking level controls and skill forwarding", () => {
   const built = buildSubagentTools();
   const startSchema = JSON.stringify(built.find((tool) => tool.name === "subagent_start")?.parameters);
   assert.ok(startSchema.includes("thinkingLevel"));
   assert.ok(startSchema.includes("skills"));
   assert.ok(startSchema.includes("Children do not inherit parent-session skills automatically"));
-  assert.ok(JSON.stringify(built.find((tool) => tool.name === "subagent_continue")?.parameters).includes("thinkingLevel"));
+  const continueSchema = JSON.stringify(built.find((tool) => tool.name === "subagent_continue")?.parameters);
+  assert.ok(continueSchema.includes("thinkingLevel"));
+  assert.ok(continueSchema.includes("files"));
+  assert.ok(continueSchema.includes("Existing specified scope is always retained"));
+  assert.ok(continueSchema.includes("runs without a specified scope reject file widening"));
 });
 
 test("subagent_start returns a tool error when fastTrack is requested while disabled", async () => {

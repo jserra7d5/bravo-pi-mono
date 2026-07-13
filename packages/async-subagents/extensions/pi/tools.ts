@@ -12,7 +12,8 @@ import { TaskStore, type TaskUpdateInput } from "../../src/taskStore.js";
 import { readTaskRuntimeState } from "../../src/taskRuntime.js";
 import { deriveTaskReadiness, unresolvedDependencies } from "../../src/taskState.js";
 import { isTerminalRunState, isThinkingLevel } from "../../src/schemas.js";
-import { startSubagent, type StartSubagentInput } from "../../src/start.js";
+import { normalizeAllowedFilePaths, startSubagent, type StartSubagentInput } from "../../src/start.js";
+import { withRunMutationLock } from "../../src/runLock.js";
 import { readSubagentStatus, updateRunStatus } from "../../src/status.js";
 import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult } from "../../src/types.js";
 import { readParentPiSessionRef } from "../../src/piSession.js";
@@ -421,6 +422,27 @@ function requiredAckFailed(params: Record<string, unknown>, result: SubagentMess
   return params.requiresAck !== false && Boolean(result.unsupported);
 }
 
+function filesFromParams(params: Record<string, unknown>): string[] | undefined {
+  if (!Array.isArray(params.files)) return undefined;
+  return normalizeAllowedFilePaths(params.files as string[]);
+}
+
+function widenedAllowedFiles(status: RunStatus, additionalFiles: string[] | undefined): string[] | undefined {
+  if (status.allowedFiles === undefined) return undefined;
+  return [...new Set([...status.allowedFiles, ...(additionalFiles ?? [])])];
+}
+
+function writeScopeAmendment(allowedFiles: string[]): string {
+  return [
+    "# Authoritative Write-Scope Amendment",
+    "",
+    "The allowed file list for this run is now the following additive union. Write only these files:",
+    ...allowedFiles.map((file) => `- ${file}`),
+    "",
+    "This is contract and prompt enforcement, not OS sandboxing.",
+  ].join("\n");
+}
+
 function continuationSequence(store: RunStore, status: RunStatus): { rootRunId: string; sequence: number } {
   const rootRunId = status.continuationRootRunId ?? status.runId;
   const priorSequences = store
@@ -518,6 +540,20 @@ async function startTerminalContinuation(input: {
   status: RunStatus;
   params: Record<string, unknown>;
 }): Promise<ToolResponse> {
+  let additionalFiles: string[] | undefined;
+  try {
+    additionalFiles = filesFromParams(input.params);
+  } catch (error) {
+    return response(error instanceof Error ? error.message : String(error), { code: "INVALID_ALLOWED_FILE", runId: input.status.runId }, true);
+  }
+  const allowedFiles = widenedAllowedFiles(input.status, additionalFiles);
+  if (additionalFiles?.length && allowedFiles === undefined) {
+    return response(
+      `Run ${input.status.runId} has no specified file scope; continue without files or start a new scoped run`,
+      { code: "SCOPE_UNSPECIFIED", runId: input.status.runId },
+      true,
+    );
+  }
   const originalResult = input.store.readResult(input.status.runId);
   const originalPiSessionPath = input.status.piSessionPath ?? originalResult?.piSessionPath;
   if (!originalPiSessionPath) {
@@ -533,7 +569,7 @@ async function startTerminalContinuation(input: {
     );
   }
 
-  const body = typeof input.params.body === "string" && input.params.body.trim() ? input.params.body.trim() : "Continue from the previous terminal result.";
+  const parentBody = typeof input.params.body === "string" && input.params.body.trim() ? input.params.body.trim() : "Continue from the previous terminal result.";
   const lineage = continuationSequence(input.store, input.status);
   const lock = claimContinuationLock(input.store, lineage.rootRunId, originalPiSessionPath, input.status.runId);
   if (!lock.claimed) {
@@ -584,8 +620,9 @@ async function startTerminalContinuation(input: {
     const result = await launcher({
       agent: input.status.agent.name,
       variant: input.status.variant,
-      task: body,
+      task: parentBody,
       cwd: input.status.cwd,
+      files: allowedFiles,
       runRoot: input.store.runRoot,
       parentRunId: input.root.parentRunId,
       rootRunId: input.root.parentRunId,
@@ -749,7 +786,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     {
       name: "subagent_start",
       label: "Subagent Start",
-      description: "Start a durable async Pi child agent and return immediately by default.",
+      description: "Start a durable async Pi child agent and return immediately; files sets an exhaustive prompt-enforced write scope, not an OS sandbox.",
       parameters: subagentStartSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const sessionCwd = ctxCwd(ctx);
@@ -759,11 +796,14 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const sessionPolicy = params.session === "none" ? "none" : params.session === "record" ? "record" : undefined;
         const notifyOn = Array.isArray(params.notifyOn) ? (params.notifyOn.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined;
         let skills: string[] | undefined;
+        let files: string[] | undefined;
         try {
           skills = skillNamesFromParams(params);
+          files = filesFromParams(params);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          return response(message, { code: "INVALID_SKILL_NAME" }, true);
+          const code = (error as { code?: string }).code === "INVALID_ALLOWED_FILE" ? "INVALID_ALLOWED_FILE" : "INVALID_SKILL_NAME";
+          return response(message, { code }, true);
         }
         const launcher = runtime.startSubagent ?? startSubagent;
         const taskId = typeof params.taskId === "string" && params.taskId ? params.taskId : undefined;
@@ -788,7 +828,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           rootRunId: root.parentRunId,
           rootSessionId: root.rootSessionId,
           depth: typeof params.maxSubagentDepth === "number" ? params.maxSubagentDepth : undefined,
-          files: Array.isArray(params.files) ? params.files.filter((file): file is string => typeof file === "string") : undefined,
+          files,
           skills,
           context: contextPolicy as ContextPolicy | undefined,
           session: sessionPolicy as SessionPolicy | undefined,
@@ -889,7 +929,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     {
       name: "subagent_continue",
       label: "Subagent Continue",
-      description: "Resume a paused child run and optionally deliver follow-up input.",
+      description: "Resume a paused child or continue a terminal run; files adds prompt-enforced write approvals without narrowing prior scope and is not an OS sandbox.",
       parameters: subagentContinueSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const cwd = ctxCwd(ctx);
@@ -900,26 +940,50 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         if (isTerminalRunState(status.state)) {
           return startTerminalContinuation({ runtime, ctx, sessionCwd: cwd, root, store, status, params });
         }
-        if (status.state !== "paused") {
-          return response(`Run ${runId} is ${status.state}; use subagent_message for normal input`, { code: "RUN_NOT_PAUSED", runId, state: status.state }, true);
+        let additionalFiles: string[] | undefined;
+        try {
+          additionalFiles = filesFromParams(params);
+        } catch (error) {
+          return response(error instanceof Error ? error.message : String(error), { code: "INVALID_ALLOWED_FILE", runId }, true);
         }
-
+        const parentBody = typeof params.body === "string" && params.body.trim() ? params.body : "Resume work.";
+        const type = (typeof params.type === "string" ? params.type : "instruction") as ParentMessageType;
+        const messageType: InboxMessageType = additionalFiles?.length ? type : !params.body ? "resume" : type;
+        const runDir = store.pathsFor({ runId }).runDir;
+        const mutation = await withRunMutationLock(runDir, () => {
+          const current = store.readStatus(runId);
+          if (current.state !== "paused") return { status: current };
+          const allowedFiles = widenedAllowedFiles(current, additionalFiles);
+          if (additionalFiles?.length && allowedFiles === undefined) return { status: current, scopeUnspecified: true };
+          if (additionalFiles?.length && allowedFiles) store.writeStatus(updateRunStatus(current, { allowedFiles }));
+          const body = additionalFiles?.length && allowedFiles
+            ? `${parentBody}\n\n${writeScopeAmendment(allowedFiles)}`
+            : parentBody;
+          const messageResult = appendParentMessage(params, store, root, runId, messageType, body);
+          return { status: current, allowedFiles, messageResult };
+        });
+        const currentStatus = mutation.value.status;
+        if (currentStatus.state !== "paused") {
+          return response(`Run ${runId} is ${currentStatus.state}; use subagent_message for normal input`, { code: "RUN_NOT_PAUSED", runId, state: currentStatus.state }, true);
+        }
+        if (mutation.value.scopeUnspecified) {
+          return response(`Run ${runId} has no specified file scope; continue without files or start a new scoped run`, { code: "SCOPE_UNSPECIFIED", runId }, true);
+        }
+        const messageResult = mutation.value.messageResult;
+        if (!messageResult) throw new Error(`Paused continuation for ${runId} did not append an inbox message`);
         const additionalRunSeconds = typeof params.additionalRunSeconds === "number" ? params.additionalRunSeconds : undefined;
         writeSupervisorControl(store, runId, { action: "resume", reason: "Continued by parent", additionalRunSeconds });
         const thinkingLevel = isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined;
-        const selectedThinkingLevel = thinkingLevel ?? status.thinkingLevel;
-        const event = createRunEvent({ sequence: nextEventSequence(store, runId), runId, parentRunId: status.parentRunId, type: "status", summary: "Continue requested", wake: false, data: { action: "continue", pid: status.pid, controlQueued: true, thinkingLevel, additionalRunSeconds } });
+        const selectedThinkingLevel = thinkingLevel ?? currentStatus.thinkingLevel;
+        const event = createRunEvent({ sequence: nextEventSequence(store, runId), runId, parentRunId: currentStatus.parentRunId, type: "status", summary: "Continue requested", wake: false, data: { action: "continue", pid: currentStatus.pid, controlQueued: true, thinkingLevel, additionalRunSeconds } });
         store.appendEvent(runId, event);
-        const body = typeof params.body === "string" && params.body.trim() ? params.body : "Resume work.";
-        const type = (typeof params.type === "string" ? params.type : "instruction") as ParentMessageType;
-        const messageType: InboxMessageType = !params.body ? "resume" : type;
-        const result = await waitForLiveAckIfNeeded(store, params, status, appendParentMessage(params, store, root, runId, messageType, body));
+        const result = await waitForLiveAckIfNeeded(store, params, currentStatus, messageResult);
         if (requiredAckFailed(params, result)) {
           await runtime.afterMutation?.(ctx, cwd, root);
-          return response(result.unsupported?.message ?? "Required child acknowledgement was not received", { ...result, runId, state: status.state, controlQueued: true, event, thinkingLevel: selectedThinkingLevel }, true);
+          return response(result.unsupported?.message ?? "Required child acknowledgement was not received", { ...result, runId, state: currentStatus.state, controlQueued: true, event, thinkingLevel: selectedThinkingLevel }, true);
         }
         await runtime.afterMutation?.(ctx, cwd, root);
-        return response(`Subagent ${runId} continue requested`, { ...result, runId, state: status.state, controlQueued: true, event, thinkingLevel: selectedThinkingLevel });
+        return response(`Subagent ${runId} continue requested`, { ...result, runId, state: currentStatus.state, controlQueued: true, event, thinkingLevel: selectedThinkingLevel });
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_continue"),
       renderResult: renderSubagentToolResultComponent,

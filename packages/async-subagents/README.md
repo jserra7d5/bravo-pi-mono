@@ -330,7 +330,9 @@ Choose the smallest reasonable `additionalRunSeconds` for the remaining work. If
 - `subagent_result`: canonical backup/recovery read of terminal `result.json`; use for truncated wakeups, artifacts, metadata, or reread, and to mark terminal delivery handled.
 - `subagent_message`: send normal parent input only (`instruction`, `answer`, `context`).
 - `subagent_interrupt`: pause or cancel an active child.
-- `subagent_continue`: resume a paused/timed-out child, optionally with `additionalRunSeconds`, or create a continuation for terminal runs.
+- `subagent_continue`: resume a paused/timed-out child, optionally with `additionalRunSeconds`, or create a continuation for terminal runs. Its repeatable `files` input widens a specified scope additively and never narrows or removes prior entries. Runs without a specified scope reject `files`; continue them without `files` or start a new scoped run. Omitting `files` preserves the existing scope.
+
+Allowed-file scope is a durable contract enforced through status, task prompts, and inbox amendments. Paths must be non-empty, single-line strings. This is not OS-level sandboxing or filesystem permission enforcement.
 
 Lifecycle controls are intentionally not accepted by `subagent_message`.
 

@@ -67,6 +67,17 @@ export interface StartSubagentInput {
   fastTrack?: boolean;
 }
 
+export function normalizeAllowedFilePaths(files: string[] | undefined): string[] | undefined {
+  if (!files?.length) return undefined;
+  for (const file of files) {
+    if (typeof file !== "string" || !file.trim() || /[\r\n]/.test(file)) {
+      throw new SubagentError("INVALID_ALLOWED_FILE", "Allowed file paths must be non-empty single-line strings", { file });
+    }
+  }
+  const unique = [...new Set(files)];
+  return unique.length ? unique : undefined;
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 
 function findPackageRoot(start: string): string {
@@ -589,6 +600,7 @@ async function spawnDetachedSupervisor(inputPath: string): Promise<string | unde
 }
 
 export async function startSubagent(input: StartSubagentInput): Promise<SubagentStartResult> {
+  const allowedFiles = normalizeAllowedFilePaths(input.files);
   const cwd = resolve(input.cwd ?? process.cwd());
   const store = new RunStore({ cwd, runRoot: input.runRoot });
   const root = resolveRootIdentity(input, cwd);
@@ -670,6 +682,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     inheritedAcrossHarness: definition.inheritedAcrossHarness,
     launchLogPath,
     inboxPath: paths.inboxPath,
+    allowedFiles,
     effectiveMaxRunMs,
     cwd,
     state: "queued",
@@ -786,7 +799,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     parentRunId: root.parentRunId,
     rootRunId: root.rootRunId,
     depth: input.depth ?? 0,
-    files: input.files,
+    files: allowedFiles,
     skills: input.skills,
     taskAssignment: input.taskAssignment ? { task: input.taskAssignment.task, dependencies: input.taskAssignment.dependencies } : undefined,
   });

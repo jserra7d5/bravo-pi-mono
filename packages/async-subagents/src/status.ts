@@ -56,6 +56,7 @@ export function createInitialStatus(input: {
   claudeInstalledSkills?: ClaudeInstalledSkill[];
   launchLogPath?: string;
   inboxPath?: string;
+  allowedFiles?: string[];
   effectiveMaxRunMs?: number;
   cwd: string;
   state?: RunState;
@@ -117,6 +118,7 @@ export function createInitialStatus(input: {
     claudeInstalledSkills: input.claudeInstalledSkills,
     launchLogPath: input.launchLogPath,
     inboxPath: input.inboxPath,
+    allowedFiles: input.allowedFiles,
     effectiveMaxRunMs: input.effectiveMaxRunMs,
     timeout: null,
     state: input.state ?? "created",

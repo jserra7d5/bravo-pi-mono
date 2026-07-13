@@ -179,6 +179,8 @@ export interface RunStatus {
   claudeInstalledSkills?: ClaudeInstalledSkill[];
   launchLogPath?: string;
   inboxPath?: string;
+  /** Authoritative prompt-enforced write scope when specified; not an OS sandbox. */
+  allowedFiles?: string[];
   state: RunState;
   writerRole?: WriterRole;
   pid?: number;
