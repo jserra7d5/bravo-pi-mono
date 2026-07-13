@@ -1,0 +1,16 @@
+[Unit]
+Description=Bravo browser workspace launcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/joe/Documents/projects/bravo-pi-mono
+ExecStart=/home/linuxbrew/.linuxbrew/opt/node@22/bin/node /home/joe/Documents/projects/bravo-pi-mono/packages/browser-workspace/dist/src/cli.js start
+Restart=on-failure
+RestartSec=2
+KillMode=process
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

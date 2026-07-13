@@ -47,6 +47,17 @@ test("workspace UI retains live iframes and switches visibility without rebuildi
   assert.doesNotMatch(workspaceHtml, /main\.textContent=''/u);
 });
 
+test("workspace UI suppresses only ttyd connection overlays and bounds manual reconnect assistance", () => {
+  assert.match(workspaceHtml, /CONNECTION_OVERLAYS=new Set\(\['Connection Closed','Reconnecting\.\.\.','Press ⏎ to Reconnect'\]\)/u);
+  assert.match(workspaceHtml, /CONNECTION_OVERLAYS\.has\(node\.textContent\)/u);
+  assert.match(workspaceHtml, /node\.style\.display='none'/u);
+  assert.match(workspaceHtml, /retries<4/u);
+  assert.match(workspaceHtml, /node===manual&&node\.textContent==='Press ⏎ to Reconnect'/u);
+  assert.match(workspaceHtml, /f\.hidden\|\|!current\|\|!manual\.isConnected/u);
+  assert.match(workspaceHtml, /new f\.contentWindow\.KeyboardEvent\('keydown',\{key:'Enter'/u);
+  assert.match(workspaceHtml, /class="transport" hidden/u);
+});
+
 test("workspace UI exposes a dedicated rename control", () => {
   assert.match(workspaceHtml, /rename\.textContent='✎'/u);
   assert.match(workspaceHtml, /rename\.onclick=.*prompt\('Workspace name'/u);

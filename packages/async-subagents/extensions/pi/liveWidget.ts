@@ -71,19 +71,22 @@ export function deriveAsyncSubagentsActivityState(input: { rows: RunSummaryRow[]
   };
 }
 
-export function readAsyncSubagentsActivityState(input: Pick<LiveWidgetInput, "store" | "parentRunId" | "rootSessionId" | "records" | "terminalCompletedVisibleMs" | "pidProber" | "renderNow">): AsyncSubagentsActivityState {
+function readReconciledRows(input: Pick<LiveWidgetInput, "store" | "parentRunId" | "rootSessionId" | "records" | "terminalCompletedVisibleMs" | "pidProber" | "renderNow">): RunSummaryRow[] {
   const now = input.renderNow ?? Date.now();
   const terminalCompletedVisibleMs = input.terminalCompletedVisibleMs ?? 60_000;
   const records = input.records ?? input.store.listActiveOrRecentRuns({ parentRunId: input.parentRunId, rootSessionId: input.rootSessionId });
-  const snapshot = readWatcherSnapshot(input.store, {
-    parentRunId: input.parentRunId,
-    rootSessionId: input.rootSessionId,
-    records,
-  });
-  const rows = snapshot.rows
+  const snapshot = readWatcherSnapshot(input.store, { parentRunId: input.parentRunId, rootSessionId: input.rootSessionId, records });
+  return snapshot.rows
     .map((row) => reconcileDeadProcessOwnedLiveRow(input, row, now, terminalCompletedVisibleMs))
     .map((row) => rowWithCurrentResultReady(input, row));
-  return deriveAsyncSubagentsActivityState({ rows });
+}
+
+export function readAsyncSubagentsActivityState(input: Pick<LiveWidgetInput, "store" | "parentRunId" | "rootSessionId" | "records" | "terminalCompletedVisibleMs" | "pidProber" | "renderNow">): AsyncSubagentsActivityState {
+  return deriveAsyncSubagentsActivityState({ rows: readReconciledRows(input) });
+}
+
+export function readRunningSubagentCount(input: Pick<LiveWidgetInput, "store" | "parentRunId" | "rootSessionId" | "records" | "terminalCompletedVisibleMs" | "pidProber" | "renderNow">): number {
+  return readReconciledRows(input).filter(row => row.state === "running").length;
 }
 
 function visibleState(state: string, updatedAt: string, now: number, terminalCompletedVisibleMs: number): boolean {

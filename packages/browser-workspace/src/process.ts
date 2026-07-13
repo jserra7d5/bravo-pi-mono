@@ -59,6 +59,7 @@ export async function fetchBounded(url: string, timeoutMs: number, init: Request
 /** Spawn without a shell. Timeout/output-cap settlement kills and reaps before rejecting. */
 export async function execBounded(command: ExternalCommand, timeoutMs = 5000, maxBytes = 1024 * 1024, signal?: AbortSignal): Promise<ExecResult> {
   if ([command.executable, ...command.args].some(value => value.includes("\0"))) throw new WorkspaceError("ARGV_INVALID", "NUL in argv", Exit.USAGE);
+  if (signal?.aborted) throw signal.reason ?? new WorkspaceError("PROCESS_ABORTED", "External command aborted", Exit.RUNTIME);
   return await new Promise<ExecResult>((resolve, reject) => {
     const child = spawn(command.executable, command.args, { env: command.env, stdio: ["ignore", "pipe", "pipe"], shell: false, detached: process.platform === "linux" });
     let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), terminalError: unknown, settled = false, identity: ProcessIdentity | undefined;
@@ -76,10 +77,11 @@ export async function execBounded(command: ExternalCommand, timeoutMs = 5000, ma
       if (which === "stdout") stdout = next.subarray(0, maxBytes); else stderr = next.subarray(0, maxBytes);
     };
     child.stdout.on("data", data => append("stdout", data)); child.stderr.on("data", data => append("stderr", data));
-    const timeout = setTimeout(() => { terminalError = new WorkspaceError("PROCESS_TIMEOUT", "External command timed out", Exit.RUNTIME); terminate(); }, timeoutMs);
-    const abort = () => { terminalError = signal?.reason ?? new WorkspaceError("PROCESS_ABORTED", "External command aborted", Exit.RUNTIME); terminate(); };
+    const timeout = setTimeout(() => { if (!terminalError) terminalError = new WorkspaceError("PROCESS_TIMEOUT", "External command timed out", Exit.RUNTIME); terminate(); }, timeoutMs);
+    const abort = () => { if (!terminalError) terminalError = signal?.reason ?? new WorkspaceError("PROCESS_ABORTED", "External command aborted", Exit.RUNTIME); terminate(); };
     signal?.addEventListener("abort", abort, { once: true });
-    child.once("error", error => { terminalError = new WorkspaceError("DEPENDENCY_SPAWN_FAILED", "Cannot execute dependency", Exit.DEPENDENCY, { code: (error as NodeJS.ErrnoException).code }); });
+    if (signal?.aborted) abort();
+    child.once("error", error => { if (!terminalError) terminalError = new WorkspaceError("DEPENDENCY_SPAWN_FAILED", "Cannot execute dependency", Exit.DEPENDENCY, { code: (error as NodeJS.ErrnoException).code }); });
     child.once("close", (code, childSignal) => {
       if (settled) return; settled = true; clearTimeout(timeout); signal?.removeEventListener("abort", abort);
       if (terminalError) reject(terminalError);

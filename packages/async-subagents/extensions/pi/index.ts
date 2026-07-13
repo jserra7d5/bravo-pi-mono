@@ -10,7 +10,8 @@ import { createRootSession, readRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import type { RootSessionIdentity, RunIndexRecord } from "../../src/types.js";
 import { buildCompactionReminder, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE } from "./compactionReminder.js";
-import { clearLiveWidget, hasTimeDependentLiveWidgetItem, readAsyncSubagentsActivityState, updateLiveWidget, type AsyncSubagentsActivityState } from "./liveWidget.js";
+import { clearLiveWidget, hasTimeDependentLiveWidgetItem, readAsyncSubagentsActivityState, readRunningSubagentCount, updateLiveWidget, type AsyncSubagentsActivityState } from "./liveWidget.js";
+import { BrowserWorkspaceStatusReporter, defaultBrowserWorkspaceStatusSocketPath, resolveBrowserWorkspaceIdentity } from "./browserWorkspaceStatus.js";
 import { reportHerdrAsyncSubagentsMetadata } from "./herdrMetadata.js";
 import { renderDiscoveredAgentCatalog } from "./agentCatalog.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
@@ -32,6 +33,9 @@ let lastHerdrMetadataSignature: string | undefined;
 let herdrMetadataReportInFlight = false;
 let pendingHerdrMetadataReport: { state: AsyncSubagentsActivityState; signature: string } | undefined;
 let herdrMetadataReporter: (state: AsyncSubagentsActivityState) => Promise<boolean> = reportHerdrAsyncSubagentsMetadata;
+let browserWorkspaceReporter: BrowserWorkspaceStatusReporter | undefined;
+let browserWorkspaceReportInFlight = false;
+let pendingBrowserWorkspaceCount: number | undefined;
 
 const MANUAL_COMPACTION_WAKEUP_COOLDOWN_MS = 5_000;
 
@@ -178,6 +182,7 @@ function tickAsyncTasksPoll(pi: ExtensionAPI, ctx: ExtensionContext): void {
   const enabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
   setTasksStatusBadge(ctx, enabled);
   reportCurrentAsyncSubagentsPresentation({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId }, records);
+  reportBrowserWorkspaceCount(readRunningSubagentCount({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, records }));
   if (Date.now() >= manualCompactionWakeupCooldownUntil) {
     pollAndSendWakeups(pi, store, identity, records, { triggerTurn: true, tasksEnabled: enabled });
   }
@@ -318,6 +323,28 @@ function reportCurrentAsyncSubagentsPresentation(input: { store: RunStore; paren
 
 function reportInactiveAsyncSubagentsPresentation(): void {
   reportHerdrMetadataState({ active: false, blocked: false, activeCount: 0 }, { force: true });
+}
+
+function reportBrowserWorkspaceCount(count: number): void {
+  if (!browserWorkspaceReporter) return;
+  pendingBrowserWorkspaceCount = count;
+  if (browserWorkspaceReportInFlight) return;
+  const drain = () => {
+    if (!browserWorkspaceReporter || pendingBrowserWorkspaceCount === undefined) return;
+    const next = pendingBrowserWorkspaceCount; pendingBrowserWorkspaceCount = undefined; browserWorkspaceReportInFlight = true;
+    void browserWorkspaceReporter.report(next).finally(() => { browserWorkspaceReportInFlight = false; if (pendingBrowserWorkspaceCount !== undefined) drain(); });
+  };
+  drain();
+}
+
+async function initializeBrowserWorkspaceReporter(ctx: ExtensionContext): Promise<void> {
+  browserWorkspaceReporter = undefined; pendingBrowserWorkspaceCount = undefined;
+  const piSessionId = piSessionIdOf(ctx), socketPath = defaultBrowserWorkspaceStatusSocketPath();
+  if (!piSessionId || !socketPath || isChildContext()) return;
+  const workspace = await resolveBrowserWorkspaceIdentity();
+  if (!workspace) return;
+  const cwd = cwdOf(ctx), identity = ensureRoot(cwd, piSessionId);
+  browserWorkspaceReporter = new BrowserWorkspaceStatusReporter({ workspace, lead: { piSessionId, rootSessionId: identity.rootSessionId } }, socketPath);
 }
 
 export function __setHerdrMetadataReporterForTest(reporter: (state: AsyncSubagentsActivityState) => Promise<boolean>): () => void {
@@ -527,6 +554,8 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
       if (ctx) {
         refreshUi(ctx as ExtensionContext);
         refreshHerdrPresentation(pi, ctx as ExtensionContext);
+        const cwd = cwdOf(ctx), identity = ensureRoot(cwd, piSessionIdOf(ctx)), store = new RunStore({ cwd });
+        reportBrowserWorkspaceCount(readRunningSubagentCount({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId }));
       }
     },
   };
@@ -554,13 +583,17 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     stopTimers(pi);
     await restoreTaskRuntimeMode(ctx);
+    await initializeBrowserWorkspaceReporter(ctx);
     startTimers(pi, ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => restoreTaskRuntimeMode(ctx));
 
   pi.on("session_shutdown", async () => {
+    const reporter = browserWorkspaceReporter;
     stopTimers(pi, currentCtx);
+    browserWorkspaceReporter = undefined; pendingBrowserWorkspaceCount = undefined;
+    if (reporter) await reporter.report(0).catch(() => false);
   });
 
   pi.on("session_compact", async (event, ctx) => {

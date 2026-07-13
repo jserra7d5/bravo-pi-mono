@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { __resetRenderClockForTest, renderClock } from "@bravo/render-clock";
 import asyncSubagentsPiExtension from "../extensions/pi/index.js";
-import { clearLiveWidget, deriveAsyncSubagentsActivityState, hasTimeDependentLiveWidgetItem, readAsyncSubagentsActivityState, renderLiveWidget, updateLiveWidget, type LiveWidgetSnapshot } from "../extensions/pi/liveWidget.js";
+import { clearLiveWidget, deriveAsyncSubagentsActivityState, hasTimeDependentLiveWidgetItem, readAsyncSubagentsActivityState, readRunningSubagentCount, renderLiveWidget, updateLiveWidget, type LiveWidgetSnapshot } from "../extensions/pi/liveWidget.js";
+import { RUN_STATES } from "../src/schemas.js";
 import { markWakeupHandled } from "../extensions/pi/wakeups.js";
 import { visWidth } from "../extensions/pi/renderers.js";
 import { RunStore } from "../src/runStore.js";
@@ -139,6 +140,21 @@ function writeRunResult(input: { store: RunStore; runId: string; parentRunId: st
     summary: input.summary ?? "done",
   }));
 }
+
+test("running count projection counts exactly running across every RunState", () => {
+  const w = workspace();
+  for (const state of RUN_STATES) addRun({ ...w, displayName: state, state, summary: state });
+  assert.equal(readRunningSubagentCount({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, pidProber: () => "alive" }), 1);
+  rmSync(w.root, { recursive: true, force: true });
+});
+
+test("running count reconciles a dead recorded running process before counting", () => {
+  const w = workspace();
+  const runId = addRun({ ...w, displayName: "dead", state: "running", summary: "working", pid: 4242, processHealth: "alive" });
+  assert.equal(readRunningSubagentCount({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, pidProber: () => "dead" }), 0);
+  assert.equal(w.store.readStatus(runId).state, "failed");
+  rmSync(w.root, { recursive: true, force: true });
+});
 
 test("async activity state keeps old uncollected terminal result-ready rows active", () => {
   const w = workspace();
