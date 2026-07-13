@@ -1,5 +1,7 @@
 # Review Log
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Status: implemented and reviewed
 Date: 2026-06-30
 

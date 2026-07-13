@@ -1,5 +1,7 @@
 # Pi Background Bash — TUI Visual Design
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Status: design (pure visual spec — no implementation)
 Date: 2026-05-31
 Related: `design.md`, `implementation-plan.md`, `.agents/skills/tui-design/SKILL.md`

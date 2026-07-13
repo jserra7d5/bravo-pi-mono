@@ -1,5 +1,7 @@
 # Notification Contract
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Status: implemented
 Applies to: `notifications.ts`, `BackgroundRunner` notifier callback, Pi `sendMessage`
 

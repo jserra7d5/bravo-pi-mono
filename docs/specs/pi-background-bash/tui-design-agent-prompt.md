@@ -1,5 +1,7 @@
 # Agent Prompt: Pure TUI Visual Design for Pi Background Bash
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 You are designing the terminal UI surfaces for the planned Pi Background Bash extension. This is a **pure visual design task**: do not implement TypeScript, do not change package code, and do not revise architecture. Produce design artifacts that an implementer can translate into Pi extension renderers later.
 
 ## Source material

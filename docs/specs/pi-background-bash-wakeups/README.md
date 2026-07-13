@@ -1,5 +1,7 @@
 # Pi Background Bash Wakeups
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Status: implemented and validated
 Date: 2026-06-30
 Implemented: 2026-07-01

@@ -44,12 +44,12 @@ test('…', (t) => {
 
 Candidate hotspots from the audit (confirm by reading each — the pointer is the symptom, not a guarantee):
 
-- **`packages/monitor`** — scheduler tests (e.g. `scheduler tick triggers timer monitor`) wait on real
+- **the superseded monitor package** — scheduler tests (e.g. `scheduler tick triggers timer monitor`) wait on real
   timers (~1.2s each, very tight min≈median). These also `spawn ps`; only the *timer wait* should be
   virtualized — leave the `ps` spawn as-is (it's a real-dependency signal, fine).
 - **`packages/async-subagents`** — runtime-budget / live-widget tests (e.g. `manual pause suspends
   runtime budget …`, `live widget uses summary read-models …`) elapse real budget time (~1.3–1.9s).
-- **`packages/pi-extension-background-bash`** — `bash timeout is seconds …` (~1.3s). **Caution:** this
+- **the superseded background-bash package** — `bash timeout is seconds …` (~1.3s). **Caution:** this
   may legitimately exercise real timeout semantics. If virtualizing it wouldn't actually test the real
   timeout path, **leave it** and note that in your report (Hard rule 4).
 
@@ -57,7 +57,7 @@ For each test you change: confirm the assertion still checks the same behavior, 
 
 ## Task 2 — Give the `monitor` validator smoke tests teeth (anti-slop)
 
-`packages/monitor/test/validation.test.ts` has 6 "accepts X" tests that call a validator and assert
+the superseded monitor validation suite has 6 "accepts X" tests that call a validator and assert
 **nothing** — they pass as long as the call doesn't throw:
 
 ```js

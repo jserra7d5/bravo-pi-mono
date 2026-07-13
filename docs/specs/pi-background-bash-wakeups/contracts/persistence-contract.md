@@ -1,5 +1,7 @@
 # Persistence Contract
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Status: implemented
 Applies to: `task-types.ts`, `task-registry.ts`, task metadata files
 
