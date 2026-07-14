@@ -3,7 +3,7 @@
 Date: 2026-07-13
 Worktree: `/home/joe/Documents/projects/bravo-pi-mono-unified-task-plane`
 Candidate commit: `17c0d5e`
-Status: Complete — pass with one non-blocking task-plane prompt/ergonomics finding
+Status: Package QA passed; default Pi enablement blocked by a tool-name collision
 
 ## Isolated launch
 
@@ -76,6 +76,7 @@ Isolation intent:
 - Nine malformed/misrouted requests were rejected synchronously with validation/route guidance and did not increase the durable task count.
 - A 301-line stream auto-stopped as `event_flood`, retained exactly 301 events, cleared ownership, and left no process behind.
 - Final terminal semantics: nonzero stream failed with exit 9; interval command timeout failed with `SIGKILL + failure_reason=command_timeout`; explicit monitor stop produced `SIGTERM + stop_reason=user`; default task listing returned 0 while completed-inclusive listing returned all 16 terminal tasks.
+- Post-merge default-install verification exposed a composition blocker hidden by the isolated launch: the globally enabled async-subagents package already registers milestone-board tools named `task_list` and `task_stop`. Pi rejects the task-plane package at startup when it tries to register its process/monitor tools with the same names.
 
 ## Findings
 
@@ -95,11 +96,22 @@ With discovered extensions disabled, Pi initially warns that globally enabled `b
 
 The flood-pass agent used `pgrep -f` with the literal monitored script embedded in its own foreground verification command. `pgrep` matched that verifier, reporting `process-remains` even though durable PID/PGID/runtime/lease fields were cleared and external process-table inspection found no monitored process. Future hand-guided probes should preserve the admitted PID/PGID before terminalization and test that identity, not grep command text.
 
+### F-04 — Default Pi cannot load task-plane beside async-subagents (integration blocker)
+
+The global async-subagents package owns `task_list` for its parent milestone board. Task-plane defines the same name for process/monitor lifecycle visibility with a different schema and semantics. (`task_stop` is unique; async-subagents uses `task_cancel`/`task_clear`.) Pi rejects the duplicate custom tool registration before startup:
+
+```
+Failed to load extension ".../packages/task-plane/src/index.ts":
+Tool "task_list" conflicts with .../packages/async-subagents/extensions/pi/index.ts
+```
+
+The isolated real-agent pass used `--no-extensions`, so async-subagents was intentionally absent and could not expose this composition failure. Load order and “lead extension” status cannot safely resolve it; Pi permits overriding built-ins such as `bash`, but custom-tool duplicates fail closed. Default enablement requires an explicit public-contract decision: rename task-plane's list tool (the narrowest change), consolidate the two list surfaces, or make registration mutually exclusive.
+
 ## Final assessment
 
-**Pass.** The unified task plane worked through a real interactive Pi agent across foreground/background execution, stream and interval observation, notification continuation, idempotency, throttling, terminal errors, stop escalation, runtime/lifespan/command timeouts, flood control, durable shutdown, expiry-on-resume, and successful rehydration.
+**Package behavior passes; default deployment is blocked.** The unified task plane worked through a real interactive Pi agent across foreground/background execution, stream and interval observation, notification continuation, idempotency, throttling, terminal errors, stop escalation, runtime/lifespan/command timeouts, flood control, durable shutdown, expiry-on-resume, and successful rehydration.
 
-No blocking functional defect was found. F-01 was addressed with one compact addition to the shared injected guidance. F-02 is isolated-launch noise outside task-plane behavior. F-03 is a QA-probe lesson, not product behavior.
+F-01 was addressed with one compact addition to the shared injected guidance. F-02 is isolated-launch noise outside task-plane behavior. F-03 is a QA-probe lesson. F-04 blocks globally enabling task-plane in the current default Pi package set and needs a tool-contract decision before installation can finish.
 
 Evidence roots:
 - Pi session: `/tmp/unified-task-plane-real-agent-qa/sessions/2026-07-14T00-02-33-496Z_019f5dee-b798-7a7f-b8bf-4242548f0b66.jsonl`
