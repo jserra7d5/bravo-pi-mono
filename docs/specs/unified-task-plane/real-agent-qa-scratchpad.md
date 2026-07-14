@@ -40,7 +40,7 @@ Isolation intent:
 ### Advanced
 - [x] Nonzero bash and monitor exits preserve output/status
 - [x] Background timeout
-- [x] Explicit `task_stop`
+- [x] Explicit `managed_task_stop`
 - [x] Monitor idempotency key
 - [x] Throttle/batching across multiple events
 - [x] Lifespan terminalization
@@ -76,7 +76,7 @@ Isolation intent:
 - Nine malformed/misrouted requests were rejected synchronously with validation/route guidance and did not increase the durable task count.
 - A 301-line stream auto-stopped as `event_flood`, retained exactly 301 events, cleared ownership, and left no process behind.
 - Final terminal semantics: nonzero stream failed with exit 9; interval command timeout failed with `SIGKILL + failure_reason=command_timeout`; explicit monitor stop produced `SIGTERM + stop_reason=user`; default task listing returned 0 while completed-inclusive listing returned all 16 terminal tasks.
-- Post-merge default-install verification exposed a composition blocker hidden by the isolated launch: the globally enabled async-subagents package already registers the milestone-board tool `task_list`. Pi rejected task-plane's process/monitor list tool with the same name. (`task_stop` was unique.)
+- Post-merge default-install verification exposed a composition blocker hidden by the isolated launch: the globally enabled async-subagents package already registers the milestone-board tool `task_list`. Pi rejected task-plane's process/monitor list tool with the same name. (The stop tool—then `task_stop`, now `managed_task_stop`—was unique.)
 
 ## Findings
 
@@ -98,7 +98,7 @@ The flood-pass agent used `pgrep -f` with the literal monitored script embedded 
 
 ### F-04 — Default Pi tool-name collision with async-subagents (resolved)
 
-The global async-subagents package owns `task_list` for its parent milestone board. Task-plane defines the same name for process/monitor lifecycle visibility with a different schema and semantics. (`task_stop` is unique; async-subagents uses `task_cancel`/`task_clear`.) Pi rejects the duplicate custom tool registration before startup:
+The global async-subagents package owns `task_list` for its parent milestone board. Task-plane defined the same name for process/monitor lifecycle visibility with a different schema and semantics. (Its stop tool is unique; async-subagents uses `task_cancel`/`task_clear`.) Pi rejected the duplicate custom tool registration before startup:
 
 ```
 Failed to load extension ".../packages/task-plane/src/index.ts":
@@ -107,7 +107,7 @@ Tool "task_list" conflicts with .../packages/async-subagents/extensions/pi/index
 
 The isolated real-agent pass used `--no-extensions`, so async-subagents was intentionally absent and could not expose this composition failure. Load order and “lead extension” status cannot safely resolve it; Pi permits overriding built-ins such as `bash`, but custom-tool duplicates fail closed.
 
-Resolution: task-plane's list tool was renamed to `managed_task_list`; `task_stop` was retained. A real Pi loader composition proof now loads task-plane and async-subagents together and verifies that both `managed_task_list` and the milestone-board `task_list` register without collision.
+Resolution: task-plane's management pair is now `managed_task_list` / `managed_task_stop`. A real Pi loader composition proof loads task-plane and async-subagents together and verifies that task-plane's managed tools and async-subagents' milestone-board `task_list` register without collision.
 
 ## Final assessment
 

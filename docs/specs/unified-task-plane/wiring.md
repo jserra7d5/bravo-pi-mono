@@ -118,7 +118,7 @@ value, which would silently stop the clock while suspended.
   runtime wins. An expired lease alone never authorizes respawn or signaling: if
   the prior process cannot be verified from a live in-runtime handle, the attempt
   becomes visible `orphaned` rather than risking duplicate execution or PID reuse.
-- A `task_stop` issued from a non-owner runtime persists a monotonic stop request.
+- A `managed_task_stop` issued from a non-owner runtime persists a monotonic stop request.
   The live owner consumes and acknowledges it before signaling its own handle.
   A separate internal acknowledgement grace accounts for the scheduler/control
   tick; `kill_after_s` begins only after acknowledgement and remains the owner's

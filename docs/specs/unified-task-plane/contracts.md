@@ -29,7 +29,7 @@ no translation layer.
 | `blocked` | live but likely waiting on interactive input | no |
 | `completed` | ended successfully (exit 0 / predicate matched) | yes |
 | `failed` | ended unsuccessfully (nonzero exit / spawn error) | yes |
-| `stopped` | ended by intervention: `task_stop`, output cap, event flood, or session shutdown (bash only — see shutdown exception) | yes |
+| `stopped` | ended by intervention: `managed_task_stop`, output cap, event flood, or session shutdown (bash only — see shutdown exception) | yes |
 | `timed_out` | ended by max-runtime or lifespan expiry | yes |
 | `orphaned` | live process from a previous runtime; unverifiable | no (unmanageable) |
 
@@ -117,8 +117,8 @@ read-then-create race).
 
 | Mode | completed | failed | timed_out | stopped |
 |---|---|---|---|---|
-| stream | process exit 0 | exit ≠ 0 or spawn error | `lifespan_s` expired | `task_stop` / event flood |
-| interval | `until_output_matches` matched | command exit ≠ 0, spawn error, or **per-execution `command_timeout_s` exceeded** | `lifespan_s` expired | `task_stop` / event flood |
+| stream | process exit 0 | exit ≠ 0 or spawn error | `lifespan_s` expired | `managed_task_stop` / event flood |
+| interval | `until_output_matches` matched | command exit ≠ 0, spawn error, or **per-execution `command_timeout_s` exceeded** | `lifespan_s` expired | `managed_task_stop` / event flood |
 
 `lifespan_s` is wall-clock from task start (`deadline_at = started_at +
 lifespan_s`, absolute); time suspended between sessions counts. A
@@ -163,10 +163,10 @@ Returns `{ tasks: [...], count }`; each item:
 `{ task_id, type: "bash" | "monitor", status, name?, command, output_path,
 started_at, ended_at? }`.
 
-## `task_stop`
+## `managed_task_stop`
 
 ```
-task_stop({
+managed_task_stop({
   task_id: string,
   signal?: "SIGTERM" | "SIGKILL",   // default SIGTERM
   kill_after_s?: number,            // escalation delay, default 5
@@ -175,7 +175,7 @@ task_stop({
 
 For a task owned by the current runtime, returns `{ task_id, status: "stopped",
 output_path }` only after process close and durable terminalization. For a task
-owned by another live runtime, `task_stop` first persists a stop request and waits
+owned by another live runtime, `managed_task_stop` first persists a stop request and waits
 for that owner to acknowledge it within an internal bounded acknowledgement grace,
 then waits through the requested `kill_after_s` escalation delay plus the bounded
 close/drain phase; success has the same return shape. `kill_after_s` controls

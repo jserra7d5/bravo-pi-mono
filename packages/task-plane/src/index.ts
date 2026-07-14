@@ -7,7 +7,7 @@ import {TaskEngine} from "./engine.js";
 import {TaskRegistry} from "./registry.js";
 import {buildTools,routeFor,TASK_PLANE_GUIDANCE} from "./tools.js";
 
-const TOOL_NAMES=["bash","monitor","managed_task_list","task_stop"] as const;
+const TOOL_NAMES=["bash","monitor","managed_task_list","managed_task_stop"] as const;
 type ToolLike={name?:unknown;extensionId?:unknown;source?:unknown;sourceInfo?:Record<string,unknown>}|string;
 function toolName(tool:ToolLike){return typeof tool==="string"?tool:typeof tool.name==="string"?tool.name:undefined;}
 function isOurs(tool:ToolLike){if(typeof tool==="string")return false;return [tool.extensionId,tool.source,...Object.values(tool.sourceInfo??{})].some(value=>typeof value==="string"&&(value.includes("pi-extension-task-plane")||value.includes("/task-plane/")));}
