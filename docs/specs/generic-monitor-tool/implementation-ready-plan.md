@@ -1,5 +1,7 @@
 # Generic Monitor Tool V1 — Implementation-Ready Plan
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Date: 2026-04-27
 Status: implementation-ready draft
 Scope: generic Pi/agent monitor package; not Tango-specific

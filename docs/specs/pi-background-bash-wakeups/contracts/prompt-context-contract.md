@@ -1,5 +1,7 @@
 # Prompt and Context Contract
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Status: implemented
 Applies to: extension prompt injection in `index.ts`, tool descriptions, start responses, README guidance
 

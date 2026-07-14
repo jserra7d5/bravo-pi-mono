@@ -1,5 +1,7 @@
 # Background Bash Wakeup Contracts
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Status: implemented
 
 This directory decomposes the background-bash wakeup design into implementation contracts. Implementers should treat these as a set: satisfying one contract while violating another is not acceptable.

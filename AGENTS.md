@@ -17,7 +17,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `packages/source-search/` contains the Pi extension package for live TypeScript `ranked_search` tool-call discovery across arbitrary directories, using git-visible files when inside a checkout and filesystem walking otherwise. It has no index/cache/CLI/sidecar lifecycle, no workspace/repo registry, and no source-search skill; read `packages/source-search/README.md` and `docs/specs/source-search-v1/design.md` before changing live corpus selection, folder/root resolution, prompt guidance, or ranked-search behavior.
 - `packages/dynamic-skills/` contains the Pi extension package for read-triggered dynamic subtree skill discovery; read `packages/dynamic-skills/README.md` and `docs/specs/pi-dynamic-skill-discovery/design.md` before changing discovery triggers, skill loading, collision behavior, prompt injection, or branch persistence.
 - `packages/gemini-code-assist/` contains the direct Antigravity Code Assist Pi provider for `antigravity-code-assist/gemini-3.5-flash`; read `packages/gemini-code-assist/README.md` before changing OAuth, model ids, reasoning controls, or provider behavior.
-- `packages/pi-extension-background-bash/` contains the opt-in Pi `bash` override with Claude-like `run_in_background`, managed background task controls, `/tasks`, and the `pi-background-bash` async-subagent migration CLI; read `packages/pi-extension-background-bash/README.md` and `docs/specs/pi-background-bash/design.md` before changing activation, tool override behavior, timeout semantics, task lifecycle, TUI rendering, or migration behavior.
+- `packages/task-plane/` contains the unified Pi task plane: the `bash` override, external-state `monitor`, and shared `task_list`/`task_stop` lifecycle controls; read `packages/task-plane/README.md` and `docs/specs/unified-task-plane/design.md` before changing tool contracts, task lifecycle, persistence, notification routing, or rehydration.
 - `docs/specs/` contains design specs. Each spec should live under a slug directory, e.g. `docs/specs/tango-v1/design.md`.
 - Package-specific source, docs, roles, includes, and extensions should live inside the relevant package directory.
 
@@ -51,8 +51,8 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `npm test --workspace @bravo/render-clock` — build and run the render clock tests.
 - `npm run check --workspace @bravo/gemini-code-assist` — type-check the Gemini/Antigravity Code Assist provider.
 - `npm test --workspace @bravo/gemini-code-assist` — build and run Gemini/Antigravity Code Assist tests.
-- `npm run check --workspace @bravo/pi-extension-background-bash` — type-check the Background Bash Pi extension.
-- `npm test --workspace @bravo/pi-extension-background-bash` — build and run Background Bash tests.
+- `npm run check --workspace @bravo/pi-extension-task-plane` — type-check the unified Task Plane extension.
+- `npm test --workspace @bravo/pi-extension-task-plane` — build and run Task Plane tests.
 - `npm run check --workspace @bravo/web-evidence-cache` — type-check the Web Evidence Cache Pi extension.
 - `npm test --workspace @bravo/web-evidence-cache` — build and run Web Evidence Cache tests.
 - `npm run check --workspace @bravo/source-search` — type-check the Source Search Pi extension.

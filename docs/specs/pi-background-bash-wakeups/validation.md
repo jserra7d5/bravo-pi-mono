@@ -1,5 +1,7 @@
 # Validation Plan
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Status: implemented
 Method: Joe-method seam-bound verification
 

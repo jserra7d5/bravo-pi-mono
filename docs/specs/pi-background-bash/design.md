@@ -1,5 +1,7 @@
 # Pi Background Bash Extension Design
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Status: proposed
 Date: 2026-05-31
 Related: `debates/pi-background-bash-2026-05-31/*`

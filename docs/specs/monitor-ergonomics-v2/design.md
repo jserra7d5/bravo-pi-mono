@@ -1,5 +1,7 @@
 # Monitor Ergonomics v2
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 ## Status
 
 Implemented pragmatic v2 subset in `packages/monitor` and aligned background-bash prompt guidance in `packages/pi-extension-background-bash`.

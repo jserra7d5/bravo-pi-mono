@@ -2,7 +2,7 @@
   "schema": 1,
   "runner": "node:test",
   "machine": "linux-x86_64",
-  "updated": "2026-06-01",
+  "updated": "2026-07-13",
   "unit_seconds": {
     "async-subagents::catalogEntry derives capabilities only from tools, skills, and extensions": {
       "median": 0.001671,
@@ -2154,471 +2154,6 @@
       "min": 1.907998,
       "samples": 3
     },
-    "monitor::always matches": {
-      "median": 0.001427,
-      "min": 0.000924,
-      "samples": 3
-    },
-    "monitor::observation_status equals": {
-      "median": 0.000139,
-      "min": 0.00013,
-      "samples": 3
-    },
-    "monitor::text_contains case sensitive": {
-      "median": 0.000104,
-      "min": 0.000103,
-      "samples": 3
-    },
-    "monitor::text_contains case insensitive": {
-      "median": 6.1e-05,
-      "min": 6e-05,
-      "samples": 3
-    },
-    "monitor::and requires all true": {
-      "median": 0.000149,
-      "min": 0.000147,
-      "samples": 3
-    },
-    "monitor::or requires any true": {
-      "median": 0.000108,
-      "min": 0.000108,
-      "samples": 3
-    },
-    "monitor::not inverts": {
-      "median": 5.6e-05,
-      "min": 5.4e-05,
-      "samples": 3
-    },
-    "monitor::default condition matches on matched status": {
-      "median": 4.7e-05,
-      "min": 4.7e-05,
-      "samples": 3
-    },
-    "monitor::scheduler skips command monitors": {
-      "median": 0.013811,
-      "min": 0.012318,
-      "samples": 3
-    },
-    "monitor::scheduler tick triggers timer monitor": {
-      "median": 1.203892,
-      "min": 1.202119,
-      "samples": 3
-    },
-    "monitor::scheduler file monitor triggers when file exists": {
-      "median": 1.202024,
-      "min": 1.20196,
-      "samples": 3
-    },
-    "monitor::scheduler persists wake delivery state for triggered monitors": {
-      "median": 0.152845,
-      "min": 0.152192,
-      "samples": 3
-    },
-    "monitor::status service backfills undelivered wake attention": {
-      "median": 0.001968,
-      "min": 0.001309,
-      "samples": 3
-    },
-    "monitor::scheduler does not claim or wake monitors owned by a different session": {
-      "median": 0.15101,
-      "min": 0.150794,
-      "samples": 3
-    },
-    "monitor::status service does not backfill wake attention owned by a different session": {
-      "median": 0.001141,
-      "min": 0.000972,
-      "samples": 3
-    },
-    "monitor::scheduler aborts stale claimed run when monitor was stopped": {
-      "median": 0.000795,
-      "min": 0.000753,
-      "samples": 3
-    },
-    "monitor::paused monitor does not run": {
-      "median": 1.205207,
-      "min": 1.202416,
-      "samples": 3
-    },
-    "monitor::backfill retries only missing wake and preserves prior notify delivery": {
-      "median": 0.001386,
-      "min": 0.001357,
-      "samples": 3
-    },
-    "monitor::backfill retries only missing notify and preserves prior wake delivery": {
-      "median": 0.000803,
-      "min": 0.000751,
-      "samples": 3
-    },
-    "monitor::notify exception does not throttle future retry": {
-      "median": 0.000677,
-      "min": 0.000614,
-      "samples": 3
-    },
-    "monitor::create and get": {
-      "median": 0.005411,
-      "min": 0.002704,
-      "samples": 3
-    },
-    "monitor::list filters by state": {
-      "median": 0.000669,
-      "min": 0.000583,
-      "samples": 3
-    },
-    "monitor::update increments version": {
-      "median": 0.000596,
-      "min": 0.000468,
-      "samples": 3
-    },
-    "monitor::update with wrong expected version throws": {
-      "median": 0.004271,
-      "min": 0.003015,
-      "samples": 3
-    },
-    "monitor::results append and list": {
-      "median": 0.000545,
-      "min": 0.000524,
-      "samples": 3
-    },
-    "monitor::claimDue returns running monitors with past next_run_at": {
-      "median": 0.001852,
-      "min": 0.000527,
-      "samples": 3
-    },
-    "monitor::releaseLease clears lease and sets next_run_at": {
-      "median": 0.000696,
-      "min": 0.000678,
-      "samples": 3
-    },
-    "monitor::prune archives old terminal monitors": {
-      "median": 0.00173,
-      "min": 0.000489,
-      "samples": 3
-    },
-    "monitor::results persist across restart": {
-      "median": 0.00281,
-      "min": 0.001962,
-      "samples": 3
-    },
-    "monitor::ack by monitor_id persists": {
-      "median": 0.003201,
-      "min": 0.001572,
-      "samples": 3
-    },
-    "monitor::ack by result_id persists": {
-      "median": 0.001487,
-      "min": 0.001092,
-      "samples": 3
-    },
-    "monitor::ack all persists": {
-      "median": 0.003988,
-      "min": 0.002687,
-      "samples": 3
-    },
-    "monitor::monitor_start creates a timer monitor": {
-      "median": 0.007448,
-      "min": 0.007061,
-      "samples": 3
-    },
-    "monitor::monitor_start creates a file monitor": {
-      "median": 0.000739,
-      "min": 0.000646,
-      "samples": 3
-    },
-    "monitor::monitor_start is idempotent and schedules immediate checks by default": {
-      "median": 0.000893,
-      "min": 0.000842,
-      "samples": 3
-    },
-    "monitor::monitor_attention lists unacked triggered results": {
-      "median": 0.001238,
-      "min": 0.00107,
-      "samples": 3
-    },
-    "monitor::monitor_result visible output includes persisted command observation metadata and ack state": {
-      "median": 0.106934,
-      "min": 0.105943,
-      "samples": 3
-    },
-    "monitor::monitor_list and monitor_attention default to current session only": {
-      "median": 0.003095,
-      "min": 0.002115,
-      "samples": 3
-    },
-    "monitor::monitor_start creates durable command monitor and monitor_output reads it": {
-      "median": 0.105175,
-      "min": 0.103805,
-      "samples": 3
-    },
-    "monitor::failing command monitor records error and useful look/output text": {
-      "median": 0.104277,
-      "min": 0.103571,
-      "samples": 3
-    },
-    "monitor::command monitor wake_agent false captures output without follow-up messages and notify flag controls ui notify": {
-      "median": 0.105302,
-      "min": 0.104063,
-      "samples": 3
-    },
-    "monitor::command monitor notify true and wake_agent false notifies without follow-up messages or backfill duplicates": {
-      "median": 0.104707,
-      "min": 0.103463,
-      "samples": 3
-    },
-    "monitor::command monitor notify true without ui.notify records undelivered and backfill can notify later": {
-      "median": 0.106905,
-      "min": 0.102733,
-      "samples": 3
-    },
-    "monitor::command monitor wake_agent true without sendMessage records undelivered and backfill can wake later": {
-      "median": 0.103267,
-      "min": 0.102121,
-      "samples": 3
-    },
-    "monitor::command monitor notification and wake exceptions do not prevent completion persistence": {
-      "median": 0.103819,
-      "min": 0.102626,
-      "samples": 3
-    },
-    "monitor::command monitor wake_agent true sends output and completion follow-up messages": {
-      "median": 0.105452,
-      "min": 0.102807,
-      "samples": 3
-    },
-    "monitor::monitor_output distinguishes not_ready and completed-empty visible text": {
-      "median": 0.106376,
-      "min": 0.104218,
-      "samples": 3
-    },
-    "monitor::monitor_output reports failed empty command without saying completed and monitor_look includes exit code": {
-      "median": 0.106626,
-      "min": 0.102104,
-      "samples": 3
-    },
-    "monitor::monitor_output returns timeout and stop kills non-exec shell child process group": {
-      "median": 0.102162,
-      "min": 0.095522,
-      "samples": 3
-    },
-    "monitor::monitor_stop escalates SIGTERM-ignoring non-exec command and persists stopped only after exit": {
-      "median": 0.046189,
-      "min": 0.04585,
-      "samples": 3
-    },
-    "monitor::monitor_stop stops a monitor": {
-      "median": 0.000835,
-      "min": 0.000784,
-      "samples": 3
-    },
-    "monitor::monitor_list returns monitors": {
-      "median": 0.000573,
-      "min": 0.000548,
-      "samples": 3
-    },
-    "monitor::monitor_look returns monitor details": {
-      "median": 0.000525,
-      "min": 0.000504,
-      "samples": 3
-    },
-    "monitor::command output wake success does not mark failed completion wake delivered and does not backfill successful completion": {
-      "median": 0.102713,
-      "min": 0.102524,
-      "samples": 3
-    },
-    "monitor::computeStatusSummary counts active triggered failed": {
-      "median": 0.001223,
-      "min": 0.001208,
-      "samples": 3
-    },
-    "monitor::renderMonitorStatus idle": {
-      "median": 0.000141,
-      "min": 0.000139,
-      "samples": 3
-    },
-    "monitor::renderMonitorStatus active": {
-      "median": 5.7e-05,
-      "min": 5.5e-05,
-      "samples": 3
-    },
-    "monitor::renderMonitorStatus with triggered and next": {
-      "median": 5.7e-05,
-      "min": 5.1e-05,
-      "samples": 3
-    },
-    "monitor::renderMonitorStatus with failed": {
-      "median": 6.2e-05,
-      "min": 5.4e-05,
-      "samples": 3
-    },
-    "monitor::truncateToWidth truncates long text": {
-      "median": 8.6e-05,
-      "min": 7.3e-05,
-      "samples": 3
-    },
-    "monitor::formatMonitorRow renders running monitor": {
-      "median": 0.000254,
-      "min": 0.000232,
-      "samples": 3
-    },
-    "monitor::validateCheck accepts timer": {
-      "median": 0.000959,
-      "min": 0.000936,
-      "samples": 3
-    },
-    "monitor::validateCheck accepts file exists": {
-      "median": 0.000135,
-      "min": 0.000132,
-      "samples": 3
-    },
-    "monitor::validateCheck rejects file contains without pattern": {
-      "median": 0.000262,
-      "min": 0.00026,
-      "samples": 3
-    },
-    "monitor::validateCheck rejects unknown check type": {
-      "median": 7.4e-05,
-      "min": 7.3e-05,
-      "samples": 3
-    },
-    "monitor::validateSchedule accepts empty schedule as immediate": {
-      "median": 9.2e-05,
-      "min": 9.1e-05,
-      "samples": 3
-    },
-    "monitor::validateSchedule accepts delay_ms": {
-      "median": 6.1e-05,
-      "min": 6e-05,
-      "samples": 3
-    },
-    "monitor::validateSchedule rejects delay_ms below minimum": {
-      "median": 5.7e-05,
-      "min": 5.6e-05,
-      "samples": 3
-    },
-    "monitor::validateSchedule rejects invalid start_at": {
-      "median": 6.9e-05,
-      "min": 6.5e-05,
-      "samples": 3
-    },
-    "monitor::validateCondition accepts always": {
-      "median": 0.000257,
-      "min": 0.000252,
-      "samples": 3
-    },
-    "monitor::validateCondition accepts and/or with children": {
-      "median": 0.000241,
-      "min": 0.000238,
-      "samples": 3
-    },
-    "monitor::validateCondition rejects and without children": {
-      "median": 0.000123,
-      "min": 0.000121,
-      "samples": 3
-    },
-    "monitor::validateStateTransition blocks terminal transitions": {
-      "median": 8e-05,
-      "min": 7.9e-05,
-      "samples": 3
-    },
-    "pi-extension-background-bash::package pi entrypoint points at loadable source": {
-      "median": 0.00186,
-      "min": 0.001693,
-      "samples": 3
-    },
-    "pi-extension-background-bash::registration and prompt guidance are consistently disabled unless load config enables": {
-      "median": 0.000325,
-      "min": 0.000299,
-      "samples": 3
-    },
-    "pi-extension-background-bash::registry registers tools when env opt-in is enabled": {
-      "median": 0.0004,
-      "min": 0.000382,
-      "samples": 3
-    },
-    "pi-extension-background-bash::output cap limits persisted bytes and stops appending": {
-      "median": 0.514756,
-      "min": 0.510163,
-      "samples": 3
-    },
-    "pi-extension-background-bash::stop refuses unverified persisted pid": {
-      "median": 0.001224,
-      "min": 0.001102,
-      "samples": 3
-    },
-    "pi-extension-background-bash::watchdog marks interactive prompt blocked without input": {
-      "median": 0.504245,
-      "min": 0.503316,
-      "samples": 3
-    },
-    "pi-extension-background-bash::invalid cwd spawn failure returns failed task": {
-      "median": 0.00422,
-      "min": 0.003635,
-      "samples": 3
-    },
-    "pi-extension-background-bash::blocked process exit becomes terminal with blocked reason retained": {
-      "median": 0.504219,
-      "min": 0.503284,
-      "samples": 3
-    },
-    "pi-extension-background-bash::activation guidance withheld when active bash override verification fails": {
-      "median": 0.000991,
-      "min": 0.000932,
-      "samples": 3
-    },
-    "pi-extension-background-bash::activation guidance withheld when extension bash exists but active bash is ambiguous": {
-      "median": 0.000465,
-      "min": 0.000446,
-      "samples": 3
-    },
-    "pi-extension-background-bash::activation guidance withheld for single bash without provenance": {
-      "median": 0.000275,
-      "min": 0.000274,
-      "samples": 3
-    },
-    "pi-extension-background-bash::activation guidance shown when active bash name maps to one extension-provenance bash": {
-      "median": 0.000291,
-      "min": 0.000234,
-      "samples": 3
-    },
-    "pi-extension-background-bash::activation guidance withheld for duplicate active bash entries even when allTools has extension provenance": {
-      "median": 0.000208,
-      "min": 0.000146,
-      "samples": 3
-    },
-    "pi-extension-background-bash::registered renderers produce bounded background task cards": {
-      "median": 0.002976,
-      "min": 0.001523,
-      "samples": 3
-    },
-    "pi-extension-background-bash::registered renderers normalize embedded newlines before chrome rendering": {
-      "median": 0.000383,
-      "min": 0.000312,
-      "samples": 3
-    },
-    "pi-extension-background-bash::bash timeout is seconds and background converts to milliseconds": {
-      "median": 1.308948,
-      "min": 1.307414,
-      "samples": 3
-    },
-    "pi-extension-background-bash::migration dry-run plans prompt and JSON tool-list updates without writing": {
-      "median": 0.01049,
-      "min": 0.007317,
-      "samples": 3
-    },
-    "pi-extension-background-bash::migration canary selection and run-artifact warnings gate writes": {
-      "median": 0.00923,
-      "min": 0.00828,
-      "samples": 3
-    },
-    "pi-extension-background-bash::migration does not append background task tools to JSON excludeTools": {
-      "median": 0.002054,
-      "min": 0.001498,
-      "samples": 3
-    },
-    "pi-extension-background-bash::migration backups can be rolled back": {
-      "median": 0.006359,
-      "min": 0.003728,
-      "samples": 3
-    },
     "showcase::identitySlot hashes deterministically into the 8-color palette": {
       "median": 0.001186,
       "min": 0.00118,
@@ -3182,6 +2717,561 @@
     "web-evidence-cache::web evidence extension appends the extension-wide prompt section before agent start": {
       "median": 0.000168,
       "min": 0.00016,
+      "samples": 3
+    },
+    "task-plane::real bash process persists output and invokes follow-up once": {
+      "median": 0.051088,
+      "min": 0.049136,
+      "samples": 3
+    },
+    "task-plane::close/stop race claims terminal notification at most once": {
+      "median": 0.17545,
+      "min": 0.174324,
+      "samples": 3
+    },
+    "task-plane::one dispatcher globally batches simultaneous bash terminals": {
+      "median": 0.09005,
+      "min": 0.079205,
+      "samples": 3
+    },
+    "task-plane::interval nonzero and real timeout fail": {
+      "median": 0.103742,
+      "min": 0.103289,
+      "samples": 3
+    },
+    "task-plane::tool schemas are closed while removed v2 fields reach teaching validation": {
+      "median": 0.001166,
+      "min": 0.001103,
+      "samples": 3
+    },
+    "task-plane::corrupt metadata at a real tool boundary is a store-repair runtime error": {
+      "median": 0.001136,
+      "min": 0.001097,
+      "samples": 3
+    },
+    "task-plane::invalid registry task directory name is store corruption at the real task_list boundary": {
+      "median": 0.000332,
+      "min": 0.000326,
+      "samples": 3
+    },
+    "task-plane::atomic idempotency and active cap": {
+      "median": 0.101448,
+      "min": 0.094552,
+      "samples": 3
+    },
+    "task-plane::session mismatch refuses dispatch": {
+      "median": 0.002655,
+      "min": 0.002324,
+      "samples": 3
+    },
+    "task-plane::queued running events are discarded when canonical task terminalizes": {
+      "median": 0.004707,
+      "min": 0.002843,
+      "samples": 3
+    },
+    "task-plane::mixed event batch keeps live tasks and discards terminalized task events": {
+      "median": 0.003455,
+      "min": 0.0028,
+      "samples": 3
+    },
+    "task-plane::queued running events are discarded after canonical suspension": {
+      "median": 0.002545,
+      "min": 0.002274,
+      "samples": 3
+    },
+    "task-plane::async host rejection persists dispatch_sync_failed and is never replayed": {
+      "median": 0.004208,
+      "min": 0.003816,
+      "samples": 3
+    },
+    "task-plane::post-invoke persistence fault leaves dispatch_requested and never invokes twice": {
+      "median": 0.004211,
+      "min": 0.003842,
+      "samples": 3
+    },
+    "task-plane::pre-host terminal claim file I/O failure invokes no host and retries safely": {
+      "median": 0.027494,
+      "min": 0.027118,
+      "samples": 3
+    },
+    "task-plane::an existing one-shot claim file suppresses a terminal host collision": {
+      "median": 0.002565,
+      "min": 0.002273,
+      "samples": 3
+    },
+    "task-plane::preclaim persistence failure retries in-process without blocking a mixed batch": {
+      "median": 0.032445,
+      "min": 0.030653,
+      "samples": 3
+    },
+    "task-plane::two dispatchers race one terminal invocation": {
+      "median": 0.003701,
+      "min": 0.003144,
+      "samples": 3
+    },
+    "task-plane::real Pi AgentSession and DefaultResourceLoader load exactly four task-plane tools": {
+      "median": 0.029572,
+      "min": 0.026786,
+      "samples": 3
+    },
+    "task-plane::real AgentSession admits only retired fields for structured teaching": {
+      "median": 0.009993,
+      "min": 0.0099,
+      "samples": 3
+    },
+    "task-plane::real AgentSession task_stop races a registered bash close with one terminal follow-up": {
+      "median": 0.11634,
+      "min": 0.115075,
+      "samples": 3
+    },
+    "task-plane::real faux-provider prompt executes owned background bash and receives its host follow-up": {
+      "median": 0.462835,
+      "min": 0.461613,
+      "samples": 3
+    },
+    "task-plane::real subprocess admissions serialize the same-session 25th/26th boundary": {
+      "median": 0.294919,
+      "min": 0.268344,
+      "samples": 3
+    },
+    "task-plane::real subprocess same-session idempotency converges while sessions remain independent": {
+      "median": 0.230907,
+      "min": 0.217922,
+      "samples": 3
+    },
+    "task-plane::strict metadata parsing rejects path injection, id mismatch, and invalid leases": {
+      "median": 0.004019,
+      "min": 0.003448,
+      "samples": 3
+    },
+    "task-plane::malformed metadata fails closed while corrupt active index self-repairs": {
+      "median": 0.003066,
+      "min": 0.002444,
+      "samples": 3
+    },
+    "task-plane::metadata commit survives index refresh failure and rebuild repairs cache": {
+      "median": 0.004964,
+      "min": 0.004615,
+      "samples": 3
+    },
+    "task-plane::stale version cannot resurrect and first terminalizer wins": {
+      "median": 0.003535,
+      "min": 0.003088,
+      "samples": 3
+    },
+    "task-plane::every operation rejects a foreign session": {
+      "median": 0.00603,
+      "min": 0.00414,
+      "samples": 3
+    },
+    "task-plane::lease claims distinguish acquisition, contention, unclaimable, and fence failures": {
+      "median": 0.005491,
+      "min": 0.003714,
+      "samples": 3
+    },
+    "task-plane::every claimed mutation treats exact lease expiry as a hard fence": {
+      "median": 0.068197,
+      "min": 0.061001,
+      "samples": 3
+    },
+    "task-plane::claimed persistence crossing expiry cannot commit": {
+      "median": 0.004062,
+      "min": 0.003559,
+      "samples": 3
+    },
+    "task-plane::expired token cannot race a second registry orphan reconciliation": {
+      "median": 0.003082,
+      "min": 0.00305,
+      "samples": 3
+    },
+    "task-plane::event flood window persists, expires inclusively, and version-fences writers": {
+      "median": 0.207734,
+      "min": 0.179499,
+      "samples": 3
+    },
+    "task-plane::orphaned records are absorbing for all execution mutations": {
+      "median": 0.005907,
+      "min": 0.004539,
+      "samples": 3
+    },
+    "task-plane::terminal patches reject JS extra fields and preserve protected state": {
+      "median": 0.001418,
+      "min": 0.001243,
+      "samples": 3
+    },
+    "task-plane::admission drafts reject lifecycle and unknown JS fields": {
+      "median": 0.000239,
+      "min": 0.000228,
+      "samples": 3
+    },
+    "task-plane::registry root and canonical paths remain absolute after cwd changes": {
+      "median": 0.000741,
+      "min": 0.000733,
+      "samples": 3
+    },
+    "task-plane::attempt patches reject JS extra fields and preserve protected state": {
+      "median": 0.001211,
+      "min": 0.001185,
+      "samples": 3
+    },
+    "task-plane::exact metadata validation rejects unknown and representative malformed fields": {
+      "median": 0.002615,
+      "min": 0.00235,
+      "samples": 3
+    },
+    "task-plane::atomic resume-and-claim permits exactly one runtime": {
+      "median": 0.003555,
+      "min": 0.003429,
+      "samples": 3
+    },
+    "task-plane::claimDue validates timestamps and fences due work": {
+      "median": 0.001742,
+      "min": 0.001416,
+      "samples": 3
+    },
+    "task-plane::one interval claim fault does not block unaffected due work and retries": {
+      "median": 0.003809,
+      "min": 0.003379,
+      "samples": 3
+    },
+    "task-plane::an old live lock owner cannot be stolen": {
+      "median": 0.040855,
+      "min": 0.040482,
+      "samples": 3
+    },
+    "task-plane::dead same-host and conservatively old malformed locks recover": {
+      "median": 0.00649,
+      "min": 0.006422,
+      "samples": 3
+    },
+    "task-plane::low-level metadata rename faults never fabricate lifecycle state": {
+      "median": 0.002594,
+      "min": 0.002214,
+      "samples": 3
+    },
+    "task-plane::suspension metadata rename fault leaves request recoverable": {
+      "median": 0.002644,
+      "min": 0.002375,
+      "samples": 3
+    },
+    "task-plane::dispatch backfill selects ordinary terminal once but never suppressed or requested": {
+      "median": 0.007354,
+      "min": 0.007027,
+      "samples": 3
+    },
+    "task-plane::terminal claim returns false only on collision and propagates other I/O": {
+      "median": 0.004491,
+      "min": 0.004376,
+      "samples": 3
+    },
+    "task-plane::canonical output writer persists from first byte and preserves descriptor line integrity": {
+      "median": 0.003747,
+      "min": 0.002803,
+      "samples": 3
+    },
+    "task-plane::newline-free chunks cap immediately with bounded decoder memory": {
+      "median": 0.030542,
+      "min": 0.025817,
+      "samples": 3
+    },
+    "task-plane::StringDecoder preserves split UTF-8 across every byte boundary": {
+      "median": 0.002272,
+      "min": 0.002198,
+      "samples": 3
+    },
+    "task-plane::bash cap retains first payload, appends sentinel, and stops": {
+      "median": 0.002854,
+      "min": 0.002792,
+      "samples": 3
+    },
+    "task-plane::monitor cap rolls newest payload and continues": {
+      "median": 0.00188,
+      "min": 0.001541,
+      "samples": 3
+    },
+    "task-plane::control frames and descriptor EOF terminate active partial boundaries": {
+      "median": 0.001328,
+      "min": 0.000512,
+      "samples": 3
+    },
+    "task-plane::repeated monitor sentinels are physically bounded by cap plus one sentinel": {
+      "median": 0.026623,
+      "min": 0.025196,
+      "samples": 3
+    },
+    "task-plane::natural stream completion flushes final partial before metadata-only terminal": {
+      "median": 0.059643,
+      "min": 0.052425,
+      "samples": 3
+    },
+    "task-plane::interval stop between polls finalizes without a stale pid": {
+      "median": 0.024914,
+      "min": 0.024856,
+      "samples": 3
+    },
+    "task-plane::shared lifespan sweep expires an interval monitor during a running poll": {
+      "median": 0.165112,
+      "min": 0.164614,
+      "samples": 3
+    },
+    "task-plane::lifespan owner terminates before a later side effect and notifies once": {
+      "median": 0.506777,
+      "min": 0.506639,
+      "samples": 3
+    },
+    "task-plane::scheduler sweep orphans a missing runtime only after lease expiry": {
+      "median": 0.14367,
+      "min": 0.124668,
+      "samples": 3
+    },
+    "task-plane::lifespan sweep requests timeout without terminalizing a foreign live lease": {
+      "median": 0.084609,
+      "min": 0.084295,
+      "samples": 3
+    },
+    "task-plane::monitor throttle is a minimum and 20 lines is only an envelope cap": {
+      "median": 0.522008,
+      "min": 0.516558,
+      "samples": 3
+    },
+    "task-plane::command timeout is recorded in output, metadata, and notification": {
+      "median": 0.083576,
+      "min": 0.082427,
+      "samples": 3
+    },
+    "task-plane::changed interval output flushes before natural predicate completion": {
+      "median": 0.041258,
+      "min": 0.040375,
+      "samples": 3
+    },
+    "task-plane::scheduler restarts after becoming idle": {
+      "median": 0.144499,
+      "min": 0.144343,
+      "samples": 3
+    },
+    "task-plane::output append failure kills the real child and finalizes failed": {
+      "median": 0.023367,
+      "min": 0.022711,
+      "samples": 3
+    },
+    "task-plane::SIGTERM-resistant process is escalated and close-confirmed": {
+      "median": 0.076904,
+      "min": 0.07639,
+      "samples": 3
+    },
+    "task-plane::stream flood boundary permits 299 and 300 raw lines": {
+      "median": 0.786253,
+      "min": 0.777291,
+      "samples": 3
+    },
+    "task-plane::stdout flood above 300 lines stops a stream monitor": {
+      "median": 0.398275,
+      "min": 0.358032,
+      "samples": 3
+    },
+    "task-plane::stream flood counts empty lines and a final partial": {
+      "median": 0.391024,
+      "min": 0.35601,
+      "samples": 3
+    },
+    "task-plane::interval flood boundary permits 299/300 and stops 301 before completion": {
+      "median": 1.074211,
+      "min": 1.02563,
+      "samples": 3
+    },
+    "task-plane::interval flood precedes a nonzero poll outcome and counts blank lines": {
+      "median": 0.33682,
+      "min": 0.304492,
+      "samples": 3
+    },
+    "task-plane::interactive prompt becomes blocked during grace then stops": {
+      "median": 2.266491,
+      "min": 2.257716,
+      "samples": 3
+    },
+    "task-plane::shutdown durably suppresses bash notification and suspends monitor after close": {
+      "median": 0.03273,
+      "min": 0.031619,
+      "samples": 3
+    },
+    "task-plane::shutdown cancels a transiently failed initial stream claim and durably suspends without spawning": {
+      "median": 0.079148,
+      "min": 0.078918,
+      "samples": 3
+    },
+    "task-plane::foreign-runtime stop is consumed by the live owner": {
+      "median": 0.048608,
+      "min": 0.04805,
+      "samples": 3
+    },
+    "task-plane::foreign stop uses control-tick acknowledgement grace, not kill_after": {
+      "median": 0.123806,
+      "min": 0.122545,
+      "samples": 3
+    },
+    "task-plane::unresponsive foreign owner stop surfaces a route failure": {
+      "median": 0.10403,
+      "min": 0.103246,
+      "samples": 3
+    },
+    "task-plane::running interval shutdown suspends after close and rehydrate atomically resumes": {
+      "median": 0.244634,
+      "min": 0.242136,
+      "samples": 3
+    },
+    "task-plane::stream rehydration preserves the remaining absolute lifespan": {
+      "median": 0.375833,
+      "min": 0.373076,
+      "samples": 3
+    },
+    "task-plane::expired suspended stream and interval monitors rehydrate to one strict timed_out notification": {
+      "median": 0.046793,
+      "min": 0.046404,
+      "samples": 3
+    },
+    "task-plane::stream respawn failure terminalizes the resumed attempt": {
+      "median": 0.02496,
+      "min": 0.024474,
+      "samples": 3
+    },
+    "task-plane::rehydration atomically recovers suspended and never-claimed stream attempts": {
+      "median": 0.203023,
+      "min": 0.202775,
+      "samples": 3
+    },
+    "task-plane::leader exit is bounded when a detached grandchild retains stdio": {
+      "median": 0.062261,
+      "min": 0.062134,
+      "samples": 3
+    },
+    "task-plane::interval stdout budget overflow fails with sentinel": {
+      "median": 0.154543,
+      "min": 0.141385,
+      "samples": 3
+    },
+    "task-plane::real bash engine stops at 10MiB and retains exactly the first cap plus sentinel": {
+      "median": 0.320542,
+      "min": 0.30548,
+      "samples": 3
+    },
+    "task-plane::real stream monitor rolls beyond 5MiB, keeps newest sentinel, and completes naturally": {
+      "median": 0.249608,
+      "min": 0.24486,
+      "samples": 3
+    },
+    "task-plane::engine runtime ownership is per instance": {
+      "median": 0.000281,
+      "min": 0.000275,
+      "samples": 3
+    },
+    "task-plane::disposing a real session synchronously disables polling, durably suspends, and does not poison a new runtime": {
+      "median": 5.3573827000000005,
+      "min": 5.357358198,
+      "samples": 3
+    },
+    "task-plane::oversized stream and interval lines emit a bounded marked event for newline and final partial": {
+      "median": 0.356774233,
+      "min": 0.330020386,
+      "samples": 3
+    },
+    "task-plane::workload heuristic unwraps wrappers, package-manager global options, and shell -c": {
+      "median": 0.001831182,
+      "min": 0.001815192,
+      "samples": 3
+    },
+    "task-plane::phase-shifted shared clock accepts the first base tick and fences its callback after shutdown": {
+      "median": 0.077640245,
+      "min": 0.076944389,
+      "samples": 3
+    },
+    "task-plane::owned task_stop retries a one-shot inactive-interval terminal metadata fault": {
+      "median": 0.054153309,
+      "min": 0.053768511,
+      "samples": 3
+    },
+    "task-plane::owned task_stop bounds persistent terminal metadata failure as runtime": {
+      "median": 2.068122088,
+      "min": 2.051336405,
+      "samples": 3
+    },
+    "task-plane::stop waits for a SIGTERM-resistant same-group descendant after the shell leader closes": {
+      "median": 0.957720468,
+      "min": 0.9550612620000001,
+      "samples": 3
+    },
+    "task-plane::manual task_stop joins an established max-runtime timeout without rewriting it": {
+      "median": 1.1904653470000002,
+      "min": 1.1893874800000002,
+      "samples": 3
+    },
+    "task-plane::redirected same-group descendant delays natural completion until group death": {
+      "median": 0.420321429,
+      "min": 0.41936510600000004,
+      "samples": 3
+    },
+    "task-plane::inherited-stdio same-group descendant delays natural completion until group death": {
+      "median": 0.415067899,
+      "min": 0.41485075,
+      "samples": 3
+    },
+    "task-plane::shutdown preserves an established bash timeout and suppresses its notification": {
+      "median": 1.135978031,
+      "min": 1.135490926,
+      "samples": 3
+    },
+    "task-plane::bash shutdown resolves only after a one-shot terminal metadata fault recovers": {
+      "median": 0.046693337999999994,
+      "min": 0.046201657,
+      "samples": 3
+    },
+    "task-plane::bash shutdown rejects boundedly on persistent terminal metadata failure": {
+      "median": 2.095254191,
+      "min": 2.083109848,
+      "samples": 3
+    },
+    "task-plane::one shutdown persistence failure does not leave a later real child running": {
+      "median": 2.823841108,
+      "min": 2.821645181,
+      "samples": 3
+    },
+    "task-plane::monitor shutdown resolves only after a one-shot suspended metadata fault recovers": {
+      "median": 0.077057666,
+      "min": 0.074508292,
+      "samples": 3
+    },
+    "task-plane::monitor shutdown rejects boundedly on persistent suspended metadata failure": {
+      "median": 2.1118769619999997,
+      "min": 2.1030776540000002,
+      "samples": 3
+    },
+    "task-plane::pending stream-claim suspension failure does not block live bash termination": {
+      "median": 2.790907835,
+      "min": 2.7796252399999997,
+      "samples": 3
+    },
+    "task-plane::manual task_stop joins latched interval command timeout during detached stdio drain": {
+      "median": 0.468106211,
+      "min": 0.467331651,
+      "samples": 3
+    },
+    "task-plane::latched interval command timeout beats lifespan during detached stdio drain": {
+      "median": 0.474331457,
+      "min": 0.473148648,
+      "samples": 3
+    },
+    "task-plane::shutdown finalizes latched interval command timeout instead of suspending": {
+      "median": 0.459585042,
+      "min": 0.45910435,
+      "samples": 3
+    },
+    "task-plane::shutdown kills a live handle from its snapshot even when metadata is malformed": {
+      "median": 0.8367510459999999,
+      "min": 0.8360890120000001,
+      "samples": 3
+    },
+    "task-plane::post-close output fault cannot erase latched command-timeout classification": {
+      "median": 0.118300154,
+      "min": 0.117870299,
       "samples": 3
     }
   }

@@ -1,5 +1,7 @@
 # Lifecycle Contract
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Status: implemented
 Applies to: `BackgroundRunner`, `TaskRegistry`, `background_task_stop`, session reload/shutdown handlers
 

@@ -1,5 +1,7 @@
 # Pi Message API Contract Evidence
 
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+
 Status: Phase 0 evidence checked
 Date: 2026-06-30
 Applies to: real Pi `sendMessage` / session binding behavior
