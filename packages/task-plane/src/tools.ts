@@ -229,6 +229,8 @@ export const TASK_PLANE_GUIDANCE=`Pick by what you're waiting for:
 - A notification per occurrence from something external → monitor({command}). Logs, CI/deploy status, health checks, queue depth, file conditions. Use when watching external state or streaming another system's events; avoid using it to run a workload. A one-shot wait belongs here as a self-terminating stream command such as gh run watch --exit-status, not an interval poll. Each stdout line is an event; the command's exit ends the watch.
 - Nothing to wait for → plain bash.
 
+Waiting is an idle state, not a tool call. After starting background bash or a monitor, if no independent work remains, end the current response; the task plane will asynchronously wake this session with the notification. Do not call task_list, sleep, or poll merely to keep the turn alive.
+
 Silence is not success. Your monitor command must produce a terminal signal for every outcome, not just the happy path. A stream command must exit on failure states too (prefer --exit-status-style flags); an interval monitor's until_output_matches must match failure statuses as well as success, or be paired with lifespan_s as a backstop. Before starting a monitor, ask: if the watched thing crashed right now, would this monitor end?
 
 Do not use timeout: 1 to make background bash return quickly; timeout is its maximum runtime. Do not append &, poll a task you'll be notified about, or build task-polling/sleep loops around failing commands. Do not pipe monitor output through buffering stages such as grep without --line-buffered or head. Events and predicates see stdout only; redirect 2>&1 if stderr matters.
