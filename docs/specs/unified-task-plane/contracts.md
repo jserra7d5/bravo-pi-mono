@@ -138,7 +138,7 @@ other terminal path and no non-terminal wake policy.
 
 Max **25 active tasks per session across both types**. Active ≡
 `running ∪ blocked`. `orphaned` does not count (it is unmanageable, not active),
-but `task_list` always shows orphans so they are visible. Admission (cap check +
+but `managed_task_list` always shows orphans so they are visible. Admission (cap check +
 idempotency check + record creation) is a single atomic registry operation;
 concurrent starts cannot overshoot.
 
@@ -153,10 +153,10 @@ Rationale: observer output is rolling evidence — the watch matters more than o
 bytes; workload output is the product — silent loss is worse than stopping.
 Sentinel bytes never count toward the cap accounting.
 
-## `task_list`
+## `managed_task_list`
 
 ```
-task_list({ include_completed?: boolean })   // default false
+managed_task_list({ include_completed?: boolean })   // default false
 ```
 
 Returns `{ tasks: [...], count }`; each item:
@@ -223,12 +223,12 @@ follow-up turn, never as user input.
 - **Shutdown exception:** tasks terminalized by session shutdown are NOT notified —
   the owning session is dying and wakes are conversation-bound (no successor
   backfill for bash tasks; monitors suspend instead of terminalizing). Their
-  terminal metadata persists and is visible via `task_list` in the next session.
+  terminal metadata persists and is visible via `managed_task_list` in the next session.
 - **Delivery guarantee (honest):** **at-most-once host invocation per terminal
   event, best-effort delivery.** The pi host provides no delivery
   acknowledgement, so exactly-once *delivery* is unprovable and is not claimed;
   the claim-file discipline guarantees no duplicate invocation, and a missed wake
-  (ambiguous post-invoke persistence) is recoverable via `task_list`, never
+  (ambiguous post-invoke persistence) is recoverable via `managed_task_list`, never
   replayed. Persisted dispatch states say what is known (`dispatch_requested`,
   `host_api_invoked`, `dispatch_sync_failed`) — nothing may claim "delivered" on
   the basis of a returned host call.

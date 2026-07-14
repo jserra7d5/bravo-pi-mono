@@ -85,7 +85,7 @@ All notifications flow through one dispatcher that owns cost control:
   `dispatch_sync_failed`. Nothing persists "delivered"; the pi host gives no
   delivery acknowledgement. Ambiguous post-invoke persistence failure leaves
   `dispatch_requested` and is never replayed (no duplicate wakes; a missed wake is
-  recoverable via `task_list`, a duplicated one poisons context).
+  recoverable via `managed_task_list`, a duplicated one poisons context).
 
 ## Durability and rehydration (the new mechanism, fully traced)
 

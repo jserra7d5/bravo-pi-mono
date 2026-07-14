@@ -26,7 +26,7 @@ After admitting background bash or a monitor, the agent may continue useful inde
 work. When no independent work remains, waiting means ending the current response and
 becoming idle—not calling another tool to keep the turn alive. The task plane delivers
 notifications as follow-ups with turn triggering, so it asynchronously resumes the same
-session. `task_list`, sleeps, and polling are inspection mechanisms, not wait mechanisms.
+session. `managed_task_list`, sleeps, and polling are inspection mechanisms, not wait mechanisms.
 
 ## Per-tool use-when / avoid-when
 

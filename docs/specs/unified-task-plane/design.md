@@ -51,7 +51,7 @@ Adopted from what Claude Code's agent experience gets right, formalized via the
 4. **One task plane, one owner.** Agents reason by analogy across tools;
    consistency is what makes the analogy work. Both spawn verbs share one registry,
    one `task_id` namespace, one state vocabulary, one notification envelope, one
-   management pair (`task_list`, `task_stop`), and one error tier vocabulary — and
+   management pair (`managed_task_list`, `task_stop`), and one error tier vocabulary — and
    all of it is owned by **one new package, `packages/task-plane`** (extension id
    `pi-extension-task-plane`), which registers all four tools, all session hooks,
    the single state root, and the single delivery dispatcher.
@@ -74,7 +74,7 @@ Everything else is wiring.
 |---|---|---|
 | `bash` | run workloads; `run_in_background` for long-running | `bash` (drops `wake_on_completion`) |
 | `monitor` | observe external state; **stdout** = events, exit = terminal | `monitor_start` (drops `kind`, `emit`, `projection`, `wake`, `file_*`) |
-| `task_list` | list tasks of both types | `background_task_list`, `monitor_list` |
+| `managed_task_list` | list tasks of both types | `background_task_list`, `monitor_list` |
 | `task_stop` | stop a task of either type | `background_task_stop`, `monitor_stop` |
 
 All four registered by `packages/task-plane` — one entrypoint, one prompt module,
