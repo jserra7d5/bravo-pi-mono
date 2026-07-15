@@ -106,23 +106,33 @@ test("archive preserves run when archive destination cannot be created", async (
   assert.ok(result.errors.some((entry) => entry.runId === candidate.runId));
 });
 
-test("capped archive discovery stops before parsing the remainder of a large index", async () => {
+test("capped archive discovery skips stale head records and stops after 25 existing run directories", async () => {
   const w = fixture();
-  mkdirSync(w.home, { recursive: true });
-  const lines: string[] = [];
-  for (let i = 0; i < 25; i += 1) {
-    lines.push(JSON.stringify({ schemaVersion: 1, runId: `run_cap_${i}`, runDir: join(w.home, "missing", `run_cap_${i}`), projectRoot: w.cwd, parentRunId: "root_cap", createdAt: old }));
-  }
-  writeFileSync(w.store.globalIndexPath(), `${lines.join("\n")}\n{not-json-after-cap}\n`, "utf8");
+  mkdirSync(join(w.store.runRoot, ".."), { recursive: true });
+  const stale = Array.from({ length: 30 }, (_, index) => JSON.stringify({
+    schemaVersion: 1,
+    runId: `run_stale_${index}`,
+    runDir: join(w.home, "missing", `run_stale_${index}`),
+    projectRoot: w.cwd,
+    parentRunId: "root_cap",
+    createdAt: old,
+  }));
+  writeFileSync(w.store.indexPath(), `${stale.join("\n")}\n`, "utf8");
+  const eligible = addRun(w.store, w.cwd, "completed", old, "run_after_stale_head");
+  for (let i = 0; i < 24; i += 1) addRun(w.store, w.cwd, "running", old, `run_cap_active_${i}`);
+  writeFileSync(w.store.indexPath(), "{not-json-after-cap}\n", { encoding: "utf8", flag: "a" });
 
-  await assert.doesNotReject(() => archiveRuns(w.store, { cap: 25, dryRun: true, nowMs }));
   class NoCompactionStore extends RunStore {
     override compactRunIndexes(): number {
       throw new Error("capped automatic sweep must not compact the full index");
     }
   }
   const cappedStore = new NoCompactionStore({ cwd: w.cwd, env: w.env });
-  await assert.doesNotReject(() => archiveRuns(cappedStore, { cap: 25, nowMs }));
+  const result = await archiveRuns(cappedStore, { cap: 25, nowMs });
+
+  assert.ok(result.archived.includes(eligible.runId));
+  assert.equal(existsSync(eligible.paths.runDir), false);
+  assert.equal(result.skipped.filter((entry) => entry.reason === "active").length, 24);
 });
 
 test("archive includes legacy top-level runs", async () => {

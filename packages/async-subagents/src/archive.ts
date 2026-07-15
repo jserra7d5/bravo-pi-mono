@@ -44,6 +44,7 @@ function archiveCandidates(store: RunStore, cap?: number): RunIndexRecord[] {
     for (const record of store.readLookupRunIndex()) latest.set(record.runId, record);
   } else {
     store.visitLookupRunIndex((record) => {
+      if (!existsSync(record.runDir)) return true;
       latest.set(record.runId, record);
       return !reachedCap();
     });

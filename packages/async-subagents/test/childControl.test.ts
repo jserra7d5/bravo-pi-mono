@@ -271,6 +271,51 @@ test("child-control recurring poll delivers post-start inbox messages on due clo
   );
 });
 
+test("child-control suppresses overlapping inbox polls while delivery waits on the run lock", async () => {
+  const fixture = childControlFixture();
+  const scheduler = makeScheduler();
+  const clock = createRenderClock({ baseIntervalMs: 1000, scheduler });
+
+  await withEnv(
+    {
+      ASYNC_SUBAGENTS_RUN_ID: fixture.runId,
+      ASYNC_SUBAGENTS_RUN_DIR: fixture.paths.runDir,
+      ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+    },
+    async () => {
+      await startChild(fixture, clock);
+      fixture.store.appendInboxMessage(
+        fixture.runId,
+        createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "Deliver exactly once" }),
+      );
+      let release!: () => void;
+      let locked!: () => void;
+      const entered = new Promise<void>((resolve) => { locked = resolve; });
+      const holder = withRunMutationLock(fixture.paths.runDir, async () => {
+        locked();
+        await new Promise<void>((resolve) => { release = resolve; });
+      });
+      await entered;
+
+      scheduler.advance(1000);
+      await tick(clock);
+      assert.equal(fixture.sentUserMessages.length, 1);
+      scheduler.advance(1000);
+      await tick(clock);
+      assert.equal(fixture.sentUserMessages.length, 1, "an in-flight poll must suppress the next due tick");
+
+      release();
+      await holder;
+      for (let i = 0; i < 50 && messageReceivedCount(fixture.store, fixture.runId) < 1; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(fixture.sentUserMessages.length, 1);
+      assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
+      await fixture.handlers.get("session_shutdown")?.();
+    },
+  );
+});
+
 test("child-control shutdown stops polling and is idempotent", async () => {
   const fixture = childControlFixture();
   const scheduler = makeScheduler();

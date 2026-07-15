@@ -22,6 +22,7 @@ const CHILD_EVENT_TYPES = ["progress", "status", "question", "blocked", "artifac
 const WAKE_TYPES = new Set<EventType>(["question", "blocked", "artifact"]);
 
 type SubscribeOnlyClock = Pick<typeof renderClock, "subscribe">;
+type InboxPollBody = () => void | Promise<void>;
 
 function env(name: string): string | undefined {
   return process.env[name] || process.env[name.replace("ASYNC_SUBAGENTS_", "ASYNC_SUBAGENT_")];
@@ -138,11 +139,11 @@ async function deliverInbox(pi: ExtensionAPI, state: ChildControlState): Promise
   }
 }
 
-function subscribeChildInboxPoll(clock: SubscribeOnlyClock, body: () => void): () => void {
+function subscribeChildInboxPoll(clock: SubscribeOnlyClock, body: InboxPollBody): () => void {
   return clock.subscribe({ id: "async-child-inbox-poll", intervalMs: 1_000, reconcile: body });
 }
 
-export function __subscribeChildInboxPollForTest(clock: SubscribeOnlyClock, body: () => void): () => void {
+export function __subscribeChildInboxPollForTest(clock: SubscribeOnlyClock, body: InboxPollBody): () => void {
   return subscribeChildInboxPoll(clock, body);
 }
 
@@ -185,8 +186,8 @@ export default function childControlExtension(pi: ExtensionAPI, options?: { cloc
     if (!state || state.runId !== next.runId || state.runDir !== next.runDir) state = next;
     inboxPollUnsubscribe?.();
     inboxPollUnsubscribe = undefined;
-    inboxPollUnsubscribe = subscribeChildInboxPoll(clock, () => {
-      if (state) void deliverInbox(pi, state).catch((error) => console.error("[async-subagents child-control] inbox delivery failed", error));
+    inboxPollUnsubscribe = subscribeChildInboxPoll(clock, async () => {
+      if (state) await deliverInbox(pi, state);
     });
     try {
       await deliverInbox(pi, state);

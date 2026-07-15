@@ -119,7 +119,7 @@ export interface FastTrackLaunch {
   requested: boolean;
   enabled: boolean;
   applied: boolean;
-  reason?: "not_requested" | "disabled" | "scout" | "ineligible_model";
+  reason?: "not_requested" | "disabled" | "ineligible_model";
   serviceTier?: "priority";
 }
 
