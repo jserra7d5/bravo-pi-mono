@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { RunStore } from "../src/runStore.js";
@@ -141,6 +141,19 @@ test("RunStore keeps unparsed tail bytes live until a partial index record compl
 
   writeFileSync(store.indexPath(), `${external.slice(split)}\n`, { encoding: "utf8", flag: "a" });
   assert.equal(store.listDirectChildren("root_partial").some((record) => record.runId === "run_partial_append"), true);
+});
+
+test("RunStore compaction rebuilds a warm shrinking index cache", () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const stale = store.createRunDirectory({ cwd: w.root, parentRunId: "root_compact" });
+  const live = store.createRunDirectory({ cwd: w.root, parentRunId: "root_compact" });
+  assert.equal(store.resolveRunDir(live.runId), live.paths.runDir);
+  rmSync(stale.paths.runDir, { recursive: true });
+
+  assert.equal(store.compactRunIndexes([store.indexPath()]), 1);
+  assert.deepEqual(store.readRunIndex().map((record) => record.runId), [live.runId]);
+  assert.equal(store.resolveRunDir(live.runId), live.paths.runDir);
 });
 
 test("RunStore reads and writes status, events, inbox, and terminal result", () => {

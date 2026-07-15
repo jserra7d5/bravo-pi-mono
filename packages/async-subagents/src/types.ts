@@ -362,6 +362,17 @@ export interface RunIndexRecord {
   createdAt: string;
 }
 
+export interface ArchiveIndexRecord {
+  schemaVersion: SchemaVersion;
+  runId: string;
+  agentName: string;
+  state: TerminalRunState;
+  createdAt: string;
+  archivedAt: string;
+  projectScope: string;
+  archivePath: string;
+}
+
 export interface DeliverySubscription {
   schemaVersion: SchemaVersion;
   parentRunId: string;

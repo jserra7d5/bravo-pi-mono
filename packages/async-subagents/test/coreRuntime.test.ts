@@ -886,6 +886,33 @@ Provider variant body.
   assert.ok(existsSync(join(started.runDir, "logs", "model-preflight.json")));
 });
 
+test("successful start schedules archival unless disabled", async () => {
+  const w = workspace();
+  const home = join(w.root, "archive-home");
+  const env = { ASYNC_SUBAGENTS_HOME: home };
+  const store = new RunStore({ cwd: w.root, env: { ...process.env, ...env } });
+  const old = store.createRunDirectory({ cwd: w.root, parentRunId: "root_old" });
+  store.writeStatus({
+    ...createInitialStatus({ runId: old.runId, parentRunId: "root_old", agentName: "scout", agentSource: "builtin", definitionPath: "/scout.md", mode: "oneshot", cwd: w.root, state: "completed" }),
+    updatedAt: "2020-01-01T00:00:00.000Z",
+  });
+  writeFileSync(old.paths.piSessionPath, "old session\n");
+
+  const started = await startSubagent({ agent: "scout", task: "Trigger sweep", cwd: w.root, parentRunId: "root_new", env, fake: { mode: "immediate" } });
+  assert.ok(existsSync(started.runDir));
+  for (let i = 0; i < 100 && existsSync(old.paths.runDir); i++) await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  assert.equal(existsSync(old.paths.runDir), false);
+
+  const disabledOld = store.createRunDirectory({ cwd: w.root, parentRunId: "root_disabled" });
+  store.writeStatus({
+    ...createInitialStatus({ runId: disabledOld.runId, parentRunId: "root_disabled", agentName: "scout", agentSource: "builtin", definitionPath: "/scout.md", mode: "oneshot", cwd: w.root, state: "completed" }),
+    updatedAt: "2020-01-01T00:00:00.000Z",
+  });
+  await startSubagent({ agent: "scout", task: "No sweep", cwd: w.root, parentRunId: "root_new", env: { ...env, ASYNC_SUBAGENTS_NO_AUTO_ARCHIVE: "1" }, fake: { mode: "immediate" } });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  assert.equal(existsSync(disabledOld.paths.runDir), true);
+});
+
 test("context fork fails clearly without a parent Pi session reference", async () => {
   const w = workspace();
   const started = await startSubagent({

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,7 @@ import { createInitialStatus, updateRunStatus } from "./status.js";
 import { codexBalancerSyncBackAndCleanup, runSupervisor, type SupervisorFakeInput, type SupervisorInput } from "./supervisor.js";
 import type { ContextPolicy, SessionPolicy, SubagentStartResult, TerminalRunState, ThinkingLevel, TaskRecord } from "./types.js";
 import { prepareLaunch } from "@bravo/codex-auth-balancer";
+import { archiveRuns } from "./archive.js";
 
 export interface StartFakeChildInput {
   mode: "child";
@@ -599,10 +600,24 @@ async function spawnDetachedSupervisor(inputPath: string): Promise<string | unde
   return undefined;
 }
 
+function scheduleAutoArchive(store: RunStore, logsDir: string, env: NodeJS.ProcessEnv): void {
+  if (env.ASYNC_SUBAGENTS_NO_AUTO_ARCHIVE === "1") return;
+  setImmediate(() => {
+    void archiveRuns(store, { cap: 25 }).then((result) => {
+      if (!result.errors.length) return;
+      try { appendFileSync(join(logsDir, "auto-archive.log"), `${result.errors.map((entry) => `${entry.runId}: ${entry.error}`).join("\n")}\n`, "utf8"); } catch { /* Best effort. */ }
+    }).catch((error) => {
+      try {
+        appendFileSync(join(logsDir, "auto-archive.log"), `${new Date().toISOString()} ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`, "utf8");
+      } catch { /* Archival must never affect a successful start. */ }
+    });
+  });
+}
+
 export async function startSubagent(input: StartSubagentInput): Promise<SubagentStartResult> {
   const allowedFiles = normalizeAllowedFilePaths(input.files);
   const cwd = resolve(input.cwd ?? process.cwd());
-  const store = new RunStore({ cwd, runRoot: input.runRoot });
+  const store = new RunStore({ cwd, runRoot: input.runRoot, env: { ...process.env, ...(input.env ?? {}) } });
   const root = resolveRootIdentity(input, cwd);
   const baseDefinition = resolveAgentDefinition(input.agent, { cwd, env: process.env });
   const definition = applyAgentVariant(baseDefinition, input.variant);
@@ -911,6 +926,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     const status = store.readStatus(runId);
     const terminalStates: TerminalRunState[] = ["completed", "failed", "cancelled", "expired"];
     const terminal = terminalStates.includes(status.state as TerminalRunState);
+    scheduleAutoArchive(store, paths.logsDir, { ...process.env, ...(input.env ?? {}) });
     return {
       runId,
       runDir: paths.runDir,
@@ -1100,6 +1116,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   const status = store.readStatus(runId);
   const terminalStates: TerminalRunState[] = ["completed", "failed", "cancelled", "expired"];
   const terminal = terminalStates.includes(status.state as TerminalRunState);
+  scheduleAutoArchive(store, paths.logsDir, { ...process.env, ...(input.env ?? {}) });
   return {
     runId,
     runDir: paths.runDir,

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { asyncSubagentsHome, defaultRunRoot, findProjectRoot } from "./config.js";
 import { SubagentError } from "./errors.js";
@@ -407,6 +407,35 @@ export class RunStore {
     return cloneIndexCache(this.getIndexCache());
   }
 
+  /** Atomically removes index records whose run directories no longer exist. */
+  compactRunIndexes(indexPaths: string[]): number {
+    let dropped = 0;
+    for (const indexPath of [...new Set(indexPaths.map((path) => resolve(path)))]) {
+      if (!existsSync(indexPath)) continue;
+      const records = readJsonl<RunIndexRecord>(indexPath).records;
+      const kept = records.filter((record) => existsSync(record.runDir));
+      dropped += records.length - kept.length;
+      if (kept.length === records.length) continue;
+      const tmp = `${indexPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      mkdirSync(resolve(indexPath, ".."), { recursive: true });
+      writeFileSync(tmp, kept.map((record) => `${JSON.stringify(record)}\n`).join(""), "utf8");
+      const fd = openSync(tmp, "r");
+      try { fsyncSync(fd); } finally { closeSync(fd); }
+      renameSync(tmp, indexPath);
+      const scopeDir = resolve(indexPath, "..");
+      if (kept.length === 0 && resolve(indexPath) !== resolve(this.globalIndexPath())) {
+        unlinkSync(indexPath);
+        rmSync(join(scopeDir, "run-index-cache.json"), { force: true });
+        try { rmSync(scopeDir); } catch { /* Other project-scope state still exists. */ }
+      }
+    }
+    // Atomic replacement changes inode (or removes a source), forcing coherent cache rebuild.
+    for (const [key, cached] of memoryIndexCaches) {
+      if (cached.sources.some((source) => indexPaths.map((path) => resolve(path)).includes(resolve(source.path)))) memoryIndexCaches.delete(key);
+    }
+    return dropped;
+  }
+
   rebuildDerivedIndexes(): RunIndexCache {
     const key = this.indexCacheKey();
     const rebuilt = this.rebuildMemoryIndexCache(key);
@@ -438,6 +467,9 @@ export class RunStore {
   }
 
   resolveRunDir(runId: string): string {
+    // Legacy top-level runs may predate indexes; a direct run-root child is authoritative.
+    const direct = join(this.runRoot, runId);
+    if (existsSync(direct)) return direct;
     const cached = this.getIndexCache().byRunId[runId];
     if (cached) return cached.runDir;
     const records = this.readLookupRunIndex().filter((record) => record.runId === runId);
