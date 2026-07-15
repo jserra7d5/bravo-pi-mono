@@ -262,9 +262,9 @@ is explicitly set.
 The canonical files remain `run-index.jsonl`, `status.json`, `events.jsonl`, `inbox.jsonl`, and `result.json`. Hot Pi paths use derived projections instead:
 
 - `run-index-cache.json` contains latest records plus parent/root-session maps. It is rebuilt automatically when stale and can be rebuilt explicitly with `RunStore.rebuildDerivedIndexes()`.
-- Per-run `summary.json` is updated by status, event, and result mutations. Widgets, compaction reminders, and wake-up polling use this compact summary for broad discovery and avoid scanning full event/result files for every historical run. They still open canonical files in bounded cases: result-ready rows may read `result.json` for current display/handled checks, and subscribed wake polling may scan `events.jsonl` to deliver every pending question/blocked/paused timeout event exactly once.
+- Per-run `summary.json` is updated by status, event, and result mutations. Widgets, compaction reminders, and wake-up polling use this compact summary for broad discovery and avoid scanning full event/result files for every historical run. They still open canonical files in bounded cases: result-ready rows may read `result.json` for current display/handled checks, and subscribed wake polling may scan `events.jsonl` to deliver pending question and blocked events exactly once.
 - UI refreshes call `RunStore.listActiveOrRecentRuns()`, which prunes old terminal rows from the in-memory refresh set after their visibility window unless `resultReady` still needs attention. The pruning cache is invalidated by summary file changes and by the visibility boundary, so old completed/failed runs stop participating in hot widget refreshes while newly updated or unhandled-result runs reappear.
-- `pruneRuns(store, { olderThanMs, dryRun })` provides conservative manual retention. It never prunes active runs, `resultReady` runs, or runs with delivered-but-unhandled wakeups. `dryRun` defaults to true.
+- `async-subagents archive [--older-than-days N] [--dry-run]` archives eligible handled terminal runs as `.tar.zst` files before removing live run directories. Active, recent, and unhandled-wakeup runs are skipped.
 
 Model-facing wakeups are runtime envelopes marked `NOT USER INPUT`. Terminal result wakeups include the terminal `RunResult.body` inline, capped at 32,000 user-facing characters by default, while `message.details.result` keeps the full body redacted to avoid duplicate payloads. If the inline body is truncated, the wakeup includes a clear marker; use `subagent_result` as the canonical recovery path for overflow, artifacts, metadata, or rereading the stored `result.json`. If the inline body is untruncated and sufficient, the parent can continue without first calling `subagent_result`.
 
@@ -291,7 +291,7 @@ Recommended loop: create coarse milestones with `task_create`, start normal chil
 
 Task storage lives next to run delivery state under `session-tasks/<rootSessionId>/`. Old child-owned task records that contain removed statuses or ownership/result fields require migration/recreation rather than silent interpretation as milestone tasks.
 
-## Runtime budgets and timeout continuation
+## Runtime budgets and expiry continuation
 
 Agent definitions use second-based runtime budgets:
 
@@ -315,13 +315,9 @@ User config may provide a fallback:
 
 Authored `maxRunMs` is rejected with a migration error. Internally the runtime records `effectiveMaxRunMs` for timers and diagnostics.
 
-When a child approaches its budget, the supervisor appends an inbox warning asking the child to finish or emit a checkpoint. If the hard budget expires and the process group can be preserved, the run moves to `paused` instead of terminal `expired`; parent wakeups suggest either cancelling or resuming with a bounded extension, for example:
+When a child approaches its budget, the supervisor appends an inbox warning asking the child to finish or emit a checkpoint. At hard expiry the supervisor sends SIGTERM to the child process group, captures the available output/checkpoint, and finalizes the run as terminal `expired` with error code `MAX_RUN_SECONDS_EXPIRED`. No budget-expired process is left paused.
 
-```ts
-subagent_continue({ runId, additionalRunSeconds: 900 })
-```
-
-Choose the smallest reasonable `additionalRunSeconds` for the remaining work. If the result is no longer needed, cancel the paused run with `subagent_interrupt({ runId, action: "cancel" })`.
+Continue useful unfinished work from the recorded session by calling `subagent_continue` on the terminal run. This creates a new continuation run that replays the session state; use `additionalRunSeconds` to choose the smallest reasonable budget for the remaining work.
 
 ## Parent Tools
 
@@ -330,7 +326,7 @@ Choose the smallest reasonable `additionalRunSeconds` for the remaining work. If
 - `subagent_result`: canonical backup/recovery read of terminal `result.json`; use for truncated wakeups, artifacts, metadata, or reread, and to mark terminal delivery handled.
 - `subagent_message`: send normal parent input only (`instruction`, `answer`, `context`).
 - `subagent_interrupt`: pause or cancel an active child.
-- `subagent_continue`: resume a paused/timed-out child, optionally with `additionalRunSeconds`, or create a continuation for terminal runs. Its repeatable `files` input widens a specified scope additively and never narrows or removes prior entries. Runs without a specified scope reject `files`; continue them without `files` or start a new scoped run. Omitting `files` preserves the existing scope.
+- `subagent_continue`: resume an explicitly parent-paused child, optionally with `additionalRunSeconds`, or create a continuation from a terminal run's recorded session (including budget-expired runs). Its repeatable `files` input widens a specified scope additively and never narrows or removes prior entries. Runs without a specified scope reject `files`; continue them without `files` or start a new scoped run. Omitting `files` preserves the existing scope.
 
 Allowed-file scope is a durable contract enforced through status, task prompts, and inbox amendments. Paths must be non-empty, single-line strings. This is not OS-level sandboxing or filesystem permission enforcement.
 

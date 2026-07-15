@@ -58,7 +58,7 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
   const status = store.readStatus(input.runId);
   const existingResult = store.readResult(input.runId);
   if (existingResult) {
-    if (!isTerminalRunState(status.state) || status.state !== existingResult.state || !status.resultReady) {
+    if (!isTerminalRunState(status.state) || status.state !== existingResult.state) {
       store.writeStatus(
         updateRunStatus(status, {
           state: existingResult.state,
@@ -194,7 +194,7 @@ export async function reconcileUnderLock(store: RunStore, runId: string, options
     let status = store.readStatus(runId);
     let repairedResult = false;
     const result = store.readResult(runId);
-    if (result && (!isTerminalRunState(status.state) || status.state !== result.state || status.resultReady !== true)) {
+    if (result && (!isTerminalRunState(status.state) || status.state !== result.state)) {
       finalizeTerminalRun(store, {
         runId,
         parentRunId: result.parentRunId,

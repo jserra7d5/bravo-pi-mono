@@ -8,6 +8,7 @@ import { writeFastTrackState } from "../src/fastTrack.js";
 import { pollWakeups } from "../extensions/pi/wakeups.js";
 import { acquireRootSessionLease } from "../src/leases.js";
 import { createRunResult } from "../src/result.js";
+import { finalizeTerminalRun } from "../src/lifecycle.js";
 import { createRootSession } from "../src/rootSession.js";
 import { RunStore } from "../src/runStore.js";
 import { TaskStore } from "../src/taskStore.js";
@@ -217,6 +218,30 @@ test("subagent_message appends inbox messages and waits for child-control acknow
   assert.equal((result.details.unsupported as { code?: string }).code, "LIVE_MESSAGE_UNSUPPORTED");
 });
 
+test("subagent_message does not append after terminal finalization wins the mutation lock", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root });
+  const runDir = store.pathsFor({ runId: w.runId }).runDir;
+  let release!: () => void;
+  let locked!: () => void;
+  const entered = new Promise<void>((resolve) => { locked = resolve; });
+  const holder = withRunMutationLock(runDir, async () => {
+    finalizeTerminalRun(store, { runId: w.runId, parentRunId: w.identity.parentRunId, agentName: "scout", state: "completed", writerRole: "child-runtime", summary: "Done" });
+    locked();
+    await new Promise<void>((resolve) => { release = resolve; });
+  });
+  await entered;
+  const pending = tools(w.identity).subagent_message.execute("call", { runId: w.runId, body: "Too late", requiresAck: false }, undefined, undefined, { cwd: w.root });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  release();
+  await holder;
+
+  const result = await pending;
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "RUN_TERMINAL");
+  assert.equal(store.readInbox(w.runId).records.length, 0);
+});
+
 test("subagent_message can append without required acknowledgement", async () => {
   const w = workspace();
   const built = tools(w.identity);
@@ -278,7 +303,8 @@ test("subagent_continue queues resume control even when required ack fails", asy
   assert.equal(inboxMessage?.thinkingLevel, "high");
   assert.match(inboxMessage?.body ?? "", /Finish the implementation/);
   assert.match(inboxMessage?.body ?? "", /Authoritative Write-Scope Amendment/);
-  assert.match(inboxMessage?.body ?? "", /Write only these files:\n- src\/original\.ts\n- src\/new\.ts/);
+  assert.match(inboxMessage?.body ?? "", /write scope for this run is now the following additive union/);
+  assert.match(inboxMessage?.body ?? "", /- src\/original\.ts\n- src\/new\.ts/);
   assert.match(inboxMessage?.body ?? "", /contract and prompt enforcement, not OS sandboxing/);
 });
 

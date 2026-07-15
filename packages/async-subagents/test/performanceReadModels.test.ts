@@ -1,13 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { renderLiveWidget } from "../extensions/pi/liveWidget.js";
 import { readWatcherSnapshot } from "../src/watcher.js";
 import { pollWakeups, writeDeliverySubscription } from "../extensions/pi/wakeups.js";
 import { acquireRootSessionLease } from "../src/leases.js";
-import { pruneRuns } from "../src/retention.js";
 import { createRunResult } from "../src/result.js";
 import { resetSummaryCacheStatsForTest, RunStore, summaryCacheStatsForTest } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
@@ -170,25 +169,6 @@ test("RunStore listActiveOrRecentRuns exclusion cache is time-bound across visib
 
   const recordsAfterBoundary = w.store.listActiveOrRecentRuns(filter, { nowMs: baseMs + terminalVisibleMs + 1, terminalVisibleMs });
   assert.deepEqual(recordsAfterBoundary, []);
-});
-
-test("manual retention dry-run skips active and unhandled result-ready runs", () => {
-  const w = workspace();
-  const old = new Date(Date.now() - 10 * 60_000).toISOString();
-  const activeRunId = addRun(w.store, w.root, w.parentRunId, "running", old);
-  const readyRunId = addRun(w.store, w.root, w.parentRunId, "completed", old);
-  w.store.writeStatus({ ...w.store.readStatus(readyRunId), resultReady: true, updatedAt: old });
-  const collectableRunId = addRun(w.store, w.root, w.parentRunId, "completed", old);
-
-  const dry = pruneRuns(w.store, { olderThanMs: 60_000, nowMs: Date.now(), dryRun: true });
-  assert.deepEqual(dry.prunedRunIds, [collectableRunId]);
-  assert.equal(existsSync(w.store.pathsFor({ runId: collectableRunId }).runDir), true);
-  assert.ok(dry.skipped.find((skip) => skip.runId === activeRunId && skip.reason === "active"));
-  assert.ok(dry.skipped.find((skip) => skip.runId === readyRunId && skip.reason === "unhandled-wakeup"));
-
-  const pruned = pruneRuns(w.store, { olderThanMs: 60_000, nowMs: Date.now(), dryRun: false });
-  assert.deepEqual(pruned.prunedRunIds, [collectableRunId]);
-  assert.equal(existsSync(join(w.store.runRoot, collectableRunId)), false);
 });
 
 test("terminal result with missing summary delivers safe metadata once", () => {

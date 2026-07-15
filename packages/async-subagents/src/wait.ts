@@ -64,7 +64,7 @@ export function waitOnce(store: RunStore, input: WaitInput): SubagentWaitResult 
       includeResult,
     );
     if (interesting.length) {
-      events.push(...interesting);
+      for (const event of interesting) events.push(event);
       readyRunIds.add(runId);
     }
     if (resultMatches(input, result)) {
@@ -109,7 +109,7 @@ export async function waitSubagents(store: RunStore, input: WaitInput): Promise<
   function accumulate(next: SubagentWaitResult): SubagentWaitResult {
     if (mode !== "all") return next;
     for (const runId of next.readyRunIds) accumulatedReady.add(runId);
-    accumulatedEvents.push(...next.events);
+    for (const event of next.events) accumulatedEvents.push(event);
     for (const result of next.results) accumulatedResults.set(result.runId, result);
     const readyRunIds = [...accumulatedReady];
     const ready = runIds.length > 0 && readyRunIds.length === runIds.length;

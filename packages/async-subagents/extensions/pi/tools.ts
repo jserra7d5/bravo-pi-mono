@@ -860,31 +860,33 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         if (!["instruction", "answer", "context"].includes(type)) {
           return response(`Use subagent_interrupt or subagent_continue for lifecycle control (${type})`, { code: "LIFECYCLE_MESSAGE_REJECTED", runId, type }, true);
         }
-        if (isTerminalRunState(status.state)) {
-          return response(`Run ${runId} is terminal; message not appended`, { code: "RUN_TERMINAL", runId, state: status.state }, true);
-        }
         let additionalFiles: string[] | undefined;
         try {
           additionalFiles = filesFromParams(params);
         } catch (error) {
           return response(error instanceof Error ? error.message : String(error), { code: "INVALID_ALLOWED_FILE", runId }, true);
         }
-        let body = String(params.body);
-        if (additionalFiles?.length) {
-          const runDir = store.pathsFor({ runId }).runDir;
-          const widened = await withRunMutationLock(runDir, () => {
-            const current = store.readStatus(runId);
-            const allowedFiles = widenedAllowedFiles(current, additionalFiles);
-            if (allowedFiles === undefined) return undefined;
-            store.writeStatus(updateRunStatus(current, { allowedFiles }));
-            return allowedFiles;
-          });
-          if (widened.value === undefined) {
-            return response(`Run ${runId} has no specified file scope; message without files or start a new scoped run`, { code: "SCOPE_UNSPECIFIED", runId }, true);
-          }
-          body = `${body}\n\n${writeScopeAmendment(widened.value)}`;
+        const runDir = store.pathsFor({ runId }).runDir;
+        const mutation = await withRunMutationLock(runDir, () => {
+          const current = store.readStatus(runId);
+          if (isTerminalRunState(current.state)) return { status: current, terminal: true as const };
+          const allowedFiles = widenedAllowedFiles(current, additionalFiles);
+          if (additionalFiles?.length && allowedFiles === undefined) return { status: current, scopeUnspecified: true as const };
+          if (additionalFiles?.length && allowedFiles) store.writeStatus(updateRunStatus(current, { allowedFiles }));
+          const body = additionalFiles?.length && allowedFiles
+            ? `${String(params.body)}\n\n${writeScopeAmendment(allowedFiles)}`
+            : String(params.body);
+          return { status: current, messageResult: appendParentMessage(params, store, root, runId, type, body) };
+        });
+        if (mutation.value.terminal) {
+          return response(`Run ${runId} is terminal; message not appended`, { code: "RUN_TERMINAL", runId, state: mutation.value.status.state }, true);
         }
-        const result = await waitForLiveAckIfNeeded(store, params, status, appendParentMessage(params, store, root, runId, type, body));
+        if (mutation.value.scopeUnspecified) {
+          return response(`Run ${runId} has no specified file scope; message without files or start a new scoped run`, { code: "SCOPE_UNSPECIFIED", runId }, true);
+        }
+        const messageResult = mutation.value.messageResult;
+        if (!messageResult) throw new Error(`Message for ${runId} did not append an inbox message`);
+        const result = await waitForLiveAckIfNeeded(store, params, mutation.value.status, messageResult);
         if (requiredAckFailed(params, result)) {
           await runtime.afterMutation?.(ctx, cwd, root);
           return response(result.unsupported?.message ?? "Required child acknowledgement was not received", { ...result, status: { runId: status.runId, state: status.state } }, true);

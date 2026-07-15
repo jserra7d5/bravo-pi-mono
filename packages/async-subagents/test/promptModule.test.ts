@@ -11,14 +11,15 @@ test("async subagents prompt module establishes neutral lifecycle rules", () => 
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /one-shot inspection/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /go idle/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /subagent_result/);
-  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /timeout wakeups/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /Budget expiry is terminal/);
   assert.doesNotMatch(ASYNC_SUBAGENTS_PROMPT_MODULE, /subagent_wait/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /validation boundary/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /@DisplayName/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /Do not hard-code or assume particular subagent types/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /Async Subagent Catalog/);
   assert.doesNotMatch(ASYNC_SUBAGENTS_PROMPT_MODULE, /\b(worker|reviewer|fast-worker)\b/);
-  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /critical-path implementation\/planning\/review/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /any eligible Codex-model child qualifies/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /scout read is the bottleneck/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /Claude variants run Claude Code children/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /durable inbox entries plus a terminal nudge/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /effort/);

@@ -195,11 +195,9 @@ function eventDelivery(event: RunEvent, status?: { agentName?: string; displayNa
   // (event types like "question" → "waiting_for_input").
   const state = event.type === "question"
     ? "waiting_for_input"
-    : event.type === "status" && event.data?.reason === "timeout"
-      ? "paused"
-      : event.type === "liveness" && typeof event.data?.state === "string"
-        ? event.data.state
-        : event.type;
+    : event.type === "liveness" && typeof event.data?.state === "string"
+      ? event.data.state
+      : event.type;
   const body = capEventBodyForWakeup(event.runId, event.body);
   const next = event.type === "question" || event.type === "blocked"
     ? [{ tool: "subagent_message", args: { runId: event.runId, type: "answer" } }]
@@ -256,8 +254,7 @@ export function isResultWakeupCurrent(store: RunStore, parentRunId: string, runI
 
 function isDeliverableAttentionEvent(event: RunEvent): boolean {
   if (["result", "completed", "failed", "cancelled", "expired"].includes(event.type)) return false;
-  const timeoutAttention = event.type === "status" && event.wake === true && event.data?.reason === "timeout";
-  return isInterestingEvent(event.type, event.wake) || timeoutAttention;
+  return isInterestingEvent(event.type, event.wake);
 }
 
 function pendingForRun(store: RunStore, parentRunId: string, runId: string, notifyOn?: EventType[]): WakeupDelivery[] {
@@ -271,12 +268,9 @@ function pendingForRun(store: RunStore, parentRunId: string, runId: string, noti
   if (deliveries.some((delivery) => delivery.message.result)) return deliveries;
   const shouldScanEvents = !allowed || [...allowed].some((type) => !["result", "completed", "failed", "cancelled", "expired"].includes(type));
   const status = shouldScanEvents ? statusForRun(store, runId) : undefined;
-  const latestTimeoutWake = summary?.latestWakeEvent?.type === "status" && summary.latestWakeEvent.wake && summary.latestWakeEvent.data?.reason === "timeout" ? summary.latestWakeEvent : undefined;
-  if (!shouldScanEvents && latestTimeoutWake) deliveries.push(eventDelivery(latestTimeoutWake, statusForRun(store, runId)));
   if (shouldScanEvents) {
     for (const event of store.readEvents(runId).records) {
-      const timeoutAttention = event.type === "status" && event.wake && event.data?.reason === "timeout";
-      if (!isDeliverableAttentionEvent(event) || (allowed && !allowed.has(event.type) && !timeoutAttention)) continue;
+      if (!isDeliverableAttentionEvent(event) || (allowed && !allowed.has(event.type))) continue;
       deliveries.push(eventDelivery(event, status));
     }
   }

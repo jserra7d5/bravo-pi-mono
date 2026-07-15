@@ -27,7 +27,7 @@ export const subagentStartSchema = Type.Object({
   session: Type.Optional(StringEnum(["record", "none"] as const, { default: "record" })),
   allowFreshFallback: Type.Optional(Type.Boolean({ default: false })),
   thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS, { description: "Override the agent definition default Pi thinking level for this child run." })),
-  fastTrack: Type.Optional(Type.Boolean({ description: "Request priority service tier for an absolute critical-path allowlisted Codex implementation/planning/review child. Includes bravo-codex-balanced/*; requires /fast-track on or launch fails closed." })),
+  fastTrack: Type.Optional(Type.Boolean({ description: "Request priority service tier for any eligible Codex-model child whose latency gates the plan, including scouts when a scout read is the bottleneck. Includes bravo-codex-balanced/*; requires /fast-track on or launch fails closed." })),
 });
 
 export const subagentMessageSchema = Type.Object({
@@ -56,7 +56,7 @@ export const subagentContinueSchema = Type.Object({
   type: Type.Optional(StringEnum(PARENT_MESSAGE_TYPES, { default: "instruction" })),
   attachments: Type.Optional(Type.Array(Attachment)),
   requiresAck: Type.Optional(Type.Boolean()),
-  additionalRunSeconds: Type.Optional(Type.Number({ description: "Additional runtime budget seconds when resuming a paused/timed-out live child." })),
+  additionalRunSeconds: Type.Optional(Type.Number({ description: "Runtime budget seconds when resuming an explicitly paused live child or continuing a terminal run." })),
   notifyOn: Type.Optional(Type.Array(StringEnum(EVENT_TYPES as readonly string[]))),
   thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS, { description: "Set the child's Pi thinking level while resuming, if the child-control extension is active." })),
 });

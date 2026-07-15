@@ -78,6 +78,24 @@ test("archive preserves runs on tar failure and skips recent and unhandled-wakeu
   assert.ok(result.skipped.some((entry) => entry.runId === wakeup.runId && entry.reason === "unhandled-wakeup"));
 });
 
+test("archive dry-run reports eligible runs while retaining active and unhandled runs", async () => {
+  const w = fixture();
+  const eligible = addRun(w.store, w.cwd, "completed", old);
+  const active = addRun(w.store, w.cwd, "running", old);
+  const unhandled = addRun(w.store, w.cwd, "completed", old);
+  w.store.writeStatus({ ...w.store.readStatus(unhandled.runId), resultReady: true, updatedAt: old });
+  const identity = probeProcessIdentity(process.pid).identity;
+  assert.ok(identity);
+  w.store.writeStatus({ ...w.store.readStatus(active.runId), supervisorPid: process.pid, supervisorHost: hostname(), supervisorStartedAtToken: identity });
+
+  const result = await archiveRuns(w.store, { olderThanDays: 7, nowMs, dryRun: true });
+
+  assert.deepEqual(result.archived, [eligible.runId]);
+  assert.ok(result.skipped.some((entry) => entry.runId === active.runId && entry.reason === "active"));
+  assert.ok(result.skipped.some((entry) => entry.runId === unhandled.runId && entry.reason === "unhandled-wakeup"));
+  assert.equal(existsSync(eligible.paths.runDir), true);
+});
+
 test("archive preserves run when archive destination cannot be created", async () => {
   const w = fixture();
   const candidate = addRun(w.store, w.cwd, "completed", old);
@@ -86,6 +104,25 @@ test("archive preserves run when archive destination cannot be created", async (
   const result = await archiveRuns(w.store, { olderThanDays: 7, nowMs });
   assert.equal(existsSync(candidate.paths.runDir), true);
   assert.ok(result.errors.some((entry) => entry.runId === candidate.runId));
+});
+
+test("capped archive discovery stops before parsing the remainder of a large index", async () => {
+  const w = fixture();
+  mkdirSync(w.home, { recursive: true });
+  const lines: string[] = [];
+  for (let i = 0; i < 25; i += 1) {
+    lines.push(JSON.stringify({ schemaVersion: 1, runId: `run_cap_${i}`, runDir: join(w.home, "missing", `run_cap_${i}`), projectRoot: w.cwd, parentRunId: "root_cap", createdAt: old }));
+  }
+  writeFileSync(w.store.globalIndexPath(), `${lines.join("\n")}\n{not-json-after-cap}\n`, "utf8");
+
+  await assert.doesNotReject(() => archiveRuns(w.store, { cap: 25, dryRun: true, nowMs }));
+  class NoCompactionStore extends RunStore {
+    override compactRunIndexes(): number {
+      throw new Error("capped automatic sweep must not compact the full index");
+    }
+  }
+  const cappedStore = new NoCompactionStore({ cwd: w.cwd, env: w.env });
+  await assert.doesNotReject(() => archiveRuns(cappedStore, { cap: 25, nowMs }));
 });
 
 test("archive includes legacy top-level runs", async () => {

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export type FastTrackReason = "not_requested" | "disabled" | "scout" | "ineligible_model";
+export type FastTrackReason = "not_requested" | "disabled" | "ineligible_model";
 
 export interface FastTrackLaunch {
   requested: boolean;
@@ -66,7 +66,6 @@ export function evaluateFastTrack(input: { requested?: boolean; enabled: boolean
   const requested = input.requested === true;
   if (!requested) return { requested: false, enabled: input.enabled, applied: false, reason: "not_requested" };
   if (!input.enabled) return { requested: true, enabled: false, applied: false, reason: "disabled" };
-  if (input.agentName === "scout") return { requested: true, enabled: true, applied: false, reason: "scout" };
   if (!isFastTrackEligibleModel(input.model)) return { requested: true, enabled: true, applied: false, reason: "ineligible_model" };
   return { requested: true, enabled: true, applied: true, serviceTier: "priority" };
 }

@@ -108,14 +108,39 @@ test("watchSubagents reports corrupt and missing run directories explicitly", as
   const corrupt = run();
   writeFileSync(corrupt.paths.statusPath, "{torn", "utf8");
   const corruptLines: WatchLine[] = [];
-  await watchSubagents({ cwd: corrupt.cwd, runIds: [corrupt.runId], intervalSeconds: 0.01, write: sink(corruptLines) });
+  const abort = new AbortController();
+  setTimeout(() => abort.abort(), 30);
+  await watchSubagents({ cwd: corrupt.cwd, runIds: [corrupt.runId], intervalSeconds: 0.01, write: sink(corruptLines), signal: abort.signal });
   assert.ok(corruptLines[0]?.error);
+  assert.equal(corruptLines.some((line) => line.allSettled), false);
 
   const missing = run();
   rmSync(missing.paths.runDir, { recursive: true, force: true });
   const missingLines: WatchLine[] = [];
   await watchSubagents({ cwd: missing.cwd, runIds: [missing.runId], intervalSeconds: 0.01, write: sink(missingLines) });
   assert.ok(missingLines[0]?.error);
+});
+
+test("watchSubagents retries and deduplicates transient errors without settling a busy run", async () => {
+  const w = run();
+  finalizeTerminalRun(w.store, { runId: w.runId, parentRunId: "root_watch", agentName: "scout", state: "completed", writerRole: "child-runtime", summary: "Recovered" });
+  let failures = 2;
+  class TransientStore extends RunStore {
+    override readStatus(runId: string) {
+      if (failures > 0) {
+        failures -= 1;
+        throw new Error("transient read fault");
+      }
+      return super.readStatus(runId);
+    }
+  }
+  const store = new TransientStore({ cwd: w.cwd, runRoot: w.store.runRoot, env: w.store.env });
+  const lines: WatchLine[] = [];
+  await watchSubagents({ cwd: w.cwd, runIds: [w.runId], intervalSeconds: 0.01, write: sink(lines), store });
+
+  assert.equal(lines.filter((line) => line.error === "transient read fault").length, 1);
+  assert.equal(lines.some((line) => line.state === "completed"), true);
+  assert.equal(lines.at(-1)?.allSettled, true);
 });
 
 test("watchSubagents --no-result-body semantics suppress bodies without consuming global report marker", async () => {

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { hostname } from "node:os";
@@ -153,6 +153,23 @@ test("reconcileUnderLock repairs torn finalization before probing the supervisor
   assert.equal(reconciled.repairedResult, true);
   assert.equal(reconciled.status.state, "completed");
   assert.equal(store.readResult(runId)?.runId, result.runId);
+});
+
+test("reconcileUnderLock leaves a consumed terminal run byte-identical", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const { runId, paths } = store.createRunDirectory({ cwd: w.root, parentRunId: "root_test" });
+  const status = createInitialStatus({ runId, parentRunId: "root_test", agentName: "scout", agentSource: "builtin", definitionPath: "/builtin/scout.md", mode: "oneshot", cwd: w.root, state: "running" });
+  store.writeStatus(status);
+  finalizeTerminalRun(store, { runId, parentRunId: "root_test", agentName: "scout", state: "completed", writerRole: "child-runtime", summary: "Consumed" });
+  store.writeStatus({ ...store.readStatus(runId), resultReady: false, updatedAt: "2020-01-01T00:00:00.000Z" });
+  const before = readFileSync(paths.statusPath);
+
+  const reconciled = await reconcileUnderLock(store, runId);
+
+  assert.equal(reconciled.repairedResult, false);
+  assert.equal(reconciled.status.resultReady, false);
+  assert.deepEqual(readFileSync(paths.statusPath), before);
 });
 
 test("reconcileUnderLock promotes dead same-host supervisor and is idempotent", async () => {

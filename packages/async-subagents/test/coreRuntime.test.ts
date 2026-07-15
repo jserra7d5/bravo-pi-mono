@@ -886,7 +886,7 @@ Provider variant body.
   assert.ok(existsSync(join(started.runDir, "logs", "model-preflight.json")));
 });
 
-test("successful start schedules archival unless disabled", async () => {
+test("automatic archival skips custom storage domains and honors the disable gate", async () => {
   const w = workspace();
   const home = join(w.root, "archive-home");
   const env = { ASYNC_SUBAGENTS_HOME: home };
@@ -900,8 +900,8 @@ test("successful start schedules archival unless disabled", async () => {
 
   const started = await startSubagent({ agent: "scout", task: "Trigger sweep", cwd: w.root, parentRunId: "root_new", env, fake: { mode: "immediate" } });
   assert.ok(existsSync(started.runDir));
-  for (let i = 0; i < 100 && existsSync(old.paths.runDir); i++) await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
-  assert.equal(existsSync(old.paths.runDir), false);
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  assert.equal(existsSync(old.paths.runDir), true);
 
   const disabledOld = store.createRunDirectory({ cwd: w.root, parentRunId: "root_disabled" });
   store.writeStatus({
@@ -983,7 +983,7 @@ test("context fork only falls back to fresh when explicitly allowed", async () =
   assert.equal(store.readResult(started.runId)?.forkFallback?.reason, "branch unavailable");
 });
 
-test("startSubagent returns no polling follow-up for running async children", async () => {
+test("startSubagent returns no polling follow-up even when an async response is already terminal", async () => {
   const w = workspace();
   const started = await startSubagent({
     agent: "scout",
@@ -991,7 +991,7 @@ test("startSubagent returns no polling follow-up for running async children", as
     cwd: w.root,
     runRoot: w.runRoot,
     parentRunId: "root_test",
-    fake: { mode: "child", env: { ASYNC_SUBAGENTS_FAKE_DELAY_MS: "50", ASYNC_SUBAGENTS_FAKE_BODY: "Async child completed" } },
+    fake: { mode: "immediate", body: "Immediate child completed" },
   });
 
   assert.equal(started.waited, false);

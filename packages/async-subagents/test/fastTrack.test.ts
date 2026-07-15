@@ -17,14 +17,19 @@ test("fast-track state persists per root session", () => {
   }
 });
 
-test("fast-track policy fails closed when disabled and gates scout/ineligible models", () => {
+test("fast-track policy fails closed when disabled, allows Codex scouts, and gates ineligible models", () => {
   assert.deepEqual(evaluateFastTrack({ requested: true, enabled: false, agentName: "worker", model: "openai-codex/gpt-5.5" }), {
     requested: true,
     enabled: false,
     applied: false,
     reason: "disabled",
   });
-  assert.deepEqual(evaluateFastTrack({ requested: true, enabled: true, agentName: "scout", model: "openai-codex/gpt-5.5" }).reason, "scout");
+  assert.deepEqual(evaluateFastTrack({ requested: true, enabled: true, agentName: "scout", model: "bravo-codex-balanced/gpt-5.6-luna" }), {
+    requested: true,
+    enabled: true,
+    applied: true,
+    serviceTier: "priority",
+  });
   assert.deepEqual(evaluateFastTrack({ requested: true, enabled: true, agentName: "worker", model: "google-gemini/gemini-2.5-pro" }).reason, "ineligible_model");
   assert.deepEqual(evaluateFastTrack({ requested: true, enabled: true, agentName: "worker", model: "google-gemini/gpt-5.5" }).reason, "ineligible_model");
   assert.deepEqual(evaluateFastTrack({ requested: true, enabled: true, agentName: "worker", model: "notcodex/gpt-5.5" }).reason, "ineligible_model");

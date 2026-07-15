@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteJson } from "./jsonl.js";
 import { reconcileUnderLock } from "./lifecycle.js";
@@ -35,6 +35,8 @@ export interface WatchSubagentsOptions {
   /** NDJSON sink; defaults to stdout. */
   write?: (line: string) => void;
   signal?: AbortSignal;
+  /** Store override for tests and embedding callers. */
+  store?: RunStore;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -44,13 +46,10 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function attentionReason(status: RunStatus, events: RunEvent[]): string | undefined {
+function attentionReason(status: RunStatus, _events: RunEvent[]): string | undefined {
   if (status.state === "waiting_for_input") return "question";
   if (status.state === "blocked") return "blocked";
-  if (status.state !== "paused") return undefined;
-  const latest = [...events].reverse().find((event) => event.type === "status" && event.data?.reason);
-  const reason = latest?.data?.reason;
-  return reason === "timeout" ? "budget_expired" : typeof reason === "string" ? reason : "parent_pause";
+  return status.state === "paused" ? "parent_pause" : undefined;
 }
 
 function cappedResultBody(body: string, runId: string): string {
@@ -82,7 +81,7 @@ async function terminalResultFields(store: RunStore, runId: string, includeBody:
 /** Poll canonical run files and emit the D2 NDJSON stream through `write`. */
 export async function watchSubagents(options: WatchSubagentsOptions): Promise<void> {
   if (!options.runIds.length) throw new Error("watch requires at least one --run-id");
-  const store = new RunStore({ cwd: options.cwd });
+  const store = options.store ?? new RunStore({ cwd: options.cwd });
   const write = options.write ?? ((line) => process.stdout.write(line));
   const emit = (line: WatchLine) => write(`${JSON.stringify(line)}\n`);
   const previous = new Map<string, string>();
@@ -121,7 +120,17 @@ export async function watchSubagents(options: WatchSubagentsOptions): Promise<vo
           previous.set(runId, transitionKey);
           emit({ runId, error: message });
         }
-        settled.set(runId, true);
+        let resolvedRunDir: string | undefined;
+        try { resolvedRunDir = store.resolveRunDir(runId); } catch { /* Confirm through the index below. */ }
+        let definitivelyGone = false;
+        if (!resolvedRunDir || !existsSync(resolvedRunDir)) {
+          try {
+            definitivelyGone = !store.readLookupRunIndex().some((record) => record.runId === runId && existsSync(record.runDir));
+          } catch {
+            // Index/read failures are transient classifications, not proof that the run is gone.
+          }
+        }
+        settled.set(runId, definitivelyGone);
       }
     }
     if (options.runIds.every((runId) => settled.get(runId) === true)) {

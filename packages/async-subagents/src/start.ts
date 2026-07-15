@@ -17,7 +17,7 @@ import { createRootSession, readRootSession } from "./rootSession.js";
 import { RunStore } from "./runStore.js";
 import { createInitialStatus, updateRunStatus } from "./status.js";
 import { codexBalancerSyncBackAndCleanup, runSupervisor, type SupervisorFakeInput, type SupervisorInput } from "./supervisor.js";
-import type { ContextPolicy, SessionPolicy, SubagentStartResult, TerminalRunState, ThinkingLevel, TaskRecord } from "./types.js";
+import type { ContextPolicy, SessionPolicy, SubagentStartResult, ThinkingLevel, TaskRecord } from "./types.js";
 import { prepareLaunch } from "@bravo/codex-auth-balancer";
 import { archiveRuns } from "./archive.js";
 
@@ -602,7 +602,7 @@ async function spawnDetachedSupervisor(inputPath: string): Promise<string | unde
 }
 
 function scheduleAutoArchive(store: RunStore, logsDir: string, env: NodeJS.ProcessEnv): void {
-  if (env.ASYNC_SUBAGENTS_NO_AUTO_ARCHIVE === "1") return;
+  if (env.ASYNC_SUBAGENTS_NO_AUTO_ARCHIVE === "1" || !store.usesDefaultUserStorage) return;
   setImmediate(() => {
     void archiveRuns(store, { cap: 25 }).then((result) => {
       if (!result.errors.length) return;
@@ -928,8 +928,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       for (let i = 0; i < 20 && store.readStatus(runId).state === "queued" && !store.readResult(runId); i++) await delay(50);
     }
     const status = store.readStatus(runId);
-    const terminalStates: TerminalRunState[] = ["completed", "failed", "cancelled", "expired"];
-    const terminal = terminalStates.includes(status.state as TerminalRunState);
+    const terminal = ["completed", "failed", "cancelled", "expired"].includes(status.state);
     scheduleAutoArchive(store, paths.logsDir, { ...process.env, ...(input.env ?? {}) });
     return {
       runId,
@@ -990,7 +989,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       maxSubagentDepth: definition.maxSubagentDepth,
       fastTrack,
       task: input.taskAssignment ? { taskId: input.taskAssignment.task.id, title: input.taskAssignment.task.title } : undefined,
-      next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [],
+      next: [],
     };
   }
 
@@ -1118,8 +1117,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   }
 
   const status = store.readStatus(runId);
-  const terminalStates: TerminalRunState[] = ["completed", "failed", "cancelled", "expired"];
-  const terminal = terminalStates.includes(status.state as TerminalRunState);
+  const terminal = ["completed", "failed", "cancelled", "expired"].includes(status.state);
   scheduleAutoArchive(store, paths.logsDir, { ...process.env, ...(input.env ?? {}) });
   return {
     runId,
@@ -1148,6 +1146,6 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     maxSubagentDepth: definition.maxSubagentDepth,
     fastTrack,
     task: input.taskAssignment ? { taskId: input.taskAssignment.task.id, title: input.taskAssignment.task.title } : undefined,
-    next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [],
+    next: [],
   };
 }

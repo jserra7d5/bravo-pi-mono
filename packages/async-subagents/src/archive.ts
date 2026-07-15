@@ -37,15 +37,24 @@ function scopeForRun(home: string, runDir: string): string {
   return parts.length >= 3 && parts[1] === "runs" ? parts[0]! : "legacy";
 }
 
-function archiveCandidates(store: RunStore): RunIndexRecord[] {
+function archiveCandidates(store: RunStore, cap?: number): RunIndexRecord[] {
   const latest = new Map<string, RunIndexRecord>();
-  for (const record of store.readLookupRunIndex()) latest.set(record.runId, record);
+  const reachedCap = () => cap !== undefined && latest.size >= cap;
+  if (cap === undefined) {
+    for (const record of store.readLookupRunIndex()) latest.set(record.runId, record);
+  } else {
+    store.visitLookupRunIndex((record) => {
+      latest.set(record.runId, record);
+      return !reachedCap();
+    });
+  }
   const legacyRoot = join(asyncSubagentsHome(store.env), "runs");
-  if (existsSync(legacyRoot)) {
+  if (!reachedCap() && existsSync(legacyRoot)) {
     for (const entry of readdirSync(legacyRoot, { withFileTypes: true })) {
       if (!entry.isDirectory() || latest.has(entry.name)) continue;
       const runDir = join(legacyRoot, entry.name);
       latest.set(entry.name, { schemaVersion: SCHEMA_VERSION, runId: entry.name, runDir, projectRoot: "", parentRunId: "", createdAt: new Date(statSync(runDir).birthtimeMs).toISOString() });
+      if (reachedCap()) break;
     }
   }
   return [...latest.values()];
@@ -63,7 +72,7 @@ export async function archiveRuns(store: RunStore, input: ArchiveRunsInput = {})
   const archiveIndexPath = join(home, "archive", "archive-index.jsonl");
   const tarCommand = input.tarCommand ?? "tar";
   const result: ArchiveRunsResult = { archived: [], skipped: [], errors: [], indexRecordsDropped: 0 };
-  const candidates = archiveCandidates(store);
+  const candidates = archiveCandidates(store, input.cap);
   const projectIndexes = new Set<string>([store.indexPath()]);
   for (const record of candidates) {
     const parent = dirname(record.runDir);
@@ -123,6 +132,8 @@ export async function archiveRuns(store: RunStore, input: ArchiveRunsInput = {})
     }
   }
 
-  if (!dryRun) result.indexRecordsDropped = store.compactRunIndexes([...projectIndexes, store.globalIndexPath()]);
+  // Capped opportunistic sweeps must not turn into an unbounded global-index compaction.
+  // Explicit archive (no cap) retains full compaction behavior.
+  if (!dryRun && input.cap === undefined) result.indexRecordsDropped = store.compactRunIndexes([...projectIndexes, store.globalIndexPath()]);
   return result;
 }

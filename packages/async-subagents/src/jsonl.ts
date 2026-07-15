@@ -1,5 +1,6 @@
 import { closeSync, existsSync, fsyncSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { SubagentError } from "./errors.js";
 
 export interface ReadJsonlOptions {
@@ -121,4 +122,45 @@ export function readJsonl<T = unknown>(path: string, options: ReadJsonlOptions =
 
 export function readJsonlRange<T = unknown>(path: string, offset: number, endExclusive?: number): ReadJsonlResult<T> {
   return readJsonlRangeInternal<T>(path, offset, endExclusive);
+}
+
+/** Stream complete JSONL records, stopping as soon as the visitor returns false. */
+export function visitJsonl<T = unknown>(path: string, visitor: (record: T) => boolean | void): void {
+  if (!existsSync(path)) return;
+  const fd = openSync(path, "r");
+  const decoder = new StringDecoder("utf8");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let pending = "";
+  let offset = 0;
+  try {
+    for (;;) {
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      pending += decoder.write(buffer.subarray(0, bytesRead));
+      for (;;) {
+        const newline = pending.indexOf("\n");
+        if (newline < 0) break;
+        const rawLine = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        const raw = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+        const recordOffset = offset;
+        offset += Buffer.byteLength(`${rawLine}\n`);
+        if (!raw.trim()) continue;
+        try {
+          if (visitor(JSON.parse(raw) as T) === false) return;
+        } catch (error) {
+          if (error instanceof SubagentError) throw error;
+          throw new SubagentError("INVALID_JSONL", `invalid complete JSONL record in ${path}`, {
+            path,
+            offset: recordOffset,
+            cause: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+    decoder.end();
+    // As elsewhere in this module, an incomplete final record is ignored until an append completes it.
+  } finally {
+    closeSync(fd);
+  }
 }
