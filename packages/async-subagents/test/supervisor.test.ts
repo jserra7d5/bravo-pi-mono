@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSupervisor } from "../src/supervisor.js";
 import { RunStore } from "../src/runStore.js";
@@ -43,13 +43,17 @@ test("manual pause suspends runtime budget and resume reinstalls timeout", async
     effectiveMaxRunMs: 500,
     command: {
       command: process.execPath,
-      args: ["-e", "setInterval(() => {}, 1000);"],
+      args: ["-e", "console.log('captured checkpoint'); setInterval(() => {}, 1000);"],
       cwd,
       env: {},
     },
   });
 
   await delay(60);
+  const owned = store.readStatus(runId);
+  assert.equal(owned.supervisorPid, process.pid);
+  assert.equal(owned.supervisorHost, hostname());
+  assert.ok(owned.supervisorStartedAtToken);
   appendFileSync(join(paths.runDir, "control.jsonl"), `${JSON.stringify({ action: "pause", reason: "manual checkpoint" })}\n`, "utf8");
   await delay(740);
   let status = store.readStatus(runId);
@@ -58,14 +62,12 @@ test("manual pause suspends runtime budget and resume reinstalls timeout", async
   assert.notEqual(status.timeout?.reason, "time budget expired");
 
   appendFileSync(join(paths.runDir, "control.jsonl"), `${JSON.stringify({ action: "resume", additionalRunSeconds: 0.1 })}\n`, "utf8");
-  await delay(420);
-  status = store.readStatus(runId);
-  assert.equal(status.state, "paused");
-  assert.equal(status.timeout?.reason, "time budget expired");
-
-  appendFileSync(join(paths.runDir, "control.jsonl"), `${JSON.stringify({ action: "cancel", reason: "test cleanup" })}\n`, "utf8");
   const result = await supervisor;
-  assert.equal(result.state, "cancelled");
+  status = store.readStatus(runId);
+  assert.equal(status.state, "expired");
+  assert.equal(result.state, "expired");
+  assert.equal(result.error?.code, "MAX_RUN_SECONDS_EXPIRED");
+  assert.equal(result.body, "captured checkpoint");
 });
 
 test("supervisor removes lifecycle listeners after child settles", async () => {

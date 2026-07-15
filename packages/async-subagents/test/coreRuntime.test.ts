@@ -269,7 +269,8 @@ Claude scout body.
     env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FAKE_CLAUDE_EXIT_DELAY_MS: "500" },
   });
 
-  assert.equal(started.state, "running");
+  // Start returns as soon as the run is handed to the tmux adapter; pane claim may still be pending.
+  assert.ok(["queued", "running"].includes(started.state), `unexpected start state: ${started.state}`);
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
   const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
   assert.equal(waited.state, "ready");
@@ -886,6 +887,33 @@ Provider variant body.
   assert.ok(existsSync(join(started.runDir, "logs", "model-preflight.json")));
 });
 
+test("automatic archival skips custom storage domains and honors the disable gate", async () => {
+  const w = workspace();
+  const home = join(w.root, "archive-home");
+  const env = { ASYNC_SUBAGENTS_HOME: home };
+  const store = new RunStore({ cwd: w.root, env: { ...process.env, ...env } });
+  const old = store.createRunDirectory({ cwd: w.root, parentRunId: "root_old" });
+  store.writeStatus({
+    ...createInitialStatus({ runId: old.runId, parentRunId: "root_old", agentName: "scout", agentSource: "builtin", definitionPath: "/scout.md", mode: "oneshot", cwd: w.root, state: "completed" }),
+    updatedAt: "2020-01-01T00:00:00.000Z",
+  });
+  writeFileSync(old.paths.piSessionPath, "old session\n");
+
+  const started = await startSubagent({ agent: "scout", task: "Trigger sweep", cwd: w.root, parentRunId: "root_new", env, fake: { mode: "immediate" } });
+  assert.ok(existsSync(started.runDir));
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  assert.equal(existsSync(old.paths.runDir), true);
+
+  const disabledOld = store.createRunDirectory({ cwd: w.root, parentRunId: "root_disabled" });
+  store.writeStatus({
+    ...createInitialStatus({ runId: disabledOld.runId, parentRunId: "root_disabled", agentName: "scout", agentSource: "builtin", definitionPath: "/scout.md", mode: "oneshot", cwd: w.root, state: "completed" }),
+    updatedAt: "2020-01-01T00:00:00.000Z",
+  });
+  await startSubagent({ agent: "scout", task: "No sweep", cwd: w.root, parentRunId: "root_new", env: { ...env, ASYNC_SUBAGENTS_NO_AUTO_ARCHIVE: "1" }, fake: { mode: "immediate" } });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  assert.equal(existsSync(disabledOld.paths.runDir), true);
+});
+
 test("context fork fails clearly without a parent Pi session reference", async () => {
   const w = workspace();
   const started = await startSubagent({
@@ -956,7 +984,7 @@ test("context fork only falls back to fresh when explicitly allowed", async () =
   assert.equal(store.readResult(started.runId)?.forkFallback?.reason, "branch unavailable");
 });
 
-test("startSubagent returns no polling follow-up for running async children", async () => {
+test("startSubagent returns no polling follow-up even when an async response is already terminal", async () => {
   const w = workspace();
   const started = await startSubagent({
     agent: "scout",
@@ -964,7 +992,7 @@ test("startSubagent returns no polling follow-up for running async children", as
     cwd: w.root,
     runRoot: w.runRoot,
     parentRunId: "root_test",
-    fake: { mode: "child", env: { ASYNC_SUBAGENTS_FAKE_DELAY_MS: "50", ASYNC_SUBAGENTS_FAKE_BODY: "Async child completed" } },
+    fake: { mode: "immediate", body: "Immediate child completed" },
   });
 
   assert.equal(started.waited, false);

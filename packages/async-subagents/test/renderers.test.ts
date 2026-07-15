@@ -22,10 +22,13 @@ import {
   renderWidgetRow,
   stateGlyph,
   summarizeRunResult,
+  summarizeStartResult,
+  summarizeStatusRows,
   textBlock,
   truncAnsi,
   visWidth,
 } from "../extensions/pi/renderers.js";
+import type { SubagentStartResult } from "../src/types.js";
 import type { RunSummaryRow } from "../src/watcher.js";
 
 function stripAnsi(value: string): string {
@@ -580,6 +583,18 @@ test("renderSubagentWakeMessageComponent adapts the card width to the render vie
     const lines = comp.render(w);
     for (const line of lines) assert.equal(visWidth(line), w);
   }
+});
+
+test("parent summaries use truthful delivery and bucket-first vocabulary", () => {
+  const start: SubagentStartResult = { runId: "run_a", runDir: "/tmp/run_a", agentName: "scout", state: "running", started: true, waited: false, contextPolicy: "fresh", sessionPolicy: "record", next: [] };
+  assert.match(summarizeStartResult(start), /async-subagents watch/);
+  assert.doesNotMatch(summarizeStartResult(start), /async wakeups/);
+  assert.match(summarizeStartResult(start, { mode: "pi-poll", pushAvailable: true }), /async wakeups/);
+  assert.equal(summarizeStatusRows([
+    { runId: "a", state: "running" },
+    { runId: "b", state: "blocked" },
+    { runId: "c", state: "completed" },
+  ]), "Subagent status: 1 terminal, 1 attention, 1 busy");
 });
 
 test("run result summary preserves the child result summary", () => {

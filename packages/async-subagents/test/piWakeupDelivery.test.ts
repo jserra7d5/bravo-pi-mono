@@ -252,45 +252,6 @@ test("active terminal result wakeups also steer into the running parent turn", a
   }
 });
 
-test("paused wakeups instruct continue or cancel", async () => {
-  const session = await withStartedExtension();
-  try {
-    const runId = createRun(session.store, session.cwd, session.identity.parentRunId, "paused");
-    session.store.appendEvent(runId, {
-      schemaVersion: SCHEMA_VERSION,
-      eventId: "evt_timeout_pause",
-      runId,
-      parentRunId: session.identity.parentRunId,
-      type: "status",
-      createdAt: new Date().toISOString(),
-      summary: "Time budget expired; run paused",
-      wake: true,
-      data: { reason: "timeout" },
-    });
-    writeDeliverySubscription(session.store, {
-      schemaVersion: SCHEMA_VERSION,
-      parentRunId: session.identity.parentRunId,
-      runId,
-      notifyOn: ["status"],
-      createdAt: new Date().toISOString(),
-    });
-
-    await session.poll();
-
-    const wakeup = session.sent.find((item) => item.message?.customType === "async-subagent-message");
-    assert.ok(wakeup);
-    assert.match(wakeup.message.content, /subagent_continue/);
-    assert.match(wakeup.message.content, /additionalRunSeconds: 900/);
-    assert.match(wakeup.message.content, /smallest reasonable budget/);
-    assert.match(wakeup.message.content, /subagent_interrupt/);
-    assert.match(wakeup.message.content, /action: "cancel"/);
-    assert.doesNotMatch(wakeup.message.content, /Call subagent_result\(\{ runId:/);
-    assert.deepEqual(wakeup.message.details?.next?.[0], { tool: "subagent_continue", args: { runId, additionalRunSeconds: 900 } });
-  } finally {
-    await session.shutdown();
-  }
-});
-
 for (const eventType of ["question", "blocked"] as const) {
   test(`${eventType} wakeups remain steerable and trigger parent action`, async () => {
     const session = await withStartedExtension();

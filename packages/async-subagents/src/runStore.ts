@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { asyncSubagentsHome, defaultRunRoot, findProjectRoot } from "./config.js";
 import { SubagentError } from "./errors.js";
-import { appendJsonl, atomicWriteJson, readJsonl, readJsonlRange } from "./jsonl.js";
+import { appendJsonl, atomicWriteJson, readJsonl, readJsonlRange, visitJsonl } from "./jsonl.js";
 import { newRunId } from "./ids.js";
+import { currentProcessIdentityToken, probeProcessIdentity } from "./runLock.js";
 import { nowIso } from "./time.js";
 import { applyEventToSummary, applyResultToSummary, summaryFromStatus, summaryPathForRunDir, type RunIndexCache, type RunSummaryReadModel } from "./readModels.js";
 import type { InboxMessage, RunEvent, RunIndexRecord, RunPaths, RunResult, RunStatus, WaitCursor } from "./types.js";
@@ -56,6 +58,80 @@ const memorySummaryCaches = new Map<string, MemorySummaryCacheEntry>();
 const memoryRefreshPruneCaches = new Map<string, RefreshPruneCache>();
 
 const TERMINAL_RUN_STATES = new Set<RunStatus["state"]>(["completed", "failed", "cancelled", "expired"]);
+const INDEX_LOCK_TIMEOUT_MS = 5_000;
+const INDEX_LOCK_STALE_MS = 30_000;
+const INDEX_LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
+
+interface IndexLockOwner {
+  pid: number;
+  token: string;
+  processIdentity?: string;
+  createdAt: number;
+}
+
+function indexLockPath(indexPath: string): string {
+  return `${resolve(indexPath)}.lock`;
+}
+
+function staleIndexLockIdentity(path: string): { dev: number; ino: number } | undefined {
+  let stat;
+  try {
+    stat = statSync(path);
+  } catch {
+    return undefined;
+  }
+  if (Date.now() - stat.mtimeMs < INDEX_LOCK_STALE_MS) return undefined;
+  let owner: Partial<IndexLockOwner>;
+  try {
+    owner = JSON.parse(readFileSync(path, "utf8")) as Partial<IndexLockOwner>;
+  } catch {
+    return { dev: stat.dev, ino: stat.ino };
+  }
+  if (typeof owner.pid === "number") {
+    const snapshot = probeProcessIdentity(owner.pid);
+    if (snapshot.permissionDenied || snapshot.alive === undefined) return undefined;
+    if (snapshot.alive === true && (!owner.processIdentity || !snapshot.identity || snapshot.identity === owner.processIdentity)) return undefined;
+  }
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+function withIndexLock<T>(indexPath: string, fn: () => T): T {
+  const path = indexLockPath(indexPath);
+  mkdirSync(resolve(path, ".."), { recursive: true });
+  const owner: IndexLockOwner = { pid: process.pid, token: `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`, processIdentity: currentProcessIdentityToken(), createdAt: Date.now() };
+  const started = Date.now();
+  for (;;) {
+    try {
+      const fd = openSync(path, "wx");
+      try {
+        writeFileSync(fd, JSON.stringify(owner), "utf8");
+      } finally {
+        closeSync(fd);
+      }
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const stale = staleIndexLockIdentity(path);
+      if (stale) {
+        try {
+          const current = statSync(path);
+          if (current.dev === stale.dev && current.ino === stale.ino) unlinkSync(path);
+        } catch { /* Another contender may have replaced it. */ }
+        continue;
+      }
+      if (Date.now() - started >= INDEX_LOCK_TIMEOUT_MS) throw new Error(`timed out acquiring run-index lock: ${path}`);
+      Atomics.wait(INDEX_LOCK_SLEEP, 0, 0, 10);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      const current = JSON.parse(readFileSync(path, "utf8")) as Partial<IndexLockOwner>;
+      if (current.token === owner.token) unlinkSync(path);
+    } catch { /* Never remove a replacement owner's lock. */ }
+  }
+}
 
 function sourceKey(paths: string[]): string {
   return paths.map((path) => resolve(path)).join("\0");
@@ -190,11 +266,15 @@ export class RunStore {
   readonly cwd: string;
   readonly runRoot: string;
   readonly env: NodeJS.ProcessEnv;
+  readonly usesDefaultUserStorage: boolean;
 
   constructor(options: RunStoreOptions = {}) {
     this.cwd = resolve(options.cwd ?? process.cwd());
     this.env = options.env ?? process.env;
     this.runRoot = defaultRunRoot(this.cwd, options.runRoot, this.env);
+    const userDefaultHome = join(process.env.HOME || homedir(), ".async-subagents");
+    this.usesDefaultUserStorage = options.runRoot === undefined
+      && resolve(asyncSubagentsHome(this.env)) === resolve(userDefaultHome);
   }
 
   resolveRunRoot(cwd = this.cwd, configuredRoot?: string): string {
@@ -267,8 +347,8 @@ export class RunStore {
   }
 
   appendRunIndex(record: RunIndexRecord): void {
-    appendJsonl(this.indexPath(), record);
-    if (resolve(this.globalIndexPath()) !== resolve(this.indexPath())) appendJsonl(this.globalIndexPath(), record);
+    const paths = [...new Set([this.indexPath(), this.globalIndexPath()].map((path) => resolve(path)))];
+    for (const path of paths) withIndexLock(path, () => appendJsonl(path, record));
     if (memoryIndexCaches.has(this.indexCacheKey())) this.getIndexCache();
   }
 
@@ -299,7 +379,7 @@ export class RunStore {
       const state = statIndexSource(path);
       if (state.exists) {
         const result = readJsonl<RunIndexRecord>(path);
-        records.push(...result.records.map(cloneRecord));
+        for (const record of result.records) records.push(cloneRecord(record));
         state.parsedOffset = result.nextOffset;
       }
       sources.push(state);
@@ -407,6 +487,64 @@ export class RunStore {
     return cloneIndexCache(this.getIndexCache());
   }
 
+  /** Test seam invoked after compaction's snapshot read and before its merge/replacement. */
+  protected beforeCompactIndexReplace(_indexPath: string): void {}
+
+  /** Atomically removes index records whose run directories no longer exist. */
+  compactRunIndexes(indexPaths: string[]): number {
+    let dropped = 0;
+    for (const indexPath of [...new Set(indexPaths.map((path) => resolve(path)))]) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const snapshot = withIndexLock(indexPath, () => {
+          if (!existsSync(indexPath)) return undefined;
+          const stat = statSync(indexPath);
+          return { dev: stat.dev, ino: stat.ino, size: stat.size };
+        });
+        if (!snapshot) break;
+        const records = readJsonlRange<RunIndexRecord>(indexPath, 0, snapshot.size).records;
+        const kept = records.filter((record) => existsSync(record.runDir));
+        const pathDropped = records.length - kept.length;
+        if (pathDropped === 0) break;
+
+        const tmp = `${indexPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        mkdirSync(resolve(indexPath, ".."), { recursive: true });
+        writeFileSync(tmp, kept.map((record) => `${JSON.stringify(record)}\n`).join(""), "utf8");
+        const initialFd = openSync(tmp, "r");
+        try { fsyncSync(initialFd); } finally { closeSync(initialFd); }
+        this.beforeCompactIndexReplace(indexPath);
+
+        const replaced = withIndexLock(indexPath, () => {
+          if (!existsSync(indexPath)) return false;
+          const current = statSync(indexPath);
+          if (current.dev !== snapshot.dev || current.ino !== snapshot.ino || current.size < snapshot.size) return false;
+          const appended = readJsonlRange<RunIndexRecord>(indexPath, snapshot.size, current.size).records;
+          if (appended.length) appendFileSync(tmp, appended.map((record) => `${JSON.stringify(record)}\n`).join(""), "utf8");
+          const finalFd = openSync(tmp, "r");
+          try { fsyncSync(finalFd); } finally { closeSync(finalFd); }
+          renameSync(tmp, indexPath);
+          const scopeDir = resolve(indexPath, "..");
+          if (kept.length + appended.length === 0 && resolve(indexPath) !== resolve(this.globalIndexPath())) {
+            unlinkSync(indexPath);
+            rmSync(join(scopeDir, "run-index-cache.json"), { force: true });
+            try { rmSync(scopeDir); } catch { /* Other project-scope state still exists. */ }
+          }
+          return true;
+        });
+        if (replaced) {
+          dropped += pathDropped;
+          break;
+        }
+        rmSync(tmp, { force: true });
+        if (attempt === 2) throw new Error(`run-index changed repeatedly during compaction: ${indexPath}`);
+      }
+    }
+    // Atomic replacement changes inode (or removes a source), forcing coherent cache rebuild.
+    for (const [key, cached] of memoryIndexCaches) {
+      if (cached.sources.some((source) => indexPaths.map((path) => resolve(path)).includes(resolve(source.path)))) memoryIndexCaches.delete(key);
+    }
+    return dropped;
+  }
+
   rebuildDerivedIndexes(): RunIndexCache {
     const key = this.indexCacheKey();
     const rebuilt = this.rebuildMemoryIndexCache(key);
@@ -431,13 +569,32 @@ export class RunStore {
   readLookupRunIndex(): RunIndexRecord[] {
     const primary = this.getIndexCache().records.map(cloneRecord);
     const records: RunIndexRecord[] = [...primary];
-    for (const path of [this.globalIndexPath(), ...this.fallbackIndexPaths()].map((path) => resolve(path))) {
-      if (path !== resolve(this.indexPath()) && existsSync(path)) records.push(...readJsonl<RunIndexRecord>(path).records);
+    const primarySources = new Set(this.indexSourcePaths());
+    for (const path of [...new Set([this.globalIndexPath(), ...this.fallbackIndexPaths()].map((path) => resolve(path)))]) {
+      if (!primarySources.has(path) && existsSync(path)) {
+        for (const record of readJsonl<RunIndexRecord>(path).records) records.push(record);
+      }
     }
     return records;
   }
 
+  /** Visit lookup records incrementally and stop without parsing the remainder of a large global index. */
+  visitLookupRunIndex(visitor: (record: RunIndexRecord) => boolean | void): void {
+    const paths = [...new Set(this.lookupIndexPaths())];
+    for (const path of paths) {
+      let keepGoing = true;
+      visitJsonl<RunIndexRecord>(path, (record) => {
+        keepGoing = visitor(record) !== false;
+        return keepGoing;
+      });
+      if (!keepGoing) return;
+    }
+  }
+
   resolveRunDir(runId: string): string {
+    // Legacy top-level runs may predate indexes; a direct run-root child is authoritative.
+    const direct = join(this.runRoot, runId);
+    if (existsSync(direct)) return direct;
     const cached = this.getIndexCache().byRunId[runId];
     if (cached) return cached.runDir;
     const records = this.readLookupRunIndex().filter((record) => record.runId === runId);

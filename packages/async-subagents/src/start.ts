@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,8 +17,9 @@ import { createRootSession, readRootSession } from "./rootSession.js";
 import { RunStore } from "./runStore.js";
 import { createInitialStatus, updateRunStatus } from "./status.js";
 import { codexBalancerSyncBackAndCleanup, runSupervisor, type SupervisorFakeInput, type SupervisorInput } from "./supervisor.js";
-import type { ContextPolicy, SessionPolicy, SubagentStartResult, TerminalRunState, ThinkingLevel, TaskRecord } from "./types.js";
+import type { ContextPolicy, SessionPolicy, SubagentStartResult, ThinkingLevel, TaskRecord } from "./types.js";
 import { prepareLaunch } from "@bravo/codex-auth-balancer";
+import { archiveRuns } from "./archive.js";
 
 export interface StartFakeChildInput {
   mode: "child";
@@ -45,6 +46,7 @@ export interface StartSubagentInput {
   rootSessionId?: string;
   depth?: number;
   files?: string[];
+  protect?: string[];
   skills?: string[];
   context?: ContextPolicy;
   session?: SessionPolicy;
@@ -599,10 +601,25 @@ async function spawnDetachedSupervisor(inputPath: string): Promise<string | unde
   return undefined;
 }
 
+function scheduleAutoArchive(store: RunStore, logsDir: string, env: NodeJS.ProcessEnv): void {
+  if (env.ASYNC_SUBAGENTS_NO_AUTO_ARCHIVE === "1" || !store.usesDefaultUserStorage) return;
+  setImmediate(() => {
+    void archiveRuns(store, { cap: 25 }).then((result) => {
+      if (!result.errors.length) return;
+      try { appendFileSync(join(logsDir, "auto-archive.log"), `${result.errors.map((entry) => `${entry.runId}: ${entry.error}`).join("\n")}\n`, "utf8"); } catch { /* Best effort. */ }
+    }).catch((error) => {
+      try {
+        appendFileSync(join(logsDir, "auto-archive.log"), `${new Date().toISOString()} ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`, "utf8");
+      } catch { /* Archival must never affect a successful start. */ }
+    });
+  });
+}
+
 export async function startSubagent(input: StartSubagentInput): Promise<SubagentStartResult> {
   const allowedFiles = normalizeAllowedFilePaths(input.files);
+  const protectedPaths = normalizeAllowedFilePaths(input.protect);
   const cwd = resolve(input.cwd ?? process.cwd());
-  const store = new RunStore({ cwd, runRoot: input.runRoot });
+  const store = new RunStore({ cwd, runRoot: input.runRoot, env: { ...process.env, ...(input.env ?? {}) } });
   const root = resolveRootIdentity(input, cwd);
   const baseDefinition = resolveAgentDefinition(input.agent, { cwd, env: process.env });
   const definition = applyAgentVariant(baseDefinition, input.variant);
@@ -683,6 +700,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     launchLogPath,
     inboxPath: paths.inboxPath,
     allowedFiles,
+    protectedPaths,
     effectiveMaxRunMs,
     cwd,
     state: "queued",
@@ -800,6 +818,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     rootRunId: root.rootRunId,
     depth: input.depth ?? 0,
     files: allowedFiles,
+    protect: protectedPaths,
     skills: input.skills,
     taskAssignment: input.taskAssignment ? { task: input.taskAssignment.task, dependencies: input.taskAssignment.dependencies } : undefined,
   });
@@ -909,8 +928,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       for (let i = 0; i < 20 && store.readStatus(runId).state === "queued" && !store.readResult(runId); i++) await delay(50);
     }
     const status = store.readStatus(runId);
-    const terminalStates: TerminalRunState[] = ["completed", "failed", "cancelled", "expired"];
-    const terminal = terminalStates.includes(status.state as TerminalRunState);
+    const terminal = ["completed", "failed", "cancelled", "expired"].includes(status.state);
+    scheduleAutoArchive(store, paths.logsDir, { ...process.env, ...(input.env ?? {}) });
     return {
       runId,
       runDir: paths.runDir,
@@ -970,7 +989,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       maxSubagentDepth: definition.maxSubagentDepth,
       fastTrack,
       task: input.taskAssignment ? { taskId: input.taskAssignment.task.id, title: input.taskAssignment.task.title } : undefined,
-      next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [],
+      next: [],
     };
   }
 
@@ -1098,8 +1117,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   }
 
   const status = store.readStatus(runId);
-  const terminalStates: TerminalRunState[] = ["completed", "failed", "cancelled", "expired"];
-  const terminal = terminalStates.includes(status.state as TerminalRunState);
+  const terminal = ["completed", "failed", "cancelled", "expired"].includes(status.state);
+  scheduleAutoArchive(store, paths.logsDir, { ...process.env, ...(input.env ?? {}) });
   return {
     runId,
     runDir: paths.runDir,
@@ -1127,6 +1146,6 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     maxSubagentDepth: definition.maxSubagentDepth,
     fastTrack,
     task: input.taskAssignment ? { taskId: input.taskAssignment.task.id, title: input.taskAssignment.task.title } : undefined,
-    next: terminal ? [{ tool: "subagent_result", args: { runId } }] : [],
+    next: [],
   };
 }

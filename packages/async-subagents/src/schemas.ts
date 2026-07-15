@@ -46,6 +46,14 @@ export function isThinkingLevel(value: unknown): value is ThinkingLevel {
   return typeof value === "string" && THINKING_LEVELS.includes(value as ThinkingLevel);
 }
 
+export type RunStateBucket = "terminal" | "attention" | "busy";
+
+export function bucketForState(state: RunState): RunStateBucket {
+  if (isTerminalRunState(state)) return "terminal";
+  if (state === "paused" || state === "blocked" || state === "waiting_for_input") return "attention";
+  return "busy";
+}
+
 export function isTerminalRunState(state: RunState): state is TerminalRunState {
   return TERMINAL_RUN_STATES.includes(state as TerminalRunState);
 }

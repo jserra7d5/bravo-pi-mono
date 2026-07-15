@@ -2,13 +2,13 @@ import { execFile, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createRunEvent, createStartedEvent } from "./events.js";
-import { finalizeTerminalRun } from "./lifecycle.js";
+import { finalizeTerminalRun, reconcileUnderLock } from "./lifecycle.js";
 import { appendJsonl } from "./jsonl.js";
 import { isTerminalRunState } from "./schemas.js";
 import { createInboxMessage } from "./message.js";
 import { RunStore } from "./runStore.js";
 import { withRunMutationLock } from "./runLock.js";
-import { updateRunStatus } from "./status.js";
+import { supervisorOwnershipPatch, updateRunStatus } from "./status.js";
 import { nowIso } from "./time.js";
 import type { PiCommand } from "./piHarness.js";
 import type { RunResult, RunStatus, TerminalRunState } from "./types.js";
@@ -63,16 +63,10 @@ function tmuxMcpDrainMs(): number {
   return Math.min(5000, parsed);
 }
 
-export async function awaitStableResult(store: RunStore, runDir: string, runId: string): Promise<RunResult | undefined> {
+export async function awaitStableResult(store: RunStore, _runDir: string, runId: string): Promise<RunResult | undefined> {
   if (!store.readResult(runId)) return undefined;
-  const settled = await withRunMutationLock(runDir, () => {
-    const result = store.readResult(runId);
-    if (!result) return undefined;
-    const status = store.readStatus(runId);
-    if (isTerminalRunState(status.state) && status.state === result.state && status.resultReady === true) return result;
-    return finalizeTerminalRun(store, { runId, parentRunId: result.parentRunId, agentName: result.agentName, state: result.state, writerRole: "child-runtime", summary: result.summary, body: result.body, effectiveMaxRunMs: result.effectiveMaxRunMs, timeout: result.timeout, error: result.error ?? null });
-  });
-  return settled.value;
+  await reconcileUnderLock(store, runId);
+  return store.readResult(runId);
 }
 
 async function waitForStableResult(store: RunStore, runDir: string, runId: string, timeoutMs: number, pollMs = 50): Promise<RunResult | undefined> {
@@ -310,7 +304,7 @@ async function runTmuxSupervisor(input: SupervisorInput): Promise<RunResult> {
         writerRole: "child-runtime",
         startedAt,
         lastActivityAt: startedAt,
-        supervisorPid: process.pid,
+        ...supervisorOwnershipPatch(),
         pid: meta?.panePid,
         childPid: meta?.panePid,
         panePid: meta?.panePid,
@@ -410,6 +404,7 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
         writerRole: "child-runtime",
         startedAt,
         lastActivityAt: startedAt,
+        ...supervisorOwnershipPatch(),
         summary: "Starting child process",
       }),
     );
@@ -443,6 +438,7 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
     let controlOffset = 0;
     let controlPoll: NodeJS.Timeout | undefined;
     let cancelState: { reason: string; command: unknown; forceTimer?: NodeJS.Timeout } | undefined;
+    let expiryState: { forceTimer?: NodeJS.Timeout } | undefined;
     let supervisorCleanupState: { reason: string; signal?: NodeJS.Signals; forceTimer?: NodeJS.Timeout; exitTimer?: NodeJS.Timeout } | undefined;
     const supervisorErrorPath = join(paths.logsDir, "supervisor-error.log");
 
@@ -504,6 +500,8 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       controlPoll = undefined;
       if (cancelState?.forceTimer) clearTimeout(cancelState.forceTimer);
       if (cancelState) cancelState.forceTimer = undefined;
+      if (expiryState?.forceTimer) clearTimeout(expiryState.forceTimer);
+      if (expiryState) expiryState.forceTimer = undefined;
       clearSupervisorCleanupTimers();
       process.off("SIGINT", onSupervisorSignal);
       process.off("SIGTERM", onSupervisorSignal);
@@ -577,7 +575,7 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       activeStartedAt = Date.now();
       const remainingMs = Math.max(0, activeBudgetMs - activeElapsedMs);
       if (remainingMs <= 0) {
-        timeout = setTimeout(pauseForBudget, 0);
+        timeout = setTimeout(expireForBudget, 0);
         return;
       }
       const warningLeadMs = Math.min(Math.floor(activeBudgetMs / 2), Math.max(5_000, Math.min(60_000, Math.floor(activeBudgetMs * 0.2))), remainingMs);
@@ -593,13 +591,13 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
               fromRunId: input.parentRunId,
               type: "context",
               requiresAck: false,
-              body: `Time budget warning: this run will be paused in about ${Math.ceil(warningLeadMs / 1000)} seconds. Checkpoint your current findings and, if you cannot finish before the deadline, emit a blocked event with a concise checkpoint and what parent input or continuation you need.`,
+              body: `Time budget warning: this run will expire in about ${Math.ceil(warningLeadMs / 1000)} seconds. Checkpoint your current findings and finish before the deadline if possible. The terminal run can be continued from its recorded session if more work is needed.`,
             });
             appendJsonl(join(paths.runDir, "inbox.jsonl"), message);
           }).catch(() => undefined);
         }, warningDelayMs);
       }
-      timeout = setTimeout(pauseForBudget, remainingMs);
+      timeout = setTimeout(expireForBudget, remainingMs);
     };
 
     const settle = (state: TerminalRunState, error?: RunResult["error"]): void => {
@@ -640,7 +638,9 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
         return;
       }
       if (settled) return;
-      if (cancelState) {
+      if (expiryState) {
+        settle("expired", { code: "MAX_RUN_SECONDS_EXPIRED", message: "Time budget expired", details: { effectiveMaxRunMs: input.effectiveMaxRunMs, code, signal } });
+      } else if (cancelState) {
         settle("cancelled", { code: "PARENT_CANCELLED", message: cancelState.reason, details: { ...(typeof cancelState.command === "object" && cancelState.command ? cancelState.command : {}), code, signal } });
       } else if (code === 0) {
         settle("completed");
@@ -693,24 +693,15 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
     };
     controlPoll = setInterval(readControls, 250);
 
-    const pauseForBudget = (): void => {
+    const expireForBudget = (): void => {
       if (settled) return;
       accountActiveTime();
       clearBudgetTimers();
-      const paused = killGroup("SIGSTOP");
-      if (!paused) {
-        void mutateLiveStatus(() => {
-          const event = createRunEvent({ sequence: store.readEvents(input.runId).records.length + 1, runId: input.runId, parentRunId: input.parentRunId, type: "status", summary: "Time budget expired; pause failed", body: "Runtime budget expired, but the supervisor could not pause the process group. The run is being finalized as expired.", wake: true, data: { reason: "timeout", effectiveMaxRunMs: input.effectiveMaxRunMs, paused } });
-          store.appendEvent(input.runId, event);
-        }).catch(() => undefined);
-        settle("expired", { code: "MAX_RUN_SECONDS_EXPIRED", message: "Time budget expired and SIGSTOP failed", details: { effectiveMaxRunMs: input.effectiveMaxRunMs } });
-        return;
-      }
-      void mutateLiveStatus((current) => {
-        const event = createRunEvent({ sequence: store.readEvents(input.runId).records.length + 1, runId: input.runId, parentRunId: input.parentRunId, type: "status", summary: "Time budget expired; run paused", body: "Runtime budget expired. Continue this run if the result is still needed, or cancel it.", wake: true, data: { reason: "timeout", effectiveMaxRunMs: input.effectiveMaxRunMs, paused } });
-        store.appendEvent(input.runId, event);
-        store.writeStatus(updateRunStatus(current, { state: "paused", processHealth: "alive", summary: event.summary, needs: "runtime budget expired", lastActivityAt: event.createdAt, lastEventId: event.eventId, timeout: { ...(current.timeout ?? {}), pausedAt: nowIso(), hardTimeoutAt: nowIso(), reason: "time budget expired" } }));
-      }).catch(() => undefined);
+      expiryState = {};
+      killGroup("SIGTERM");
+      killGroup("SIGCONT");
+      expiryState.forceTimer = setTimeout(() => killGroup("SIGKILL"), 500);
+      expiryState.forceTimer.unref();
     };
     installBudgetTimers();
   });

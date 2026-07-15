@@ -13,6 +13,7 @@ export interface PromptAssemblyInput {
   rootRunId: string;
   depth: number;
   files?: string[];
+  protect?: string[];
   skills?: string[];
   taskAssignment?: { task: TaskRecord; dependencies?: TaskRecord[] };
 }
@@ -104,9 +105,19 @@ ${assignedTask}
 - cwd: ${input.cwd}
 - resultFormat: ${input.definition.resultFormat}
 
-# Allowed Files
+# Write Scope
+
+You may create or edit ONLY paths matching these entries. An entry is an exact file path, a directory root (write anything beneath it), or a glob (\`*\` within a path segment, \`**\` across segments). This is contract enforcement, not OS sandboxing.
 
 ${(input.files ?? []).map((file) => `- ${file}`).join("\n") || "- (not specified)"}
+
+# Protected Paths
+
+Never create, edit, or delete these paths, even where they match the write scope. Reading them is always allowed.
+
+${(input.protect ?? []).map((file) => `- ${file}`).join("\n") || "- (none)"}
+
+If completing the task requires writing a path outside the write scope, do not silently comply and do not end the run: report it with your blocked event mechanism (subagent_event type "blocked"; subagent_block on Claude), naming the exact paths and why they are needed, then continue any remaining in-scope work while awaiting the parent's scope amendment — it arrives as a parent message.
 
 # Inbox
 

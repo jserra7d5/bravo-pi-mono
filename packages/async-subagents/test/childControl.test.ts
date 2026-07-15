@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { createRenderClock, type RenderClock, type RenderClockScheduler } from "@bravo/render-clock";
 import childControlExtension from "../extensions/child-control/index.js";
 import { createInboxMessage } from "../src/message.js";
+import { finalizeTerminalRun } from "../src/lifecycle.js";
+import { withRunMutationLock } from "../src/runLock.js";
 import { RunStore } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
 import { startSubagent } from "../src/start.js";
@@ -122,6 +124,11 @@ async function startChild(fixture: ChildControlFixture, clock: RenderClock): Pro
   await fixture.handlers.get("session_start")?.();
 }
 
+async function tick(clock: RenderClock): Promise<void> {
+  clock.tick("manual");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function workspace() {
   const root = mkdtempSync(join(tmpdir(), "async-subagents-child-control-"));
   const agentsDir = join(root, ".agents");
@@ -230,7 +237,7 @@ test("child-control recurring poll delivers post-start inbox messages on due clo
     },
     async () => {
       await startChild(fixture, clock);
-      clock.tick("manual");
+      await tick(clock);
       assert.equal(fixture.sentUserMessages.length, 0);
       assert.equal(messageReceivedCount(fixture.store, fixture.runId), 0);
 
@@ -244,21 +251,66 @@ test("child-control recurring poll delivers post-start inbox messages on due clo
       );
 
       scheduler.advance(999);
-      clock.tick("manual");
+      await tick(clock);
       assert.equal(fixture.sentUserMessages.length, 0, "poll must not run before its 1s interval is due");
       assert.equal(messageReceivedCount(fixture.store, fixture.runId), 0);
 
       scheduler.advance(1);
-      clock.tick("manual");
+      await tick(clock);
       assert.equal(fixture.sentUserMessages.length, 1);
       assert.match(String(fixture.sentUserMessages[0]?.content), /Post-start delivery/);
       assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
 
       scheduler.advance(1000);
-      clock.tick("manual");
+      await tick(clock);
       assert.equal(fixture.sentUserMessages.length, 1, "idle ticks must not duplicate delivered messages");
       assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
 
+      await fixture.handlers.get("session_shutdown")?.();
+    },
+  );
+});
+
+test("child-control suppresses overlapping inbox polls while delivery waits on the run lock", async () => {
+  const fixture = childControlFixture();
+  const scheduler = makeScheduler();
+  const clock = createRenderClock({ baseIntervalMs: 1000, scheduler });
+
+  await withEnv(
+    {
+      ASYNC_SUBAGENTS_RUN_ID: fixture.runId,
+      ASYNC_SUBAGENTS_RUN_DIR: fixture.paths.runDir,
+      ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+    },
+    async () => {
+      await startChild(fixture, clock);
+      fixture.store.appendInboxMessage(
+        fixture.runId,
+        createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "Deliver exactly once" }),
+      );
+      let release!: () => void;
+      let locked!: () => void;
+      const entered = new Promise<void>((resolve) => { locked = resolve; });
+      const holder = withRunMutationLock(fixture.paths.runDir, async () => {
+        locked();
+        await new Promise<void>((resolve) => { release = resolve; });
+      });
+      await entered;
+
+      scheduler.advance(1000);
+      await tick(clock);
+      assert.equal(fixture.sentUserMessages.length, 1);
+      scheduler.advance(1000);
+      await tick(clock);
+      assert.equal(fixture.sentUserMessages.length, 1, "an in-flight poll must suppress the next due tick");
+
+      release();
+      await holder;
+      for (let i = 0; i < 50 && messageReceivedCount(fixture.store, fixture.runId) < 1; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(fixture.sentUserMessages.length, 1);
+      assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
       await fixture.handlers.get("session_shutdown")?.();
     },
   );
@@ -288,7 +340,7 @@ test("child-control shutdown stops polling and is idempotent", async () => {
         createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "After shutdown" }),
       );
       scheduler.advance(1000);
-      clock.tick("manual");
+      await tick(clock);
       assert.equal(fixture.sentUserMessages.length, 0);
       assert.equal(messageReceivedCount(fixture.store, fixture.runId), 0);
     },
@@ -327,7 +379,7 @@ test("child-control double session_start preserves cursor and does not replay", 
         createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "New after restart" }),
       );
       scheduler.advance(1000);
-      clock.tick("manual");
+      await tick(clock);
       assert.equal(fixture.sentUserMessages.length, 2);
       assert.match(String(fixture.sentUserMessages.at(-1)?.content), /New after restart/);
       assert.equal(messageReceivedCount(fixture.store, fixture.runId), 2);
@@ -363,7 +415,7 @@ test("child-control establishes poll when pre-existing inbox is malformed", asyn
           fixture.runId,
           createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "Recovered delivery" }),
         );
-        clock.tick("manual");
+        await tick(clock);
         assert.equal(fixture.sentUserMessages.length, 1);
         assert.match(String(fixture.sentUserMessages[0]?.content), /Recovered delivery/);
         assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
@@ -392,7 +444,7 @@ test("child-control does not resend when bookkeeping event append fails after de
       },
       async () => {
         await startChild(fixture, clock);
-        clock.tick("manual");
+        await tick(clock);
         rmSync(fixture.paths.eventsPath, { force: true });
         mkdirSync(fixture.paths.eventsPath);
         fixture.store.appendInboxMessage(
@@ -401,13 +453,13 @@ test("child-control does not resend when bookkeeping event append fails after de
         );
 
         scheduler.advance(1000);
-        clock.tick("manual");
+        await tick(clock);
         assert.equal(fixture.sentUserMessages.length, 1);
         assert.match(String(fixture.sentUserMessages[0]?.content), /Bookkeeping may fail/);
         assert.equal(errors.length, 1);
 
         scheduler.advance(1000);
-        clock.tick("manual");
+        await tick(clock);
         assert.equal(fixture.sentUserMessages.length, 1, "post-send event append failure must not cause a resend");
         assert.equal(errors.length, 1);
 
@@ -443,20 +495,20 @@ test("child-control retries inbox message after transient send failure", async (
       },
       async () => {
         await startChild(fixture, clock);
-        clock.tick("manual");
+        await tick(clock);
         fixture.store.appendInboxMessage(
           fixture.runId,
           createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "Retry me" }),
         );
 
         scheduler.advance(1000);
-        clock.tick("manual");
+        await tick(clock);
         assert.equal(errors.length, 1);
         assert.equal(fixture.sentUserMessages.length, 0);
         assert.equal(messageReceivedCount(fixture.store, fixture.runId), 0);
 
         scheduler.advance(1000);
-        clock.tick("manual");
+        await tick(clock);
         assert.equal(fixture.sentUserMessages.length, 1);
         assert.match(String(fixture.sentUserMessages[0]?.content), /Retry me/);
         assert.equal(messageReceivedCount(fixture.store, fixture.runId), 1);
@@ -486,4 +538,141 @@ test("child launches do not allowlist removed task-owned child tools", async () 
   assert.equal(tools.includes("task_submit_result"), false);
   assert.equal(tools.includes("task_update_progress"), false);
   assert.equal(tools.includes("task_report_blocked"), false);
+});
+
+test("child-control restores running state when an answer unsticks a blocked child", async () => {
+  const root = mkdtempSync(join(tmpdir(), "async-subagents-child-control-"));
+  const store = new RunStore({ cwd: root, runRoot: join(root, ".subagents", "runs") });
+  const { runId, paths } = store.createRunDirectory({ cwd: root, parentRunId: "root_test", rootSessionId: "root_test" });
+  store.writeStatus(
+    createInitialStatus({
+      runId,
+      parentRunId: "root_test",
+      rootSessionId: "root_test",
+      agentName: "worker",
+      agentSource: "builtin",
+      definitionPath: "/builtin/worker.md",
+      mode: "oneshot",
+      cwd: root,
+      state: "blocked",
+    }),
+  );
+  store.appendInboxMessage(
+    runId,
+    createInboxMessage({
+      toRunId: runId,
+      fromRunId: "root_test",
+      type: "answer",
+      body: "Scope approved; proceed.",
+    }),
+  );
+  const handlers = new Map<string, (...args: any[]) => Promise<void> | void>();
+  const pi = {
+    registerTool(_tool: unknown) {},
+    on(event: string, handler: (...args: any[]) => Promise<void> | void) {
+      handlers.set(event, handler);
+    },
+    sendUserMessage(_content: unknown, _options: unknown) {},
+    setThinkingLevel(_level: string) {},
+  };
+  await withEnv(
+    {
+      ASYNC_SUBAGENTS_RUN_ID: runId,
+      ASYNC_SUBAGENTS_RUN_DIR: paths.runDir,
+      ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+    },
+    async () => {
+      childControlExtension(pi as never);
+      await handlers.get("session_start")?.();
+      const status = store.readStatus(runId);
+      assert.equal(status.state, "running");
+      assert.equal(status.needs, null);
+      await handlers.get("session_shutdown")?.();
+    },
+  );
+});
+
+test("child-control restore racing terminal finalization never resurrects the run", async () => {
+  const fixture = childControlFixture();
+  fixture.store.writeStatus({ ...fixture.store.readStatus(fixture.runId), state: "blocked" });
+  fixture.store.appendInboxMessage(fixture.runId, createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", type: "answer", body: "Proceed" }));
+  const scheduler = makeScheduler();
+  const clock = createRenderClock({ baseIntervalMs: 1000, scheduler });
+  let release!: () => void;
+  let locked!: () => void;
+  const entered = new Promise<void>((resolve) => { locked = resolve; });
+  const holder = withRunMutationLock(fixture.paths.runDir, async () => {
+    finalizeTerminalRun(fixture.store, { runId: fixture.runId, parentRunId: "root_test", agentName: "scout", state: "completed", writerRole: "child-runtime", summary: "Finished" });
+    locked();
+    await new Promise<void>((resolve) => { release = resolve; });
+  });
+  await entered;
+
+  await withEnv(
+    {
+      ASYNC_SUBAGENTS_RUN_ID: fixture.runId,
+      ASYNC_SUBAGENTS_RUN_DIR: fixture.paths.runDir,
+      ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+    },
+    async () => {
+      childControlExtension(fixture.pi as never, { clock });
+      const starting = fixture.handlers.get("session_start")?.();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      release();
+      await holder;
+      await starting;
+      assert.equal(fixture.store.readStatus(fixture.runId).state, "completed");
+      await fixture.handlers.get("session_shutdown")?.();
+    },
+  );
+});
+
+test("child-control leaves running state untouched for context messages", async () => {
+  const root = mkdtempSync(join(tmpdir(), "async-subagents-child-control-"));
+  const store = new RunStore({ cwd: root, runRoot: join(root, ".subagents", "runs") });
+  const { runId, paths } = store.createRunDirectory({ cwd: root, parentRunId: "root_test", rootSessionId: "root_test" });
+  store.writeStatus(
+    createInitialStatus({
+      runId,
+      parentRunId: "root_test",
+      rootSessionId: "root_test",
+      agentName: "worker",
+      agentSource: "builtin",
+      definitionPath: "/builtin/worker.md",
+      mode: "oneshot",
+      cwd: root,
+      state: "blocked",
+    }),
+  );
+  store.appendInboxMessage(
+    runId,
+    createInboxMessage({
+      toRunId: runId,
+      fromRunId: "root_test",
+      type: "context",
+      body: "FYI only.",
+    }),
+  );
+  const handlers = new Map<string, (...args: any[]) => Promise<void> | void>();
+  const pi = {
+    registerTool(_tool: unknown) {},
+    on(event: string, handler: (...args: any[]) => Promise<void> | void) {
+      handlers.set(event, handler);
+    },
+    sendUserMessage(_content: unknown, _options: unknown) {},
+    setThinkingLevel(_level: string) {},
+  };
+  await withEnv(
+    {
+      ASYNC_SUBAGENTS_RUN_ID: runId,
+      ASYNC_SUBAGENTS_RUN_DIR: paths.runDir,
+      ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+    },
+    async () => {
+      childControlExtension(pi as never);
+      await handlers.get("session_start")?.();
+      assert.equal(store.readStatus(runId).state, "blocked");
+      await handlers.get("session_shutdown")?.();
+    },
+  );
 });

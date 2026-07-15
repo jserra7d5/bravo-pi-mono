@@ -6,7 +6,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { renderClock } from "@bravo/render-clock";
 import { Type } from "typebox";
 import { appendJsonl, atomicWriteJson, readJsonl } from "../../src/jsonl.js";
-import { RunStore } from "../../src/runStore.js";
+import { withRunMutationLock } from "../../src/runLock.js";
+import { isTerminalRunState } from "../../src/schemas.js";
 import { SCHEMA_VERSION, type EventType, type InboxMessage, type RunEvent, type RunStatus } from "../../src/types.js";
 
 type ChildControlState = {
@@ -21,6 +22,7 @@ const CHILD_EVENT_TYPES = ["progress", "status", "question", "blocked", "artifac
 const WAKE_TYPES = new Set<EventType>(["question", "blocked", "artifact"]);
 
 type SubscribeOnlyClock = Pick<typeof renderClock, "subscribe">;
+type InboxPollBody = () => void | Promise<void>;
 
 function env(name: string): string | undefined {
   return process.env[name] || process.env[name.replace("ASYNC_SUBAGENTS_", "ASYNC_SUBAGENT_")];
@@ -38,7 +40,7 @@ function eventId(): string {
   return `evt_${Date.now().toString(36)}_${randomBytes(5).toString("base64url")}`;
 }
 
-function appendEvent(state: ChildControlState, input: { type: EventType; summary?: string; body?: string; wake?: boolean; data?: Record<string, unknown> }): RunEvent {
+async function appendEvent(state: ChildControlState, input: { type: EventType; summary?: string; body?: string; wake?: boolean; data?: Record<string, unknown> }): Promise<RunEvent> {
   const event: RunEvent = {
     schemaVersion: SCHEMA_VERSION,
     eventId: eventId(),
@@ -53,27 +55,30 @@ function appendEvent(state: ChildControlState, input: { type: EventType; summary
     data: input.data ?? {},
   };
   appendJsonl(join(state.runDir, "events.jsonl"), event);
-  updateStatusFromEvent(state, event);
+  await updateStatusFromEvent(state, event);
   return event;
 }
 
-function updateStatusFromEvent(state: ChildControlState, event: RunEvent): void {
+async function updateStatusFromEvent(state: ChildControlState, event: RunEvent): Promise<void> {
   const statusPath = join(state.runDir, "status.json");
   try {
-    const status = JSON.parse(readFileSync(statusPath, "utf8")) as RunStatus;
-    const nextState =
-      event.type === "question" ? "waiting_for_input" :
-      event.type === "blocked" ? "blocked" :
-      status.state;
-    atomicWriteJson(statusPath, {
-      ...status,
-      state: nextState,
-      writerRole: "child-runtime",
-      updatedAt: event.createdAt,
-      lastActivityAt: event.createdAt,
-      lastEventId: event.eventId,
-      summary: event.summary ?? status.summary,
-      needs: event.type === "question" || event.type === "blocked" ? event.summary ?? event.body ?? null : status.needs,
+    await withRunMutationLock(state.runDir, () => {
+      const status = JSON.parse(readFileSync(statusPath, "utf8")) as RunStatus;
+      if (isTerminalRunState(status.state)) return;
+      const nextState =
+        event.type === "question" ? "waiting_for_input" :
+        event.type === "blocked" ? "blocked" :
+        status.state;
+      atomicWriteJson(statusPath, {
+        ...status,
+        state: nextState,
+        writerRole: "child-runtime",
+        updatedAt: event.createdAt,
+        lastActivityAt: event.createdAt,
+        lastEventId: event.eventId,
+        summary: event.summary ?? status.summary,
+        needs: event.type === "question" || event.type === "blocked" ? event.summary ?? event.body ?? null : status.needs,
+      });
     });
   } catch {
     // Status is best-effort here. The durable event is the communication contract.
@@ -90,16 +95,38 @@ function parentMessageText(message: InboxMessage): string {
   return `${prefix} (${message.messageId}, ${message.type}):\n\n${message.body}`;
 }
 
-function deliverInbox(pi: ExtensionAPI, state: ChildControlState): void {
+async function restoreRunningAfterAnswer(state: ChildControlState, message: InboxMessage): Promise<void> {
+  if (message.type !== "answer" && message.type !== "instruction") return;
+  const statusPath = join(state.runDir, "status.json");
+  try {
+    await withRunMutationLock(state.runDir, () => {
+      const status = JSON.parse(readFileSync(statusPath, "utf8")) as RunStatus;
+      if (isTerminalRunState(status.state) || (status.state !== "blocked" && status.state !== "waiting_for_input")) return;
+      atomicWriteJson(statusPath, {
+        ...status,
+        state: "running",
+        writerRole: "child-runtime",
+        updatedAt: new Date().toISOString(),
+        needs: null,
+        summary: `Resumed after parent ${message.type}`,
+      });
+    });
+  } catch {
+    // Status restore is best-effort; the delivered message is the contract.
+  }
+}
+
+async function deliverInbox(pi: ExtensionAPI, state: ChildControlState): Promise<void> {
   for (;;) {
     const read = readJsonl<InboxMessage>(join(state.runDir, "inbox.jsonl"), { offset: state.cursor, maxRecords: 1 });
     const message = read.records[0];
     if (!message) break;
     if (message.thinkingLevel) pi.setThinkingLevel(message.thinkingLevel);
     pi.sendUserMessage(parentMessageText(message), { deliverAs: message.type === "cancel" ? "followUp" : "steer" });
+    await restoreRunningAfterAnswer(state, message);
     state.cursor = read.nextOffset;
     try {
-      appendEvent(state, {
+      await appendEvent(state, {
         type: "message.received",
         summary: `Received ${message.type} from parent`,
         body: message.body,
@@ -112,11 +139,11 @@ function deliverInbox(pi: ExtensionAPI, state: ChildControlState): void {
   }
 }
 
-function subscribeChildInboxPoll(clock: SubscribeOnlyClock, body: () => void): () => void {
+function subscribeChildInboxPoll(clock: SubscribeOnlyClock, body: InboxPollBody): () => void {
   return clock.subscribe({ id: "async-child-inbox-poll", intervalMs: 1_000, reconcile: body });
 }
 
-export function __subscribeChildInboxPollForTest(clock: SubscribeOnlyClock, body: () => void): () => void {
+export function __subscribeChildInboxPollForTest(clock: SubscribeOnlyClock, body: InboxPollBody): () => void {
   return subscribeChildInboxPoll(clock, body);
 }
 
@@ -139,7 +166,7 @@ export default function childControlExtension(pi: ExtensionAPI, options?: { cloc
     }),
     async execute(_toolCallId, params) {
       if (!state) throw new Error("subagent_event is only available inside an async-subagents child run");
-      const event = appendEvent(state, {
+      const event = await appendEvent(state, {
         type: params.type as EventType,
         summary: params.summary,
         body: params.body,
@@ -159,11 +186,11 @@ export default function childControlExtension(pi: ExtensionAPI, options?: { cloc
     if (!state || state.runId !== next.runId || state.runDir !== next.runDir) state = next;
     inboxPollUnsubscribe?.();
     inboxPollUnsubscribe = undefined;
-    inboxPollUnsubscribe = subscribeChildInboxPoll(clock, () => {
-      if (state) deliverInbox(pi, state);
+    inboxPollUnsubscribe = subscribeChildInboxPoll(clock, async () => {
+      if (state) await deliverInbox(pi, state);
     });
     try {
-      deliverInbox(pi, state);
+      await deliverInbox(pi, state);
     } catch (error) {
       console.error("[async-subagents child-control] initial inbox delivery failed", error);
     }

@@ -12,11 +12,11 @@ Pi agent definitions encode their normal thinking level. Do not override thinkin
 
 Some agent definitions expose variants. A variant keeps the same agent prompt and role but overlays launch config such as model, thinking level, or even harness. Use \`variant\` only when the task calls for that configured execution lane, for example \`{ agent: "agent-name", variant: "claude", task: "..." }\`; omit it for the default agent config. Provider-backed Pi variants must also declare the Pi provider extension that registers their model; otherwise the isolated child launch preflight will fail before spawn. Claude variants run Claude Code children; Pi tools/extensions and \`thinkingLevel\` do not apply to them. Claude variants use definition/variant \`effort\`, have trusted dangerous-auth execution with best-effort non-bare memory isolation, and expose capabilities through the catalog rather than inheriting base Pi tools.
 
-\`/fast-track on\` is an operator greenlight, not a blanket instruction. When it is armed, weight \`subagent_start.fastTrack: true\` toward the critical-path implementation/planning/review child whose heavy output-token work is the latency bottleneck, including a review that gates further remediation. Leave ordinary launches normal: scouts, default fanout, routine non-gating reviews, status checks, Gemini/non-Codex variants, and low-risk mechanical work. If fast-track is requested while policy is off, the launch fails closed; ineligible models launch normally and report that fast-track was not applied.
+\`/fast-track on\` is an operator greenlight, not a blanket instruction. When it is armed, any eligible Codex-model child qualifies; spend \`subagent_start.fastTrack: true\` on whatever lane's latency gates the plan, including scouts when a scout read is the bottleneck. Leave ordinary non-gating fanout, routine reviews, status checks, Gemini/non-Codex variants, and low-risk mechanical work normal. If fast-track is requested while policy is off, the launch fails closed; ineligible models launch normally and report that fast-track was not applied.
 
 Read source-of-truth artifacts yourself before delegating interpretation of them. Use subagents for reconnaissance, independent checks, implementation slices, or review around that source, not as a replacement for owning the spec.
 
-After delegating broad work, do not duplicate the same broad exploration yourself. Continue with non-overlapping work if useful; otherwise end your turn and go idle. Async wakeups, not polling, are the normal signal for questions, blockers, timeout pauses, and terminal results. Claude interactive children can be long-running; parent messages are durable inbox entries plus a terminal nudge, and the nudge alone is not proof of delivery. When \`requiresAck\` is set, treat success as the message being handled unless the tool result explicitly says it only waited for receipt.
+After delegating broad work, do not duplicate the same broad exploration yourself. Continue with non-overlapping work if useful; otherwise end your turn and go idle. Async wakeups, not polling, are the normal signal for questions, blockers, explicit parent pauses, and terminal results. Claude interactive children can be long-running; parent messages are durable inbox entries plus a terminal nudge, and the nudge alone is not proof of delivery. When \`requiresAck\` is set, treat success as the message being handled unless the tool result explicitly says it only waited for receipt.
 
 Prefer pipelined orchestration over batch barriers, keeping dependency sequencing in the parent session. Independent child runs can run concurrently; start a downstream child once all prerequisite results are collected and the parent has enough concrete context to define its bounded task. Do not wait for unrelated child runs.
 
@@ -30,9 +30,9 @@ Use \`subagent_result\` as the canonical backup/recovery path for terminal resul
 
 When a child fails, blocks, or returns a surprising result, inspect native status/result details first if the inline wakeup is insufficient. Inspect raw run files or logs only when native surfaces are insufficient.
 
-Use \`subagent_message\` to answer questions or unblock children, \`subagent_continue\` only when a paused/timed-out child result is still needed, and \`subagent_status\` only for one-shot inspection/recovery. Treat timeout wakeups as runtime events, not user requests.
+Use \`subagent_message\` to answer questions or unblock children, \`subagent_continue\` when an explicitly paused child or terminal continuation is still needed, and \`subagent_status\` only for one-shot inspection/recovery. Budget expiry is terminal and can be continued from its recorded session.
 
-For implementation children, include allowed write scope and validation boundary in the task. When an implementation child changes code, prompts, config, migrations, public contracts, or other meaningful artifacts, normally run an independent review unless the change is trivial, the user waived review, or no suitable review lane is available. Start review only after collecting the implementation result, and include the exact diff, files, claim, or artifact being reviewed. If review finds issues, remediate and re-review until the lane is clean, blocked, or needs a decision.
+For implementation children, set write scope by ownership boundary, not exhaustive file enumeration: pass \`subagent_start.files\` as the directory roots or globs the task owns (for example a package root plus its tests), and list must-not-touch files (specs, ledgers, references) in \`subagent_start.protect\`. Reserve exact-file scope for genuinely surgical tasks. Children asked to write outside their scope emit a blocked event naming the exact paths instead of stopping; answer with \`subagent_message\` (type answer, optional additive \`files\`) to grant or refuse — the run keeps its live context either way. Include the validation boundary in the task. When an implementation child changes code, prompts, config, migrations, public contracts, or other meaningful artifacts, normally run an independent review unless the change is trivial, the user waived review, or no suitable review lane is available. Start review only after collecting the implementation result, and include the exact diff, files, claim, or artifact being reviewed. If review finds issues, remediate and re-review until the lane is clean, blocked, or needs a decision.
 
 When asking children to run tests, builds, git remote operations, package installs, or network/API calls, require explicit fail-fast timeouts and noninteractive git/SSH behavior where practical; if a check cannot be safely bounded, have the child skip it and report why.
 
@@ -70,7 +70,7 @@ There are no task-ready wakeups, task tokens, child task tools, \`task_accept_re
 12. Do not call \`subagent_status\` repeatedly to wait for completion; go idle and let async wakeups resume you.
 13. Tasks are parent-owned milestones; children report normally and the parent mutates tasks with \`task_update\`.
 14. After \`task_create\` or \`task_update\`, inspect \`newly_ready\` and schedule any now-unblocked follow-up work before idling when inputs are ready.
-15. Treat \`fastTrack: true\` as a scarce speed lever for an armed critical-path implementation/planning/review child whose output-token latency bottlenecks the plan, including gating review; keep scouts, broad fanout, routine non-gating reviews, status checks, and Gemini/non-Codex variants on the normal lane by default.`;
+15. Treat \`fastTrack: true\` as a scarce speed lever for any eligible Codex-model child whose latency bottlenecks the plan; scouts qualify when a scout read is the bottleneck. Keep broad non-gating fanout, routine reviews, status checks, and Gemini/non-Codex variants on the normal lane by default.`;
 
 const SESSION_STATE_START = "<!-- async-subagents-session-state:start -->";
 const SESSION_STATE_END = "<!-- async-subagents-session-state:end -->";
@@ -89,7 +89,7 @@ function asyncSubagentsSessionState(options?: { fastTrackArmed?: boolean; tasksE
   if (options?.fastTrackArmed !== undefined) {
     const status = options.fastTrackArmed ? "armed/on" : "off";
     const guidance = options.fastTrackArmed
-      ? "You may set `fastTrack: true` for an absolute critical-path implementation/planning/gating-review child when appropriate."
+      ? "You may set `fastTrack: true` for any eligible Codex-model child whose latency gates the plan, including a bottleneck scout read."
       : "Do not set `fastTrack: true` unless the operator arms it with `/fast-track on`; requesting it while off fails closed.";
     lines.push(`- Fast-track policy is currently **${status}**. ${guidance}`);
   }

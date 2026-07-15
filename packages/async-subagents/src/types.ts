@@ -119,7 +119,7 @@ export interface FastTrackLaunch {
   requested: boolean;
   enabled: boolean;
   applied: boolean;
-  reason?: "not_requested" | "disabled" | "scout" | "ineligible_model";
+  reason?: "not_requested" | "disabled" | "ineligible_model";
   serviceTier?: "priority";
 }
 
@@ -181,10 +181,13 @@ export interface RunStatus {
   inboxPath?: string;
   /** Authoritative prompt-enforced write scope when specified; not an OS sandbox. */
   allowedFiles?: string[];
+  protectedPaths?: string[];
   state: RunState;
   writerRole?: WriterRole;
   pid?: number;
   supervisorPid?: number;
+  supervisorHost?: string;
+  supervisorStartedAtToken?: string;
   childPid?: number;
   panePid?: number;
   processGroupId?: number;
@@ -358,6 +361,17 @@ export interface RunIndexRecord {
   forkSourceSessionFile?: string;
   forkSourceLeafId?: string;
   createdAt: string;
+}
+
+export interface ArchiveIndexRecord {
+  schemaVersion: SchemaVersion;
+  runId: string;
+  agentName: string;
+  state: TerminalRunState;
+  createdAt: string;
+  archivedAt: string;
+  projectScope: string;
+  archivePath: string;
 }
 
 export interface DeliverySubscription {
