@@ -11,8 +11,9 @@ import { RunStore } from "../../src/runStore.js";
 import { TaskStore, type TaskUpdateInput } from "../../src/taskStore.js";
 import { readTaskRuntimeState } from "../../src/taskRuntime.js";
 import { deriveTaskReadiness, unresolvedDependencies } from "../../src/taskState.js";
-import { isTerminalRunState, isThinkingLevel } from "../../src/schemas.js";
+import { bucketForState, isTerminalRunState, isThinkingLevel } from "../../src/schemas.js";
 import { normalizeAllowedFilePaths, startSubagent, type StartSubagentInput } from "../../src/start.js";
+import { reconcileUnderLock } from "../../src/lifecycle.js";
 import { withRunMutationLock } from "../../src/runLock.js";
 import { readSubagentStatus, updateRunStatus } from "../../src/status.js";
 import { SCHEMA_VERSION, type ContextPolicy, type EventType, type InboxMessageType, type ParentMessageType, type RootSessionIdentity, type RunResult, type RunStatus, type SessionPolicy, type SubagentMessageResult } from "../../src/types.js";
@@ -49,6 +50,8 @@ export interface ToolRuntime {
   startSubagent?: (input: StartSubagentInput) => ReturnType<typeof startSubagent>;
   isTaskRuntimeEnabled?: (cwd: string, rootSessionId: string) => boolean;
   afterMutation?: (ctx: unknown, cwd: string, identity: RootSessionIdentity) => void | Promise<void>;
+  /** Set only by registerSubagentTools inside a live Pi extension runtime. */
+  pushAvailable?: boolean;
 }
 
 export const TASK_TOOL_NAMES = ["task_create", "task_list", "task_get", "task_update", "task_cancel", "task_clear"] as const;
@@ -337,36 +340,9 @@ function nextEventSequence(store: RunStore, runId: string): number {
   return store.readEvents(runId).records.length + 1;
 }
 
-function processHealth(pid: number | undefined): "unknown" | "alive" | "dead" {
-  if (!pid) return "unknown";
-  try {
-    process.kill(pid, 0);
-    return "alive";
-  } catch {
-    return "dead";
-  }
-}
-
-function reconcileProcessHealth(store: RunStore, status: RunStatus): RunStatus {
-  const health = processHealth(status.pid);
-  if (health === status.processHealth) return status;
-  const next = updateRunStatus(status, { processHealth: health });
-  if (!isTerminalRunState(status.state) && health === "dead") {
-    const event = createRunEvent({
-      sequence: nextEventSequence(store, status.runId),
-      runId: status.runId,
-      parentRunId: status.parentRunId,
-      type: "status",
-      summary: "Recorded child process is no longer alive",
-      wake: true,
-      data: { reconciliation: "pid_dead", pid: status.pid },
-    });
-    store.appendEvent(status.runId, event);
-    store.writeStatus({ ...next, lastActivityAt: event.createdAt, lastEventId: event.eventId, summary: event.summary });
-    return { ...next, lastActivityAt: event.createdAt, lastEventId: event.eventId, summary: event.summary };
-  }
-  store.writeStatus(next);
-  return next;
+function deliveryFor(runtime: ToolRuntime): { mode: "pi-poll" | "none"; pushAvailable: boolean } {
+  const pushAvailable = runtime.pushAvailable === true;
+  return { mode: pushAvailable ? "pi-poll" : "none", pushAvailable };
 }
 
 function writeSupervisorControl(store: RunStore, runId: string, command: Record<string, unknown>): void {
@@ -651,9 +627,13 @@ async function startTerminalContinuation(input: {
       createdAt: new Date().toISOString(),
     });
     await input.runtime.afterMutation?.(input.ctx, input.sessionCwd, input.root);
-    const summary = `Created continuation run ${result.runId} from terminal run ${input.status.runId}`;
+    const delivery = deliveryFor(input.runtime);
+    const summary = delivery.pushAvailable
+      ? `Created continuation run ${result.runId} from terminal run ${input.status.runId}; async wakeups will report attention or results`
+      : `Created continuation run ${result.runId} from terminal run ${input.status.runId}; use async-subagents watch --cwd ${JSON.stringify(input.sessionCwd)} --run-id ${result.runId}`;
     return response(summary, {
       ...result,
+      delivery,
       originalRunId: input.status.runId,
       continuedFromRunId: input.status.runId,
       continuationRootRunId: lineage.rootRunId,
@@ -854,7 +834,8 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         });
         await runtime.afterMutation?.(ctx, sessionCwd, root);
         const isStartFailure = result.started === false || result.state === "failed";
-        return response(summarizeStartResult(result), { ...result, taskId, rootSessionId: root.rootSessionId }, isStartFailure);
+        const delivery = deliveryFor(runtime);
+        return response(summarizeStartResult(result, delivery), { ...result, delivery, taskId, rootSessionId: root.rootSessionId }, isStartFailure);
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_start"),
       renderResult: renderSubagentToolResultComponent,
@@ -983,7 +964,11 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           return response(result.unsupported?.message ?? "Required child acknowledgement was not received", { ...result, runId, state: currentStatus.state, controlQueued: true, event, thinkingLevel: selectedThinkingLevel }, true);
         }
         await runtime.afterMutation?.(ctx, cwd, root);
-        return response(`Subagent ${runId} continue requested`, { ...result, runId, state: currentStatus.state, controlQueued: true, event, thinkingLevel: selectedThinkingLevel });
+        const delivery = deliveryFor(runtime);
+        const summary = delivery.pushAvailable
+          ? `Subagent ${runId} continue requested; async wakeups will report attention or results`
+          : `Subagent ${runId} continue requested; use async-subagents watch --cwd ${JSON.stringify(cwd)} --run-id ${runId}`;
+        return response(summary, { ...result, delivery, runId, state: currentStatus.state, controlQueued: true, event, thinkingLevel: selectedThinkingLevel });
       },
       renderCall: (args: Record<string, unknown>, theme: unknown) => renderSubagentToolCallComponent(args, theme as Parameters<typeof renderSubagentToolCallComponent>[1], "subagent_continue"),
       renderResult: renderSubagentToolResultComponent,
@@ -1051,7 +1036,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     {
       name: "subagent_status",
       label: "Subagent Status",
-      description: "One-shot inspection of direct children or selected run ids. Not a polling/waiting tool; if runs are merely active, go idle and wait for async wakeups.",
+      description: "One-shot inspection of direct children or selected run ids. Returns terminal, attention, and busy buckets; CLI callers should use async-subagents watch for polling.",
       parameters: subagentStatusSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const cwd = ctxCwd(ctx);
@@ -1060,22 +1045,26 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const parentRunId = typeof params.parentRunId === "string" ? params.parentRunId : root.parentRunId;
         const runIds = defaultRunIds(store, parentRunId, params);
         const maxEvents = typeof params.maxEvents === "number" ? params.maxEvents : 10;
-        const rows = runIds.flatMap((runId) => {
+        const rows = (await Promise.all(runIds.map(async (runId) => {
           try {
-            const status = reconcileProcessHealth(store, readSubagentStatus(store, { runId }));
+            const reconciliation = await reconcileUnderLock(store, runId);
+            const status = reconciliation.status;
             const diagnostics = statusDiagnostics(store, status);
+            if (reconciliation.repairedResult) diagnostics.push("result exists but status is non-terminal");
             return [{
               runId: status.runId,
               state: status.state,
+              bucket: bucketForState(status.state),
               displayName: status.displayName,
               namePack: status.namePack,
               agentName: status.agent.name,
-              summary: preview(status.summary, 120),
+              summary: `${bucketForState(status.state)}: ${preview(status.summary, 120) || status.state}`,
               cwd: status.cwd,
               parentRunId: status.parentRunId,
               rootSessionId: status.rootSessionId,
               pid: status.pid,
               processHealth: status.processHealth,
+              supervisorAlive: reconciliation.supervisorAlive,
               harness: status.harness,
               launchHarness: status.launchHarness,
               resultParser: status.resultParser,
@@ -1122,15 +1111,19 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           } catch {
             return [];
           }
-        });
+        }))).flat();
         const details: Record<string, unknown> = {
+          scope: "explicit",
+          requestedRunIds: runIds,
           parentRunId,
           rootSessionId: root.rootSessionId,
           rows,
           counts: {
             total: rows.length,
-            active: rows.filter((row) => !isTerminalRunState(row.state)).length,
-            terminal: rows.filter((row) => isTerminalRunState(row.state)).length,
+            busy: rows.filter((row) => row.bucket === "busy").length,
+            attention: rows.filter((row) => row.bucket === "attention").length,
+            terminal: rows.filter((row) => row.bucket === "terminal").length,
+            active: rows.filter((row) => row.bucket !== "terminal").length,
           },
         };
         if (params.includeEvents === true) {
@@ -1149,7 +1142,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
 }
 
 export function registerSubagentTools(pi: ExtensionAPI, runtime: ToolRuntime = {}): void {
-  for (const tool of buildSubagentTools(runtime)) pi.registerTool(tool as never);
+  for (const tool of buildSubagentTools({ ...runtime, pushAvailable: true })) pi.registerTool(tool as never);
 }
 
 export const tools = buildSubagentTools();

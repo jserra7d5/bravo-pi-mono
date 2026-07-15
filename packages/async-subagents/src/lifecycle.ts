@@ -1,10 +1,29 @@
+import { hostname } from "node:os";
 import { extractCostFromSessionLogSync } from "./cost.js";
 import { createResultEvent, createTerminalEvent } from "./events.js";
 import { createRunResult } from "./result.js";
+import { probeProcessIdentity, withRunMutationLock, type ProcessIdentitySnapshot } from "./runLock.js";
 import { RunStore } from "./runStore.js";
 import { isTerminalRunState } from "./schemas.js";
 import { updateRunStatus } from "./status.js";
-import type { RunMetrics, RunResult, TerminalRunState, WriterRole } from "./types.js";
+import type { RunMetrics, RunResult, RunStatus, TerminalRunState, WriterRole } from "./types.js";
+
+export const SUPERVISOR_LAUNCH_GRACE_MS = 5 * 60 * 1000;
+
+export type SupervisorAlive = "alive" | "dead" | "unknown";
+
+export interface ReconcileResult {
+  status: RunStatus;
+  supervisorAlive: SupervisorAlive;
+  repairedResult: boolean;
+  promoted: boolean;
+}
+
+export interface ReconcileOptions {
+  nowMs?: number;
+  localHost?: string;
+  probe?: (pid: number) => ProcessIdentitySnapshot;
+}
 
 export interface FinalizeTerminalRunInput {
   runId: string;
@@ -152,4 +171,75 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
     }),
   );
   return result;
+}
+
+function supervisorLiveness(status: RunStatus, localHost: string, probe: (pid: number) => ProcessIdentitySnapshot): SupervisorAlive {
+  if (!status.supervisorPid || !status.supervisorHost || !status.supervisorStartedAtToken || status.supervisorHost !== localHost) return "unknown";
+  const snapshot = probe(status.supervisorPid);
+  if (snapshot.permissionDenied || snapshot.alive === undefined) return "unknown";
+  if (snapshot.alive === false) {
+    if (snapshot.identity && snapshot.identity !== status.supervisorStartedAtToken) return "unknown";
+    return "dead";
+  }
+  return snapshot.identity === status.supervisorStartedAtToken ? "alive" : "unknown";
+}
+
+/** Result-first lifecycle repair and supervisor reconciliation under one run mutation lock. */
+export async function reconcileUnderLock(store: RunStore, runId: string, options: ReconcileOptions = {}): Promise<ReconcileResult> {
+  const runDir = store.pathsFor({ runId }).runDir;
+  const localHost = options.localHost ?? hostname();
+  const probe = options.probe ?? probeProcessIdentity;
+  const nowMs = options.nowMs ?? Date.now();
+  const reconciled = await withRunMutationLock(runDir, () => {
+    let status = store.readStatus(runId);
+    let repairedResult = false;
+    const result = store.readResult(runId);
+    if (result && (!isTerminalRunState(status.state) || status.state !== result.state || status.resultReady !== true)) {
+      finalizeTerminalRun(store, {
+        runId,
+        parentRunId: result.parentRunId,
+        agentName: result.agentName,
+        state: result.state,
+        writerRole: "parent-runtime",
+        summary: result.summary,
+        body: result.body,
+        effectiveMaxRunMs: result.effectiveMaxRunMs,
+        timeout: result.timeout,
+        error: result.error ?? null,
+      });
+      status = store.readStatus(runId);
+      repairedResult = true;
+    }
+    if (isTerminalRunState(status.state)) {
+      return { status, supervisorAlive: supervisorLiveness(status, localHost, probe), repairedResult, promoted: false };
+    }
+
+    const supervisorAlive = supervisorLiveness(status, localHost, probe);
+    let failure: { code: "SUPERVISOR_DIED" | "SUPERVISOR_LAUNCH_FAILED"; summary: string; message: string } | undefined;
+    if (status.state === "created" || status.state === "queued") {
+      const createdAt = Date.parse(status.createdAt);
+      const stale = Number.isFinite(createdAt) && nowMs - createdAt >= SUPERVISOR_LAUNCH_GRACE_MS;
+      const hasCompleteIdentity = Boolean(status.supervisorPid && status.supervisorHost && status.supervisorStartedAtToken);
+      if (stale && (!hasCompleteIdentity || supervisorAlive === "dead")) {
+        failure = { code: "SUPERVISOR_LAUNCH_FAILED", summary: "Supervisor launch failed", message: "No live supervisor took ownership within the launch grace period" };
+      }
+    } else if (supervisorAlive === "dead") {
+      failure = { code: "SUPERVISOR_DIED", summary: "Supervisor died", message: "The recorded supervisor process is no longer alive" };
+    }
+    if (!failure) return { status, supervisorAlive, repairedResult, promoted: false };
+
+    finalizeTerminalRun(store, {
+      runId,
+      parentRunId: status.parentRunId,
+      agentName: status.agent.name,
+      state: "failed",
+      writerRole: "parent-runtime",
+      summary: failure.summary,
+      body: failure.message,
+      error: { code: failure.code, message: failure.message },
+    });
+    status = store.readStatus(runId);
+    return { status, supervisorAlive: "dead" as const, repairedResult, promoted: true };
+  });
+  return reconciled.value;
 }

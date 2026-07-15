@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSy
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { hostname, tmpdir } from "node:os";
-import { withRunMutationLock } from "../src/runLock.js";
+import { currentProcessIdentityToken, probeProcessIdentity, withRunMutationLock } from "../src/runLock.js";
 
 function workspace(): string {
   return mkdtempSync(join(tmpdir(), "async-subagents-lock-"));
@@ -60,6 +60,13 @@ async function waitForZombieIdentity(pid: number): Promise<string> {
 }
 
 const hasPython3 = process.platform === "linux" && spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
+
+test("process identity probe returns the current process start token and liveness", () => {
+  const snapshot = probeProcessIdentity(process.pid);
+  assert.equal(snapshot.alive, true);
+  assert.equal(snapshot.identity, currentProcessIdentityToken());
+  assert.ok(snapshot.identity);
+});
 
 test("withRunMutationLock serializes concurrent mutations", async () => {
   const runDir = workspace();

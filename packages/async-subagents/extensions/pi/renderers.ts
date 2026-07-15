@@ -1,4 +1,5 @@
 import type { RunSummaryRow } from "../../src/watcher.js";
+import { bucketForState } from "../../src/schemas.js";
 import type { DerivedTaskState, RunEvent, RunResult, RunStatus, SubagentMessageResult, SubagentStartResult, TaskRecord } from "../../src/types.js";
 import { deriveTaskState, unresolvedDependencies } from "../../src/taskState.js";
 
@@ -1323,11 +1324,15 @@ export function renderSubagentWakeMessageComponent(message: WakeupMessage, optio
 // Summaries (plain-text, used by tool-call response text and notifications)
 // ----------------------------------------------------------------------------
 
-export function summarizeStartResult(result: SubagentStartResult): string {
+export function summarizeStartResult(result: SubagentStartResult, delivery: { mode: "pi-poll" | "none"; pushAvailable: boolean } = { mode: "none", pushAvailable: false }): string {
   const action = result.started === false || result.state === "failed" ? "failed to start" : result.waited ? "started and waited" : "started";
   const agent = result.variant ? `${result.agentName}/${result.variant}` : result.agentName;
   const label = result.displayName ? `@${result.displayName} (${agent})` : agent;
-  const suffix = result.started === false || result.state === "failed" ? "" : "; async wakeups will report attention or results";
+  const suffix = result.started === false || result.state === "failed"
+    ? ""
+    : delivery.pushAvailable
+      ? "; async wakeups will report attention or results"
+      : `; use async-subagents watch for run ${result.runId}`;
   return `Subagent ${result.runId} ${action}: ${label} (${result.state})${suffix}`;
 }
 
@@ -1351,10 +1356,10 @@ export function summarizeRunResult(result: RunResult | undefined, runId: string)
 }
 
 export function summarizeStatusRows(rows: Array<Pick<RunStatus, "runId" | "state" | "summary">>): string {
-  if (!rows.length) return "No subagent runs found";
-  const active = rows.filter((row) => !["completed", "failed", "cancelled", "expired"].includes(row.state)).length;
-  const actionable = rows.filter((row) => ["blocked", "waiting_for_input", "paused"].includes(row.state)).length;
-  const results = rows.filter((row) => ["completed", "failed", "cancelled", "expired"].includes(row.state)).length;
-  const suffix = active > 0 && actionable === 0 ? "; no action needed for merely active runs until an async wakeup arrives" : "";
-  return `Subagent status: ${active} active, ${results} terminal, ${rows.length} total${suffix}`;
+  if (!rows.length) return "Subagent status: 0 terminal, 0 attention, 0 busy";
+  const buckets = rows.map((row) => bucketForState(row.state));
+  const terminal = buckets.filter((bucket) => bucket === "terminal").length;
+  const attention = buckets.filter((bucket) => bucket === "attention").length;
+  const busy = buckets.filter((bucket) => bucket === "busy").length;
+  return `Subagent status: ${terminal} terminal, ${attention} attention, ${busy} busy`;
 }

@@ -1,5 +1,7 @@
+import { hostname } from "node:os";
 import { nowIso } from "./time.js";
 import { RunStore } from "./runStore.js";
+import { currentProcessIdentityToken } from "./runLock.js";
 import { isTerminalRunState } from "./schemas.js";
 import type { AgentDefinitionSource, AgentHarness, AgentMode, ClaudeAuthHome, ClaudeEffort, ClaudeExecutionMode, ClaudeInstalledSkill, ClaudeMemoryIsolation, ContextPolicy, HarnessBoundaryProvenance, LaunchHarness, ResultParser, RunState, RunStatus, SessionPolicy, ThinkingLevel } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
@@ -128,6 +130,14 @@ export function createInitialStatus(input: {
     updatedAt: now,
     resultReady: false,
     error: null,
+  };
+}
+
+export function supervisorOwnershipPatch(): Pick<RunStatus, "supervisorPid" | "supervisorHost" | "supervisorStartedAtToken"> {
+  return {
+    supervisorPid: process.pid,
+    supervisorHost: hostname(),
+    supervisorStartedAtToken: currentProcessIdentityToken(),
   };
 }
 

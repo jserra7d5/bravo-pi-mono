@@ -53,9 +53,12 @@ interface LinuxProcessStat {
   state?: string;
 }
 
-interface ProcessSnapshot {
+export interface ProcessIdentitySnapshot {
+  /** Definitive liveness only. Undefined means permission or platform uncertainty. */
   alive?: boolean;
+  /** OS process-start identity token when available. */
   identity?: string;
+  permissionDenied?: boolean;
 }
 
 function parseLinuxProcessStat(stat: string): LinuxProcessStat | undefined {
@@ -78,7 +81,7 @@ function readLinuxProcessStat(pid: number): LinuxProcessStat | undefined {
   }
 }
 
-function processSnapshot(pid: number): ProcessSnapshot {
+export function probeProcessIdentity(pid: number): ProcessIdentitySnapshot {
   if (!Number.isInteger(pid) || pid <= 0) return {};
   const linuxStat = readLinuxProcessStat(pid);
   if (linuxStat?.state === "Z" || linuxStat?.state === "X" || linuxStat?.state === "x") {
@@ -91,18 +94,18 @@ function processSnapshot(pid: number): ProcessSnapshot {
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ESRCH") alive = false;
-    else if (code === "EPERM") alive = true;
+    if (code === "EPERM") return { identity: linuxStat?.identity, permissionDenied: true };
   }
   return { alive, identity: linuxStat?.identity ?? (pid === process.pid ? SELF_FALLBACK_PROCESS_IDENTITY : undefined) };
 }
 
-function processIdentity(pid: number): string | undefined {
-  return processSnapshot(pid).identity;
+export function currentProcessIdentityToken(): string | undefined {
+  return probeProcessIdentity(process.pid).identity;
 }
 
 function newOwner(): LockOwner {
   const now = new Date().toISOString();
-  return { pid: process.pid, token: newToken(), host: hostname(), processIdentity: processIdentity(process.pid), acquiredAt: now, heartbeatAt: now };
+  return { pid: process.pid, token: newToken(), host: hostname(), processIdentity: currentProcessIdentityToken(), acquiredAt: now, heartbeatAt: now };
 }
 
 function ownerFileName(token: string): string {
@@ -168,12 +171,13 @@ function heartbeatAgeMs(record: OwnerRecord, nowMs: number): number {
 function ownerIsStale(record: OwnerRecord, staleMs: number, nowMs: number): boolean {
   const age = heartbeatAgeMs(record, nowMs);
   if (record.owner && record.owner.host === hostname()) {
-    const snapshot = processSnapshot(record.owner.pid);
+    const snapshot = probeProcessIdentity(record.owner.pid);
     if (snapshot.alive === false) return true;
     if (snapshot.alive === true) {
       if (record.owner.processIdentity && snapshot.identity && snapshot.identity !== record.owner.processIdentity) return age >= staleMs;
       return false;
     }
+    if (snapshot.permissionDenied) return false;
   }
   return age >= staleMs;
 }

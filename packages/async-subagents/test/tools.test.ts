@@ -7,6 +7,7 @@ import { buildSubagentTools } from "../extensions/pi/tools.js";
 import { createRootSession } from "../src/rootSession.js";
 import { RunStore } from "../src/runStore.js";
 import { TaskStore } from "../src/taskStore.js";
+import { createInitialStatus } from "../src/status.js";
 import type { RootSessionIdentity } from "../src/types.js";
 
 function workspace() {
@@ -40,6 +41,52 @@ async function withParentToolEnv<T>(fn: () => Promise<T>): Promise<T> {
     else process.env.ASYNC_SUBAGENT_RUN_ID = previousLegacyRunId;
   }
 }
+
+test("wrapper-built start reports no push delivery and points callers at watch", async () => {
+  const w = workspace();
+  const built = buildSubagentTools({
+    getRootIdentity() { return w.identity; },
+    async startSubagent() {
+      const created = w.runStore.createRunDirectory({ runId: "run_delivery", cwd: w.root, parentRunId: w.identity.parentRunId });
+      w.runStore.writeStatus(createInitialStatus({ runId: created.runId, parentRunId: w.identity.parentRunId, agentName: "scout", agentSource: "builtin", definitionPath: "/builtin/scout.md", mode: "oneshot", cwd: w.root, state: "running" }));
+      return { runId: created.runId, runDir: created.paths.runDir, agentName: "scout", state: "running", started: true, waited: false, contextPolicy: "fresh", sessionPolicy: "record", next: [] };
+    },
+  });
+  const start = built.find((tool) => tool.name === "subagent_start")!;
+  const result = await start.execute("call", { agent: "scout", task: "inspect" }, undefined, undefined, { cwd: w.root });
+  assert.deepEqual(result.details.delivery, { mode: "none", pushAvailable: false });
+  assert.match(String(result.details.summary), /async-subagents watch/);
+  assert.doesNotMatch(String(result.details.summary), /async wakeups/);
+});
+
+test("live runtime start reports pi-poll delivery and may promise async wakeups", async () => {
+  const w = workspace();
+  const built = buildSubagentTools({
+    pushAvailable: true,
+    getRootIdentity() { return w.identity; },
+    async startSubagent() {
+      const created = w.runStore.createRunDirectory({ runId: "run_live_delivery", cwd: w.root, parentRunId: w.identity.parentRunId });
+      w.runStore.writeStatus(createInitialStatus({ runId: created.runId, parentRunId: w.identity.parentRunId, agentName: "scout", agentSource: "builtin", definitionPath: "/builtin/scout.md", mode: "oneshot", cwd: w.root, state: "running" }));
+      return { runId: created.runId, runDir: created.paths.runDir, agentName: "scout", state: "running", started: true, waited: false, contextPolicy: "fresh", sessionPolicy: "record", next: [] };
+    },
+  });
+  const start = built.find((tool) => tool.name === "subagent_start")!;
+  const result = await start.execute("call", { agent: "scout", task: "inspect" }, undefined, undefined, { cwd: w.root });
+  assert.deepEqual(result.details.delivery, { mode: "pi-poll", pushAvailable: true });
+  assert.match(String(result.details.summary), /async wakeups/);
+});
+
+test("status response is explicit and reports bucket-first rows", async () => {
+  const w = workspace();
+  const { runId } = w.runStore.createRunDirectory({ cwd: w.root, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId });
+  w.runStore.writeStatus(createInitialStatus({ runId, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId, agentName: "scout", agentSource: "builtin", definitionPath: "/builtin/scout.md", mode: "oneshot", cwd: w.root, state: "blocked" }));
+  const result = await tools(w.identity).subagent_status.execute("call", { runIds: [runId] }, undefined, undefined, { cwd: w.root });
+  assert.equal(result.details.scope, "explicit");
+  assert.deepEqual(result.details.requestedRunIds, [runId]);
+  assert.equal((result.details.rows as Array<{ bucket: string }>)[0]?.bucket, "attention");
+  assert.match((result.details.rows as Array<{ summary: string }>)[0]?.summary ?? "", /^attention:/);
+  assert.match(String(result.details.summary), /terminal.*attention.*busy/);
+});
 
 test("task_clear cancels non-done milestone tasks without child-control next-actions", async () => {
   const w = workspace();

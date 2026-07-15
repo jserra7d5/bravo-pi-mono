@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { isInterestingEvent } from "./schemas.js";
+import { bucketForState, isInterestingEvent, type RunStateBucket } from "./schemas.js";
 import type { AgentHarness, ClaudeEffort, ClaudeExecutionMode, ClaudeInstalledSkill, ClaudeLivenessState, LaunchHarness, ResultParser, RunEvent, RunIndexRecord, RunMetrics, RunResult, RunState, RunStatus } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
@@ -40,11 +40,14 @@ export interface RunSummaryReadModel {
   tmuxPane?: string;
   panePid?: number;
   supervisorPid?: number;
+  supervisorHost?: string;
+  supervisorStartedAtToken?: string;
   childPid?: number;
   processGroupId?: number;
   transcriptPath?: string;
   resolvedSkills?: string[];
   state: RunState;
+  bucket: RunStateBucket;
   summary?: string;
   needs?: string | null;
   resultReady: boolean;
@@ -109,11 +112,14 @@ export function summaryFromStatus(status: RunStatus, runDir: string, previous?: 
     tmuxPane: status.tmuxPane,
     panePid: status.panePid,
     supervisorPid: status.supervisorPid,
+    supervisorHost: status.supervisorHost,
+    supervisorStartedAtToken: status.supervisorStartedAtToken,
     childPid: status.childPid,
     processGroupId: status.processGroupId,
     transcriptPath: status.transcriptPath,
     resolvedSkills: status.resolvedSkills,
     state: status.state,
+    bucket: bucketForState(status.state),
     summary: status.summary,
     needs: status.needs,
     resultReady: status.resultReady,
@@ -147,6 +153,7 @@ export function applyResultToSummary(summary: RunSummaryReadModel, result: RunRe
     updatedAt: result.createdAt,
     lastActivityAt: result.createdAt,
     state: result.state,
+    bucket: bucketForState(result.state),
     summary: result.summary ?? summary.summary,
     resultReady: true,
     resultCreatedAt: result.createdAt,

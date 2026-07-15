@@ -185,6 +185,8 @@ export interface RunStatus {
   writerRole?: WriterRole;
   pid?: number;
   supervisorPid?: number;
+  supervisorHost?: string;
+  supervisorStartedAtToken?: string;
   childPid?: number;
   panePid?: number;
   processGroupId?: number;
