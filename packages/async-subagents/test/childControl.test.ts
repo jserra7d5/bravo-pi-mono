@@ -487,3 +487,105 @@ test("child launches do not allowlist removed task-owned child tools", async () 
   assert.equal(tools.includes("task_update_progress"), false);
   assert.equal(tools.includes("task_report_blocked"), false);
 });
+
+test("child-control restores running state when an answer unsticks a blocked child", async () => {
+  const root = mkdtempSync(join(tmpdir(), "async-subagents-child-control-"));
+  const store = new RunStore({ cwd: root, runRoot: join(root, ".subagents", "runs") });
+  const { runId, paths } = store.createRunDirectory({ cwd: root, parentRunId: "root_test", rootSessionId: "root_test" });
+  store.writeStatus(
+    createInitialStatus({
+      runId,
+      parentRunId: "root_test",
+      rootSessionId: "root_test",
+      agentName: "worker",
+      agentSource: "builtin",
+      definitionPath: "/builtin/worker.md",
+      mode: "oneshot",
+      cwd: root,
+      state: "blocked",
+    }),
+  );
+  store.appendInboxMessage(
+    runId,
+    createInboxMessage({
+      toRunId: runId,
+      fromRunId: "root_test",
+      type: "answer",
+      body: "Scope approved; proceed.",
+    }),
+  );
+  const handlers = new Map<string, (...args: any[]) => Promise<void> | void>();
+  const pi = {
+    registerTool(_tool: unknown) {},
+    on(event: string, handler: (...args: any[]) => Promise<void> | void) {
+      handlers.set(event, handler);
+    },
+    sendUserMessage(_content: unknown, _options: unknown) {},
+    setThinkingLevel(_level: string) {},
+  };
+  await withEnv(
+    {
+      ASYNC_SUBAGENTS_RUN_ID: runId,
+      ASYNC_SUBAGENTS_RUN_DIR: paths.runDir,
+      ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+    },
+    async () => {
+      childControlExtension(pi as never);
+      await handlers.get("session_start")?.();
+      const status = store.readStatus(runId);
+      assert.equal(status.state, "running");
+      assert.equal(status.needs, null);
+      await handlers.get("session_shutdown")?.();
+    },
+  );
+});
+
+test("child-control leaves running state untouched for context messages", async () => {
+  const root = mkdtempSync(join(tmpdir(), "async-subagents-child-control-"));
+  const store = new RunStore({ cwd: root, runRoot: join(root, ".subagents", "runs") });
+  const { runId, paths } = store.createRunDirectory({ cwd: root, parentRunId: "root_test", rootSessionId: "root_test" });
+  store.writeStatus(
+    createInitialStatus({
+      runId,
+      parentRunId: "root_test",
+      rootSessionId: "root_test",
+      agentName: "worker",
+      agentSource: "builtin",
+      definitionPath: "/builtin/worker.md",
+      mode: "oneshot",
+      cwd: root,
+      state: "blocked",
+    }),
+  );
+  store.appendInboxMessage(
+    runId,
+    createInboxMessage({
+      toRunId: runId,
+      fromRunId: "root_test",
+      type: "context",
+      body: "FYI only.",
+    }),
+  );
+  const handlers = new Map<string, (...args: any[]) => Promise<void> | void>();
+  const pi = {
+    registerTool(_tool: unknown) {},
+    on(event: string, handler: (...args: any[]) => Promise<void> | void) {
+      handlers.set(event, handler);
+    },
+    sendUserMessage(_content: unknown, _options: unknown) {},
+    setThinkingLevel(_level: string) {},
+  };
+  await withEnv(
+    {
+      ASYNC_SUBAGENTS_RUN_ID: runId,
+      ASYNC_SUBAGENTS_RUN_DIR: paths.runDir,
+      ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+    },
+    async () => {
+      childControlExtension(pi as never);
+      await handlers.get("session_start")?.();
+      assert.equal(store.readStatus(runId).state, "blocked");
+      await handlers.get("session_shutdown")?.();
+    },
+  );
+});

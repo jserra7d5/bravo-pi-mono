@@ -90,6 +90,25 @@ function parentMessageText(message: InboxMessage): string {
   return `${prefix} (${message.messageId}, ${message.type}):\n\n${message.body}`;
 }
 
+function restoreRunningAfterAnswer(state: ChildControlState, message: InboxMessage): void {
+  if (message.type !== "answer" && message.type !== "instruction") return;
+  const statusPath = join(state.runDir, "status.json");
+  try {
+    const status = JSON.parse(readFileSync(statusPath, "utf8")) as RunStatus;
+    if (status.state !== "blocked" && status.state !== "waiting_for_input") return;
+    atomicWriteJson(statusPath, {
+      ...status,
+      state: "running",
+      writerRole: "child-runtime",
+      updatedAt: new Date().toISOString(),
+      needs: null,
+      summary: `Resumed after parent ${message.type}`,
+    });
+  } catch {
+    // Status restore is best-effort; the delivered message is the contract.
+  }
+}
+
 function deliverInbox(pi: ExtensionAPI, state: ChildControlState): void {
   for (;;) {
     const read = readJsonl<InboxMessage>(join(state.runDir, "inbox.jsonl"), { offset: state.cursor, maxRecords: 1 });
@@ -97,6 +116,7 @@ function deliverInbox(pi: ExtensionAPI, state: ChildControlState): void {
     if (!message) break;
     if (message.thinkingLevel) pi.setThinkingLevel(message.thinkingLevel);
     pi.sendUserMessage(parentMessageText(message), { deliverAs: message.type === "cancel" ? "followUp" : "steer" });
+    restoreRunningAfterAnswer(state, message);
     state.cursor = read.nextOffset;
     try {
       appendEvent(state, {

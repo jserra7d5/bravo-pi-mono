@@ -17,7 +17,8 @@ export const subagentStartSchema = Type.Object({
   task: Type.String({ description: "Bounded task for the child agent." }),
   taskId: Type.Optional(Type.String({ description: "Optional parent-owned milestone id to associate with this child run for traceability. Milestone status is updated separately with task_update." })),
   cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current Pi session cwd." })),
-  files: Type.Optional(Type.Array(Type.String(), { description: "Exhaustive prompt-enforced write scope for the child. Paths must be non-empty single-line strings. This is not OS sandboxing." })),
+  files: Type.Optional(Type.Array(Type.String(), { description: "Prompt-enforced write scope for the child: exact file paths, directory roots, or globs (* within a segment, ** across segments). Prefer scoping by ownership boundary (a package or module root) plus `protect` for files that must stay untouched, over exhaustively enumerating files. Entries must be non-empty single-line strings. This is not OS sandboxing." })),
+  protect: Type.Optional(Type.Array(Type.String(), { description: "Prompt-enforced protected paths the child must never create, edit, or delete even when they match the write scope (specs, ledgers, reference files). Reading stays allowed. Entries must be non-empty single-line strings." })),
   skills: Type.Optional(Type.Array(Type.String(), { description: "Additional skill names to enable for this child run, merged with the agent definition skills. Children do not inherit parent-session skills automatically. Pass skill names only; path-like values are rejected." })),
   attachments: Type.Optional(Type.Array(Attachment)),
   notifyOn: Type.Optional(Type.Array(StringEnum(EVENT_TYPES as readonly string[]))),
@@ -34,6 +35,7 @@ export const subagentMessageSchema = Type.Object({
   runDir: Type.Optional(Type.String({ description: "Recovery path when the run index is unavailable." })),
   type: Type.Optional(StringEnum(PARENT_MESSAGE_TYPES, { default: "instruction" })),
   body: Type.String({ description: "Message body to append to the child inbox." }),
+  files: Type.Optional(Type.Array(Type.String(), { description: "Additional prompt-enforced write-scope entries granted with this message (additive; existing scope is always retained). Use to answer a child's blocked scope-expansion request without pausing or restarting it. Runs without a specified scope reject widening." })),
   attachments: Type.Optional(Type.Array(Attachment)),
   requiresAck: Type.Optional(Type.Boolean()),
 });

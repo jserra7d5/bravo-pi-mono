@@ -59,6 +59,7 @@ export function createInitialStatus(input: {
   launchLogPath?: string;
   inboxPath?: string;
   allowedFiles?: string[];
+  protectedPaths?: string[];
   effectiveMaxRunMs?: number;
   cwd: string;
   state?: RunState;
@@ -121,6 +122,7 @@ export function createInitialStatus(input: {
     launchLogPath: input.launchLogPath,
     inboxPath: input.inboxPath,
     allowedFiles: input.allowedFiles,
+    protectedPaths: input.protectedPaths,
     effectiveMaxRunMs: input.effectiveMaxRunMs,
     timeout: null,
     state: input.state ?? "created",

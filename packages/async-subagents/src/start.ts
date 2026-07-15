@@ -46,6 +46,7 @@ export interface StartSubagentInput {
   rootSessionId?: string;
   depth?: number;
   files?: string[];
+  protect?: string[];
   skills?: string[];
   context?: ContextPolicy;
   session?: SessionPolicy;
@@ -616,6 +617,7 @@ function scheduleAutoArchive(store: RunStore, logsDir: string, env: NodeJS.Proce
 
 export async function startSubagent(input: StartSubagentInput): Promise<SubagentStartResult> {
   const allowedFiles = normalizeAllowedFilePaths(input.files);
+  const protectedPaths = normalizeAllowedFilePaths(input.protect);
   const cwd = resolve(input.cwd ?? process.cwd());
   const store = new RunStore({ cwd, runRoot: input.runRoot, env: { ...process.env, ...(input.env ?? {}) } });
   const root = resolveRootIdentity(input, cwd);
@@ -698,6 +700,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     launchLogPath,
     inboxPath: paths.inboxPath,
     allowedFiles,
+    protectedPaths,
     effectiveMaxRunMs,
     cwd,
     state: "queued",
@@ -815,6 +818,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     rootRunId: root.rootRunId,
     depth: input.depth ?? 0,
     files: allowedFiles,
+    protect: protectedPaths,
     skills: input.skills,
     taskAssignment: input.taskAssignment ? { task: input.taskAssignment.task, dependencies: input.taskAssignment.dependencies } : undefined,
   });

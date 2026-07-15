@@ -412,7 +412,7 @@ function writeScopeAmendment(allowedFiles: string[]): string {
   return [
     "# Authoritative Write-Scope Amendment",
     "",
-    "The allowed file list for this run is now the following additive union. Write only these files:",
+    "The write scope for this run is now the following additive union of exact paths, directory roots, and globs. Write only within it; protected paths remain protected:",
     ...allowedFiles.map((file) => `- ${file}`),
     "",
     "This is contract and prompt enforcement, not OS sandboxing.",
@@ -599,6 +599,7 @@ async function startTerminalContinuation(input: {
       task: parentBody,
       cwd: input.status.cwd,
       files: allowedFiles,
+      protect: input.status.protectedPaths,
       runRoot: input.store.runRoot,
       parentRunId: input.root.parentRunId,
       rootRunId: input.root.parentRunId,
@@ -777,9 +778,11 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const notifyOn = Array.isArray(params.notifyOn) ? (params.notifyOn.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined;
         let skills: string[] | undefined;
         let files: string[] | undefined;
+        let protect: string[] | undefined;
         try {
           skills = skillNamesFromParams(params);
           files = filesFromParams(params);
+          protect = normalizeAllowedFilePaths(Array.isArray(params.protect) ? (params.protect as string[]) : undefined);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           const code = (error as { code?: string }).code === "INVALID_ALLOWED_FILE" ? "INVALID_ALLOWED_FILE" : "INVALID_SKILL_NAME";
@@ -809,6 +812,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           rootSessionId: root.rootSessionId,
           depth: typeof params.maxSubagentDepth === "number" ? params.maxSubagentDepth : undefined,
           files,
+          protect,
           skills,
           context: contextPolicy as ContextPolicy | undefined,
           session: sessionPolicy as SessionPolicy | undefined,
@@ -859,7 +863,28 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         if (isTerminalRunState(status.state)) {
           return response(`Run ${runId} is terminal; message not appended`, { code: "RUN_TERMINAL", runId, state: status.state }, true);
         }
-        const result = await waitForLiveAckIfNeeded(store, params, status, appendParentMessage(params, store, root, runId, type, String(params.body)));
+        let additionalFiles: string[] | undefined;
+        try {
+          additionalFiles = filesFromParams(params);
+        } catch (error) {
+          return response(error instanceof Error ? error.message : String(error), { code: "INVALID_ALLOWED_FILE", runId }, true);
+        }
+        let body = String(params.body);
+        if (additionalFiles?.length) {
+          const runDir = store.pathsFor({ runId }).runDir;
+          const widened = await withRunMutationLock(runDir, () => {
+            const current = store.readStatus(runId);
+            const allowedFiles = widenedAllowedFiles(current, additionalFiles);
+            if (allowedFiles === undefined) return undefined;
+            store.writeStatus(updateRunStatus(current, { allowedFiles }));
+            return allowedFiles;
+          });
+          if (widened.value === undefined) {
+            return response(`Run ${runId} has no specified file scope; message without files or start a new scoped run`, { code: "SCOPE_UNSPECIFIED", runId }, true);
+          }
+          body = `${body}\n\n${writeScopeAmendment(widened.value)}`;
+        }
+        const result = await waitForLiveAckIfNeeded(store, params, status, appendParentMessage(params, store, root, runId, type, body));
         if (requiredAckFailed(params, result)) {
           await runtime.afterMutation?.(ctx, cwd, root);
           return response(result.unsupported?.message ?? "Required child acknowledgement was not received", { ...result, status: { runId: status.runId, state: status.state } }, true);

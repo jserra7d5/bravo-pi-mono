@@ -181,6 +181,7 @@ export interface RunStatus {
   inboxPath?: string;
   /** Authoritative prompt-enforced write scope when specified; not an OS sandbox. */
   allowedFiles?: string[];
+  protectedPaths?: string[];
   state: RunState;
   writerRole?: WriterRole;
   pid?: number;

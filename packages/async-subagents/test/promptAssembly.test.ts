@@ -134,3 +134,65 @@ Claude worker system body.
   assert.match(task, /subagent_complete/);
   assert.doesNotMatch(task, /normal result/);
 });
+
+test("assemblePrompt renders write scope semantics, protected paths, and ask-dont-stop guidance", () => {
+  const root = mkdtempSync(join(tmpdir(), "async-subagents-prompt-"));
+  mkdirSync(join(root, ".agents", "subagents"), { recursive: true });
+  const definitionPath = join(root, ".agents", "subagents", "worker.md");
+  writeFileSync(definitionPath, `---
+description: Worker
+---
+
+Worker system body.
+`);
+  const definition = parseAgentDefinitionFile(definitionPath, "project");
+  const store = new RunStore({ cwd: root, runRoot: join(root, ".subagents", "runs") });
+  const { paths } = store.createRunDirectory({ cwd: root, parentRunId: "root_b", rootSessionId: "root_b" });
+  const assembled = assemblePrompt({
+    definition,
+    runPaths: paths,
+    task: "Implement the feature.",
+    cwd: root,
+    parentRunId: "root_b",
+    rootRunId: "root_b",
+    depth: 0,
+    files: ["packages/thing/src/**", "packages/thing/test/feature.test.ts"],
+    protect: ["docs/specs/thing/design.md"],
+  });
+
+  const task = readFileSync(assembled.taskPath, "utf8");
+  assert.match(task, /# Write Scope/);
+  assert.match(task, /directory root/);
+  assert.match(task, /packages\/thing\/src\/\*\*/);
+  assert.match(task, /# Protected Paths/);
+  assert.match(task, /docs\/specs\/thing\/design\.md/);
+  assert.match(task, /blocked event mechanism/);
+  assert.match(task, /scope amendment/);
+});
+
+test("assemblePrompt renders none for absent protected paths", () => {
+  const root = mkdtempSync(join(tmpdir(), "async-subagents-prompt-"));
+  mkdirSync(join(root, ".agents", "subagents"), { recursive: true });
+  const definitionPath = join(root, ".agents", "subagents", "worker.md");
+  writeFileSync(definitionPath, `---
+description: Worker
+---
+
+Worker system body.
+`);
+  const definition = parseAgentDefinitionFile(definitionPath, "project");
+  const store = new RunStore({ cwd: root, runRoot: join(root, ".subagents", "runs") });
+  const { paths } = store.createRunDirectory({ cwd: root, parentRunId: "root_c", rootSessionId: "root_c" });
+  const assembled = assemblePrompt({
+    definition,
+    runPaths: paths,
+    task: "Read-only survey.",
+    cwd: root,
+    parentRunId: "root_c",
+    rootRunId: "root_c",
+    depth: 0,
+  });
+  const task = readFileSync(assembled.taskPath, "utf8");
+  assert.match(task, /# Protected Paths\n\n[^#]*- \(none\)/);
+  assert.match(task, /# Write Scope\n\n[^#]*- \(not specified\)/);
+});

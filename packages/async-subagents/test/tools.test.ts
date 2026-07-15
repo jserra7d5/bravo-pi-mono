@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildSubagentTools } from "../extensions/pi/tools.js";
@@ -138,4 +138,51 @@ test("parent tools create separate task roots for different Pi sessions in the s
     if (previousRootSessionId === undefined) delete process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID;
     else process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID = previousRootSessionId;
   }
+});
+
+test("subagent_message with files additively widens scope and appends amendment", async () => {
+  await withParentToolEnv(async () => {
+    const w = workspace();
+    const { runId, paths } = w.runStore.createRunDirectory({ cwd: w.root, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId });
+    w.runStore.writeStatus(createInitialStatus({
+      runId,
+      parentRunId: w.identity.parentRunId,
+      agentName: "worker",
+      agentSource: "project",
+      definitionPath: join(w.root, "worker.md"),
+      mode: "oneshot",
+      allowedFiles: ["packages/thing/src/**"],
+      cwd: w.root,
+      state: "blocked",
+    }));
+    const toolset = tools(w.identity);
+    const response = await toolset.subagent_message.execute("t1", { runId, type: "answer", body: "Scope approved.", files: ["packages/thing/scripts/build.mjs"], requiresAck: false }, undefined, undefined, { cwd: w.root });
+    assert.ok(!response.isError, JSON.stringify(response.content));
+    const status = w.runStore.readStatus(runId);
+    assert.deepEqual(status.allowedFiles, ["packages/thing/src/**", "packages/thing/scripts/build.mjs"]);
+    const inbox = readFileSync(paths.inboxPath, "utf8");
+    assert.match(inbox, /Write-Scope Amendment/);
+    assert.match(inbox, /packages\/thing\/scripts\/build\.mjs/);
+  });
+});
+
+test("subagent_message files widening rejects runs without a specified scope", async () => {
+  await withParentToolEnv(async () => {
+    const w = workspace();
+    const { runId } = w.runStore.createRunDirectory({ cwd: w.root, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId });
+    w.runStore.writeStatus(createInitialStatus({
+      runId,
+      parentRunId: w.identity.parentRunId,
+      agentName: "worker",
+      agentSource: "project",
+      definitionPath: join(w.root, "worker.md"),
+      mode: "oneshot",
+      cwd: w.root,
+      state: "running",
+    }));
+    const toolset = tools(w.identity);
+    const response = await toolset.subagent_message.execute("t2", { runId, type: "answer", body: "No scope run.", files: ["a.ts"] }, undefined, undefined, { cwd: w.root });
+    assert.ok(response.isError);
+    assert.equal(response.details.code, "SCOPE_UNSPECIFIED");
+  });
 });

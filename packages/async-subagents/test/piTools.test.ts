@@ -393,7 +393,7 @@ test("subagent_continue creates an async terminal continuation using the origina
   assert.deepEqual(continuation.allowedFiles, ["src/original.ts", "src/shared.ts", "src/retry.ts"]);
   assert.equal(store.readResult(newRunId)?.continuedFromRunId, w.runId);
   const continuationTask = readFileSync(join(store.pathsFor({ runId: newRunId }).artifactsDir, "task.md"), "utf8");
-  assert.match(continuationTask, /# Allowed Files\n\n- src\/original\.ts\n- src\/shared\.ts\n- src\/retry\.ts/);
+  assert.match(continuationTask, /# Write Scope\n\n[^#]*- src\/original\.ts\n- src\/shared\.ts\n- src\/retry\.ts/);
 
   const launch = JSON.parse(readFileSync(join(store.pathsFor({ runId: newRunId }).runDir, "logs", "launch.json"), "utf8"));
   assert.deepEqual(launch.args.slice(launch.args.indexOf("--session"), launch.args.indexOf("--session") + 2), ["--session", originalSession]);
