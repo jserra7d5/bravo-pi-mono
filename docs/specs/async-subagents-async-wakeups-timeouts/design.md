@@ -1,7 +1,7 @@
 # Async Subagents Async Wakeups and Graceful Timeouts Design
 
 Date: 2026-05-28
-Status: Draft
+Status: Superseded (timeout semantics) — budget expiry is now terminal `expired`, not `paused`; see docs/specs/async-subagents-lifecycle-reliability/design.md (D1). Wakeup delivery sections remain historically accurate.
 
 ## Problem
 

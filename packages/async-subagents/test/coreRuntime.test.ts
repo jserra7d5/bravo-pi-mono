@@ -269,7 +269,8 @@ Claude scout body.
     env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FAKE_CLAUDE_EXIT_DELAY_MS: "500" },
   });
 
-  assert.equal(started.state, "running");
+  // Start returns as soon as the run is handed to the tmux adapter; pane claim may still be pending.
+  assert.ok(["queued", "running"].includes(started.state), `unexpected start state: ${started.state}`);
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
   const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
   assert.equal(waited.state, "ready");
