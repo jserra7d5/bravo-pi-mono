@@ -274,7 +274,7 @@ async function finalizeRun(input: SupervisorInput, output: { state: TerminalRunS
       state: output.state,
       writerRole: "child-runtime",
       startedAt: status.startedAt,
-      summary: summaryFromOutput(body ?? "", output.state === "completed" ? "Completed" : `Run ${output.state}`),
+      summary: summaryFromOutput(output.error?.message ?? body ?? "", output.state === "completed" ? "Completed" : `Run ${output.state}`),
       body,
       effectiveMaxRunMs: input.effectiveMaxRunMs,
       error: output.error ?? null,

@@ -67,7 +67,34 @@ test("manual pause suspends runtime budget and resume reinstalls timeout", async
   assert.equal(status.state, "expired");
   assert.equal(result.state, "expired");
   assert.equal(result.error?.code, "MAX_RUN_SECONDS_EXPIRED");
+  assert.equal(result.summary, "Time budget expired");
   assert.equal(result.body, "captured checkpoint");
+  assert.equal(status.summary, "Time budget expired");
+});
+
+test("expiration error summary wins while harmless stderr remains the body", async () => {
+  const { cwd, runRoot, parentRunId, runId } = createQueuedRun();
+  const warning = 'Warning: No models match pattern "bravo-codex-balanced/gpt-5.6-luna"';
+
+  const result = await runSupervisor({
+    runId,
+    runRoot,
+    cwd,
+    parentRunId,
+    agentName: "scout",
+    effectiveMaxRunMs: 100,
+    command: {
+      command: process.execPath,
+      args: ["-e", `console.error(${JSON.stringify(warning)}); setInterval(() => {}, 1000);`],
+      cwd,
+      env: {},
+    },
+  });
+
+  assert.equal(result.state, "expired");
+  assert.equal(result.error?.code, "MAX_RUN_SECONDS_EXPIRED");
+  assert.equal(result.summary, "Time budget expired");
+  assert.equal(result.body, warning);
 });
 
 test("supervisor removes lifecycle listeners after child settles", async () => {
@@ -83,13 +110,14 @@ test("supervisor removes lifecycle listeners after child settles", async () => {
     agentName: "scout",
     command: {
       command: process.execPath,
-      args: ["-e", "process.exit(0);"],
+      args: ["-e", "console.log('successful child summary');"],
       cwd,
       env: {},
     },
   });
 
   assert.equal(result.state, "completed");
+  assert.equal(result.summary, "successful child summary");
   for (const signal of signals) {
     assert.equal(process.listenerCount(signal), before.get(signal));
   }
