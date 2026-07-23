@@ -19,7 +19,6 @@ import codexUsageExtension, {
 	renderStatsLine,
 	renderTopLine,
 	stripAnsi,
-	tasksSegment,
 	threshold,
 	parseCodexUsage,
 	redactCodexAccountLabel,
@@ -41,7 +40,6 @@ function makeState(overrides: Partial<FooterRenderState> = {}): FooterRenderStat
 		providerCount: 2,
 		thinking: "medium",
 		fast: false,
-		tasksEnabled: true,
 		ctxPct: 12,
 		ctxUsed: 33_000,
 		ctxWindow: 272_000,
@@ -447,11 +445,9 @@ test("renderFooter handles unknown context (post-compaction)", () => {
 	assert.ok(stripAnsi(lines[1]).includes("?%"));
 });
 
-test("renderTopLine includes sticky async task mode badge", () => {
-	assert.equal(stripAnsi(tasksSegment(true)), "tasks:on");
-	assert.equal(stripAnsi(tasksSegment(false)), "tasks:off");
-	assert.ok(stripAnsi(renderTopLine(120, makeState({ tasksEnabled: true }))).includes("tasks:on"));
-	assert.ok(stripAnsi(renderTopLine(120, makeState({ tasksEnabled: false }))).includes("tasks:off"));
+test("tasks status is rendered only through the generic extension-status lane", () => {
+	assert.ok(!stripAnsi(renderTopLine(120, makeState())).includes("tasks:"));
+	assert.equal(stripAnsi(renderStatsLine(120, makeState({ codex: null }), ["tasks:on"])).match(/tasks:on/g)?.length, 1);
 });
 
 test("installed footer render uses cached state until invalidated", async () => {
