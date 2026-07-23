@@ -415,6 +415,33 @@ test("renderFooter still emits two lines when codex data is missing", () => {
 	assert.ok(!stats.includes("wk"));
 });
 
+test("renderStatsLine renders extension statuses in producer insertion order and preserves ANSI", () => {
+	const first = "\x1b[38;2;229;181;72m? questions\x1b[0m";
+	const second = "\x1b[1mchild running\x1b[0m";
+	const line = renderStatsLine(160, makeState({ codex: null }), [first, second]);
+	assert.ok(line.includes(first));
+	assert.ok(line.includes(second));
+	assert.ok(line.indexOf(first) < line.indexOf(second));
+	assert.equal(visWidth(first), 11);
+	assert.ok(visWidth(line) <= 160);
+});
+
+test("renderStatsLine greedily drops and ANSI-safely truncates statuses at narrow widths", () => {
+	const first = "\x1b[33mfirst-status-that-is-long\x1b[0m";
+	const second = "\x1b[35msecond-status\x1b[0m";
+	for (const width of [40, 50, 60]) {
+		const line = renderStatsLine(width, makeState({ codex: null }), [first, second]);
+		assert.ok(visWidth(line) <= width, `status line too wide at ${width}`);
+		assert.ok(stripAnsi(line).includes("ctx"), "context must remain protected");
+		assert.ok(!stripAnsi(line).includes("second-status"), "later status should drop first");
+		if (width === 60) {
+			assert.ok(stripAnsi(line).includes("first-"), "first status should truncate into remaining space");
+			assert.ok(line.includes("\x1b[33m"), "producer ANSI styling should survive truncation");
+		}
+		assert.ok(!line.endsWith("\x1b["), "must not cut an ANSI sequence");
+	}
+});
+
 test("renderFooter handles unknown context (post-compaction)", () => {
 	const lines = renderFooter(makeState({ ctxKnown: false, ctxPct: 0, ctxUsed: 0 }), 94);
 	assert.ok(stripAnsi(lines[1]).includes("?%"));
@@ -459,6 +486,7 @@ test("installed footer render uses cached state until invalidated", async () => 
 	let providerCountCalls = 0;
 	const footerData = {
 		getGitBranch: () => { branchCalls += 1; return "main"; },
+		getExtensionStatuses: () => new Map(),
 		getAvailableProviderCount: () => { providerCountCalls += 1; return 2; },
 		onBranchChange: () => () => undefined,
 	};
@@ -473,6 +501,42 @@ test("installed footer render uses cached state until invalidated", async () => 
 	assert.equal(branchCalls, 2);
 	assert.equal(providerCountCalls, 2);
 
+	component.dispose?.();
+	await handlers.get("session_shutdown")?.({}, ctx);
+});
+
+test("installed footer reads live status map on every render without invalidation", async () => {
+	const handlers = new Map<string, Function>();
+	let footerFactory: Function | undefined;
+	codexUsageExtension({
+		on: (event: string, handler: Function) => { handlers.set(event, handler); },
+		registerCommand() {},
+		getThinkingLevel: () => "off",
+	} as any);
+	const ctx = {
+		hasUI: true,
+		cwd: process.cwd(),
+		model: { id: "other", provider: "test", contextWindow: 1000 },
+		getContextUsage: () => ({ percent: 10, tokens: 100, contextWindow: 1000 }),
+		sessionManager: { getSessionId: () => "status-live", getSessionName: () => null, getEntries: () => [] },
+		modelRegistry: { isUsingOAuth: () => false },
+		ui: { setFooter: (factory: Function | undefined) => { footerFactory = factory; } },
+	} as any;
+	await handlers.get("session_start")?.({}, ctx);
+	const statuses = new Map<string, string>();
+	const component = footerFactory!({ requestRender() {} }, {}, {
+		getGitBranch: () => "main",
+		getExtensionStatuses: () => statuses,
+		getAvailableProviderCount: () => 1,
+		onBranchChange: () => () => undefined,
+	});
+	assert.ok(!stripAnsi(component.render(120)[1]).includes("waiting input"));
+	statuses.set("questions", "\x1b[33m? waiting input\x1b[0m");
+	assert.ok(component.render(120)[1].includes("\x1b[33m? waiting input\x1b[0m"));
+	statuses.set("child", "child active");
+	assert.ok(stripAnsi(component.render(120)[1]).indexOf("waiting input") < stripAnsi(component.render(120)[1]).indexOf("child active"));
+	statuses.delete("questions");
+	assert.ok(!stripAnsi(component.render(120)[1]).includes("waiting input"));
 	component.dispose?.();
 	await handlers.get("session_shutdown")?.({}, ctx);
 });

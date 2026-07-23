@@ -22,7 +22,7 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
-import type { Component, TUI } from "@earendil-works/pi-tui";
+import { truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
 // ── codex usage via Codex auth balancer cache ──────────────────────────────
 
@@ -542,12 +542,14 @@ function codexAccountPrimarySegment(
 	return ` ${c.dim}5h${R} ${bar(remainingPct, barW, col)} ${col}${Math.round(remainingPct)}%${R}${resetIn ? `${c.dim}/${resetIn}${R}` : ""}`;
 }
 
-export function renderStatsLine(width: number, s: FooterRenderState): string {
+export function renderStatsLine(width: number, s: FooterRenderState, extensionStatuses: readonly string[] = []): string {
 	const { ctxBar, codexBar } = pickLayoutWidths(width);
 
 	const parts: string[] = [ctxSegment(s.ctxPct, s.ctxUsed, s.ctxWindow, ctxBar, s.ctxKnown)];
 	const costSeg = costSegment(s.cost, s.sub);
 	if (costSeg) parts.push(costSeg);
+	const protectedPartCount = parts.length;
+	parts.push(...extensionStatuses);
 
 	if (s.codex) {
 		if (!s.codex.accounts && (s.codex.primary != null || s.codex.secondary != null)) {
@@ -592,20 +594,25 @@ export function renderStatsLine(width: number, s: FooterRenderState): string {
 
 	const gutter = `${c.dim}   ${R}`;
 	let line = parts.join(gutter);
-	while (visWidth(line) > width && parts.length > 1) {
+	const overflowed = visWidth(line) > width;
+	while (visWidth(line) > width && parts.length > protectedPartCount) {
 		parts.pop();
 		line = parts.join(gutter);
 	}
+	if (overflowed && parts.length === protectedPartCount && extensionStatuses.length > 0) {
+		const protectedLine = parts.join(gutter);
+		const available = width - visWidth(protectedLine) - visWidth(gutter);
+		if (available > 0) line = `${protectedLine}${gutter}${truncateToWidth(extensionStatuses[0], available)}`;
+	}
 	if (visWidth(line) > width) {
-		// Last resort: hard truncate the plain text.
-		const plain = stripAnsi(line);
-		line = `${c.dim}${truncEnd(plain, width)}${R}`;
+		// Last resort protects the context prefix even when the terminal is tiny.
+		line = `${c.dim}${truncEnd(stripAnsi(line), width)}${R}`;
 	}
 	return line;
 }
 
-export function renderFooter(state: FooterRenderState, width: number): string[] {
-	return [renderTopLine(width, state), renderStatsLine(width, state)];
+export function renderFooter(state: FooterRenderState, width: number, extensionStatuses: readonly string[] = []): string[] {
+	return [renderTopLine(width, state), renderStatsLine(width, state, extensionStatuses)];
 }
 
 // ── state collection from ExtensionContext ─────────────────────────────────
@@ -952,7 +959,8 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 
 			const component: Component & { dispose?(): void } = {
 				render(width: number): string[] {
-					return renderFooter(cachedFooterState ?? fallbackFooterState(ctx), Math.max(20, width));
+					const statuses = [...footerData.getExtensionStatuses().values()];
+					return renderFooter(cachedFooterState ?? fallbackFooterState(ctx), Math.max(20, width), statuses);
 				},
 				invalidate(): void {
 					refreshCachedFooterState(ctx);
