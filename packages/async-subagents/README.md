@@ -156,6 +156,8 @@ Eligibility is fail-safe:
 
 Applied launches inject the package-owned `extensions/child-fast-track` child extension, which sets `service_tier: "priority"` in `before_provider_request`. Status/result metadata, launch logs, launch/result cards, and the live widget expose fast-track state for auditability.
 
+Fast-track is sticky for the lifetime of the child lineage. Resuming a paused run keeps the same process and launch configuration. Continuing a terminal run creates a new process over the recorded Pi session and inherits fast-track when the prior run actually had it applied, even if `/fast-track` has since been disarmed. Runs where fast-track was merely requested but not applied do not inherit it.
+
 ## Codex auth balancer
 
 When the balancer is enabled, every Codex-backed child launch is routed through the
@@ -326,7 +328,7 @@ Continue useful unfinished work from the recorded session by calling `subagent_c
 - `subagent_result`: canonical backup/recovery read of terminal `result.json`; use for truncated wakeups, artifacts, metadata, or reread, and to mark terminal delivery handled.
 - `subagent_message`: send normal parent input only (`instruction`, `answer`, `context`).
 - `subagent_interrupt`: pause or cancel an active child.
-- `subagent_continue`: resume an explicitly parent-paused child, optionally with `additionalRunSeconds`, or create a continuation from a terminal run's recorded session (including budget-expired runs). Its repeatable `files` input widens a specified scope additively and never narrows or removes prior entries. Runs without a specified scope reject `files`; continue them without `files` or start a new scoped run. Omitting `files` preserves the existing scope.
+- `subagent_continue`: resume an explicitly parent-paused child, optionally with `additionalRunSeconds`, or create a continuation from a terminal run's recorded session (including budget-expired runs). A terminal continuation inherits fast-track only when it was applied to the prior run; callers do not need or receive a `fastTrack` parameter. Its repeatable `files` input widens a specified scope additively and never narrows or removes prior entries. Runs without a specified scope reject `files`; continue them without `files` or start a new scoped run. Omitting `files` preserves the existing scope.
 
 Allowed-file scope is a durable contract enforced through status, task prompts, and inbox amendments. Paths must be non-empty, single-line strings. This is not OS-level sandboxing or filesystem permission enforcement.
 

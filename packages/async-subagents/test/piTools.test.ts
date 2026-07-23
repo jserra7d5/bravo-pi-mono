@@ -288,7 +288,15 @@ test("subagent_continue queues resume control even when required ack fails", asy
   const w = workspace();
   const store = new RunStore({ cwd: w.root });
   const status = store.readStatus(w.runId);
-  store.writeStatus({ ...status, state: "paused", pid: process.pid, processHealth: "alive", thinkingLevel: "low", allowedFiles: ["src/original.ts"] });
+  store.writeStatus({
+    ...status,
+    state: "paused",
+    pid: process.pid,
+    processHealth: "alive",
+    thinkingLevel: "low",
+    allowedFiles: ["src/original.ts"],
+    fastTrack: { requested: true, enabled: true, applied: true, serviceTier: "priority" },
+  });
   const built = tools(w.identity);
   const result = await built.subagent_continue.execute("call", { runId: w.runId, thinkingLevel: "high", body: "Finish the implementation", files: ["src/new.ts", "src/original.ts", "src/new.ts"] }, undefined, undefined, { cwd: w.root });
 
@@ -298,6 +306,7 @@ test("subagent_continue queues resume control even when required ack fails", asy
   assert.equal(result.details.thinkingLevel, "high");
   assert.equal(store.readStatus(w.runId).state, "paused");
   assert.equal(store.readStatus(w.runId).thinkingLevel, "low");
+  assert.equal(store.readStatus(w.runId).fastTrack?.applied, true);
   assert.deepEqual(store.readStatus(w.runId).allowedFiles, ["src/original.ts", "src/new.ts"]);
   const inboxMessage = store.readInbox(w.runId).records.at(-1);
   assert.equal(inboxMessage?.thinkingLevel, "high");
@@ -376,11 +385,13 @@ test("subagent_continue creates an async terminal continuation using the origina
     requestedPiSessionPath: join(store.pathsFor({ runId: w.runId }).runDir, "pi-session", "session.jsonl"),
     thinkingLevel: "low",
     allowedFiles: ["src/original.ts", "src/shared.ts"],
+    agent: { ...original.agent, name: "worker" },
+    fastTrack: { requested: true, enabled: true, applied: true, serviceTier: "priority" },
   });
   store.writeResult(createRunResult({
     runId: w.runId,
     parentRunId: w.identity.parentRunId,
-    agentName: "scout",
+    agentName: "worker",
     thinkingLevel: "low",
     state: "completed",
     summary: "Original done",
@@ -407,6 +418,7 @@ test("subagent_continue creates an async terminal continuation using the origina
   assert.equal(result.details.continuationOfPiSessionPath, originalSession);
   assert.equal(Object.hasOwn(calls[0] as Record<string, unknown>, "startMode"), false);
   assert.deepEqual((calls[0] as { files?: string[] }).files, ["src/original.ts", "src/shared.ts", "src/retry.ts"]);
+  assert.equal((calls[0] as { inheritedFastTrack?: boolean }).inheritedFastTrack, true);
 
   const newRunId = result.details.runId as string;
   assert.notEqual(newRunId, w.runId);
@@ -417,6 +429,7 @@ test("subagent_continue creates an async terminal continuation using the origina
   assert.equal(continuation.continuationOfPiSessionPath, originalSession);
   assert.equal(continuation.piSessionPath, originalSession);
   assert.deepEqual(continuation.allowedFiles, ["src/original.ts", "src/shared.ts", "src/retry.ts"]);
+  assert.equal(continuation.fastTrack?.applied, true);
   assert.equal(store.readResult(newRunId)?.continuedFromRunId, w.runId);
   const continuationTask = readFileSync(join(store.pathsFor({ runId: newRunId }).artifactsDir, "task.md"), "utf8");
   assert.match(continuationTask, /# Write Scope\n\n[^#]*- src\/original\.ts\n- src\/shared\.ts\n- src\/retry\.ts/);
@@ -424,6 +437,8 @@ test("subagent_continue creates an async terminal continuation using the origina
   const launch = JSON.parse(readFileSync(join(store.pathsFor({ runId: newRunId }).runDir, "logs", "launch.json"), "utf8"));
   assert.deepEqual(launch.args.slice(launch.args.indexOf("--session"), launch.args.indexOf("--session") + 2), ["--session", originalSession]);
   assert.equal(launch.continuation.continuedFromRunId, w.runId);
+  assert.equal(launch.fastTrack.applied, true);
+  assert.ok(launch.extensions.some((entry: string) => entry.endsWith("extensions/child-fast-track/index.ts")));
 
   const second = await byName.subagent_continue.execute("second", { runId: newRunId, body: "Continue again" }, undefined, undefined, { cwd: w.root });
   assert.equal(second.isError, undefined);

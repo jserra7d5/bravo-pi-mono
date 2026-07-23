@@ -67,6 +67,8 @@ export interface StartSubagentInput {
   fake?: StartFakeImmediateInput | StartFakeChildInput;
   taskAssignment?: { task: TaskRecord; dependencies?: TaskRecord[] };
   fastTrack?: boolean;
+  /** Internal continuation authorization: preserve priority for a run whose prior launch applied fast-track. */
+  inheritedFastTrack?: boolean;
 }
 
 export function normalizeAllowedFilePaths(files: string[] | undefined): string[] | undefined {
@@ -657,7 +659,9 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   const maxRunSeconds = definition.maxRunSeconds ?? asyncSubagentsConfig.defaultMaxRunSeconds;
   if (!Number.isFinite(maxRunSeconds) || maxRunSeconds <= 0) throw new SubagentError("INVALID_AGENT_DEFINITION", "maxRunSeconds must be a positive finite number");
   const effectiveMaxRunMs = Math.ceil(maxRunSeconds * 1000);
-  const fastTrack = evaluateFastTrack({ requested: input.fastTrack, enabled: readFastTrackState(store.runRoot, root.rootSessionId).enabled, agentName: definition.name, model: definition.model });
+  const fastTrack = input.inheritedFastTrack === true
+    ? { requested: true, enabled: true, applied: true, serviceTier: "priority" as const }
+    : evaluateFastTrack({ requested: input.fastTrack, enabled: readFastTrackState(store.runRoot, root.rootSessionId).enabled, agentName: definition.name, model: definition.model });
   if (fastTrack.applied && !existsSync(childFastTrackExtensionPath)) throw new SubagentError("FAST_TRACK_EXTENSION_MISSING", `fast-track child extension is missing: ${childFastTrackExtensionPath}`);
 
   const initialStatus = createInitialStatus({

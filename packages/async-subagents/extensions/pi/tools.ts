@@ -618,6 +618,7 @@ async function startTerminalContinuation(input: {
         ASYNC_SUBAGENTS_PARENT_RUN_ID: input.root.parentRunId,
       },
       thinkingLevel: isThinkingLevel(input.params.thinkingLevel) ? input.params.thinkingLevel : input.status.thinkingLevel,
+      inheritedFastTrack: input.status.fastTrack?.applied === true,
     });
     const notifyOn = Array.isArray(input.params.notifyOn) ? (input.params.notifyOn.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined;
     writeDeliverySubscription(input.store, {
