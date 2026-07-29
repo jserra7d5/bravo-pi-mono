@@ -4,7 +4,10 @@ import { ASYNC_SUBAGENTS_PROMPT_MODULE, appendAsyncSubagentsPrompt } from "../ex
 
 test("async subagents prompt module establishes neutral lifecycle rules", () => {
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /first-party interface/);
-  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /thinking override/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /Omit `thinkingLevel` by default for every role/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /narrow, named reasoning bottleneck/);
+  assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /high reasoning as a scarce exception/);
+  assert.doesNotMatch(ASYNC_SUBAGENTS_PROMPT_MODULE, /raise it for high-risk/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /source-of-truth artifacts/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /async wakeups/);
   assert.match(ASYNC_SUBAGENTS_PROMPT_MODULE, /subagent_status/);
