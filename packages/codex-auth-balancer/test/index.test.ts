@@ -8,12 +8,40 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { cleanupLaunch, finishTokenLease, getDbStatus, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, isProcessAlive, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, shouldStealRefreshLock, startTokenLease, syncBack, unbrickSlot } from '../src/index.js';
+import { PROACTIVE_REFRESH_LEAD_MS, cleanupLaunch, ensureFreshTokens, finishTokenLease, getDbStatus, getSlotTokenHealth, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, isProcessAlive, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, shouldStealRefreshLock, startTokenLease, syncBack, unbrickSlot } from '../src/index.js';
 import codexBalancedProvider, { getBalancedCodexModels, loadHostingPiAiRuntime, mapBalancedCodexModels, resolveHostingPiPackageRoot } from '../extensions/pi/index.js';
-import { getModels } from '@earendil-works/pi-ai';
-import { openaiCodexOAuthProvider } from '@earendil-works/pi-ai/oauth';
+import { getModels } from '@earendil-works/pi-ai/compat';
 
 const exec = promisify(execFile);
+
+// ── refresh seam ───────────────────────────────────────────────────────────
+// The balancer owns the token exchange, so its true boundary is the wire.
+// Stubbing fetch runs the REAL refreshCodexToken — endpoint URL, form body,
+// status handling, response-field validation, and the exact error strings
+// classifyOAuthRefreshError keys off — plus every caller above it.
+//
+// The previous seam faked openaiCodexOAuthProvider.refreshToken, handing the
+// lease path a pre-correct credential and exercising none of that. It is also
+// why a dead import went unnoticed for ten days: a test that replaces the
+// symbol it is meant to be testing cannot notice the symbol is undefined.
+type TokenStub = { restore(): void; readonly calls: URLSearchParams[] };
+function stubTokenEndpoint(handler: (body: URLSearchParams) => Response | Promise<Response>): TokenStub {
+  const original = globalThis.fetch;
+  const calls: URLSearchParams[] = [];
+  (globalThis as any).fetch = async (url: unknown, init: any) => {
+    assert.equal(String(url), 'https://auth.openai.com/oauth/token', 'refresh must hit the Codex token endpoint');
+    const body = new URLSearchParams(String(init?.body ?? ''));
+    assert.equal(body.get('grant_type'), 'refresh_token');
+    assert.ok(body.get('client_id'), 'refresh must send a client_id');
+    calls.push(body);
+    return handler(body);
+  };
+  return { restore: () => { (globalThis as any).fetch = original; }, calls };
+}
+const tokenOk = (access: string, refresh: string, expiresInSeconds = 3600) =>
+  new Response(JSON.stringify({ access_token: access, refresh_token: refresh, expires_in: expiresInSeconds }), { status: 200, headers: { 'content-type': 'application/json' } });
+const tokenHttpError = (status: number, body: string) => new Response(body, { status });
+const invalidGrant = () => tokenHttpError(400, '{"error":"invalid_grant"}');
 async function tmp() { return fs.mkdtemp(path.join(os.tmpdir(), 'cab-')); }
 async function writeJson(p: string, v: unknown) { await fs.mkdir(path.dirname(p), { recursive: true }); await fs.writeFile(p, JSON.stringify(v)); }
 function fakeCodexJwt(accountId = 'acct-test', expSeconds?: number): string {
@@ -753,16 +781,17 @@ test('startTokenLease refreshes near-expired OAuth credentials before leasing', 
   await writeJson(path.join(root, 'accounts', 'refresh', 'pi-openai-codex.json'), { access: 'old-access-token', refresh: 'refresh-token', expires: Date.now() + 10 });
   await writeJson(path.join(root, 'accounts', 'refresh', 'auth.json'), { access_token: 'codex-token', expiry_date: Date.now() + 60_000 });
   const refreshedToken = fakeCodexJwt('acct-1', 3600);
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => ({ type: 'oauth', access: refreshedToken, refresh: 'new-refresh-token', expires: Date.now() + 60_000, accountId: 'acct-1' });
+  const stub = stubTokenEndpoint(() => tokenOk(refreshedToken, 'new-refresh-token', 60));
   try {
     const lease = await startTokenLease({ stateRoot: root, provider: 'bravo-codex-balanced', model: 'bravo-codex-balanced/fake', purpose: 'pi-provider-request', expected_runtime_ms: 1000, ttl_safety_buffer_ms: 1000, preferred_slot: 'refresh' });
     assert.equal(lease.access_token, refreshedToken);
+    // The stale refresh token on disk is what gets sent, and the rotated one is persisted.
+    assert.equal(stub.calls[0]?.get('refresh_token'), 'refresh-token');
     const stored = JSON.parse(await fs.readFile(path.join(root, 'accounts', 'refresh', 'pi-openai-codex.json'), 'utf8'));
     assert.equal(stored.access, refreshedToken);
     assert.equal(stored.refresh, 'new-refresh-token');
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
 });
 
@@ -837,12 +866,11 @@ function latestFailedDetails(root: string, reservationId: string | undefined): a
 test('startTokenLease marks slot broken on invalid_grant refresh failure and stops selecting it', async () => {
   const root = await tmp();
   await seedRefreshSlot(root, 'broke');
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}'); };
+  const stub = stubTokenEndpoint(invalidGrant);
   try {
     await assert.rejects(startTokenLease(leaseArgs(root, 'broke')), /selected slot access token refresh failed/);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
   const usage = await getUsage({ stateRoot: root });
   const slot = usage.accounts.find(a => a.slot === 'broke');
@@ -860,18 +888,17 @@ test('startTokenLease recovers from a concurrent rotation: invalid_grant but a f
   await seedRefreshSlot(root, 'race');
   const slotAuth = path.join(root, 'accounts', 'race', 'pi-openai-codex.json');
   const freshJwt = fakeCodexJwt('acct-1', 3600);
-  const original = openaiCodexOAuthProvider.refreshToken;
   // Simulate a concurrent pi-balanced child that rotated our token and synced the fresh
   // credential to disk BEFORE our refresh of the stale token returns invalid_grant.
-  (openaiCodexOAuthProvider as any).refreshToken = async () => {
+  const stub = stubTokenEndpoint(async () => {
     await writeJson(slotAuth, { access: freshJwt, refresh: 'r1', expires: Date.now() + 3_600_000 });
-    throw new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}');
-  };
+    return invalidGrant();
+  });
   try {
     const lease = await startTokenLease(leaseArgs(root, 'race'));
     assert.equal(lease.access_token, freshJwt);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
   const slot = (await getUsage({ stateRoot: root })).accounts.find(a => a.slot === 'race');
   assert.notEqual(slot?.status, 'broken');
@@ -882,22 +909,20 @@ test('startTokenLease does NOT chain-retry with a rotated refresh token (reuse-s
   await seedRefreshSlot(root, 'advance');
   const slotAuth = path.join(root, 'accounts', 'advance', 'pi-openai-codex.json');
   await writeJson(slotAuth, { access: 'old-access-token', refresh: 'r0', expires: Date.now() + 10 });
-  let calls = 0;
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async (cred: any) => {
-    calls += 1;
+  const stub = stubTokenEndpoint(async () => {
     // A concurrent process rotated r0 -> r1 on disk but left NO usable access token. Replaying/
     // advancing to r1 could trip OpenAI refresh-token reuse detection and invalidate the whole
     // family, so we must NOT try it: recovery only adopts a usable access token, never another refresh.
     await writeJson(slotAuth, { access: 'old-access-token', refresh: 'r1', expires: Date.now() + 10 });
-    throw new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}');
-  };
+    return invalidGrant();
+  });
   try {
     await assert.rejects(startTokenLease(leaseArgs(root, 'advance')), /selected slot access token refresh failed/);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
-  assert.equal(calls, 1); // tried r0 exactly once; never retried with the rotated r1
+  assert.equal(stub.calls.length, 1); // tried r0 exactly once; never retried with the rotated r1
+  assert.equal(stub.calls[0]?.get('refresh_token'), 'r0');
   const slot = (await getUsage({ stateRoot: root })).accounts.find(a => a.slot === 'advance');
   assert.equal(slot?.status, 'broken');
 });
@@ -905,13 +930,12 @@ test('startTokenLease does NOT chain-retry with a rotated refresh token (reuse-s
 test('startTokenLease still bricks on invalid_grant when the on-disk token never advances (genuinely dead)', async () => {
   const root = await tmp();
   await seedRefreshSlot(root, 'dead');
-  const original = openaiCodexOAuthProvider.refreshToken;
   // Always invalid_grant and never mutate the file: the token cannot advance, so no recovery.
-  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}'); };
+  const stub = stubTokenEndpoint(invalidGrant);
   try {
     await assert.rejects(startTokenLease(leaseArgs(root, 'dead')), /selected slot access token refresh failed/);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
   const slot = (await getUsage({ stateRoot: root })).accounts.find(a => a.slot === 'dead');
   assert.equal(slot?.status, 'broken');
@@ -922,13 +946,12 @@ test('startTokenLease atomic write leaves no temp files behind', async () => {
   const root = await tmp();
   await seedRefreshSlot(root, 'atomic');
   const freshJwt = fakeCodexJwt('acct-1', 3600);
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => ({ type: 'oauth', access: freshJwt, refresh: 'new-refresh-token', expires: Date.now() + 3_600_000, accountId: 'acct-1' });
+  const stub = stubTokenEndpoint(() => tokenOk(freshJwt, 'new-refresh-token'));
   try {
     const lease = await startTokenLease(leaseArgs(root, 'atomic'));
     assert.equal(lease.access_token, freshJwt);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
   const slotDir = path.join(root, 'accounts', 'atomic');
   const entries = await fs.readdir(slotDir);
@@ -940,35 +963,33 @@ test('startTokenLease atomic write leaves no temp files behind', async () => {
 test('startTokenLease does not break slot on transient refresh failure', async () => {
   const root = await tmp();
   await seedRefreshSlot(root, 'flap');
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error('OpenAI Codex token refresh failed (503): upstream'); };
+  const failing = stubTokenEndpoint(() => tokenHttpError(503, 'upstream'));
   try {
     await assert.rejects(startTokenLease(leaseArgs(root, 'flap')), /selected slot access token refresh failed/);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    failing.restore();
   }
   const usage = await getUsage({ stateRoot: root });
   const slot = usage.accounts.find(a => a.slot === 'flap');
   assert.notEqual(slot?.status, 'broken');
   // Still selectable: refresh now succeeds and the slot leases.
-  (openaiCodexOAuthProvider as any).refreshToken = async () => ({ type: 'oauth', access: fakeCodexJwt('acct-1', 3600), refresh: 'new-refresh-token', expires: Date.now() + 60_000, accountId: 'acct-1' });
+  const healthy = stubTokenEndpoint(() => tokenOk(fakeCodexJwt('acct-1', 3600), 'new-refresh-token', 60));
   try {
     const lease = await startTokenLease(leaseArgs(root, 'flap'));
     assert.equal(lease.slot, 'flap');
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    healthy.restore();
   }
 });
 
 test('startTokenLease records real error_kind in telemetry on hard failure', async () => {
   const root = await tmp();
   await seedRefreshSlot(root, 'tele');
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}'); };
+  const stub = stubTokenEndpoint(invalidGrant);
   try {
     await assert.rejects(startTokenLease(leaseArgs(root, 'tele')), /selected slot access token refresh failed/);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
   const reservation = (await listReservations({ stateRoot: root, includeInactive: true })).find(r => r.state === 'failed');
   assert.ok(reservation, 'expected a failed reservation');
@@ -980,12 +1001,13 @@ test('startTokenLease redacts secrets from recorded refresh failure details', as
   const root = await tmp();
   await seedRefreshSlot(root, 'redact');
   const jwt = 'eyJabc.eyJdef.sigghi';
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error(`refresh blew up token=${jwt} Bearer sk-secret`); };
+  // The upstream error body is echoed into the message verbatim, so a provider
+  // that reflects a token back at us is a real way secrets reach the event log.
+  const stub = stubTokenEndpoint(() => tokenHttpError(400, `refresh blew up token=${jwt} Bearer sk-secret`));
   try {
     await assert.rejects(startTokenLease(leaseArgs(root, 'redact')), /selected slot access token refresh failed/);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
   const reservation = (await listReservations({ stateRoot: root, includeInactive: true })).find(r => r.state === 'failed');
   const details = latestFailedDetails(root, reservation?.id);
@@ -998,38 +1020,36 @@ test('startTokenLease redacts secrets from recorded refresh failure details', as
 test('startTokenLease preserves the generic refresh failure error message contract', async () => {
   const root = await tmp();
   await seedRefreshSlot(root, 'contract');
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}'); };
+  const stub = stubTokenEndpoint(invalidGrant);
   try {
     await startTokenLease(leaseArgs(root, 'contract'));
     assert.fail('expected startTokenLease to reject');
   } catch (error) {
     assert.equal((error as Error).message, 'selected slot access token refresh failed');
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
 });
 
 test('unbrickSlot clears broken status and makes the slot selectable again', async () => {
   const root = await tmp();
   await seedRefreshSlot(root, 'fixme');
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => { throw new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}'); };
+  const broken = stubTokenEndpoint(invalidGrant);
   try {
     await assert.rejects(startTokenLease(leaseArgs(root, 'fixme')), /selected slot access token refresh failed/);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    broken.restore();
   }
   assert.equal((await getUsage({ stateRoot: root })).accounts.find(a => a.slot === 'fixme')?.status, 'broken');
   unbrickSlot(root, 'fixme');
   assert.equal((await getUsage({ stateRoot: root })).accounts.find(a => a.slot === 'fixme')?.status, 'unknown');
   // Re-auth happened out of band; a healthy refresh now leases the slot.
-  (openaiCodexOAuthProvider as any).refreshToken = async () => ({ type: 'oauth', access: fakeCodexJwt('acct-1', 3600), refresh: 'new-refresh-token', expires: Date.now() + 60_000, accountId: 'acct-1' });
+  const healthy = stubTokenEndpoint(() => tokenOk(fakeCodexJwt('acct-1', 3600), 'new-refresh-token', 60));
   try {
     const lease = await startTokenLease(leaseArgs(root, 'fixme'));
     assert.equal(lease.slot, 'fixme');
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    healthy.restore();
   }
 });
 
@@ -1038,16 +1058,14 @@ test('startTokenLease leases pass-through a valid claim-bearing token without re
   const token = fakeCodexJwt('acct-1', 3600);
   await writeJson(path.join(root, 'accounts', 'passthru', 'pi-openai-codex.json'), { access: token, refresh: 'refresh-token', expires: Date.now() + 3_600_000 });
   await writeJson(path.join(root, 'accounts', 'passthru', 'auth.json'), { access_token: 'codex-token', expiry_date: Date.now() + 3_600_000 });
-  const original = openaiCodexOAuthProvider.refreshToken;
-  let refreshCalled = false;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => { refreshCalled = true; throw new Error('refresh should not be called for a claim-bearing token'); };
+  const stub = stubTokenEndpoint(() => { throw new Error('refresh should not be called for a claim-bearing token'); });
   try {
     const lease = await startTokenLease(leaseArgs(root, 'passthru'));
-    assert.equal(refreshCalled, false);
+    assert.equal(stub.calls.length, 0);
     assert.equal(lease.access_token, token);
     assert.equal(lease.slot, 'passthru');
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
 });
 
@@ -1057,17 +1075,15 @@ test('startTokenLease refreshes a not-yet-expired but claimless cached token', a
   // auth.json must exist for the slot to be discovered by scanInternalAccounts; the lease reads piAuthPath (pi-openai-codex.json) first.
   await writeJson(path.join(root, 'accounts', 'claimless', 'auth.json'), { access_token: fakeClaimlessJwt(3600), expiry_date: Date.now() + 3_600_000 });
   const refreshed = fakeCodexJwt('acct-1', 3600);
-  const original = openaiCodexOAuthProvider.refreshToken;
-  let refreshCalled = false;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => { refreshCalled = true; return { type: 'oauth', access: refreshed, refresh: 'r2', expires: Date.now() + 3_600_000, accountId: 'acct-1' }; };
+  const stub = stubTokenEndpoint(() => tokenOk(refreshed, 'r2'));
   try {
     const lease = await startTokenLease(leaseArgs(root, 'claimless'));
-    assert.equal(refreshCalled, true);
+    assert.equal(stub.calls.length, 1);
     assert.equal(lease.access_token, refreshed);
     const slot = (await getUsage({ stateRoot: root })).accounts.find(a => a.slot === 'claimless');
     assert.notEqual(slot?.status, 'broken');
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
 });
 
@@ -1077,12 +1093,11 @@ test('startTokenLease marks slot broken + fails when refresh still yields a clai
   // auth.json must exist for the slot to be discovered by scanInternalAccounts; the lease reads piAuthPath (pi-openai-codex.json) first.
   await writeJson(path.join(root, 'accounts', 'stillclaimless', 'auth.json'), { access_token: fakeClaimlessJwt(3600), expiry_date: Date.now() + 3_600_000 });
   await writeJson(path.join(root, 'accounts', 'good', 'auth.json'), { access_token: fakeCodexJwt('acct-good', 3600), expiry_date: Date.now() + 3_600_000 });
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => ({ type: 'oauth', access: fakeClaimlessJwt(3600), refresh: 'r2', expires: Date.now() + 3_600_000, accountId: 'acct-1' });
+  const stub = stubTokenEndpoint(() => tokenOk(fakeClaimlessJwt(3600), 'r2'));
   try {
     await assert.rejects(startTokenLease(leaseArgs(root, 'stillclaimless')), /selected slot access token refresh failed/);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
   const slot = (await getUsage({ stateRoot: root })).accounts.find(a => a.slot === 'stillclaimless');
   assert.equal(slot?.status, 'broken');
@@ -1145,16 +1160,13 @@ test('withRefreshLock serializes two concurrent refreshes for the same slot (loc
   await seedRefreshSlot(root, 'serialize');
   const slotAuth = path.join(root, 'accounts', 'serialize', 'pi-openai-codex.json');
   const freshJwt = fakeCodexJwt('acct-1', Math.floor((Date.now() + 3_600_000) / 1000));
-  let refreshCount = 0;
-  const original = openaiCodexOAuthProvider.refreshToken;
-  // Each refresh: count it, await a small delay (forces the two leases to overlap inside the
+  // Each exchange: await a small delay (forces the two leases to overlap inside the
   // lock window), then WRITE the fresh far-future token to disk like the real refresh path does.
-  (openaiCodexOAuthProvider as any).refreshToken = async () => {
-    refreshCount += 1;
+  const stub = stubTokenEndpoint(async () => {
     await new Promise(r => setTimeout(r, 50));
     await writeJson(slotAuth, { access: freshJwt, refresh: 'r1', expires: Date.now() + 3_600_000 });
-    return { type: 'oauth', access: freshJwt, refresh: 'r1', expires: Date.now() + 3_600_000, accountId: 'acct-1' };
-  };
+    return tokenOk(freshJwt, 'r1');
+  });
   try {
     // Both promises created before any await so they genuinely race for the same lock.
     const p1 = startTokenLease(leaseArgs(root, 'serialize'));
@@ -1163,9 +1175,9 @@ test('withRefreshLock serializes two concurrent refreshes for the same slot (loc
     assert.equal(a.access_token, freshJwt);
     assert.equal(b.access_token, freshJwt);
     // The lock serialized them: the 2nd acquirer re-read the now-fresh token and skipped refresh.
-    assert.equal(refreshCount, 1);
+    assert.equal(stub.calls.length, 1);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
 });
 
@@ -1179,14 +1191,13 @@ test('withRefreshLock steals a stale lock whose owner pid is dead', async () => 
   const old = new Date(Date.now() - 120_000);
   await fs.utimes(lockDir, old, old);
   const freshJwt = fakeCodexJwt('acct-1', Math.floor((Date.now() + 3_600_000) / 1000));
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => ({ type: 'oauth', access: freshJwt, refresh: 'r1', expires: Date.now() + 3_600_000, accountId: 'acct-1' });
+  const stub = stubTokenEndpoint(() => tokenOk(freshJwt, 'r1'));
   try {
     const lease = await startTokenLease(leaseArgs(root, 'deadowner'));
     assert.equal(lease.access_token, freshJwt);
     assert.equal(lease.slot, 'deadowner');
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
   }
 });
 
@@ -1199,14 +1210,13 @@ test('withRefreshLock does NOT steal a fresh lock held by a live owner (times ou
   await writeJson(path.join(lockDir, 'owner.json'), { schema_version: 1, pid: process.pid, nonce: 'live-owner-nonce', created_at: Date.now() });
   const now = new Date();
   await fs.utimes(lockDir, now, now);
-  const original = openaiCodexOAuthProvider.refreshToken;
   const priorEnv = process.env.CODEX_BALANCER_REFRESH_LOCK_ACQUIRE_MS;
   process.env.CODEX_BALANCER_REFRESH_LOCK_ACQUIRE_MS = '400';
-  (openaiCodexOAuthProvider as any).refreshToken = async () => ({ type: 'oauth', access: fakeCodexJwt('acct-1', 3600), refresh: 'r1', expires: Date.now() + 3_600_000, accountId: 'acct-1' });
+  const stub = stubTokenEndpoint(() => tokenOk(fakeCodexJwt('acct-1', 3600), 'r1'));
   try {
     await assert.rejects(startTokenLease(leaseArgs(root, 'liveowner')), /timed out waiting for token refresh lock/);
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
     if (priorEnv === undefined) delete process.env.CODEX_BALANCER_REFRESH_LOCK_ACQUIRE_MS;
     else process.env.CODEX_BALANCER_REFRESH_LOCK_ACQUIRE_MS = priorEnv;
     await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
@@ -1223,13 +1233,12 @@ test('withRefreshLock finally does NOT delete a lock re-taken by another owner (
   const lockDir = refreshLockDirForTest(root, 'foreignsteal');
   const ownerPath = path.join(lockDir, 'owner.json');
   const freshJwt = fakeCodexJwt('acct-1', Math.floor((Date.now() + 3_600_000) / 1000));
-  const original = openaiCodexOAuthProvider.refreshToken;
-  (openaiCodexOAuthProvider as any).refreshToken = async () => {
+  const stub = stubTokenEndpoint(async () => {
     // Mid-run, a different process "steals" and re-takes the lock: overwrite owner.json with a
     // foreign nonce. Our finally must see the mismatch and leave this lock intact.
     await writeJson(ownerPath, { schema_version: 1, pid: process.pid, nonce: 'foreign-stealer-nonce', created_at: Date.now() });
-    return { type: 'oauth', access: freshJwt, refresh: 'r1', expires: Date.now() + 3_600_000, accountId: 'acct-1' };
-  };
+    return tokenOk(freshJwt, 'r1');
+  });
   try {
     const lease = await startTokenLease(leaseArgs(root, 'foreignsteal'));
     assert.equal(lease.access_token, freshJwt);
@@ -1237,7 +1246,175 @@ test('withRefreshLock finally does NOT delete a lock re-taken by another owner (
     const remaining = JSON.parse(await fs.readFile(ownerPath, 'utf8'));
     assert.equal(remaining.nonce, 'foreign-stealer-nonce');
   } finally {
-    (openaiCodexOAuthProvider as any).refreshToken = original;
+    stub.restore();
     await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
   }
+});
+
+// ── proactive refresh (ensureFreshTokens) ──────────────────────────────────
+
+const DAY = 24 * 60 * 60 * 1000;
+/** Seed a slot whose access token is claim-bearing and expires in `expiresInDays`. */
+async function seedAgingSlot(root: string, slot: string, expiresInDays: number, refreshToken: string | null = 'r0') {
+  const expSeconds = Math.floor((Date.now() + expiresInDays * DAY) / 1000);
+  await writeJson(path.join(root, 'accounts', slot, 'auth.json'), {
+    tokens: { access_token: fakeCodexJwt(`acct-${slot}`, expSeconds), ...(refreshToken ? { refresh_token: refreshToken } : {}) },
+  });
+}
+
+test('ensureFreshTokens leaves a token that is still far from expiry alone', async () => {
+  const root = await tmp();
+  await seedAgingSlot(root, 'young', 9);
+  const stub = stubTokenEndpoint(() => { throw new Error('must not refresh a young token'); });
+  try {
+    const [outcome] = await ensureFreshTokens({ stateRoot: root });
+    assert.equal(outcome.action, 'fresh');
+    assert.equal(stub.calls.length, 0);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('ensureFreshTokens rotates a token inside the lead window and persists the new refresh token', async () => {
+  const root = await tmp();
+  // Inside PROACTIVE_REFRESH_LEAD_MS, but still perfectly usable right now: the
+  // whole point is refreshing while the old token would still have worked.
+  await seedAgingSlot(root, 'aging', (PROACTIVE_REFRESH_LEAD_MS / DAY) - 1);
+  const rotated = fakeCodexJwt('acct-aging', Math.floor((Date.now() + 10 * DAY) / 1000));
+  const stub = stubTokenEndpoint(() => tokenOk(rotated, 'r1', 10 * 24 * 3600));
+  try {
+    const [outcome] = await ensureFreshTokens({ stateRoot: root });
+    assert.equal(outcome.action, 'refreshed');
+    assert.equal(stub.calls[0]?.get('refresh_token'), 'r0');
+    const stored = JSON.parse(await fs.readFile(path.join(root, 'accounts', 'aging', 'auth.json'), 'utf8'));
+    assert.equal(stored.tokens.access_token, rotated);
+    // The rotated single-use refresh token MUST be persisted; stranding it bricks the slot.
+    assert.equal(stored.tokens.refresh_token, 'r1');
+  } finally {
+    stub.restore();
+  }
+});
+
+test('ensureFreshTokens records an invalid_grant failure, bricks the slot, and then backs off', async () => {
+  const root = await tmp();
+  await seedAgingSlot(root, 'revoked', 1);
+  const stub = stubTokenEndpoint(invalidGrant);
+  try {
+    const [failure] = await ensureFreshTokens({ stateRoot: root });
+    assert.equal(failure.action, 'failed');
+    assert.equal(failure.errorKind, 'invalid_grant');
+    // A durable failure must be visible on the slot before anything tries to lease it.
+    const slot = (await getUsage({ stateRoot: root })).accounts.find(a => a.slot === 'revoked');
+    assert.equal(slot?.status, 'broken');
+    assert.equal(slot?.problem?.code, 'refresh_invalid_grant');
+
+    // Second call inside the cooldown must not hit the wire again: a persistently
+    // dead refresh cannot be allowed to spin on every session start.
+    const callsAfterFirst = stub.calls.length;
+    const [second] = await ensureFreshTokens({ stateRoot: root });
+    assert.equal(second.action, 'cooldown');
+    assert.equal(stub.calls.length, callsAfterFirst);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('ensureFreshTokens reports a transient failure without bricking the slot', async () => {
+  const root = await tmp();
+  await seedAgingSlot(root, 'flaky', 1);
+  const stub = stubTokenEndpoint(() => tokenHttpError(503, 'upstream'));
+  try {
+    const [outcome] = await ensureFreshTokens({ stateRoot: root });
+    assert.equal(outcome.action, 'failed');
+    assert.equal(outcome.errorKind, 'transient');
+    const slot = (await getUsage({ stateRoot: root })).accounts.find(a => a.slot === 'flaky');
+    assert.notEqual(slot?.status, 'broken');
+  } finally {
+    stub.restore();
+  }
+});
+
+test('ensureFreshTokens surfaces a malformed token response as a durable failure', async () => {
+  const root = await tmp();
+  await seedAgingSlot(root, 'garbage', 1);
+  // Injected fault at the true boundary: a 200 that is missing required fields.
+  // A provider-object fake could never produce this, which is exactly the class
+  // of bug that response validation exists to catch.
+  const stub = stubTokenEndpoint(() => new Response(JSON.stringify({ access_token: 'a' }), { status: 200 }));
+  try {
+    const [outcome] = await ensureFreshTokens({ stateRoot: root });
+    assert.equal(outcome.action, 'failed');
+    assert.equal(outcome.errorKind, 'invalid_grant');
+    // The half-written response must not have clobbered the on-disk credential.
+    const stored = JSON.parse(await fs.readFile(path.join(root, 'accounts', 'garbage', 'auth.json'), 'utf8'));
+    assert.equal(stored.tokens.refresh_token, 'r0');
+  } finally {
+    stub.restore();
+  }
+});
+
+test('ensureFreshTokens reports a credential with no refresh token as unrefreshable', async () => {
+  const root = await tmp();
+  await seedAgingSlot(root, 'norefresh', 1, null);
+  const stub = stubTokenEndpoint(() => { throw new Error('nothing to exchange'); });
+  try {
+    const [outcome] = await ensureFreshTokens({ stateRoot: root });
+    assert.equal(outcome.action, 'unrefreshable');
+    assert.equal(stub.calls.length, 0);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('ensureFreshTokens adopts a token another process refreshed while it waited on the lock', async () => {
+  const root = await tmp();
+  await seedAgingSlot(root, 'raced', 1);
+  const authPath = path.join(root, 'accounts', 'raced', 'auth.json');
+  const adopted = fakeCodexJwt('acct-raced', Math.floor((Date.now() + 10 * DAY) / 1000));
+  // Stand in for the concurrent writer: land a fresh credential before we look
+  // under the lock. Re-reading there is what makes double-rotation impossible.
+  await writeJson(authPath, { tokens: { access_token: adopted, refresh_token: 'r-other' } });
+  const stub = stubTokenEndpoint(() => { throw new Error('must not rotate a token another process already refreshed'); });
+  try {
+    const [outcome] = await ensureFreshTokens({ stateRoot: root });
+    assert.equal(outcome.action, 'fresh');
+    assert.equal(stub.calls.length, 0);
+  } finally {
+    stub.restore();
+  }
+});
+
+test('getSlotTokenHealth reports expiry and flags slots that cannot self-heal', async () => {
+  const root = await tmp();
+  await seedAgingSlot(root, 'healthy', 9);
+  await seedAgingSlot(root, 'stranded', 1, null);
+  const health = await getSlotTokenHealth({ stateRoot: root });
+  const healthy = health.find(h => h.slot === 'healthy');
+  const stranded = health.find(h => h.slot === 'stranded');
+
+  assert.ok(healthy && healthy.expiresInMs! > 8 * DAY, 'expiry is read from the leased credential');
+  assert.equal(healthy?.hasRefreshToken, true);
+  assert.equal(healthy?.claimBearing, true);
+  assert.equal(healthy?.needsReauth, false);
+  // No refresh token: this one is going to die on its own and needs a human.
+  assert.equal(stranded?.needsReauth, true);
+});
+
+test('getSlotTokenHealth flags a slot whose refresh token was revoked', async () => {
+  const root = await tmp();
+  await seedAgingSlot(root, 'revoked', 1);
+  const stub = stubTokenEndpoint(invalidGrant);
+  try {
+    await ensureFreshTokens({ stateRoot: root });
+  } finally {
+    stub.restore();
+  }
+  const health = (await getSlotTokenHealth({ stateRoot: root })).find(h => h.slot === 'revoked');
+  assert.equal(health?.needsReauth, true, 'a recorded invalid_grant means the refresh token is dead');
+  assert.equal(health?.lastProactiveAttempt?.ok, false);
+});
+
+test('ensureFreshTokens never throws, even when the state root is unreadable', async () => {
+  const outcomes = await ensureFreshTokens({ stateRoot: path.join(await tmp(), 'does-not-exist') });
+  assert.deepEqual(outcomes, []);
 });

@@ -7,7 +7,11 @@ import codexUsageExtension, {
 	bar,
 	applyModelSpeedToPayload,
 	codexThreshold,
+	codexExpiryWarning,
+	codexHealthWarnings,
 	codexWindowSegment,
+	CODEX_EXPIRY_WARN_MS,
+	CODEX_EXPIRY_CRITICAL_MS,
 	costSegment,
 	ctxSegment,
 	formatTokens,
@@ -710,4 +714,96 @@ test("redactCodexAccountLabel avoids raw emails and long ids", () => {
 	assert.equal(redactCodexAccountLabel({ slot: "s1", label: "user@example.com", email: "user@example.com" }), "s1");
 	assert.equal(redactCodexAccountLabel({ slot: "s2", label: "abcdefghijklmnopqrstuvwxyz0123456789" }), "s2");
 	assert.equal(redactCodexAccountLabel({ slot: "s3", label: "Team" }), "Team");
+});
+
+// ── credential expiry warning ──────────────────────────────────────────────
+
+const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
+const NOW = 1_800_000_000_000;
+
+test("codexExpiryWarning stays silent while the credential has runway", () => {
+	// The balancer refreshes with days of headroom, so a healthy slot must never
+	// spend a footer slot on this.
+	assert.equal(codexExpiryWarning(NOW + 10 * DAY, NOW), null);
+	assert.equal(codexExpiryWarning(NOW + 4 * DAY, NOW), null);
+	assert.equal(codexExpiryWarning(undefined, NOW), null);
+});
+
+test("codexExpiryWarning boundaries: 3d warns, 24h escalates", () => {
+	// Exactly at each threshold the stricter side wins; one ms outside relaxes.
+	assert.equal(codexExpiryWarning(NOW + CODEX_EXPIRY_WARN_MS + 1, NOW), null);
+	assert.equal(codexExpiryWarning(NOW + CODEX_EXPIRY_WARN_MS, NOW)?.level, "warn");
+	assert.equal(codexExpiryWarning(NOW + CODEX_EXPIRY_CRITICAL_MS + 1, NOW)?.level, "warn");
+	assert.equal(codexExpiryWarning(NOW + CODEX_EXPIRY_CRITICAL_MS, NOW)?.level, "critical");
+	assert.equal(codexExpiryWarning(NOW + 1 * HOUR, NOW)?.level, "critical");
+});
+
+test("codexExpiryWarning renders an already-expired credential as now, not a negative duration", () => {
+	assert.deepEqual(codexExpiryWarning(NOW - 5 * HOUR, NOW), { label: "now", level: "critical" });
+	assert.deepEqual(codexExpiryWarning(NOW, NOW), { label: "now", level: "critical" });
+});
+
+function accountWithExpiry(expiry: ReturnType<typeof codexExpiryWarning>) {
+	return makeState({
+		codex: {
+			accounts: [{
+				slot: "1", label: "1", active: true, status: "ok" as const,
+				primary: 80, primaryReset: "4h", secondary: 60, secondaryReset: "4d",
+				stale: false, expiry,
+			}],
+		},
+	});
+}
+
+test("footer omits the expiry chip entirely above the warn threshold", () => {
+	const line = stripAnsi(renderStatsLine(160, accountWithExpiry(null)));
+	assert.doesNotMatch(line, /exp/, "a healthy credential must not add footer noise");
+});
+
+test("footer shows expiry in amber under 3d and red under 24h", () => {
+	const warn = renderStatsLine(160, accountWithExpiry({ label: "2d4h", level: "warn" }));
+	assert.match(stripAnsi(warn), /exp 2d4h/);
+	assert.ok(warn.includes(`${c.warn}exp 2d4h`), "3d window renders amber");
+
+	const critical = renderStatsLine(160, accountWithExpiry({ label: "9h", level: "critical" }));
+	assert.match(stripAnsi(critical), /exp 9h/);
+	assert.ok(critical.includes(`${c.bad}exp 9h`), "under 24h renders red");
+});
+
+test("the expiry chip survives every narrow-width degradation step", () => {
+	// It rides the identity head rather than the usage segment precisely so that
+	// dropping usage detail never drops the thing that needs acting on.
+	const state = accountWithExpiry({ label: "9h", level: "critical" });
+	for (const width of [160, 120, 119, 100, 80, 79, 60]) {
+		const line = stripAnsi(renderStatsLine(width, state));
+		assert.match(line, /exp 9h/, `expiry warning dropped at width ${width}`);
+	}
+	// Below that the greedy drop sheds the whole codex chip to protect the
+	// context and cost prefix. Nothing about expiry can survive that, so this
+	// records where the guarantee genuinely stops rather than implying it holds.
+	assert.doesNotMatch(stripAnsi(renderStatsLine(44, state)), /cx/);
+});
+
+// ── session-start health warnings ──────────────────────────────────────────
+
+test("codexHealthWarnings is silent for a healthy slot", () => {
+	assert.deepEqual(codexHealthWarnings([{ slot: "1", expiresAt: NOW + 9 * DAY, needsReauth: false }], NOW), []);
+});
+
+test("codexHealthWarnings calls out a slot that cannot refresh itself, with the SSH-safe recipe", () => {
+	const [warning] = codexHealthWarnings([{ slot: "2", expiresAt: NOW + 2 * DAY, needsReauth: true }], NOW);
+	assert.match(warning, /slot 2 cannot refresh itself/);
+	assert.match(warning, /expires 2d/);
+	// /reauth logs out first and needs a browser, so it is the wrong advice here.
+	assert.match(warning, /--device-auth/);
+});
+
+test("codexHealthWarnings explains a near-expiry slot by why proactive refresh has not fixed it", () => {
+	const [warning] = codexHealthWarnings([{
+		slot: "1", expiresAt: NOW + 12 * HOUR, needsReauth: false,
+		lastProactiveAttempt: { ok: false, error: "OpenAI Codex token refresh error: connect ETIMEDOUT" },
+	}], NOW);
+	assert.match(warning, /proactive refresh has not renewed it/);
+	assert.match(warning, /ETIMEDOUT/);
 });

@@ -5,8 +5,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { openaiCodexOAuthProvider, type OAuthCredentials } from '@earendil-works/pi-ai/oauth';
-import { classifyOAuthRefreshError, redactSecretsInText } from './oauth-error.js';
+import { refreshCodexToken, type CodexTokenSet } from './codex-oauth.js';
+import { classifyOAuthRefreshError, redactSecretsInText, type OAuthErrorKind } from './oauth-error.js';
 
 export type UsageWindow = {
   label: 'primary' | 'secondary' | string;
@@ -26,6 +26,14 @@ export type CodexAccountSlot = {
   status: CodexAccountStatus;
   usage?: { primary?: UsageWindow; secondary?: UsageWindow; updatedAt?: number; source?: 'cache' | 'probe' | 'live' | 'broken' | 'manual' | 'unknown' };
   problem?: { code: string; message: string };
+  /**
+   * Absolute expiry (epoch ms) of the access token this slot would actually
+   * lease, read from the same file the lease path reads. Undefined when the
+   * credential is missing or carries no derivable expiry.
+   */
+  tokenExpiresAt?: number;
+  /** False when the credential cannot be refreshed at all — re-auth required. */
+  refreshable?: boolean;
 };
 export type CodexUsage = { accounts: CodexAccountSlot[]; generatedAt: number; staleAfterMs: number; unavailable?: boolean; error?: string };
 export type UsageEntry = {
@@ -38,7 +46,7 @@ export type UsageEntry = {
   problem?: { code: string; message: string };
 };
 export type Account = { slot: string; authPath: string; piAuthPath?: string; idHash: string; usage?: UsageEntry };
-type InternalAccount = Account & { authHash: string; accountIdHash?: string; activePi: boolean; activeCodex: boolean };
+type InternalAccount = Account & { authHash: string; accountIdHash?: string; activePi: boolean; activeCodex: boolean; tokenExpiresAt?: number; hasRefreshToken: boolean; claimBearing: boolean };
 type SelectionMetadata = {
   reservation_id: string;
   launch_id: string;
@@ -352,7 +360,7 @@ function tokenFromAuth(value: unknown): { accessToken?: string; refreshToken?: s
   return { accessToken, refreshToken, expiresAt, accountId, codexCliShape: typeof value.access_token === 'string' || typeof value.refresh_token === 'string' || Object.hasOwn(value, 'expiry_date') };
 }
 
-function withRefreshedTokenShape(original: unknown, refreshed: OAuthCredentials): unknown {
+function withRefreshedTokenShape(original: unknown, refreshed: CodexTokenSet): unknown {
   if (isRecord(original) && isRecord(original['openai-codex'])) {
     return { ...original, 'openai-codex': withRefreshedTokenShape(original['openai-codex'], refreshed) };
   }
@@ -653,6 +661,8 @@ export async function getUsage(options: { stateRoot?: string; staleAfterMs?: num
           status: a.usage?.status || (a.usage?.primary || a.usage?.secondary ? 'ok' : 'unknown'),
           usage: { primary, secondary, updatedAt: a.usage?.updatedAt, source: a.usage?.source || (a.usage ? 'cache' : 'unknown') },
           problem: a.usage?.problem,
+          tokenExpiresAt: a.tokenExpiresAt,
+          refreshable: a.hasRefreshToken,
         };
       }),
     };
@@ -675,6 +685,10 @@ async function scanInternalAccounts(stateRoot = resolveStateRoot()): Promise<Int
     const piAuthPath = (await exists(path.join(dir, slot, 'pi-openai-codex.json'))) ? path.join(dir, slot, 'pi-openai-codex.json') : undefined;
     const accountIdHash = await readAccountIdHash(piAuthPath);
     const content = await fs.readFile(authPath);
+    // Read expiry from the file startTokenLease actually leases from (same
+    // piAuthPath-then-authPath precedence), so what the footer warns about is
+    // what will really expire.
+    const leased = tokenFromAuth(await readJson<unknown>(piAuthPath || authPath, undefined));
     out.push({
       slot,
       authPath,
@@ -684,6 +698,9 @@ async function scanInternalAccounts(stateRoot = resolveStateRoot()): Promise<Int
       accountIdHash,
       activePi: !!accountIdHash && accountIdHash === activePiHash,
       activeCodex: !!accountIdHash && accountIdHash === activeCodexHash,
+      tokenExpiresAt: leased.expiresAt,
+      hasRefreshToken: !!leased.refreshToken,
+      claimBearing: !!accessTokenAccountId(leased.accessToken),
     });
   }
   return out;
@@ -699,7 +716,7 @@ async function loadInternalAccounts(stateRoot = resolveStateRoot()): Promise<Int
     closeDb(db);
   }
 }
-export async function loadAccounts(stateRoot = resolveStateRoot()): Promise<Account[]> { return (await loadInternalAccounts(stateRoot)).map(({ authHash: _authHash, activePi: _activePi, activeCodex: _activeCodex, accountIdHash: _accountIdHash, ...account }) => account); }
+export async function loadAccounts(stateRoot = resolveStateRoot()): Promise<Account[]> { return (await loadInternalAccounts(stateRoot)).map(({ authHash: _authHash, activePi: _activePi, activeCodex: _activeCodex, accountIdHash: _accountIdHash, tokenExpiresAt: _tokenExpiresAt, hasRefreshToken: _hasRefreshToken, claimBearing: _claimBearing, ...account }) => account); }
 
 async function findLatestJsonl(dir: string): Promise<string | undefined> {
   const found: Array<{ path: string; mtime: number }> = [];
@@ -1303,6 +1320,163 @@ async function withRefreshLock<T>(stateRoot: string, slot: string, signal: Abort
   }
 }
 
+/**
+ * Persist a freshly-exchanged credential. This is the one dangerous step both
+ * the lease path and the proactive path share, so it lives in exactly one
+ * place: the refreshed credential carries the rotated SINGLE-USE refresh token,
+ * and failing to write it strands that token and bricks the slot with
+ * invalid_grant on the next refresh. Callers must run this inside the slot's
+ * refresh lock, and must not perform any fallible work between the exchange and
+ * this call. Returns the new on-disk auth document.
+ */
+async function persistRefreshedCredential(authPath: string, auth: unknown, refreshed: CodexTokenSet): Promise<unknown> {
+  const next = withRefreshedTokenShape(auth, refreshed);
+  await atomicWriteJson(authPath, next);
+  return next;
+}
+
+/**
+ * How long before expiry a slot becomes eligible for proactive refresh.
+ *
+ * Codex access tokens live ~10 days. Refreshing with 4 days of headroom means a
+ * refresh that has started failing gets ~4 days of retries before the token can
+ * actually die — and, because the footer only warns under 3 days, a visible
+ * expiry warning now means "proactive refresh is failing", not merely "time is
+ * passing". That is the early signal; without it the first symptom is an outage.
+ */
+export const PROACTIVE_REFRESH_LEAD_MS = 4 * 24 * 60 * 60 * 1000;
+/** Minimum spacing between proactive attempts per slot, so a persistently failing refresh cannot spin on every session start. */
+const PROACTIVE_ATTEMPT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
+function readKv(db: DatabaseSync, key: string): string | undefined {
+  return rowString((db.prepare('SELECT value FROM policy WHERE key = ?').get(key) as SqlRow | undefined)?.value);
+}
+function writeKv(stateRoot: string, key: string, value: string) {
+  const db = openDb(stateRoot);
+  try { db.prepare('INSERT INTO policy(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value); } finally { closeDb(db); }
+}
+function readProactiveAttempt(stateRoot: string, slot: string): ProactiveAttempt | undefined {
+  const db = openDb(stateRoot);
+  try {
+    const raw = readKv(db, `proactive_refresh:${slot}`);
+    if (!raw) return undefined;
+    const parsed: unknown = JSON.parse(raw);
+    return isRecord(parsed) && typeof parsed.at === 'number' ? (parsed as ProactiveAttempt) : undefined;
+  } catch { return undefined; } finally { closeDb(db); }
+}
+
+export type ProactiveAttempt = { at: number; ok: boolean; error?: string; errorKind?: OAuthErrorKind };
+export type ProactiveRefreshOutcome = {
+  slot: string;
+  /** 'fresh': still far from expiry. 'cooldown': attempted too recently. 'adopted': another process had already refreshed it. */
+  action: 'fresh' | 'cooldown' | 'adopted' | 'refreshed' | 'failed' | 'unrefreshable';
+  expiresAt?: number;
+  error?: string;
+  errorKind?: OAuthErrorKind;
+};
+
+/**
+ * Top up any slot whose access token expires within PROACTIVE_REFRESH_LEAD_MS.
+ *
+ * Deliberately NOT a second implementation of the lease refresh: it takes the
+ * same per-slot refresh lock, re-reads under it, exchanges at most once, and
+ * persists through the same shared write. It needs none of the lease path's
+ * reservation telemetry or adopt-race retry loop — with no request waiting on
+ * it, a token another process already refreshed is simply observed under the
+ * lock and adopted, and a failure just gets recorded for the next attempt.
+ *
+ * Never throws: every outcome is reported per slot so callers can run it
+ * fire-and-forget from a session hook.
+ */
+export async function ensureFreshTokens(options: { stateRoot?: string; leadMs?: number; signal?: AbortSignal; force?: boolean } = {}): Promise<ProactiveRefreshOutcome[]> {
+  const stateRoot = options.stateRoot || resolveStateRoot();
+  const leadMs = options.leadMs ?? PROACTIVE_REFRESH_LEAD_MS;
+  const accounts = await scanInternalAccounts(stateRoot).catch(() => [] as InternalAccount[]);
+  const out: ProactiveRefreshOutcome[] = [];
+  for (const account of accounts) {
+    const authPath = account.piAuthPath || account.authPath;
+    const due = (expiresAt: number | undefined) => !expiresAt || expiresAt - Date.now() <= leadMs;
+    if (!options.force && !due(account.tokenExpiresAt) && account.claimBearing) {
+      out.push({ slot: account.slot, action: 'fresh', expiresAt: account.tokenExpiresAt });
+      continue;
+    }
+    if (!account.hasRefreshToken) {
+      out.push({ slot: account.slot, action: 'unrefreshable', expiresAt: account.tokenExpiresAt });
+      continue;
+    }
+    const last = readProactiveAttempt(stateRoot, account.slot);
+    if (!options.force && last && !last.ok && Date.now() - last.at < PROACTIVE_ATTEMPT_COOLDOWN_MS) {
+      out.push({ slot: account.slot, action: 'cooldown', expiresAt: account.tokenExpiresAt, error: last.error, errorKind: last.errorKind });
+      continue;
+    }
+    try {
+      const outcome = await withRefreshLock(stateRoot, account.slot, options.signal, async (): Promise<ProactiveRefreshOutcome> => {
+        const auth = await readJson<unknown>(authPath, undefined);
+        const parsed = tokenFromAuth(auth);
+        // Re-checked under the lock: a concurrent process may have refreshed
+        // while we queued. Adopt its result rather than rotating again.
+        if (!options.force && !due(parsed.expiresAt) && accessTokenAccountId(parsed.accessToken)) {
+          return { slot: account.slot, action: 'adopted', expiresAt: parsed.expiresAt };
+        }
+        if (!parsed.refreshToken) return { slot: account.slot, action: 'unrefreshable', expiresAt: parsed.expiresAt };
+        const exchanged = await refreshCodexToken(parsed.refreshToken, options.signal);
+        const next = await persistRefreshedCredential(authPath, auth, { ...exchanged, accountId: parsed.accountId });
+        return { slot: account.slot, action: 'refreshed', expiresAt: tokenFromAuth(next).expiresAt };
+      });
+      if (outcome.action === 'refreshed') {
+        writeKv(stateRoot, `proactive_refresh:${account.slot}`, JSON.stringify({ at: Date.now(), ok: true } satisfies ProactiveAttempt));
+      }
+      out.push(outcome);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const errorKind = classifyOAuthRefreshError(message);
+      const redacted = redactSecretsInText(message);
+      writeKv(stateRoot, `proactive_refresh:${account.slot}`, JSON.stringify({ at: Date.now(), ok: false, error: redacted, errorKind } satisfies ProactiveAttempt));
+      // A revoked/exhausted refresh token is durable: surface it the same way
+      // the lease path does so the slot reads as broken before it is needed.
+      if (errorKind === 'invalid_grant') {
+        try { writeBrokenSnapshot(stateRoot, account.slot, 'refresh_invalid_grant', redacted); } catch { /* best-effort */ }
+      }
+      out.push({ slot: account.slot, action: 'failed', expiresAt: account.tokenExpiresAt, error: redacted, errorKind });
+    }
+  }
+  return out;
+}
+
+export type SlotTokenHealth = {
+  slot: string;
+  expiresAt?: number;
+  expiresInMs?: number;
+  hasRefreshToken: boolean;
+  claimBearing: boolean;
+  lastProactiveAttempt?: ProactiveAttempt;
+  /** True when this slot cannot survive on its own: expired/expiring with no working refresh. */
+  needsReauth: boolean;
+};
+
+/**
+ * Read-only credential health per slot, for a loud check at session start.
+ * Answers "can this slot still refresh itself, and how long has it got" without
+ * touching the network or rotating anything.
+ */
+export async function getSlotTokenHealth(options: { stateRoot?: string } = {}): Promise<SlotTokenHealth[]> {
+  const stateRoot = options.stateRoot || resolveStateRoot();
+  const accounts = await scanInternalAccounts(stateRoot).catch(() => [] as InternalAccount[]);
+  return accounts.map(account => {
+    const lastProactiveAttempt = readProactiveAttempt(stateRoot, account.slot);
+    const expiresInMs = account.tokenExpiresAt == null ? undefined : account.tokenExpiresAt - Date.now();
+    return {
+      slot: account.slot,
+      expiresAt: account.tokenExpiresAt,
+      expiresInMs,
+      hasRefreshToken: account.hasRefreshToken,
+      claimBearing: account.claimBearing,
+      lastProactiveAttempt,
+      needsReauth: !account.hasRefreshToken || lastProactiveAttempt?.errorKind === 'invalid_grant',
+    };
+  });
+}
+
 export async function startTokenLease(input: StartTokenLeaseInput): Promise<TokenLease> {
   assertTokenLeaseInput(input);
   const stateRoot = input.stateRoot || resolveStateRoot();
@@ -1360,15 +1534,12 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
             markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: parsed.expiresAt ? 'access_token_ttl_insufficient' : 'access_token_expiry_unknown' });
             throw new Error(parsed.expiresAt ? 'selected slot access token expires before requested lease ttl and cannot refresh' : 'selected slot access token expiry is unknown and cannot refresh');
           }
-          let refreshed: OAuthCredentials;
+          let refreshed: CodexTokenSet;
           try {
-            refreshed = await openaiCodexOAuthProvider.refreshToken({
-              type: 'oauth',
-              access: parsed.accessToken || '',
-              refresh: parsed.refreshToken,
-              expires: parsed.expiresAt || 0,
-              accountId: parsed.accountId || account.accountIdHash || account.idHash,
-            } as OAuthCredentials);
+            const exchanged = await refreshCodexToken(parsed.refreshToken, input.abort_signal);
+            // The token endpoint does not echo the account id; carry forward the
+            // one already on disk so withRefreshedTokenShape keeps writing it.
+            refreshed = { ...exchanged, accountId: parsed.accountId };
           } catch (refreshError) {
             const upstream = refreshError instanceof Error ? refreshError.message : String(refreshError);
             const kind = classifyOAuthRefreshError(upstream);
@@ -1402,15 +1573,7 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
             markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'aborted_after_refresh' });
             throw new Error('token lease aborted');
           }
-          // FIX B (intentional, do not reorder): we MUST persist the refreshed credential before
-          // the claimless guard below. The refreshed credential carries the freshly-rotated
-          // SINGLE-USE refresh token; not writing it would strand that token and brick the slot
-          // with invalid_grant on the next refresh. The claimless guard is an unreachable belt in
-          // production — the real openaiCodexOAuthProvider.refreshToken THROWS on a claimless access
-          // token (pi-ai validates the claim), so refreshed.access is always claim-bearing — but in
-          // the synthetic/mocked case it can fire, and the write above is still correct and required.
-          auth = withRefreshedTokenShape(auth, refreshed);
-          await atomicWriteJson(authPath, auth);
+          auth = await persistRefreshedCredential(authPath, auth, refreshed);
           parsed = tokenFromAuth(auth);
           if (!accessTokenAccountId(parsed.accessToken)) {
             writeBrokenSnapshot(stateRoot, account.slot, 'refresh_claimless_token', 'refreshed access token has no chatgpt_account_id claim');

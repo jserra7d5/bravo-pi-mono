@@ -1,10 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { streamSimpleOpenAICodexResponses } from '@earendil-works/pi-ai';
+import { streamSimpleOpenAICodexResponses } from '@earendil-works/pi-ai/compat';
 import { createBalancedStreamRunner, type BalancedRunnerDeps } from '../extensions/pi/index.js';
 
 const MODEL = { id: 'bravo-codex-balanced/gpt-5.5', provider: 'bravo-codex-balanced', api: 'openai-codex-responses', baseUrl: 'https://x' } as any;
@@ -329,10 +326,11 @@ test('rotate-on-429: a 429 on slot 1 silently rotates to slot 2 and forwards its
   ]);
 });
 
-test('Pi 0.74 streamer makes exactly one wire request per leased slot despite rejecting observers', async () => {
-  const piAiRoot = dirname(dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-ai'))));
-  assert.equal(JSON.parse(readFileSync(join(piAiRoot, 'package.json'), 'utf8')).version, '0.74.1', 'test must exercise the pinned old runtime');
-
+// Runs the REAL host streamer against a real socket, so it proves the
+// maxRetries=0 boundary holds in whatever pi-ai is installed. It previously
+// asserted the resolved pi-ai was exactly 0.74.1, which pinned the guard to one
+// upstream release and would have gone green while the shipped version drifted.
+test('host streamer makes exactly one wire request per leased slot despite rejecting observers', async () => {
   const wireByToken = new Map<string, number>();
   const server = createServer((request, response) => {
     const token = String(request.headers.authorization ?? '').replace(/^Bearer /, '');

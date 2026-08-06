@@ -16,6 +16,16 @@ The footer rides the shared `@bravo/render-clock` (imported by relative path fro
 
 Use `/codex-accounts status` to show the cached account state. Use `/codex-accounts refresh` to explicitly refresh through the Codex auth balancer package and then reread the cache.
 
+### Credential expiry
+
+Usage percentages say nothing about whether a credential is still alive: a slot at 100% remaining is dead if its refresh token was revoked. Two surfaces cover that.
+
+The account chip gains an `exp <duration>` segment — amber inside 3 days, red inside 24 hours, and **absent above 3 days**. It sits on the identity head rather than the usage segment, so it survives every narrow-width degradation step down to identity-only (below ~48 columns the whole codex chip is dropped to protect the context/cost prefix). The balancer refreshes proactively with 4 days of headroom, so a visible chip means proactive refresh is failing, not merely that time is passing.
+
+At session start the extension also notifies for any slot that is inside the expiry window or can no longer refresh itself, including the reason the last proactive refresh failed.
+
+`/reauth <slot>` needs a local browser and must not be used over SSH — it runs `codex logout` first, revoking the refresh token server-side, and then cannot complete its localhost callback login. Headless: run `CODEX_HOME=~/.bravo/codex-auth-balancer/accounts/<slot> codex exec --skip-git-repo-check "say ok"` to force a refresh (no browser needed while the refresh token is live), and only if that reports the token revoked, `CODEX_HOME=<slotDir> codex login --device-auth`.
+
 For interactive account balancing, use the `bravo-codex-balanced/*` provider models with the Codex balanced provider extension loaded. `pi-balanced` is the convenience launcher while this is piloted; it should load the provider path rather than relying on Pi/Codex auth-home swapping. Bare `pi` with `openai-codex/*` still uses `~/.pi/agent/auth.json` directly.
 
 ### `/fast`

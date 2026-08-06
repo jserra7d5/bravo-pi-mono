@@ -11,7 +11,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { getUsage, ingestDirectPiLiveUsage, refreshUsage, resolveStateRoot } from "../../packages/codex-auth-balancer/src/index.ts";
+import { getSlotTokenHealth, getUsage, ingestDirectPiLiveUsage, refreshUsage, resolveStateRoot } from "../../packages/codex-auth-balancer/src/index.ts";
 import type { CodexUsage, CodexAccountSlot, CodexAccountStatus, UsageWindow } from "../../packages/codex-auth-balancer/src/index.ts";
 import { renderClock, type RenderClock } from "../../packages/render-clock/src/index.ts";
 import { dirname, join } from "node:path";
@@ -375,6 +375,49 @@ export function codexThreshold(remainingPct: number): string {
 	return c.ok;
 }
 
+// Credential expiry. Silent by default: the balancer refreshes proactively with
+// days of headroom, so a visible warning here means that refresh is not working
+// — which is the only time this is worth a slot in the footer.
+export const CODEX_EXPIRY_WARN_MS = 3 * 24 * 60 * 60 * 1000;
+export const CODEX_EXPIRY_CRITICAL_MS = 24 * 60 * 60 * 1000;
+export type CodexExpiryWarning = { label: string; level: "warn" | "critical" };
+
+export function codexExpiryWarning(expiresAt: number | undefined, now = Date.now()): CodexExpiryWarning | null {
+	if (!expiresAt) return null;
+	const remaining = expiresAt - now;
+	if (remaining > CODEX_EXPIRY_WARN_MS) return null;
+	// Already dead reads as "exp now" rather than a negative duration.
+	const label = remaining <= 0 ? "now" : (formatReset(expiresAt, now) ?? "now");
+	return { label, level: remaining <= CODEX_EXPIRY_CRITICAL_MS ? "critical" : "warn" };
+}
+
+/**
+ * One line per slot that is in trouble, for a loud notice at session start.
+ *
+ * Two failures are worth interrupting for, and neither is visible from usage
+ * percentages: a credential that can no longer refresh itself (only a re-auth
+ * fixes it), and one close enough to expiry that proactive refresh should
+ * already have handled it and evidently has not.
+ */
+export function codexHealthWarnings(
+	health: readonly { slot: string; expiresAt?: number; needsReauth: boolean; lastProactiveAttempt?: { ok: boolean; error?: string } }[],
+	now = Date.now(),
+): string[] {
+	const warnings: string[] = [];
+	for (const slot of health) {
+		const expiry = codexExpiryWarning(slot.expiresAt, now);
+		if (slot.needsReauth) {
+			warnings.push(`Codex slot ${slot.slot} cannot refresh itself${expiry ? ` and expires ${expiry.label}` : ""} — re-auth it: codex login --device-auth with CODEX_HOME set to the slot dir (/reauth needs a browser).`);
+			continue;
+		}
+		if (expiry) {
+			const because = slot.lastProactiveAttempt?.ok === false ? ` last refresh failed: ${slot.lastProactiveAttempt.error}` : "";
+			warnings.push(`Codex slot ${slot.slot} expires ${expiry.label} and proactive refresh has not renewed it.${because}`);
+		}
+	}
+	return warnings;
+}
+
 export function bar(pct: number, width: number, fillColor: string): string {
 	const safePct = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
 	const cells = Math.max(0, Math.min(width, Math.round((safePct / 100) * width)));
@@ -442,7 +485,7 @@ export interface FooterRenderState {
 		primaryReset?: string | null;
 		secondary?: number | null;
 		secondaryReset?: string | null;
-		accounts?: Array<{ slot: string; label: string; active: boolean; status: CodexAccountStatus; primary: number | null; primaryReset: string | null; secondary: number | null; secondaryReset: string | null; stale: boolean }>;
+		accounts?: Array<{ slot: string; label: string; active: boolean; status: CodexAccountStatus; primary: number | null; primaryReset: string | null; secondary: number | null; secondaryReset: string | null; stale: boolean; expiry: CodexExpiryWarning | null }>;
 		unavailable?: boolean;
 		stale?: boolean;
 	} | null;
@@ -563,7 +606,13 @@ export function renderStatsLine(width: number, s: FooterRenderState, extensionSt
 						const mark = account.active ? "*" : "";
 						const status = account.status === "broken" ? `${c.bad}!${R}` : account.status === "limited" ? `${c.warn}!${R}` : "";
 						const stale = account.stale ? `${c.warn} stale${R}` : "";
-						const head = `${c.dim}cx${mark}${R}${status}${c.text}${account.label}${R}`;
+						// Rides on the head, not the usage segment: an expiring credential
+						// outranks usage percentages, so it must survive every degradation
+						// step down to identity-only.
+						const expiry = account.expiry
+							? ` ${account.expiry.level === "critical" ? c.bad : c.warn}exp ${account.expiry.label}${R}`
+							: "";
+						const head = `${c.dim}cx${mark}${R}${status}${c.text}${account.label}${R}${expiry}`;
 						if (mode === "identity") return `${head}${stale}`;
 						const p = account.primary == null ? "?" : `${Math.round(account.primary)}%`;
 						const primary = mode === "full" && account.active
@@ -673,6 +722,7 @@ function buildCodexState(
 		secondary: a.usage?.secondary?.remainingPercent ?? null,
 		secondaryReset: resetFor(a.usage?.secondary, now),
 		stale: usage.error === "stale" || a.usage?.primary?.stale === true || a.usage?.secondary?.stale === true,
+		expiry: codexExpiryWarning(a.tokenExpiresAt, now),
 	}));
 	return { accounts, stale: usage.error === "stale" };
 }
@@ -736,6 +786,10 @@ function codexUsageSemanticKey(usage: CodexUsage | undefined, balancedAffinitySl
 			activeCodex: account.activeCodex,
 			status: account.status,
 			problemCode: account.problem?.code ?? null,
+			// Bucketed, not raw: the raw timestamp changes every poll and would
+			// force a redraw every second for a value that only matters at two
+			// thresholds. This flips exactly when the rendered chip changes.
+			expiry: codexExpiryWarning(account.tokenExpiresAt),
 			primary: codexWindowSemanticKey(account.usage?.primary),
 			secondary: codexWindowSemanticKey(account.usage?.secondary),
 		})),
@@ -1026,6 +1080,14 @@ export default function codexUsageExtension(pi: ExtensionAPI): void {
 			});
 		}
 		void refresh(ctx, true);
+		// Credential health is not derivable from usage percentages: a slot at
+		// 100% remaining is still dead if its refresh token was revoked. Surface
+		// that at session start rather than at the first failed lease.
+		if (ctx.hasUI) {
+			void getSlotTokenHealth()
+				.then((health) => { for (const warning of codexHealthWarnings(health)) ctx.ui.notify(warning, "error"); })
+				.catch(() => { /* best-effort indicator, never blocks startup */ });
+		}
 		timer = subscribeCodexUsagePoll(renderClock, (now) => refresh(ctx, false, now));
 	});
 

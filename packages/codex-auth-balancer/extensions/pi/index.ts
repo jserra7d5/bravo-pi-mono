@@ -11,6 +11,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, parse } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
+  ensureFreshTokens,
   finishTokenLease,
   ingestLiveUsage,
   loadAccounts,
@@ -164,7 +165,19 @@ export async function loadHostingPiAiRuntime(options: {
   let modulePath: string;
   let runtime: PiAiRuntimeModule;
   if (!hostRoot) {
-    modulePath = options.localModulePath ?? import.meta.resolve(PI_AI_PACKAGE);
+    // The compat gate applies here too. Without a hosting Pi (tests, direct
+    // library use) the package root is resolved locally, and on pi-ai 0.80+ the
+    // root export no longer carries the catalog/streamer — so resolving '.' the
+    // way pre-0.80 did fails closed on an otherwise healthy install.
+    let localSpecifier = options.localModulePath ?? import.meta.resolve(PI_AI_PACKAGE);
+    if (!options.localModulePath) {
+      const rootPath = localSpecifier.startsWith('file:') ? fileURLToPath(localSpecifier) : localSpecifier;
+      const localRoot = packageRootOwning(rootPath, PI_AI_PACKAGE);
+      if (localRoot && isPiAiCompatVersion(packageMetadataAt(localRoot)?.version)) {
+        localSpecifier = import.meta.resolve(`${PI_AI_PACKAGE}/compat`);
+      }
+    }
+    modulePath = localSpecifier;
     runtime = options.localModule ?? await importer(modulePath);
     const localPath = modulePath.startsWith('file:') ? fileURLToPath(modulePath) : modulePath;
     packageRoot = packageRootOwning(localPath, PI_AI_PACKAGE) ?? dirname(localPath);
@@ -650,6 +663,33 @@ export function registerBalancedProvider(pi: ExtensionAPI): void {
   });
 }
 
+/**
+ * Refresh credentials well before anything needs them.
+ *
+ * Left alone, the only thing that ever refreshes a slot is a lease that has
+ * already run out of runway — so a refresh path that has broken stays invisible
+ * until the access token dies, and the first symptom is a hard outage. Doing it
+ * from session start instead means a broken refresh surfaces days early, while
+ * the current token still works.
+ *
+ * Fire-and-forget by construction: ensureFreshTokens reports failures rather
+ * than throwing, holds the same per-slot lock the lease path uses, and skips
+ * slots it refreshed (or failed on) recently, so concurrent pi sessions cannot
+ * stampede the token endpoint.
+ */
+async function topUpTokens(): Promise<void> {
+  try {
+    const outcomes = await ensureFreshTokens();
+    for (const outcome of outcomes) {
+      if (outcome.action === 'failed') {
+        process.stderr.write(`[codex-balancer] proactive refresh failed slot=${outcome.slot} kind=${outcome.errorKind}: ${outcome.error}\n`);
+      }
+    }
+  } catch (error) {
+    process.stderr.write(`[codex-balancer] proactive refresh skipped: ${redactSecretsInText(error instanceof Error ? error.message : String(error))}\n`);
+  }
+}
+
 export default function codexBalancedProvider(pi: ExtensionAPI) {
   // registerProvider installs an override of the shared `openai-codex-responses`
   // api-handler (pi-ai's api-registry is one global, last-writer-wins map); that
@@ -668,7 +708,7 @@ export default function codexBalancedProvider(pi: ExtensionAPI) {
   // present at dispatch time. registerProvider is documented safe to call from
   // event callbacks, takes effect immediately, and writes to the process-global
   // registry pi dispatches from — so this self-heals any reset, whenever it ran.
-  pi.on('session_start', () => { registerBalancedProvider(pi); });
+  pi.on('session_start', () => { registerBalancedProvider(pi); void topUpTokens(); });
   pi.on('turn_start', () => { registerBalancedProvider(pi); });
 
   // turn_start does NOT cover the two non-turn model-stream paths. Both issue
