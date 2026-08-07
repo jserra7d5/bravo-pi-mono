@@ -1346,8 +1346,13 @@ function formatResultSummary(result: RunResult, options?: { includeSummary?: boo
 }
 
 export function summarizeMessageResult(result: SubagentMessageResult): string {
-  if (result.unsupported) return `Message ${result.messageId} appended to ${result.runId}; live delivery unsupported`;
-  return `Message ${result.messageId} appended to ${result.runId}${result.liveDelivered ? " and delivered" : ""}`;
+  if (result.delivery === "undeliverable" || result.unsupported) {
+    return `Message ${result.messageId} appended to ${result.runId}; the run cannot read it (${result.unsupported?.code ?? "run is terminal"})`;
+  }
+  if (result.delivery === "acknowledged") return `Message ${result.messageId} delivered to ${result.runId} and acknowledged`;
+  // Queued is the normal outcome: durable in inbox.jsonl, read on the child's
+  // own polling cadence. Saying so beats implying something went wrong.
+  return `Message ${result.messageId} queued for ${result.runId}; the run will pick it up from its inbox`;
 }
 
 export function summarizeRunResult(result: RunResult | undefined, runId: string): string {

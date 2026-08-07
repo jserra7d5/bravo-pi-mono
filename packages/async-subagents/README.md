@@ -317,7 +317,11 @@ User config may provide a fallback:
 
 Authored `maxRunMs` is rejected with a migration error. Internally the runtime records `effectiveMaxRunMs` for timers and diagnostics.
 
+The budget measures time the agent spent working, not wall clock. While a child's state is `blocked` or `waiting_for_input` the supervisor holds the clock and reinstalls the timers when it moves back — a run waiting on a human answer does not burn its budget and die at the deadline having done nothing since. An explicit parent `pause` still owns the clock outright; the hold never resumes a run the parent paused.
+
 When a child approaches its budget, the supervisor appends an inbox warning asking the child to finish or emit a checkpoint. At hard expiry the supervisor sends SIGTERM to the child process group, captures the available output/checkpoint, and finalizes the run as terminal `expired` with error code `MAX_RUN_SECONDS_EXPIRED`. No budget-expired process is left paused.
+
+A child killed mid-report has written nothing to stdout while everything it actually said sits in `events.jsonl`. Rather than finalize with an empty body, the supervisor reconstructs one from those event summaries and bodies, marked `# Reconstructed report` so it is not mistaken for the agent's intended deliverable.
 
 Continue useful unfinished work from the recorded session by calling `subagent_continue` on the terminal run. This creates a new continuation run that replays the session state; use `additionalRunSeconds` to choose the smallest reasonable budget for the remaining work.
 
@@ -326,11 +330,13 @@ Continue useful unfinished work from the recorded session by calling `subagent_c
 - `subagent_start`: start a durable async child run and return immediately; accepts `fastTrack: true` for armed, allowlisted critical-path launches.
 - `subagent_status`: inspect current and recent child state.
 - `subagent_result`: canonical backup/recovery read of terminal `result.json`; use for truncated wakeups, artifacts, metadata, or reread, and to mark terminal delivery handled.
-- `subagent_message`: send normal parent input only (`instruction`, `answer`, `context`).
+- `subagent_message`: send normal parent input only (`instruction`, `answer`, `context`). Reports `delivery`: `acknowledged` (the child confirmed it inside the call's window), `queued` (durably in `inbox.jsonl`, pickup on the child's own cadence — the normal case, not an error), or `undeliverable` (the run is terminal; nothing will read that inbox again). Only `undeliverable` is a failure.
 - `subagent_interrupt`: pause or cancel an active child.
-- `subagent_continue`: resume an explicitly parent-paused child, optionally with `additionalRunSeconds`, or create a continuation from a terminal run's recorded session (including budget-expired runs). A terminal continuation inherits fast-track only when it was applied to the prior run; callers do not need or receive a `fastTrack` parameter. Its repeatable `files` input widens a specified scope additively and never narrows or removes prior entries. Runs without a specified scope reject `files`; continue them without `files` or start a new scoped run. Omitting `files` preserves the existing scope.
+- `subagent_continue`: resume an explicitly parent-paused child, optionally with `additionalRunSeconds`, or create a continuation from a terminal run's recorded session (including budget-expired runs). A terminal continuation inherits fast-track only when it was applied to the prior run; callers do not need or receive a `fastTrack` parameter. Its repeatable `files` input widens scope additively and never narrows or removes prior entries. Omitting `files` preserves the existing scope. Calling it on a run that is already running is not an error: the body is delivered as a message and the response carries `RUN_ALREADY_RUNNING` with the run's live state.
 
 Allowed-file scope is a durable contract enforced through status, task prompts, and inbox amendments. Paths must be non-empty, single-line strings. This is not OS-level sandboxing or filesystem permission enforcement.
+
+A run launched with `files` has a real `allowedFiles` list, and a grant unions into it. A run launched without `files` keeps its scope as prose in its brief, which the runtime cannot see or union with; a grant there is delivered as an additive amendment and `allowedFiles` stays unset. Writing the granted paths into `allowedFiles` would be a silent narrowing — telling an agent scoped to a subtree that its scope is now one file.
 
 Lifecycle controls are intentionally not accepted by `subagent_message`.
 

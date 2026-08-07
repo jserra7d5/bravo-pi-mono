@@ -258,6 +258,38 @@ export async function codexBalancerSyncBackAndCleanup(input: Pick<SupervisorInpu
   }
 }
 
+/**
+ * Rebuild a best-effort report from what the child already told us.
+ *
+ * When a run is killed before it can emit its final report, `result.json` would
+ * otherwise carry an empty body even though the child's substantive output —
+ * findings, answers, the reason it was blocked — is sitting in events.jsonl.
+ * Those bodies are the deliverable; recovering them by hand is how a killed run
+ * gets salvaged today, so do it here instead.
+ *
+ * Explicitly marked as reconstructed: this is not the report the agent intended
+ * to write, and a reader must not mistake it for one.
+ */
+function salvageBodyFromEvents(store: RunStore, runId: string): string {
+  let records: Array<{ type?: string; createdAt?: string; summary?: string; body?: string }>;
+  try { records = store.readEvents(runId).records as never; } catch { return ""; }
+  const sections = records
+    .filter((event) => (event.body ?? "").trim() || (event.summary ?? "").trim())
+    .filter((event) => event.type !== "started" && event.type !== "expired")
+    .map((event) => {
+      const heading = `## ${event.type ?? "event"}${event.createdAt ? ` · ${event.createdAt}` : ""}`;
+      return [heading, event.summary?.trim(), event.body?.trim()].filter(Boolean).join("\n\n");
+    });
+  if (!sections.length) return "";
+  return [
+    "# Reconstructed report",
+    "",
+    "This run ended before it emitted a final report. The following is assembled from the event bodies it did write, newest last. It is a salvage, not the agent's intended deliverable.",
+    "",
+    ...sections,
+  ].join("\n\n");
+}
+
 async function finalizeRun(input: SupervisorInput, output: { state: TerminalRunState; stdout?: string; stderr?: string; error?: RunResult["error"] }): Promise<RunResult> {
   await codexBalancerSyncBackAndCleanup(input);
   const store = new RunStore({ cwd: input.cwd, runRoot: input.runRoot });
@@ -600,11 +632,50 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       timeout = setTimeout(expireForBudget, remainingMs);
     };
 
+    // A run that is blocked on the parent is not spending its budget doing work.
+    // The child writes `blocked`/`waiting_for_input` straight to status.json from
+    // its own process, so the supervisor only learns about it by looking. Without
+    // this, time spent waiting for a human answer is charged to the run exactly
+    // like time spent working, and a run can be killed seconds after it is
+    // unblocked, holding a finished deliverable it never got to report.
+    //
+    // Deliberately distinct from the parent `pause` (SIGSTOP) path: the child
+    // process stays runnable here — it may still be working while it waits — so
+    // this suspends only the accounting, never the process. Explicit pause and
+    // cancel keep full control; this never resumes a run the parent paused.
+    const BUDGET_HOLD_STATES = new Set(["blocked", "waiting_for_input"]);
+    let budgetHeldByBlock = false;
+    const syncBudgetToChildState = (): void => {
+      if (settled || cancelState || expiryState) return;
+      let state: string;
+      try { state = store.readStatus(input.runId).state; } catch { return; }
+      // The parent's own pause owns the clock; never fight it.
+      if (state === "paused") return;
+      const shouldHold = BUDGET_HOLD_STATES.has(state);
+      if (shouldHold === budgetHeldByBlock) return;
+      budgetHeldByBlock = shouldHold;
+      if (shouldHold) {
+        accountActiveTime();
+        clearBudgetTimers();
+      } else {
+        installBudgetTimers();
+      }
+    };
+
     const settle = (state: TerminalRunState, error?: RunResult["error"]): void => {
       if (settled) return;
       settled = true;
       clearRuntimeResources();
-      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const capturedStdout = Buffer.concat(stdoutChunks).toString("utf8");
+      // A child killed mid-report has written nothing to stdout, so the run would
+      // finalize with an empty body while everything it actually said sits in
+      // events.jsonl. Salvage that rather than shipping a result with no content:
+      // an expired run that already did the work is a delay, not a loss.
+      //
+      // Not for `failed`: finalizeRun falls back to stderr for the body, and on a
+      // crash that stderr IS the diagnostic. Salvaging into stdout would outrank
+      // it and hide the reason the run died. Those events stay in events.jsonl.
+      const stdout = capturedStdout.trim() || state === "failed" ? capturedStdout : salvageBodyFromEvents(store, input.runId);
       const rawStderr = Buffer.concat(stderrChunks).toString("utf8");
       const diagnostics = state === "failed" ? augmentChildFailureDiagnostics(input.command, rawStderr, error) : { stderr: rawStderr, error };
       if (diagnostics.stderr !== rawStderr) appendLog(stderrPath, diagnostics.stderr.slice(rawStderr.length));
@@ -691,7 +762,7 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
         try { applyControl(JSON.parse(line)); } catch { /* ignore malformed control line */ }
       }
     };
-    controlPoll = setInterval(readControls, 250);
+    controlPoll = setInterval(() => { readControls(); syncBudgetToChildState(); }, 250);
 
     const expireForBudget = (): void => {
       if (settled) return;

@@ -381,16 +381,22 @@ async function waitForLiveAckIfNeeded(store: RunStore, params: Record<string, un
   if (isTerminalRunState(status.state)) return result;
   const ack = await waitForMessageAckFromParams(store, params, status.runId, result.messageId);
   if (ack) {
+    result.delivery = "acknowledged";
     result.liveDelivered = true;
     result.ackEventId = ack.eventId;
     result.unsupported = undefined;
-  } else {
-    result.liveDelivered = false;
-    result.unsupported = {
-      code: "LIVE_MESSAGE_UNSUPPORTED",
-      message: "message was appended to inbox.jsonl, but the child-control extension did not acknowledge it before timeout",
-    };
+    return result;
   }
+  // No ack inside the window is the NORMAL case, not a failure. The child picks
+  // messages up on its own inbox cadence, which is far longer than any latency
+  // we are willing to block a parent call on — so an un-acked message is queued
+  // and will be handled, and reporting it as a delivery error sent callers
+  // looking for another way to reach a run that had already received them.
+  //
+  // Terminal runs are the genuine can't-deliver case and returned above.
+  result.delivery = "queued";
+  result.liveDelivered = false;
+  result.unsupported = undefined;
   return result;
 }
 
@@ -403,20 +409,56 @@ function filesFromParams(params: Record<string, unknown>): string[] | undefined 
   return normalizeAllowedFilePaths(params.files as string[]);
 }
 
-function widenedAllowedFiles(status: RunStatus, additionalFiles: string[] | undefined): string[] | undefined {
-  if (status.allowedFiles === undefined) return undefined;
-  return [...new Set([...status.allowedFiles, ...(additionalFiles ?? [])])];
-}
-
-function writeScopeAmendment(allowedFiles: string[]): string {
-  return [
-    "# Authoritative Write-Scope Amendment",
-    "",
-    "The write scope for this run is now the following additive union of exact paths, directory roots, and globs. Write only within it; protected paths remain protected:",
-    ...allowedFiles.map((file) => `- ${file}`),
-    "",
-    "This is contract and prompt enforcement, not OS sandboxing.",
-  ].join("\n");
+/**
+ * Resolve an additive write-scope grant for a running run.
+ *
+ * Two shapes, because a run declares its scope in one of two places:
+ *
+ * - The run was launched with `files`, so `allowedFiles` is real runtime state.
+ *   The grant unions into it and the child is handed the full authoritative
+ *   scope.
+ * - The run was launched without `files`. Its scope lives in the brief, as prose,
+ *   which the runtime cannot see or union with. The grant is still meaningful —
+ *   the child is honouring prose — so it is delivered as an additive amendment
+ *   and `allowedFiles` is left alone. Writing the granted paths into
+ *   `allowedFiles` here would be a silent *narrowing*: it would tell an agent
+ *   whose brief scoped it to a subtree that its scope is now one file.
+ *
+ * Rejecting the second case (the previous behaviour) left no way to widen a
+ * running run over a single path — the alternatives were killing a long run or
+ * granting it in prose anyway, which works and makes the rejection pure cost.
+ */
+function scopeGrantFor(status: RunStatus, additionalFiles: string[] | undefined): { allowedFiles?: string[]; amendment?: string } {
+  const additions = additionalFiles ?? [];
+  if (status.allowedFiles === undefined) {
+    if (!additions.length) return {};
+    return {
+      amendment: [
+        "# Authoritative Write-Scope Amendment (additive)",
+        "",
+        "The following paths are now granted in addition to the write scope stated in your task brief. The brief's scope otherwise stands unchanged; protected paths remain protected:",
+        ...additions.map((file) => `- ${file}`),
+        "",
+        "This is contract and prompt enforcement, not OS sandboxing.",
+      ].join("\n"),
+    };
+  }
+  // Always report the effective scope, additions or not: callers use this as the
+  // run's allowed-files state, and returning nothing when there is nothing to add
+  // would silently drop the scope the run already had.
+  const allowedFiles = [...new Set([...status.allowedFiles, ...additions])];
+  if (!additions.length) return { allowedFiles };
+  return {
+    allowedFiles,
+    amendment: [
+      "# Authoritative Write-Scope Amendment",
+      "",
+      "The write scope for this run is now the following additive union of exact paths, directory roots, and globs. Write only within it; protected paths remain protected:",
+      ...allowedFiles.map((file) => `- ${file}`),
+      "",
+      "This is contract and prompt enforcement, not OS sandboxing.",
+    ].join("\n"),
+  };
 }
 
 function continuationSequence(store: RunStore, status: RunStatus): { rootRunId: string; sequence: number } {
@@ -522,14 +564,7 @@ async function startTerminalContinuation(input: {
   } catch (error) {
     return response(error instanceof Error ? error.message : String(error), { code: "INVALID_ALLOWED_FILE", runId: input.status.runId }, true);
   }
-  const allowedFiles = widenedAllowedFiles(input.status, additionalFiles);
-  if (additionalFiles?.length && allowedFiles === undefined) {
-    return response(
-      `Run ${input.status.runId} has no specified file scope; continue without files or start a new scoped run`,
-      { code: "SCOPE_UNSPECIFIED", runId: input.status.runId },
-      true,
-    );
-  }
+  const { allowedFiles, amendment } = scopeGrantFor(input.status, additionalFiles);
   const originalResult = input.store.readResult(input.status.runId);
   const originalPiSessionPath = input.status.piSessionPath ?? originalResult?.piSessionPath;
   if (!originalPiSessionPath) {
@@ -545,7 +580,11 @@ async function startTerminalContinuation(input: {
     );
   }
 
-  const parentBody = typeof input.params.body === "string" && input.params.body.trim() ? input.params.body.trim() : "Continue from the previous terminal result.";
+  const requestedBody = typeof input.params.body === "string" && input.params.body.trim() ? input.params.body.trim() : "Continue from the previous terminal result.";
+  // A scoped continuation carries its grant in `files`, which the launcher renders
+  // into the task's Write Scope section. An unscoped one has nowhere else to put
+  // it, so the amendment rides in the task body or the grant is silently dropped.
+  const parentBody = allowedFiles || !amendment ? requestedBody : `${requestedBody}\n\n${amendment}`;
   const lineage = continuationSequence(input.store, input.status);
   const lock = claimContinuationLock(input.store, lineage.rootRunId, originalPiSessionPath, input.status.runId);
   if (!lock.claimed) {
@@ -849,7 +888,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     {
       name: "subagent_message",
       label: "Subagent Message",
-      description: "Append parent-to-child input to inbox.jsonl. Live delivery is reported only when supported.",
+      description: "Append parent-to-child input to inbox.jsonl. Reports delivery as acknowledged, queued (durable, picked up on the child's own cadence — normal, not a failure), or undeliverable (the run is terminal).",
       parameters: subagentMessageSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const cwd = ctxCwd(ctx);
@@ -871,19 +910,13 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const mutation = await withRunMutationLock(runDir, () => {
           const current = store.readStatus(runId);
           if (isTerminalRunState(current.state)) return { status: current, terminal: true as const };
-          const allowedFiles = widenedAllowedFiles(current, additionalFiles);
-          if (additionalFiles?.length && allowedFiles === undefined) return { status: current, scopeUnspecified: true as const };
-          if (additionalFiles?.length && allowedFiles) store.writeStatus(updateRunStatus(current, { allowedFiles }));
-          const body = additionalFiles?.length && allowedFiles
-            ? `${String(params.body)}\n\n${writeScopeAmendment(allowedFiles)}`
-            : String(params.body);
+          const grant = scopeGrantFor(current, additionalFiles);
+          if (grant.allowedFiles) store.writeStatus(updateRunStatus(current, { allowedFiles: grant.allowedFiles }));
+          const body = grant.amendment ? `${String(params.body)}\n\n${grant.amendment}` : String(params.body);
           return { status: current, messageResult: appendParentMessage(params, store, root, runId, type, body) };
         });
         if (mutation.value.terminal) {
           return response(`Run ${runId} is terminal; message not appended`, { code: "RUN_TERMINAL", runId, state: mutation.value.status.state }, true);
-        }
-        if (mutation.value.scopeUnspecified) {
-          return response(`Run ${runId} has no specified file scope; message without files or start a new scoped run`, { code: "SCOPE_UNSPECIFIED", runId }, true);
         }
         const messageResult = mutation.value.messageResult;
         if (!messageResult) throw new Error(`Message for ${runId} did not append an inbox message`);
@@ -938,7 +971,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     {
       name: "subagent_continue",
       label: "Subagent Continue",
-      description: "Resume a paused child or continue a terminal run; files adds prompt-enforced write approvals without narrowing prior scope and is not an OS sandbox.",
+      description: "Resume a paused child or continue a terminal run; on an already-running child the input is delivered as a message instead. files adds prompt-enforced write approvals without narrowing prior scope and is not an OS sandbox.",
       parameters: subagentContinueSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const cwd = ctxCwd(ctx);
@@ -961,22 +994,30 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const runDir = store.pathsFor({ runId }).runDir;
         const mutation = await withRunMutationLock(runDir, () => {
           const current = store.readStatus(runId);
-          if (current.state !== "paused") return { status: current };
-          const allowedFiles = widenedAllowedFiles(current, additionalFiles);
-          if (additionalFiles?.length && allowedFiles === undefined) return { status: current, scopeUnspecified: true };
-          if (additionalFiles?.length && allowedFiles) store.writeStatus(updateRunStatus(current, { allowedFiles }));
-          const body = additionalFiles?.length && allowedFiles
-            ? `${parentBody}\n\n${writeScopeAmendment(allowedFiles)}`
-            : parentBody;
+          if (isTerminalRunState(current.state)) return { status: current };
+          const grant = scopeGrantFor(current, additionalFiles);
+          if (grant.allowedFiles) store.writeStatus(updateRunStatus(current, { allowedFiles: grant.allowedFiles }));
+          const body = grant.amendment ? `${parentBody}\n\n${grant.amendment}` : parentBody;
           const messageResult = appendParentMessage(params, store, root, runId, messageType, body);
-          return { status: current, allowedFiles, messageResult };
+          return { status: current, allowedFiles: grant.allowedFiles, messageResult };
         });
         const currentStatus = mutation.value.status;
-        if (currentStatus.state !== "paused") {
-          return response(`Run ${runId} is ${currentStatus.state}; use subagent_message for normal input`, { code: "RUN_NOT_PAUSED", runId, state: currentStatus.state }, true);
+        if (isTerminalRunState(currentStatus.state)) {
+          // Raced to terminal under the lock, so nothing was appended. A terminal
+          // run needs a continuation launch, not a resume.
+          return startTerminalContinuation({ runtime, ctx, sessionCwd: cwd, root, store, status: currentStatus, params });
         }
-        if (mutation.value.scopeUnspecified) {
-          return response(`Run ${runId} has no specified file scope; continue without files or start a new scoped run`, { code: "SCOPE_UNSPECIFIED", runId }, true);
+        if (currentStatus.state !== "paused") {
+          // Not an error: the body above was already appended to the inbox, so the
+          // input landed. A run commonly leaves `paused` between the caller's
+          // status check and this call — a message auto-resumes it — and the old
+          // response told you to use subagent_message, which is what caused the
+          // resume. Report the delivery and why it is running instead.
+          const resumedBy = mutation.value.messageResult?.messageId;
+          return response(
+            `Run ${runId} is already ${currentStatus.state}${currentStatus.summary ? ` (${currentStatus.summary})` : ""}; input delivered as a message${resumedBy ? ` (${resumedBy})` : ""}. No continuation was needed.`,
+            { code: "RUN_ALREADY_RUNNING", runId, state: currentStatus.state, summary: currentStatus.summary, delivered: "queued", messageId: resumedBy, lastActivityAt: currentStatus.lastActivityAt },
+          );
         }
         const messageResult = mutation.value.messageResult;
         if (!messageResult) throw new Error(`Paused continuation for ${runId} did not append an inbox message`);

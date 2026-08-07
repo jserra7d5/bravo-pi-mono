@@ -543,10 +543,20 @@ export interface SubagentWaitResult {
   next: Array<{ tool: string; args: Record<string, unknown> }>;
 }
 
+/**
+ * Outcome of delivering a message to a child.
+ *
+ * `queued` is a success: the message is durably in inbox.jsonl and the child
+ * will pick it up on its own polling cadence. Only `undeliverable` means the
+ * message will never be read.
+ */
+export type MessageDelivery = "acknowledged" | "queued" | "undeliverable";
+
 export interface SubagentMessageResult {
   messageId: string;
   runId: string;
   appended: boolean;
+  delivery?: MessageDelivery;
   liveDelivered: boolean;
   unsupported?: {
     code: "LIVE_MESSAGE_UNSUPPORTED";

@@ -16,6 +16,7 @@ import {
   renderSubagentToolCallComponent,
   renderSubagentToolResultComponent,
   renderSubagentWakeMessage,
+  summarizeMessageResult,
   renderSubagentWakeMessageComponent,
   renderWakeCard,
   renderWidgetCard,
@@ -855,4 +856,23 @@ test("widget row prefers Claude harness and liveness read-model fields", () => {
   assert.match(text, /worker\/claude/);
   assert.match(text, /comatose/);
   assert.match(text, /no terminal output/);
+});
+
+test("message summaries separate a queued delivery from one the run cannot read", () => {
+  const base = { messageId: "msg_1", runId: "run_1", appended: true as const, liveDelivered: false };
+
+  // The old wording reported a queued message as a delivery failure, which sent
+  // parents hunting for another way to reach a run that already had the message.
+  const queued = summarizeMessageResult({ ...base, delivery: "queued" });
+  assert.match(queued, /queued for run_1/);
+  assert.doesNotMatch(queued, /cannot read/);
+
+  assert.match(summarizeMessageResult({ ...base, delivery: "acknowledged", liveDelivered: true }), /acknowledged/);
+
+  const dead = summarizeMessageResult({ ...base, delivery: "undeliverable" });
+  assert.match(dead, /cannot read it/);
+  assert.match(dead, /run is terminal/);
+
+  const unsupported = summarizeMessageResult({ ...base, delivery: "queued", unsupported: { code: "LIVE_MESSAGE_UNSUPPORTED", message: "no live transport" } });
+  assert.match(unsupported, /LIVE_MESSAGE_UNSUPPORTED/);
 });

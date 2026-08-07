@@ -207,15 +207,19 @@ test("model-facing tool catalog does not expose subagent_wait", () => {
   assert.equal(Object.hasOwn(built, "subagent_wait"), false);
 });
 
-test("subagent_message appends inbox messages and waits for child-control acknowledgement", async () => {
+test("subagent_message reports an un-acked live run as queued, not as a delivery failure", async () => {
   const w = workspace();
   const built = tools(w.identity);
   const result = await built.subagent_message.execute("call", { runId: w.runId, body: "Continue" }, undefined, undefined, { cwd: w.root });
 
-  assert.equal(result.isError, true);
+  // A child picks its inbox up on its own cadence, far longer than the window a
+  // parent call blocks for. No ack is the normal case, so it must not surface as
+  // an error that sends the caller looking for another way to reach the run.
+  assert.equal(result.isError, undefined);
   assert.equal(result.details.appended, true);
+  assert.equal(result.details.delivery, "queued");
   assert.equal(result.details.liveDelivered, false);
-  assert.equal((result.details.unsupported as { code?: string }).code, "LIVE_MESSAGE_UNSUPPORTED");
+  assert.equal(result.details.unsupported, undefined);
 });
 
 test("subagent_message does not append after terminal finalization wins the mutation lock", async () => {
@@ -275,16 +279,25 @@ test("subagent_interrupt cancel queues supervisor control without finalizing liv
   assert.equal(store.readInbox(w.runId).records.at(-1)?.type, "cancel");
 });
 
-test("subagent_continue rejects non-paused runs", async () => {
+test("subagent_continue on a running run delivers the input and reports it as already running", async () => {
   const w = workspace();
+  const store = new RunStore({ cwd: w.root });
   const built = tools(w.identity);
-  const result = await built.subagent_continue.execute("call", { runId: w.runId, body: "Use the narrowed scope" }, undefined, undefined, { cwd: w.root });
+  const result = await built.subagent_continue.execute("call", { runId: w.runId, body: "Use the narrowed scope", requiresAck: false }, undefined, undefined, { cwd: w.root });
 
-  assert.equal(result.isError, true);
-  assert.equal(result.details.code, "RUN_NOT_PAUSED");
+  // The old rejection told callers to use subagent_message instead — which is
+  // exactly what this already did. The input landed; say so.
+  assert.equal(result.isError, undefined);
+  assert.equal(result.details.code, "RUN_ALREADY_RUNNING");
+  assert.equal(result.details.state, "running");
+  assert.equal(result.details.delivered, "queued");
+  const delivered = store.readInbox(w.runId).records.at(-1);
+  assert.equal(delivered?.messageId, result.details.messageId);
+  assert.match(delivered?.body ?? "", /Use the narrowed scope/);
+  assert.equal(existsSync(join(store.pathsFor({ runId: w.runId }).runDir, "control.jsonl")), false);
 });
 
-test("subagent_continue queues resume control even when required ack fails", async () => {
+test("subagent_continue queues resume control and unions widened scope without waiting on an ack", async () => {
   const w = workspace();
   const store = new RunStore({ cwd: w.root });
   const status = store.readStatus(w.runId);
@@ -300,7 +313,7 @@ test("subagent_continue queues resume control even when required ack fails", asy
   const built = tools(w.identity);
   const result = await built.subagent_continue.execute("call", { runId: w.runId, thinkingLevel: "high", body: "Finish the implementation", files: ["src/new.ts", "src/original.ts", "src/new.ts"] }, undefined, undefined, { cwd: w.root });
 
-  assert.equal(result.isError, true);
+  assert.equal(result.isError, undefined);
   assert.equal(result.details.state, "paused");
   assert.equal(result.details.controlQueued, true);
   assert.equal(result.details.thinkingLevel, "high");
@@ -356,7 +369,7 @@ test("paused scope widening re-reads status under the run mutation lock", async 
   assert.deepEqual(amendments[1], persistedFiles);
 });
 
-test("unscoped paused runs reject file widening without resuming or mutating", async () => {
+test("unscoped paused runs take file widening as an additive amendment and still resume", async () => {
   const w = workspace();
   const store = new RunStore({ cwd: w.root });
   const status = store.readStatus(w.runId);
@@ -365,11 +378,16 @@ test("unscoped paused runs reject file widening without resuming or mutating", a
 
   const result = await built.subagent_continue.execute("call", { runId: w.runId, files: ["src/additional.ts"], requiresAck: false }, undefined, undefined, { cwd: w.root });
 
-  assert.equal(result.isError, true);
-  assert.equal(result.details.code, "SCOPE_UNSPECIFIED");
+  assert.equal(result.isError, undefined);
+  assert.equal(result.details.controlQueued, true);
+  // The run's scope is prose in its brief. Persisting ["src/additional.ts"] would
+  // narrow a subtree-scoped agent to a single file, so allowedFiles stays unset.
   assert.equal(store.readStatus(w.runId).allowedFiles, undefined);
-  assert.equal(store.readInbox(w.runId).records.length, 0);
-  assert.equal(existsSync(join(store.pathsFor({ runId: w.runId }).runDir, "control.jsonl")), false);
+  const message = store.readInbox(w.runId).records.at(-1);
+  assert.match(message?.body ?? "", /Write-Scope Amendment \(additive\)/);
+  assert.match(message?.body ?? "", /- src\/additional\.ts/);
+  assert.doesNotMatch(message?.body ?? "", /write scope for this run is now the following additive union/);
+  assert.equal(existsSync(join(store.pathsFor({ runId: w.runId }).runDir, "control.jsonl")), true);
 });
 
 test("subagent_continue creates an async terminal continuation using the original Pi session", async () => {
@@ -445,7 +463,7 @@ test("subagent_continue creates an async terminal continuation using the origina
   assert.deepEqual(store.readStatus(second.details.runId as string).allowedFiles, ["src/original.ts", "src/shared.ts", "src/retry.ts"]);
 });
 
-test("unscoped terminal runs reject file widening before launch", async () => {
+test("unscoped terminal continuations take file widening as an additive amendment and launch", async () => {
   const w = workspace();
   const store = new RunStore({ cwd: w.root });
   const originalSession = join(w.root, "unscoped-child-session.jsonl");
@@ -459,15 +477,22 @@ test("unscoped terminal runs reject file widening before launch", async () => {
   });
   const byName = Object.fromEntries(built.map((tool) => [tool.name, tool]));
 
-  const result = await byName.subagent_continue.execute("call", { runId: w.runId, files: ["src/new.ts"] }, undefined, undefined, { cwd: w.root });
+  const result = await byName.subagent_continue.execute("call", { runId: w.runId, files: ["src/new.ts"], body: "Continue with the extra file" }, undefined, undefined, { cwd: w.root });
 
-  assert.equal(result.isError, true);
-  assert.equal(result.details.code, "SCOPE_UNSPECIFIED");
-  assert.equal(launches, 0);
+  assert.equal(result.isError, undefined);
+  assert.equal(launches, 1);
+  const grantedRunId = result.details.runId as string;
+  // No allowedFiles to union into, so the grant rides in the task body instead of
+  // narrowing the continuation to the one granted path.
+  assert.equal(store.readStatus(grantedRunId).allowedFiles, undefined);
+  const task = readFileSync(join(store.pathsFor({ runId: grantedRunId }).artifactsDir, "task.md"), "utf8");
+  assert.match(task, /Write-Scope Amendment \(additive\)/);
+  assert.match(task, /- src\/new\.ts/);
+  assert.match(task, /# Write Scope\n\n[^#]*- \(not specified\)/);
 
   const withoutFiles = await byName.subagent_continue.execute("without-files", { runId: w.runId, body: "Continue unscoped" }, undefined, undefined, { cwd: w.root });
   assert.equal(withoutFiles.isError, undefined);
-  assert.equal(launches, 1);
+  assert.equal(launches, 2);
   assert.equal(store.readStatus(withoutFiles.details.runId as string).allowedFiles, undefined);
 });
 

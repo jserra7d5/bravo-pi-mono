@@ -166,10 +166,10 @@ test("subagent_message with files additively widens scope and appends amendment"
   });
 });
 
-test("subagent_message files widening rejects runs without a specified scope", async () => {
+test("subagent_message files widening on an unscoped run grants an additive amendment without inventing allowedFiles", async () => {
   await withParentToolEnv(async () => {
     const w = workspace();
-    const { runId } = w.runStore.createRunDirectory({ cwd: w.root, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId });
+    const { runId, paths } = w.runStore.createRunDirectory({ cwd: w.root, parentRunId: w.identity.parentRunId, rootSessionId: w.identity.rootSessionId });
     w.runStore.writeStatus(createInitialStatus({
       runId,
       parentRunId: w.identity.parentRunId,
@@ -181,8 +181,13 @@ test("subagent_message files widening rejects runs without a specified scope", a
       state: "running",
     }));
     const toolset = tools(w.identity);
-    const response = await toolset.subagent_message.execute("t2", { runId, type: "answer", body: "No scope run.", files: ["a.ts"] }, undefined, undefined, { cwd: w.root });
-    assert.ok(response.isError);
-    assert.equal(response.details.code, "SCOPE_UNSPECIFIED");
+    const response = await toolset.subagent_message.execute("t2", { runId, type: "answer", body: "No scope run.", files: ["a.ts"], requiresAck: false }, undefined, undefined, { cwd: w.root });
+    assert.ok(!response.isError, JSON.stringify(response.content));
+    // The run's scope lives in its brief as prose. Writing ["a.ts"] into
+    // allowedFiles would narrow it to one file, so the grant stays additive.
+    assert.equal(w.runStore.readStatus(runId).allowedFiles, undefined);
+    const inbox = readFileSync(paths.inboxPath, "utf8");
+    assert.match(inbox, /Write-Scope Amendment \(additive\)/);
+    assert.match(inbox, /- a\.ts/);
   });
 });

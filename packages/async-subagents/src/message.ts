@@ -115,6 +115,8 @@ export function sendSubagentMessage(store: RunStore, input: SendSubagentMessageI
       messageId: message.messageId,
       runId: input.runId,
       appended: true,
+      // Durably queued either way; the nudge only shortens the pickup latency.
+      delivery: "queued",
       liveDelivered,
       unsupported: supportedLiveTransport
         ? undefined
@@ -129,6 +131,9 @@ export function sendSubagentMessage(store: RunStore, input: SendSubagentMessageI
     messageId: message.messageId,
     runId: input.runId,
     appended: true,
+    // A cancel on a live run is read by the supervisor, not the agent, so it is
+    // queued. Only a terminal run has nothing left that will read its inbox.
+    delivery: live ? "queued" : "undeliverable",
     liveDelivered: false,
   };
 }
