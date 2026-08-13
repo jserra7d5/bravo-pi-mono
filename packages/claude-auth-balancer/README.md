@@ -133,17 +133,60 @@ a second owner of Claude OAuth material:
 
 Slot ids are authswap account numbers, so `slot 2` here is `authswap` account 2.
 
-### Known gap: token refresh
+### Token refresh
 
-**Not implemented.** authswap has no refresh logic either — it relies on Claude
-Code refreshing whichever account it made active, which is why idle slots go
-stale within a day. Implementing refresh needs the Claude Code OAuth
-`client_id`, which is not extractable from the shipped binary.
+The balancer refreshes its own tokens, so idle slots stay usable. Without this
+only the account Claude Code happens to have made active in authswap stays
+fresh — the other slots expire within ~12h, and a balancer with one live
+account is just one account.
 
-Until that is supplied, an account whose access token has expired is marked
-`needs-reauth` and excluded from selection, rather than being sent to the wire
-to 401. Refresh it by making it active in authswap and letting Claude Code do
-the refresh.
+The endpoint, client id, and scope set were read out of the shipped Claude Code
+binary rather than guessed:
+
+```
+POST https://platform.claude.com/v1/oauth/token
+Content-Type: application/json
+
+{"grant_type":"refresh_token","refresh_token":"...",
+ "client_id":"9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+ "scope":"user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"}
+```
+
+Two details are load-bearing. The body is **JSON**, not form-encoded. And the
+response **may omit `refresh_token`**, which means unchanged rather than
+revoked — Claude Code's own destructure is `{refresh_token: d = e}`. Observed
+behaviour is that Anthropic does rotate it on every call, so the omission path
+is a safety net rather than the norm.
+
+Refresh happens 30 minutes ahead of expiry, never reactively on a 401: a 401
+mid-generation is unrecoverable, because the client already has a 200 and part
+of the body. A background sweep covers idle slots, which reactive refresh
+never could — an expired account is not selected, so nothing would trigger it.
+
+Failures are classified. `terminal` (400/401/403) means the grant is dead and
+only re-auth fixes it; the slot backs off for an hour. Everything else,
+including 429 and every 5xx, is `transient`: the credential file is left
+byte-identical and the same refresh token is retried. `needs-reauth` now means
+what it says — no credential, or an expired access token with no live refresh
+token behind it.
+
+## Running it as a daemon
+
+```bash
+claude-auth-balancer install-service            # systemd user unit, then start
+claude-auth-balancer install-service --port 9000 --allow-overage
+sudo loginctl enable-linger "$USER"             # once, to survive logout
+```
+
+`--allow-overage` is baked into the unit rather than left to a runtime flag.
+Overage spends real money past 100%, and a daemon is precisely the thing nobody
+is watching.
+
+One balancer per state root is enforced with a pid lock taken before the port
+is bound. A port collision is not enough of a guard: two `serve` invocations on
+different ports both bind happily and then share one state root, which is the
+configuration that the in-process atomicity of selection and lease-pinning does
+not cover. A lock whose pid is gone is taken over automatically.
 
 ## Commands
 
@@ -151,9 +194,12 @@ the refresh.
 claude-auth-balancer serve    [--port N] [--allow-overage]
 claude-auth-balancer status   [--model M]     # headroom, claims, live leases
 claude-auth-balancer accounts                 # slots, health, token expiry
+claude-auth-balancer refresh                  # refresh near-expiry slots now
 claude-auth-balancer metrics  [--days N] [--daily] [--json] [--sql "..."]
 claude-auth-balancer sweep                    # drop expired lease files
 claude-auth-balancer prune    [--days N]      # drop old raw metric rows
+claude-auth-balancer install-service   [--port N] [--allow-overage]
+claude-auth-balancer uninstall-service
 ```
 
 ## What the proxy does not do

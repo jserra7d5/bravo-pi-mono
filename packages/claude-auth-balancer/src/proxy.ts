@@ -27,6 +27,7 @@ import { hasClaims, parseClaims } from './claims.js';
 import { discoverAccounts, loadAccountStates, readOAuth, recordObservation, resolveAuthswapRoot, resolveStateRoot, tokenFingerprint } from './accounts.js';
 import type { Account } from './accounts.js';
 import { selectAccount } from './policy.js';
+import { REFRESH_SWEEP_INTERVAL_MS, TokenRefresher } from './refresh.js';
 
 export const SESSION_HEADER = 'x-claude-code-session-id';
 export const DEFAULT_UPSTREAM = 'https://api.anthropic.com';
@@ -86,7 +87,7 @@ const REQUEST_STRIP = new Set([
 const RESPONSE_STRIP = HOP_BY_HOP;
 
 export type ProxyLogEvent = {
-  kind: 'route' | 'retry' | 'error' | 'exhausted';
+  kind: 'route' | 'retry' | 'error' | 'exhausted' | 'refresh';
   method: string;
   path: string;
   model?: string;
@@ -395,6 +396,39 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
     now: opts.now,
   });
 
+  const refresher = new TokenRefresher({
+    now: opts.now,
+    log: e =>
+      opts.log({
+        kind: e.outcome === 'failed' ? 'error' : 'refresh',
+        method: 'OAUTH',
+        path: '/v1/oauth/token',
+        slot: e.slot,
+        reason: e.outcome,
+        message:
+          e.message ??
+          (e.outcome === 'refreshed'
+            ? `valid for ${Math.round((e.expiresInMs ?? 0) / 60000)}m${e.rotated ? ', refresh token rotated' : ''}`
+            : undefined),
+      }),
+  });
+
+  // Idle slots are the whole point. Reactive refresh only ever touches accounts
+  // that are being selected, and an account is not selected precisely when it
+  // has gone stale — so without this sweep the balancer degenerates to whichever
+  // account Claude Code happens to keep warm.
+  const runRefreshSweep = () => {
+    void refresher
+      .sweep(discoverAccounts(opts.authswapRoot))
+      .catch(() => {}); // a sweep failure must never take the proxy down
+  };
+  runRefreshSweep();
+  {
+    const timer = setInterval(runRefreshSweep, REFRESH_SWEEP_INTERVAL_MS);
+    timer.unref();
+    server_close_hooks.push(() => clearInterval(timer));
+  }
+
   const metrics = opts.metrics ? new MetricsStore(opts.stateRoot) : undefined;
   const runPrune = () => {
     try {
@@ -493,8 +527,30 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
       }
 
       const account = accounts.get(selection.slot) as Account | undefined;
-      const oauth = account ? readOAuth(account.credentialPath) : undefined;
-      if (!account || !oauth) {
+      if (!account) {
+        excluded.add(selection.slot);
+        return false;
+      }
+
+      // Refresh before use, not after a 401. The token has to be valid for the
+      // whole generation, and a 401 mid-stream is unrecoverable — the client
+      // has already received a 200 and part of the body.
+      const refreshed = await refresher.ensureFresh(account);
+      if (refreshed.status === 'failed' || refreshed.status === 'skipped') {
+        opts.log({
+          kind: 'error',
+          method,
+          path: reqPath,
+          slot: selection.slot,
+          message: `refresh ${refreshed.status}: ${
+            refreshed.status === 'failed' ? refreshed.message : refreshed.reason
+          }`,
+        });
+      }
+      const oauth = readOAuth(account.credentialPath);
+      if (!oauth || (oauth.expiresAt !== undefined && oauth.expiresAt <= opts.now())) {
+        // Still unusable after the refresh attempt. Exclude and let the loop
+        // try another account rather than sending a dead token to the wire.
         excluded.add(selection.slot);
         return false;
       }

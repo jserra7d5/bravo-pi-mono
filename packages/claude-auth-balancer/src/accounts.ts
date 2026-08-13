@@ -9,12 +9,10 @@
 // Each credential file is Claude Code's own shape:
 //   { "claudeAiOauth": { accessToken, refreshToken, expiresAt, ... } }
 //
-// Refresh is deliberately NOT implemented here. authswap has no refresh logic
-// either (it relies on Claude Code refreshing whichever account it made
-// active), which is why idle slots go stale within a day. Wiring real refresh
-// needs the Claude Code OAuth client_id, which is not extractable from the
-// shipped binary. Until that is supplied, an expired slot is reported as
-// `needs-reauth` and excluded from selection rather than silently 401-ing.
+// Refresh lives in ./refresh.ts, which writes these files. authswap has no
+// refresh logic of its own — it relies on Claude Code refreshing whichever
+// account it made active — so without that module every inactive slot expires
+// within ~12h.
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync } from 'node:fs';
@@ -134,9 +132,23 @@ export function writeSlotObservation(stateRoot: string, account: PersistedAccoun
 }
 
 /**
+ * True when a credential can be revived without a human.
+ *
+ * An expired access token is only fatal if the refresh token is missing or
+ * itself expired. Conflating the two would drop every slot the refresher is
+ * about to rescue — and since an excluded slot is never selected, nothing
+ * would ever trigger its refresh. That is the deadlock this predicate avoids.
+ */
+export function isRefreshable(oauth: ClaudeOAuth | undefined, nowMs: number): boolean {
+  if (!oauth?.refreshToken) return false;
+  const expiry = oauth.refreshTokenExpiresAt;
+  return expiry === undefined || expiry > nowMs;
+}
+
+/**
  * Join credential files with persisted observations into the shape the policy
- * consumes. Accounts whose access token has expired are marked `needs-reauth`
- * so they drop out of selection instead of failing at the wire.
+ * consumes. `needs-reauth` means a human must act: no credential, or an expired
+ * access token with no live refresh token behind it.
  */
 export function loadAccountStates(options: {
   stateRoot: string;
@@ -153,10 +165,11 @@ export function loadAccountStates(options: {
     const prior = readSlotObservation(options.stateRoot, account.slot);
     const expiresAt = oauth?.expiresAt;
     const expired = expiresAt !== undefined && expiresAt <= options.nowMs;
+    const dead = !oauth || (expired && !isRefreshable(oauth, options.nowMs));
     states.push({
       slot: account.slot,
       email: account.email,
-      health: !oauth ? 'needs-reauth' : expired ? 'needs-reauth' : 'ok',
+      health: dead ? 'needs-reauth' : 'ok',
       claims: prior?.claims,
       observedAt: prior?.observedAt,
       tokenExpiresAt: expiresAt,

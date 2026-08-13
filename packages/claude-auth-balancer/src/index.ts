@@ -4,4 +4,7 @@ export * from './metrics.js';
 export * from './policy.js';
 export * from './accounts.js';
 export * from './affinity.js';
+export * from './oauth.js';
+export * from './refresh.js';
+export * from './daemon.js';
 export * from './proxy.js';

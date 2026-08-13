@@ -6,8 +6,17 @@
 //   claude-auth-balancer accounts
 //   claude-auth-balancer sweep
 
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
 import { AffinityStore } from './affinity.js';
-import { loadAccountStates, resolveAuthswapRoot, resolveStateRoot } from './accounts.js';
+import { discoverAccounts, loadAccountStates, resolveAuthswapRoot, resolveStateRoot } from './accounts.js';
+import { TokenRefresher } from './refresh.js';
+import { acquireSingletonLock, renderUnit, userUnitPath } from './daemon.js';
+import type { SingletonLock } from './daemon.js';
 import { MetricsStore } from './metrics.js';
 import { computeHeadroom } from './policy.js';
 import { DEFAULT_PORT, startProxy } from './proxy.js';
@@ -37,6 +46,26 @@ function ago(ms: number | undefined, now: number): string {
 async function cmdServe(argv: string[]): Promise<void> {
   const port = Number(value(argv, 'port') ?? DEFAULT_PORT);
   const allowOverage = flag(argv, 'allow-overage');
+
+  // Claimed before the port is bound. Two balancers on different ports would
+  // both succeed at binding and then quietly share one state root — the exact
+  // case the in-process atomicity of selection and lease-pinning does not cover.
+  let lock: SingletonLock;
+  try {
+    lock = acquireSingletonLock(resolveStateRoot());
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+    return;
+  }
+  const drop = () => lock.release();
+  process.on('exit', drop);
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => {
+      drop();
+      process.exit(0);
+    });
+  }
   const log = (e: ProxyLogEvent) => {
     const bits = [
       new Date().toISOString(),
@@ -116,6 +145,75 @@ function cmdAccounts(): void {
   }
 }
 
+/**
+ * Install (or refresh) the systemd user unit and start it.
+ *
+ * A user unit, not a system one: the credentials live in the user's home and
+ * the proxy has no business running as anything else.
+ */
+function cmdInstallService(argv: string[]): void {
+  const port = Number(value(argv, 'port') ?? DEFAULT_PORT);
+  const allowOverage = flag(argv, 'allow-overage');
+  const target = userUnitPath();
+
+  const unit = renderUnit({
+    execPath: process.execPath,
+    // Resolve to the real file rather than whatever shim is on PATH today, so
+    // the unit keeps working after a PATH change or a shell rewrite.
+    cliPath: fileURLToPath(import.meta.url),
+    port,
+    allowOverage,
+  });
+
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(target, unit);
+  console.log(`wrote ${target}`);
+
+  const run = (...args: string[]): boolean => {
+    const r = spawnSync('systemctl', ['--user', ...args], { stdio: 'inherit' });
+    return r.status === 0;
+  };
+
+  if (!run('daemon-reload')) {
+    console.error('systemctl --user daemon-reload failed; is systemd user mode available?');
+    process.exitCode = 1;
+    return;
+  }
+  run('enable', 'claude-auth-balancer.service');
+  // `restart` rather than `start`, so reinstalling picks up a changed port or
+  // a changed overage decision instead of silently leaving the old one running.
+  if (!run('restart', 'claude-auth-balancer.service')) {
+    console.error('failed to start the service; check: systemctl --user status claude-auth-balancer');
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log('');
+  console.log(`service running on port ${port}; overage ${allowOverage ? 'ALLOWED' : 'blocked'}`);
+  console.log('  logs   : journalctl --user -u claude-auth-balancer -f');
+  console.log('  status : systemctl --user status claude-auth-balancer');
+  console.log('');
+  console.log('For it to survive logout, enable lingering once:');
+  console.log(`  sudo loginctl enable-linger ${os.userInfo().username}`);
+  console.log('');
+  console.log('Then point clients at it:');
+  console.log(`  export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}`);
+}
+
+function cmdUninstallService(): void {
+  const target = userUnitPath();
+  spawnSync('systemctl', ['--user', 'disable', '--now', 'claude-auth-balancer.service'], {
+    stdio: 'inherit',
+  });
+  try {
+    rmSync(target);
+    console.log(`removed ${target}`);
+  } catch {
+    console.log(`no unit at ${target}`);
+  }
+  spawnSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'inherit' });
+}
+
 function cmdSweep(): void {
   const removed = new AffinityStore({ stateRoot: resolveStateRoot() }).maybeSweep(true);
   console.log(`removed ${removed} expired lease file(s)`);
@@ -176,6 +274,29 @@ function cmdMetrics(argv: string[]): void {
   }
 }
 
+/**
+ * Force a refresh pass now.
+ *
+ * The daemon does this on a timer; this is for checking that refresh works on
+ * this machine without waiting, and for reviving slots after a long shutdown.
+ */
+async function cmdRefresh(): Promise<void> {
+  const refresher = new TokenRefresher({
+    log: e =>
+      console.log(
+        `slot ${e.slot}  ${e.email ?? ''}  ${e.outcome}${e.kind ? ` (${e.kind})` : ''}` +
+          `${e.rotated ? '  refresh-token-rotated' : ''}` +
+          `${e.expiresInMs !== undefined ? `  valid ${(e.expiresInMs / 3_600_000).toFixed(1)}h` : ''}` +
+          `${e.message ? `  ${e.message}` : ''}`,
+      ),
+  });
+  const accounts = discoverAccounts();
+  const outcomes = await refresher.sweep(accounts);
+  if (outcomes.length === 0) {
+    console.log(`nothing to do: all ${accounts.length} account(s) are outside the refresh window`);
+  }
+}
+
 function cmdPrune(argv: string[]): void {
   const store = new MetricsStore(resolveStateRoot());
   try {
@@ -208,14 +329,26 @@ async function main(): Promise<void> {
     case 'prune':
       cmdPrune(argv);
       return;
+    case 'refresh':
+      await cmdRefresh();
+      return;
+    case 'install-service':
+      cmdInstallService(argv);
+      return;
+    case 'uninstall-service':
+      cmdUninstallService();
+      return;
     default:
       console.error(`unknown command: ${command}`);
       console.error(
-        'usage: claude-auth-balancer <serve|status|accounts|metrics|sweep|prune>\n' +
-          '  serve   [--port N] [--allow-overage]\n' +
-          '  status  [--model M]\n' +
-          '  metrics [--days N] [--daily] [--json] [--sql "SELECT ..."]\n' +
-          '  prune   [--days N]',
+        'usage: claude-auth-balancer <serve|status|accounts|metrics|refresh|sweep|prune|install-service>\n' +
+          '  serve            [--port N] [--allow-overage]\n' +
+          '  status           [--model M]\n' +
+          '  metrics          [--days N] [--daily] [--json] [--sql "SELECT ..."]\n' +
+          '  refresh          refresh any account near expiry, now\n' +
+          '  prune            [--days N]\n' +
+          '  install-service  [--port N] [--allow-overage]   systemd user unit\n' +
+          '  uninstall-service',
       );
       process.exitCode = 2;
   }
