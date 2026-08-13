@@ -18,6 +18,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `packages/dynamic-skills/` contains the Pi extension package for read-triggered dynamic subtree skill discovery; read `packages/dynamic-skills/README.md` and `docs/specs/pi-dynamic-skill-discovery/design.md` before changing discovery triggers, skill loading, collision behavior, prompt injection, or branch persistence.
 - `packages/gemini-code-assist/` contains the direct Antigravity Code Assist Pi provider for `antigravity-code-assist/gemini-3.5-flash`; read `packages/gemini-code-assist/README.md` before changing OAuth, model ids, reasoning controls, or provider behavior.
 - `packages/task-plane/` contains the unified Pi task plane: the `bash` override, external-state `monitor`, and shared `managed_task_list`/`managed_task_stop` lifecycle controls; read `packages/task-plane/README.md` and `docs/specs/unified-task-plane/design.md` before changing tool contracts, task lifecycle, persistence, notification routing, or rehydration.
+- `packages/claude-auth-balancer/` contains the cache-affinity-first Claude OAuth balancer: a local proxy (`ANTHROPIC_BASE_URL`) that pins each Claude Code session+model to one account, routes on the `anthropic-ratelimit-unified-*` claims, and records per-account usage metrics to SQLite. Read `packages/claude-auth-balancer/README.md` before changing routing, the quota normalization, the affinity lease lifetime, or the request-target validation — affinity is a cost decision (a broken session pays ~20x on its next request), not a nicety.
 - `docs/specs/` contains design specs. Each spec should live under a slug directory, e.g. `docs/specs/tango-v1/design.md`.
 - Package-specific source, docs, roles, includes, and extensions should live inside the relevant package directory.
 
@@ -58,6 +59,8 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `npm run check --workspace @bravo/source-search` — type-check the Source Search Pi extension.
 - `npm test --workspace @bravo/source-search` — build and run Source Search tests.
 - `npm run check --workspace @bravo/dynamic-skills` — type-check the Dynamic Skills extension.
+- `npm run check --workspace @bravo/claude-auth-balancer` — type-check the Claude auth balancer.
+- `npm test --workspace @bravo/claude-auth-balancer` — build and run the Claude auth balancer tests.
 - `npm test --workspace @bravo/dynamic-skills` — build and run Dynamic Skills tests.
 - `npm run antigravity:proof --workspace @bravo/gemini-code-assist -- --mode sweep` — live-proof the direct Antigravity provider and thinking controls.
 - `npm test --workspace @bravo/loom` — run Loom's vertical-slice tests.

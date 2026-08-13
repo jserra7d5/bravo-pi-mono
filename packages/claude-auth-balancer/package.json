@@ -1,0 +1,29 @@
+{
+  "name": "@bravo/claude-auth-balancer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cache-affinity-first Claude OAuth balancer: a local proxy that pins each Claude Code session to one account and routes on unified rate-limit claims.",
+  "keywords": ["pi-package"],
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "bin": {
+    "claude-auth-balancer": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json && chmod +x dist/src/cli.js",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  },
+  "engines": { "node": ">=22.13" }
+}
