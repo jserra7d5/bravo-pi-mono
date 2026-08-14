@@ -18,6 +18,16 @@ import path from 'node:path';
 export type AffinityLease = {
   schema_version: 1;
   session_id_hash: string;
+  /**
+   * Hash of the session id ALONE, without the model.
+   *
+   * `session_id_hash` mixes in the model, which is right for routing but makes
+   * a lease unfindable by anyone who knows only the session id — the statusline,
+   * which is handed `session_id` and cannot know which model string the proxy
+   * saw in the request body. Additive: leases written before this field are
+   * still valid, they simply cannot be found by session alone.
+   */
+  session_hash?: string;
   slot: string;
   created_at: number;
   last_seen_at: number;
@@ -77,6 +87,21 @@ export class AffinityStore {
       .slice(0, 32);
   }
 
+  /**
+   * Hash of a session id with no model mixed in.
+   *
+   * Domain-separated from {@link hashSession} so it can never equal the routing
+   * key of a model-less request — those are different questions and a shared
+   * value would make one look like the other.
+   */
+  static hashSessionOnly(sessionId: string): string {
+    return createHash('sha256')
+      .update('session-only\0')
+      .update(sessionId)
+      .digest('hex')
+      .slice(0, 32);
+  }
+
   private pathFor(hash: string): string {
     return path.join(this.dir, `${hash}.json`);
   }
@@ -120,6 +145,7 @@ export class AffinityStore {
     const lease: AffinityLease = {
       schema_version: 1,
       session_id_hash: hash,
+      session_hash: AffinityStore.hashSessionOnly(sessionId),
       slot,
       created_at: prior?.slot === slot ? prior.created_at : now,
       last_seen_at: now,
@@ -127,6 +153,52 @@ export class AffinityStore {
     };
     this.write(lease);
     return lease;
+  }
+
+  /**
+   * The live lease for a session, whichever model it was created under.
+   *
+   * Strictly read-only — no sweep, no writes. The statusline runs on every turn
+   * of every session, and a renderer that mutates routing state is a renderer
+   * that can change what it is reporting.
+   *
+   * A session can hold one lease per model, and they can legitimately sit on
+   * different accounts. `model` is therefore not a hint but the question being
+   * asked: pass the model the caller cares about and its exact lease is read
+   * directly, in one stat. Without it — or if that model has no live lease —
+   * the directory is scanned and the most recently used lease wins, which is
+   * only an approximation: a background haiku call can be the most recent lease
+   * while the foreground turn runs on another account entirely.
+   *
+   * The exact-key path also matters for cost. The scan is O(number of leases)
+   * with a file read each, on a path that runs on every turn of every session;
+   * at a thousand leases it was measured at 383ms.
+   */
+  peekSession(sessionId: string, model?: string, maxScan = 2000): AffinityLease | undefined {
+    if (!existsSync(this.dir)) return undefined;
+    const now0 = this.now();
+    if (model) {
+      const exact = this.read(AffinityStore.hashSession(sessionId, model));
+      if (exact && exact.expires_at > now0) return exact;
+    }
+    const wanted = AffinityStore.hashSessionOnly(sessionId);
+    const now = this.now();
+    let best: AffinityLease | undefined;
+    let scanned = 0;
+    for (const name of readdirSync(this.dir)) {
+      if (!name.endsWith('.json')) continue;
+      // Bounded so a leaked lease directory can never make the statusline hang.
+      if (++scanned > maxScan) break;
+      try {
+        const lease = JSON.parse(readFileSync(path.join(this.dir, name), 'utf8')) as AffinityLease;
+        if (lease?.session_hash !== wanted) continue;
+        if (lease.expires_at <= now) continue;
+        if (!best || lease.last_seen_at > best.last_seen_at) best = lease;
+      } catch {
+        /* skip */
+      }
+    }
+    return best;
   }
 
   /** Remove expired lease files. Rate-limited so it never runs per request. */

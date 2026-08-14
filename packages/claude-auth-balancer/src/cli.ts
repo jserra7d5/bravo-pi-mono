@@ -6,7 +6,8 @@
 //   claude-auth-balancer accounts
 //   claude-auth-balancer sweep
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -214,6 +215,62 @@ function cmdUninstallService(): void {
   spawnSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'inherit' });
 }
 
+/**
+ * Point Claude Code's statusline at this package.
+ *
+ * Writes `statusLine` into `~/.claude/settings.json`, preserving everything
+ * else in the file, and keeps a one-time backup of whatever was there before so
+ * a previous HUD can be restored by hand.
+ */
+function cmdInstallStatusline(): void {
+  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+  let settings: Record<string, unknown> = {};
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
+  } catch (error) {
+    // ONLY a genuinely absent file may be treated as an empty object. Anything
+    // else — a trailing comma, a half-written file from a concurrent Claude
+    // Code process, EACCES — would otherwise be "recovered" by writing `{}`
+    // over the top, silently destroying env, permissions, plugins and themes
+    // with no backup, because statusLine_previous is captured from the object
+    // that just failed to load.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.error(`refusing to rewrite ${settingsPath}: ${(error as Error).message}`);
+      console.error('fix or move that file, then run install-statusline again.');
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  const previous = settings['statusLine'];
+  if (previous && !settings['statusLine_previous']) {
+    // Only ever taken once, so reinstalling cannot overwrite the original with
+    // our own command and lose it.
+    settings['statusLine_previous'] = previous;
+  }
+
+  // The entry is executable and carries `#!/usr/bin/env node`, so it is invoked
+  // directly rather than through `process.execPath`. Baking in the absolute
+  // path of whichever node ran the installer breaks the status bar on the next
+  // nvm/brew upgrade, silently and on every turn.
+  const entry = fileURLToPath(new URL('./statusline-cli.js', import.meta.url));
+  settings['statusLine'] = { type: 'command', command: JSON.stringify(entry) };
+
+  mkdirSync(path.dirname(settingsPath), { recursive: true });
+  // Same tmp+rename as accounts.ts: Claude Code reads this file on startup and
+  // on change, so a torn write is a broken editor, not just a broken statusline.
+  const tmp = `${settingsPath}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(settings, null, 2)}\n`);
+  renameSync(tmp, settingsPath);
+
+  console.log(`statusline installed in ${settingsPath}`);
+  console.log(`  command: ${(settings['statusLine'] as { command: string }).command}`);
+  if (previous) console.log('  previous statusLine saved as "statusLine_previous"');
+  console.log('');
+  console.log('Preview it now with:');
+  console.log(`  echo '{}' | ${entry}`);
+}
+
 function cmdSweep(): void {
   const removed = new AffinityStore({ stateRoot: resolveStateRoot() }).maybeSweep(true);
   console.log(`removed ${removed} expired lease file(s)`);
@@ -332,6 +389,9 @@ async function main(): Promise<void> {
     case 'refresh':
       await cmdRefresh();
       return;
+    case 'install-statusline':
+      cmdInstallStatusline();
+      return;
     case 'install-service':
       cmdInstallService(argv);
       return;
@@ -346,6 +406,7 @@ async function main(): Promise<void> {
           '  status           [--model M]\n' +
           '  metrics          [--days N] [--daily] [--json] [--sql "SELECT ..."]\n' +
           '  refresh          refresh any account near expiry, now\n' +
+          '  install-statusline  point the Claude Code status bar at this package\n' +
           '  prune            [--days N]\n' +
           '  install-service  [--port N] [--allow-overage]   systemd user unit\n' +
           '  uninstall-service',
