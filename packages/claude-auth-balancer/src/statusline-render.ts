@@ -9,14 +9,11 @@
 //   1. Width is finite and shared. Bars shrink before anything is dropped, and
 //      what gets dropped is dropped in a fixed order, so the line never reflows
 //      unpredictably as numbers change.
-//   2. Colour is never the only signal. The active account is marked with a
-//      glyph as well as a colour, because the whole point is to be readable at a
-//      glance and terminals disagree about colour.
+//   2. Active account attribution uses both a glyph and colour. Quota warnings
+//      stay compact: the existing red bar plus a red account marker carries the
+//      evacuation state without adding a large text label.
 //   3. Salience tracks relevance. The account serving this session renders at
 //      full strength; every other account renders one step down, hue intact.
-//      Otherwise the loudest thing on the bar — a bold red EVACUATING on an
-//      account the user is not on — is a permanent false alarm, and a bar whose
-//      alarm is always on is a bar nobody reads.
 
 import type { AccountView, StatuslineModel } from './statusline.js';
 
@@ -373,9 +370,11 @@ function renderAccountLine(
   const g = opts.glyphs;
   const w = barWidth(opts.width);
   const off = !account.active;
-  const mark = account.active
-    ? paint(g.active, `${BOLD}${GREEN}`, c)
-    : paint(g.inactive, DIM, c);
+  const markGlyph = account.active ? g.active : g.inactive;
+  const markStyle = account.evacuating
+    ? account.active ? `${BOLD}${RED}` : RED
+    : account.active ? `${BOLD}${GREEN}` : DIM;
+  const mark = paint(markGlyph, markStyle, c);
   const label = padVisible(account.label, labelWidth);
   const name = account.active ? paint(label, BOLD, c) : paint(label, DIM, c);
 
@@ -402,8 +401,7 @@ function renderAccountLine(
   const optional: string[] = [];
 
   // The reset time leads the optional tail — it is the only thing here the bars
-  // do not already say. A red bar at 96% communicates "evacuating" on its own;
-  // "and it refills in 1d4h" is the part that decides whether you wait or move.
+  // and evacuation marker do not already say.
   const sevenHotter = (account.sevenDay ?? 0) >= (account.fiveHour ?? 0);
   const binding = sevenHotter
     ? formatReset(account.sevenDayResetAt, nowMs)
@@ -412,9 +410,7 @@ function renderAccountLine(
   // against whichever one the eye landed on last.
   if (binding) optional.push(paint(`${sevenHotter ? '7d' : '5h'}${g.reset}${binding}`, DIM, c));
 
-  if (account.evacuating) {
-    optional.push(paint('EVACUATING', off ? `${DIM}${RED}` : `${BOLD}${RED}`, c));
-  } else if (account.overageAllowed && (account.sevenDay ?? 0) >= 90) {
+  if (!account.evacuating && account.overageAllowed && (account.sevenDay ?? 0) >= 90) {
     optional.push(paint('overage ok', off ? DIM : YELLOW, c));
   }
   // "no observation at all" and "an observation from eleven hours ago" are

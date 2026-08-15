@@ -239,10 +239,32 @@ test('every balanced account appears, not just the one that served last', () => 
   assert.equal(model.accounts[0]!.fiveHour, 34);
   assert.equal(model.accounts[1]!.sevenDay, 96);
 
-  const out = render(model, { width: 120, color: false }, NOW);
-  assert.match(out, /1 info/);
-  assert.match(out, /2 joseph/);
-  assert.match(out, /EVACUATING/, 'a 96% account is called out, not just coloured');
+  const plain = render(model, { width: 120, color: false }, NOW);
+  assert.match(plain, /1 info/);
+  assert.match(plain, /2 joseph/);
+  assert.doesNotMatch(plain, /EVACUATING/, 'evacuation does not add a large text label');
+
+  const coloured = render(model, { width: 120, color: true }, NOW);
+  const hot = coloured.split('\n').find(line => line.includes('2 joseph'))!;
+  assert.ok(
+    hot.startsWith(`${ESC}[31m·${ESC}[0m`),
+    `an evacuating account uses a red left marker: ${JSON.stringify(hot)}`,
+  );
+});
+
+test('an active evacuating account keeps its active glyph but turns it red', () => {
+  const { stateRoot, authswapRoot } = world([
+    { slot: '1', email: 'hot@nad.com', u5h: 0.1, u7d: 0.96 },
+  ]);
+  new AffinityStore({ stateRoot, now: () => NOW }).touch('sess-hot', '1', 'claude-opus-5');
+  const model = gather({ session_id: 'sess-hot' }, { stateRoot, authswapRoot, nowMs: NOW });
+  const line = render(model, { width: 120, color: true }, NOW).split('\n')[0]!;
+
+  assert.ok(
+    line.startsWith(`${ESC}[1m${ESC}[31m▸${ESC}[0m`),
+    `active evacuation uses a bold red active marker: ${JSON.stringify(line)}`,
+  );
+  assert.ok(!line.includes('EVACUATING'));
 });
 
 test('the session is attributed to the account holding its lease', () => {
@@ -413,7 +435,7 @@ test('a reset already in the past is not offered as a countdown', () => {
   assert.equal(model.accounts[0]!.sevenDayResetAt, undefined);
 });
 
-test('EVACUATING follows the router, which spares a window that refills within the cache horizon', () => {
+test('the evacuation marker follows the router and spares a window refilling within the cache horizon', () => {
   // computeHeadroom will not pay a 20x cache re-create to dodge a bucket that
   // refills in ten minutes. The badge must not claim otherwise.
   const soon = world([{ slot: '1', email: 'a@b.com', u5h: 0.97, u7d: 0.2, reset5h: 600 }]);
@@ -426,7 +448,7 @@ test('EVACUATING follows the router, which spares a window that refills within t
   assert.equal(gather({}, { ...later, nowMs: NOW }).accounts[0]!.evacuating, true);
 });
 
-test('EVACUATING fires on the Fable-only weekly, which has no bar of its own', () => {
+test('the evacuation marker fires on the Fable-only weekly, which has no bar of its own', () => {
   // 7d_oi drives routing but is not one of the two bars, so without this the
   // user watches two calm bars while every session is being moved off.
   const { stateRoot, authswapRoot } = world([
