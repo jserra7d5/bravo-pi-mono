@@ -261,6 +261,10 @@ function streamAntigravity(model: Model<any>, context: Context, options?: Simple
       finishText();
       if (options?.signal?.aborted) throw new Error("Request was aborted");
       if (output.stopReason === "error" || output.stopReason === "aborted") throw new Error("Antigravity generation stopped with error");
+      // pi 0.84.2 narrowed `done.reason` to exclude "pending". Nothing here assigns it
+      // (init is "stop"; mapStopReason returns stop|length|error), so this is a loud
+      // guard against an upstream change rather than a reachable branch.
+      if (output.stopReason === "pending") throw new Error("Antigravity generation ended without a terminal stop reason");
       stream.push({ type: "done", reason: output.stopReason, message: output });
       stream.end();
     } catch (error) {

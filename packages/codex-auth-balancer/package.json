@@ -27,11 +27,11 @@
     "test": "npm run build && node --test dist/test/*.test.js"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "0.81.1",
+    "@earendil-works/pi-ai": "0.84.2",
     "@earendil-works/pi-coding-agent": "latest"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.81.1",
+    "@earendil-works/pi-ai": "0.84.2",
     "@earendil-works/pi-coding-agent": "latest",
     "@types/node": "latest",
     "typescript": "latest"
