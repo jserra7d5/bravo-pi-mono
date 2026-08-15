@@ -137,6 +137,7 @@ test('the sandbox leaves the credential directory writable', () => {
   assert.match(unit, /ProtectHome=read-only/);
   assert.match(unit, /ReadWritePaths=.*%h\/\.authswap/);
   assert.match(unit, /ReadWritePaths=.*%h\/\.bravo/);
+  assert.doesNotMatch(unit, /ReadWritePaths=.*%h\/\.claude/);
 });
 
 test('the unit restarts on failure and waits for the network', () => {
@@ -144,6 +145,11 @@ test('the unit restarts on failure and waits for the network', () => {
   assert.match(unit, /Restart=on-failure/);
   assert.match(unit, /After=network-online\.target/);
   assert.match(unit, /WantedBy=default\.target/, 'a user unit, started at login');
+  const unitSection = unit.slice(unit.indexOf('[Unit]'), unit.indexOf('[Service]'));
+  const serviceSection = unit.slice(unit.indexOf('[Service]'), unit.indexOf('[Install]'));
+  assert.match(unitSection, /StartLimitIntervalSec=300/);
+  assert.match(unitSection, /StartLimitBurst=5/);
+  assert.doesNotMatch(serviceSection, /StartLimit/, 'systemd ignores start-limit keys in Service');
 });
 
 test('a custom state root is passed through as an environment override', () => {

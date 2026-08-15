@@ -16,6 +16,7 @@ import type { Account } from '../src/accounts.js';
 import { isRefreshable, loadAccountStates, readOAuth } from '../src/accounts.js';
 import { OAuthRefreshError, refreshClaudeToken } from '../src/oauth.js';
 import { REFRESH_SKEW_MS, TERMINAL_BACKOFF_MS, TokenRefresher, mergeCredentialFile } from '../src/refresh.js';
+import { readAuthWarnings } from '../src/health.js';
 
 const NOW = Date.UTC(2026, 7, 13, 12, 0, 0);
 const HOUR = 3_600_000;
@@ -166,6 +167,25 @@ test('a terminal failure backs off instead of hammering a revoked grant', async 
   now += TERMINAL_BACKOFF_MS + 1;
   await r.ensureFresh(account);
   assert.equal(seen.length, 2, 'it does retry once the backoff elapses');
+});
+
+test('terminal refresh warning persists without tokens and clears after recovery', async () => {
+  const account = fixture(live(NOW - HOUR));
+  const stateRoot = mkdtempSync(path.join(os.tmpdir(), 'cab-health-'));
+  roots.push(stateRoot);
+  let now = NOW;
+  const { refresh } = await endpoint(n => n === 1
+    ? { status: 400, payload: { error: 'invalid_grant' } }
+    : ok(n));
+  const r = new TokenRefresher({ now: () => now, refresh, stateRoot });
+
+  assert.equal((await r.ensureFresh(account)).status, 'failed');
+  assert.equal(readAuthWarnings(stateRoot)[0]?.code, 'refresh-terminal');
+  assert.ok(!readFileSync(path.join(stateRoot, 'state', 'auth-health', 'refresh', '1.json'), 'utf8').includes('sk-ant-'));
+
+  now += TERMINAL_BACKOFF_MS + 1;
+  assert.equal((await r.ensureFresh(account)).status, 'refreshed');
+  assert.deepEqual(readAuthWarnings(stateRoot), []);
 });
 
 test('concurrent callers share ONE exchange, so rotation cannot race itself', async () => {

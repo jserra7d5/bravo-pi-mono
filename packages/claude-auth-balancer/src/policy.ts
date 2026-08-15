@@ -94,6 +94,12 @@ export type HeadroomBreakdown = {
   slot: string;
   /** Normalized request-units of this model that still fit. 0 = exhausted. */
   headroom: number;
+  /**
+   * Headroom that can be spent now while remaining on pace until each window
+   * resets. Fresh-session ranking uses this; raw headroom still governs hard
+   * eligibility and affinity because a warm session can consume its reserve.
+   */
+  spendableHeadroom: number;
   /** Which claim is binding. */
   bindingClaim?: ClaimId;
   /** Highest raw utilization across the claims this model touches, unscaled. */
@@ -156,6 +162,7 @@ export function computeHeadroom(
   const base: HeadroomBreakdown = {
     slot: account.slot,
     headroom: 0,
+    spendableHeadroom: 0,
     evacuating: false,
     requiresOverage: false,
     overageAvailable,
@@ -173,6 +180,7 @@ export function computeHeadroom(
     account.claims?.fallbackPercentage ?? quota.subBudgetFraction ?? 1;
 
   let min = Number.POSITIVE_INFINITY;
+  let minSpendable = Number.POSITIVE_INFINITY;
   let binding: ClaimId | undefined;
   let peak: number | undefined;
   let sawAny = false;
@@ -205,21 +213,33 @@ export function computeHeadroom(
     // Without the subBudget factor a half-sized Fable budget reads as if it
     // were full-sized, and cross-account ranking compares incommensurate
     // numbers whenever one account binds on 7d_oi and another on 7d.
-    const scaled =
-      id === quota.extraClaim
-        ? (raw * subBudget) / quota.costMultiplier
-        : raw / quota.costMultiplier;
+    const scale = id === quota.extraClaim
+      ? subBudget / quota.costMultiplier
+      : 1 / quota.costMultiplier;
+    const scaled = raw * scale;
     if (scaled < min) {
       min = scaled;
       binding = id;
     }
+
+    // Conserve quota in proportion to time left in the server's own window.
+    // Example: 68% weekly remaining with 23% of the week left has 45% available
+    // to spend now; 98% remaining with 91% left has only 7% available. Ranking
+    // raw remainder alone burns the account whose reset is furthest away.
+    const windowMs = id === '5h' ? 5 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+    const timeRemaining = claim?.reset === undefined
+      ? 0
+      : Math.max(0, Math.min(1, (claim.reset * 1000 - nowMs) / windowMs));
+    minSpendable = Math.min(minSpendable, Math.max(0, raw - timeRemaining) * scale);
   }
 
   const headroom = sawAny ? min : UNKNOWN_HEADROOM;
+  const spendableHeadroom = sawAny ? minSpendable : UNKNOWN_HEADROOM;
   const evacuating = evacuationTriggered;
   return {
     ...base,
     headroom,
+    spendableHeadroom,
     bindingClaim: sawAny ? binding : undefined,
     peakUtilization: peak,
     evacuating,
@@ -292,7 +312,11 @@ export function selectAccount(input: SelectInput): Selection {
   const serviceable = breakdown.filter(b => b.headroom > floor && !b.requiresOverage);
   const healthy = serviceable.filter(b => !b.evacuating);
   const rank = (pool: HeadroomBreakdown[]) =>
-    [...pool].sort((a, b) => b.headroom - a.headroom || a.slot.localeCompare(b.slot));
+    [...pool].sort((a, b) =>
+      b.spendableHeadroom - a.spendableHeadroom ||
+      b.headroom - a.headroom ||
+      a.slot.localeCompare(b.slot),
+    );
 
   // Affinity holds only on an account that is not evacuating. Once an account
   // crosses the threshold we move the session while a move is still cheap and
@@ -333,7 +357,7 @@ export function selectAccount(input: SelectInput): Selection {
         ? evacuated
           ? `sticky slot ${input.affinitySlot} at ${((bySlot.get(input.affinitySlot!)?.peakUtilization ?? 0) * 100).toFixed(1)}%; evacuated to ${pick.slot}`
           : `sticky slot ${input.affinitySlot} could not serve; moved to ${pick.slot} (one cache re-create)`
-        : `most headroom (${pick.headroom.toFixed(3)} on ${pick.bindingClaim ?? 'unknown'})`,
+        : `most spendable headroom (${pick.spendableHeadroom.toFixed(3)} conserved, ${pick.headroom.toFixed(3)} raw on ${pick.bindingClaim ?? 'unknown'})`,
       breakdown,
     };
   }

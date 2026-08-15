@@ -2,6 +2,7 @@
 // claude-auth-balancer CLI.
 //
 //   claude-auth-balancer serve [--port N] [--allow-overage]
+//   claude-auth-balancer claude [args...]
 //   claude-auth-balancer status [--model M]
 //   claude-auth-balancer accounts
 //   claude-auth-balancer sweep
@@ -16,12 +17,14 @@ import { fileURLToPath } from 'node:url';
 import { AffinityStore } from './affinity.js';
 import { discoverAccounts, loadAccountStates, resolveAuthswapRoot, resolveStateRoot } from './accounts.js';
 import { TokenRefresher } from './refresh.js';
+import { conciseWarnings, readAuthWarnings } from './health.js';
 import { acquireSingletonLock, renderUnit, userUnitPath } from './daemon.js';
 import type { SingletonLock } from './daemon.js';
 import { MetricsStore } from './metrics.js';
 import { computeHeadroom } from './policy.js';
 import { DEFAULT_PORT, startProxy } from './proxy.js';
 import type { ProxyLogEvent } from './proxy.js';
+import { launchClaude } from './client-launch.js';
 
 function flag(argv: string[], name: string): boolean {
   return argv.includes(`--${name}`);
@@ -34,6 +37,10 @@ function value(argv: string[], name: string): string | undefined {
 
 function pct(n: number | undefined): string {
   return n === undefined ? '   -  ' : `${(n * 100).toFixed(1).padStart(5)}%`;
+}
+
+function displayedWarnings(stateRoot: string): string[] {
+  return conciseWarnings(readAuthWarnings(stateRoot));
 }
 
 function ago(ms: number | undefined, now: number): string {
@@ -87,8 +94,9 @@ async function cmdServe(argv: string[]): Promise<void> {
   console.log(`credentials: ${resolveAuthswapRoot()}/providers/anthropic/credentials`);
   console.log(`overage    : ${allowOverage ? 'ALLOWED (will spend money past 100%)' : 'blocked'}`);
   console.log('');
-  console.log('Point a client at it with:');
-  console.log(`  export ANTHROPIC_BASE_URL=${url}`);
+  console.log('Launch new Claude Code sessions through this gateway:');
+  console.log(`  CLAUDE_AUTH_BALANCER_URL=${url} claude-auth-balancer claude [args...]`);
+  console.log('Existing Claude sessions must be restarted through that command.');
 }
 
 function cmdStatus(argv: string[]): void {
@@ -96,6 +104,8 @@ function cmdStatus(argv: string[]): void {
   const model = value(argv, 'model');
   const stateRoot = resolveStateRoot();
   const { states } = loadAccountStates({ stateRoot, nowMs: now });
+  const warnings = displayedWarnings(stateRoot);
+  if (warnings.length) console.log(`WARNING: ${warnings.join('; ')}`);
 
   if (states.length === 0) {
     console.log('No Anthropic accounts found under', resolveAuthswapRoot());
@@ -136,7 +146,10 @@ function cmdStatus(argv: string[]): void {
 
 function cmdAccounts(): void {
   const now = Date.now();
-  const { states } = loadAccountStates({ stateRoot: resolveStateRoot(), nowMs: now });
+  const stateRoot = resolveStateRoot();
+  const warnings = displayedWarnings(stateRoot);
+  if (warnings.length) console.log(`WARNING: ${warnings.join('; ')}`);
+  const { states } = loadAccountStates({ stateRoot, nowMs: now });
   for (const s of states) {
     const exp =
       s.tokenExpiresAt === undefined
@@ -197,8 +210,23 @@ function cmdInstallService(argv: string[]): void {
   console.log('For it to survive logout, enable lingering once:');
   console.log(`  sudo loginctl enable-linger ${os.userInfo().username}`);
   console.log('');
-  console.log('Then point clients at it:');
-  console.log(`  export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}`);
+  console.log('Then launch new Claude Code sessions through the gateway:');
+  console.log(`  CLAUDE_AUTH_BALANCER_URL=http://127.0.0.1:${port} claude-auth-balancer claude [args...]`);
+  console.log('Existing Claude sessions must be restarted through that command.');
+}
+
+async function cmdClaude(argv: string[]): Promise<void> {
+  const baseUrl = process.env.CLAUDE_AUTH_BALANCER_URL ?? `http://127.0.0.1:${DEFAULT_PORT}`;
+  const result = await launchClaude({
+    args: argv,
+    baseUrl,
+    selfPath: fileURLToPath(import.meta.url),
+  });
+  if (result.signal) {
+    process.kill(process.pid, result.signal);
+  } else {
+    process.exitCode = result.code ?? 1;
+  }
 }
 
 function cmdUninstallService(): void {
@@ -338,7 +366,9 @@ function cmdMetrics(argv: string[]): void {
  * this machine without waiting, and for reviving slots after a long shutdown.
  */
 async function cmdRefresh(): Promise<void> {
+  const stateRoot = resolveStateRoot();
   const refresher = new TokenRefresher({
+    stateRoot,
     log: e =>
       console.log(
         `slot ${e.slot}  ${e.email ?? ''}  ${e.outcome}${e.kind ? ` (${e.kind})` : ''}` +
@@ -392,6 +422,9 @@ async function main(): Promise<void> {
     case 'install-statusline':
       cmdInstallStatusline();
       return;
+    case 'claude':
+      await cmdClaude(argv);
+      return;
     case 'install-service':
       cmdInstallService(argv);
       return;
@@ -401,12 +434,13 @@ async function main(): Promise<void> {
     default:
       console.error(`unknown command: ${command}`);
       console.error(
-        'usage: claude-auth-balancer <serve|status|accounts|metrics|refresh|sweep|prune|install-service>\n' +
+        'usage: claude-auth-balancer <serve|claude|status|accounts|metrics|refresh|sweep|prune|install-service>\n' +
           '  serve            [--port N] [--allow-overage]\n' +
           '  status           [--model M]\n' +
           '  metrics          [--days N] [--daily] [--json] [--sql "SELECT ..."]\n' +
           '  refresh          refresh any account near expiry, now\n' +
           '  install-statusline  point the Claude Code status bar at this package\n' +
+          '  claude           [args...] launch Claude through the local gateway\n' +
           '  prune            [--days N]\n' +
           '  install-service  [--port N] [--allow-overage]   systemd user unit\n' +
           '  uninstall-service',

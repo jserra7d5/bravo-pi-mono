@@ -94,6 +94,7 @@ async function boot(options: {
   upstreamUrl: string;
   allowOverage?: boolean;
   metrics?: boolean;
+  upstreamHeaderTimeoutMs?: number;
 }): Promise<{ url: string; stateRoot: string }> {
   const stateRoot = tmpRoot('cab-state-');
   const { server, url } = await startProxy({
@@ -103,6 +104,7 @@ async function boot(options: {
     authswapRoot: options.authswapRoot,
     allowOverage: options.allowOverage,
     metrics: options.metrics ?? false,
+    upstreamHeaderTimeoutMs: options.upstreamHeaderTimeoutMs,
   });
   cleanups.push(() => server.close());
   return { url, stateRoot };
@@ -126,6 +128,38 @@ const OK_HEADERS = {
   'anthropic-ratelimit-unified-7d-utilization': '0.10',
   'anthropic-ratelimit-unified-overage-status': 'rejected',
 };
+
+test('a pre-header stall is bounded without imposing a streaming-body deadline', async () => {
+  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
+  const up = await upstream((_call, _res) => { /* deliberately never send headers */ });
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, upstreamHeaderTimeoutMs: 75 });
+  const started = Date.now();
+  const out = await post(url, { model: 'claude-opus-5' });
+  assert.equal(out.status, 502);
+  assert.ok(Date.now() - started < 1000, 'pre-header dead transport must fail promptly');
+});
+
+test('a body stream stays alive beyond the short header timeout once headers arrive', async () => {
+  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
+  const up = await upstream((_call, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('event: ping\ndata: one\n\n');
+    setTimeout(() => res.end('event: done\ndata: two\n\n'), 150);
+  });
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, upstreamHeaderTimeoutMs: 40 });
+  const out = await post(url, { model: 'claude-opus-5', stream: true });
+  assert.equal(out.status, 200);
+  assert.match(out.text, /data: two/, 'body remained connected after header deadline elapsed');
+});
+
+test('a pre-header socket abort fails the request without retrying messages', async () => {
+  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
+  const up = await upstream((_call, res) => res.socket?.destroy());
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url });
+  const out = await post(url, { model: 'claude-opus-5' });
+  assert.equal(out.status, 502);
+  assert.equal(up.calls.length, 1, 'messages must not be blindly replayed');
+});
 
 test('the client-supplied Authorization is replaced with the selected account token', async () => {
   const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-slot-1' }]);

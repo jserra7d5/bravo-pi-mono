@@ -33,8 +33,8 @@ export const SESSION_HEADER = 'x-claude-code-session-id';
 export const DEFAULT_UPSTREAM = 'https://api.anthropic.com';
 export const DEFAULT_PORT = 8789;
 
-/** Long enough for a slow generation, short enough to not pin a socket forever. */
-export const UPSTREAM_TIMEOUT_MS = 15 * 60 * 1000;
+/** Bounds connect/TLS/wait-for-headers; response streams are deliberately unbounded. */
+export const DEFAULT_UPSTREAM_HEADER_TIMEOUT_MS = 90 * 1000;
 
 /**
  * A 429 whose `retry-after` is at or below this is cheaper to wait out than to
@@ -113,6 +113,8 @@ export type ProxyOptions = {
   metrics?: boolean;
   /** Raw-row retention window; the daily rollup is kept forever. */
   metricsRetentionDays?: number;
+  /** Maximum connect/TLS/header wait. Streaming after headers is not limited. */
+  upstreamHeaderTimeoutMs?: number;
   now?: () => number;
   log?: (event: ProxyLogEvent) => void;
 };
@@ -134,6 +136,7 @@ function resolveOptions(options: ProxyOptions): Resolved {
     retryOnRateLimit: options.retryOnRateLimit ?? true,
     metrics: options.metrics ?? true,
     metricsRetentionDays: options.metricsRetentionDays ?? DEFAULT_RAW_RETENTION_DAYS,
+    upstreamHeaderTimeoutMs: options.upstreamHeaderTimeoutMs ?? DEFAULT_UPSTREAM_HEADER_TIMEOUT_MS,
     now: options.now ?? Date.now,
     log: options.log ?? (() => {}),
   };
@@ -190,6 +193,7 @@ function forward(
   req: http.IncomingMessage,
   body: Buffer,
   token: string,
+  headerTimeoutMs: number,
 ): Promise<UpstreamResult> {
   const base = new URL(upstreamBase);
   const rawTarget = req.url ?? '/';
@@ -213,6 +217,8 @@ function forward(
 
   const agent = target.protocol === 'http:' ? http : https;
   return new Promise((resolve, reject) => {
+    const started = Date.now();
+    let timer: NodeJS.Timeout;
     const upstreamReq = agent.request(
       {
         protocol: target.protocol,
@@ -222,14 +228,24 @@ function forward(
         method: req.method,
         headers,
       },
-      res =>
-        resolve({ status: res.statusCode ?? 502, headers: res.headers, stream: res, request: upstreamReq }),
+      res => {
+        clearTimeout(timer);
+        resolve({ status: res.statusCode ?? 502, headers: res.headers, stream: res, request: upstreamReq });
+      },
     );
-    upstreamReq.on('error', reject);
-    // A stalled upstream must not pin a client request forever.
-    upstreamReq.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
-      upstreamReq.destroy(new Error('upstream timed out'));
+    upstreamReq.on('error', error => {
+      clearTimeout(timer);
+      const detail = error as NodeJS.ErrnoException & { phase?: string; durationMs?: number; reusedSocket?: boolean };
+      detail.phase = 'pre-header';
+      detail.durationMs = Date.now() - started;
+      detail.reusedSocket = upstreamReq.reusedSocket;
+      reject(detail);
     });
+    timer = setTimeout(() => {
+      const error = new Error(`upstream headers timed out after ${headerTimeoutMs}ms`) as NodeJS.ErrnoException;
+      error.code = 'UPSTREAM_HEADERS_TIMEOUT';
+      upstreamReq.destroy(error);
+    }, headerTimeoutMs);
     if (body.length > 0) upstreamReq.write(body);
     upstreamReq.end();
   });
@@ -398,6 +414,7 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
 
   const refresher = new TokenRefresher({
     now: opts.now,
+    stateRoot: opts.stateRoot,
     log: e =>
       opts.log({
         kind: e.outcome === 'failed' ? 'error' : 'refresh',
@@ -578,15 +595,37 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
 
       let result: UpstreamResult;
       try {
-        result = await forward(opts.upstream, req, body, oauth.accessToken);
+        result = await forward(opts.upstream, req, body, oauth.accessToken, opts.upstreamHeaderTimeoutMs);
       } catch (error) {
+        const detail = error as NodeJS.ErrnoException & { phase?: string; durationMs?: number; reusedSocket?: boolean };
         opts.log({
           kind: 'error',
           method,
           path: reqPath,
           slot: selection.slot,
-          message: error instanceof Error ? error.message : String(error),
+          message: [
+            detail.message,
+            detail.phase ? `phase=${detail.phase}` : '',
+            detail.code ? `code=${detail.code}` : '',
+            detail.syscall ? `syscall=${detail.syscall}` : '',
+            detail.durationMs !== undefined ? `duration=${detail.durationMs}ms` : '',
+            detail.reusedSocket !== undefined ? `reused=${detail.reusedSocket}` : '',
+          ].filter(Boolean).join(' '),
         });
+        try {
+          metrics?.record({
+            ts: startedAt,
+            slot: selection.slot,
+            email: account.email,
+            sessionHash: sessionId ? AffinityStore.hashSession(sessionId, model) : undefined,
+            model,
+            endpoint: reqPath,
+            status: 502,
+            decision: selection.decision,
+            durationMs: opts.now() - startedAt,
+            usage: {},
+          });
+        } catch { /* transport failure reporting must not mask the response */ }
         if (!res.headersSent) res.writeHead(502).end();
         return true;
       }

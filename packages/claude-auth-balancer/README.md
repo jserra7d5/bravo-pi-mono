@@ -3,12 +3,14 @@
 A local proxy that balances Claude Code across multiple Claude subscription
 accounts **without breaking prompt-cache continuity**.
 
-Point Claude Code at it and nothing else changes:
+Start it, then launch Claude Code through the local gateway:
 
 ```bash
 claude-auth-balancer serve
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8789
+claude-auth-balancer claude [args...]
 ```
+
+Existing Claude sessions must be restarted through the launcher.
 
 ## Why affinity is the whole design
 
@@ -42,7 +44,10 @@ session on one account until it genuinely cannot serve.
    model's budget must not move another model's warm prefix.
 2. **The lease expires exactly when the cache does** (1 hour, sliding on each
    request). Past that the prefix is gone, so an idle session is a *free*
-   rebalancing point and the next request goes to the healthiest account.
+   rebalancing point. Fresh sessions rank accounts by spendable headroom: raw
+   remaining quota minus the fraction of each server window still left. This
+   spends quota that resets sooner instead of stranding it while consuming an
+   account whose reset is days farther away.
 3. **Evacuate at 95%, but only when it buys something.** An account at or above
    95% raw utilization stops taking new sessions and existing ones move off —
    *unless* that window resets within the cache TTL, in which case moving pays
@@ -124,14 +129,30 @@ prune is a ranged `DELETE`.
 
 ## Credentials
 
-Credentials come from the existing authswap layout — this package never becomes
-a second owner of Claude OAuth material:
+Authswap slot files are the sole OAuth credential owners:
 
 ```
 ~/.authswap/providers/anthropic/credentials/.credentials-<n>-<email>.json
 ```
 
 Slot ids are authswap account numbers, so `slot 2` here is `authswap` account 2.
+The balancer never reads or writes `~/.claude/.credentials.json` or Claude's
+settings. `claude-auth-balancer claude [args...]` launches the real `claude`
+executable with this child-only environment block:
+
+```
+ANTHROPIC_BASE_URL=http://127.0.0.1:8789
+ANTHROPIC_API_KEY=claude-auth-balancer-local-gateway
+```
+
+Override the URL for a non-default daemon port with
+`CLAUDE_AUTH_BALANCER_URL=http://127.0.0.1:<port>`. If launcher resolution is
+ambiguous, set `CLAUDE_BIN` to the absolute real Claude executable. All Claude
+arguments, cwd, stdio, exit status, and signal termination are preserved.
+
+The API-key value is a documented, non-secret mode selector. It makes Claude
+Code send requests without requiring local OAuth state; the proxy strips it and
+injects the selected canonical OAuth token. It never goes upstream.
 
 ### Token refresh
 
@@ -166,9 +187,11 @@ never could — an expired account is not selected, so nothing would trigger it.
 Failures are classified. `terminal` (400/401/403) means the grant is dead and
 only re-auth fixes it; the slot backs off for an hour. Everything else,
 including 429 and every 5xx, is `transient`: the credential file is left
-byte-identical and the same refresh token is retried. `needs-reauth` now means
-what it says — no credential, or an expired access token with no live refresh
-token behind it.
+byte-identical and the same refresh token is retried. Sanitized per-slot refresh
+warnings persist in independently owned files under the balancer state root and appear in
+`status`, `accounts`, and the width-bounded statusline; successful recovery
+clears them. Tokens are never included. `needs-reauth` means no credential, or
+an expired access token with no live refresh token behind it.
 
 ## Running it as a daemon
 
@@ -176,6 +199,7 @@ token behind it.
 claude-auth-balancer install-service            # systemd user unit, then start
 claude-auth-balancer install-service --port 9000 --allow-overage
 sudo loginctl enable-linger "$USER"             # once, to survive logout
+CLAUDE_AUTH_BALANCER_URL=http://127.0.0.1:9000 claude-auth-balancer claude
 ```
 
 `--allow-overage` is baked into the unit rather than left to a runtime flag.
@@ -198,9 +222,20 @@ claude-auth-balancer refresh                  # refresh near-expiry slots now
 claude-auth-balancer metrics  [--days N] [--daily] [--json] [--sql "..."]
 claude-auth-balancer sweep                    # drop expired lease files
 claude-auth-balancer prune    [--days N]      # drop old raw metric rows
+claude-auth-balancer claude [args...]           # launch client through gateway
 claude-auth-balancer install-service   [--port N] [--allow-overage]
 claude-auth-balancer uninstall-service
 ```
+
+## Transport timeouts
+
+Connecting, TLS negotiation, and waiting for upstream response headers are
+bounded to 90 seconds by default (`upstreamHeaderTimeoutMs` in the programmatic
+API). Once headers arrive, streaming responses are not subject to that deadline,
+so long generations remain safe. Pre-header failures log only safe diagnostics:
+phase, error code/syscall, elapsed duration, and reused-socket state. Requests
+are not blindly retried, especially `/v1/messages`, where replay could duplicate
+work or spend quota twice.
 
 ## What the proxy does not do
 
@@ -219,9 +254,10 @@ request target is validated before any account is selected:
   from any local process would otherwise redirect a token off-origin. This was
   reproduced against an earlier revision; it now returns 400 before the
   credential store is touched, with a second origin check at forward time.
-- **`x-api-key` and `anthropic-auth-token` are stripped from requests.** A box
-  with `ANTHROPIC_API_KEY` exported would otherwise send a console API key
-  alongside the substituted subscription bearer, and silently bill at list price.
+- **`x-api-key` and `anthropic-auth-token` are stripped from requests.** This
+  includes the non-secret gateway selector set by the `claude` launcher; it
+  is consumed locally and can never displace the injected subscription bearer
+  or reach Anthropic.
 - Bind address defaults to `127.0.0.1`. There is no authentication on the proxy
   itself, so anything that can reach the port can spend your quota — do not bind
   it to a routable interface.

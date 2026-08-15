@@ -159,6 +159,27 @@ test('a fresh session picks the account with the most headroom', () => {
   assert.equal(s.decision, 'fresh');
 });
 
+test('a fresh session spends the account resetting sooner instead of stranding its quota', () => {
+  const claimHeaders = (utilization: number, weeklyResetMs: number) => ({
+    // The short window has just reset and does not bind this weekly decision.
+    'anthropic-ratelimit-unified-5h-utilization': '0',
+    'anthropic-ratelimit-unified-5h-reset': String(Math.floor((NOW - 1) / 1000)),
+    'anthropic-ratelimit-unified-7d-utilization': String(utilization),
+    'anthropic-ratelimit-unified-7d-reset': String(Math.floor(weeklyResetMs / 1000)),
+  });
+  const sooner = nad(claimHeaders(0.32, NOW + 38 * 60 * 60 * 1000));
+  const later = joseph(claimHeaders(0.02, NOW + 152 * 60 * 60 * 1000));
+
+  const s = selectAccount({ accounts: [later, sooner], model: 'claude-opus-5', nowMs: NOW });
+
+  assert.equal(s.slot, '1', '68% resetting in 38h is more spendable than 98% resetting in 152h');
+  assert.ok(
+    s.breakdown.find(account => account.slot === '1')!.spendableHeadroom >
+      s.breakdown.find(account => account.slot === '2')!.spendableHeadroom,
+  );
+  assert.match(s.reason, /spendable headroom/);
+});
+
 test('affinity is held even when another account has far more headroom', () => {
   const s = selectAccount({
     accounts: [joseph(JOSEPH_HAIKU), nad(NAD_FABLE)],

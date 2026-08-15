@@ -128,6 +128,9 @@ Documentation=https://github.com/bravo/bravo-pi-mono
 # The proxy is useless without egress, and systemd starts user units early.
 After=network-online.target
 Wants=network-online.target
+# Loops fast enough to trip this are broken, not busy.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -136,17 +139,13 @@ ExecStart=${exec}
 # every client would fail closed until someone noticed.
 Restart=on-failure
 RestartSec=5
-# Loops fast enough to trip this are broken, not busy.
-StartLimitIntervalSec=300
-StartLimitBurst=5
 ${options.stateRoot ? `Environment=CLAUDE_AUTH_BALANCER_HOME=${options.stateRoot}\n` : ''}\
 # It only ever talks to the Anthropic API and its own state directory.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-# ...but the state root and the authswap credentials must stay writable, since
-# refreshing a token means rewriting the credential file in place.
+# ...but state and canonical authswap credentials must stay writable.
 ReadWritePaths=%h/.bravo %h/.authswap
 
 [Install]

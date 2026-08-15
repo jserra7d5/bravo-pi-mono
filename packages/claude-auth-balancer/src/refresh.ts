@@ -26,12 +26,13 @@ import type { Account, ClaudeOAuth } from './accounts.js';
 import { readOAuth } from './accounts.js';
 import { OAuthRefreshError, refreshClaudeToken } from './oauth.js';
 import type { ClaudeTokenSet } from './oauth.js';
+import { setRefreshWarning } from './health.js';
 
 /**
  * Refresh this long before the access token actually expires.
  *
- * Wide enough that a slot is never selected with a token that dies mid-flight
- * on a long generation (UPSTREAM_TIMEOUT_MS is 15 minutes).
+ * Wide enough that a slot is never selected with a token that dies during a
+ * long generation; the transport's 90-second deadline ends once headers arrive.
  */
 export const REFRESH_SKEW_MS = 30 * 60 * 1000;
 
@@ -76,6 +77,7 @@ type Deps = {
   now: () => number;
   refresh: typeof refreshClaudeToken;
   log?: (event: RefreshLogEvent) => void;
+  stateRoot?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -165,6 +167,7 @@ export class TokenRefresher {
       now: deps.now ?? Date.now,
       refresh: deps.refresh ?? refreshClaudeToken,
       log: deps.log,
+      stateRoot: deps.stateRoot,
     };
   }
 
@@ -191,7 +194,12 @@ export class TokenRefresher {
     const existing = this.inflight.get(account.slot);
     if (existing) return existing;
 
-    const run = this.refreshSlot(account).finally(() => {
+    const run = this.refreshSlot(account).then(outcome => {
+      if (outcome.status === 'fresh' && this.deps.stateRoot) {
+        setRefreshWarning(this.deps.stateRoot, account.slot);
+      }
+      return outcome;
+    }).finally(() => {
       this.inflight.delete(account.slot);
     });
     this.inflight.set(account.slot, run);
@@ -203,7 +211,14 @@ export class TokenRefresher {
     if (outcome.status === 'failed') {
       event.kind = outcome.kind;
       event.message = outcome.message;
+      if (this.deps.stateRoot) setRefreshWarning(this.deps.stateRoot, account.slot, {
+        code: outcome.kind === 'terminal' ? 'refresh-terminal' : 'refresh-backoff',
+        slot: account.slot,
+        message: outcome.message,
+        at: nowMs,
+      });
     } else if (outcome.status === 'refreshed') {
+      if (this.deps.stateRoot) setRefreshWarning(this.deps.stateRoot, account.slot);
       event.rotated = outcome.rotated;
       event.expiresInMs = (outcome.oauth.expiresAt ?? nowMs) - nowMs;
     } else if (outcome.status === 'skipped') {
@@ -267,7 +282,11 @@ export class TokenRefresher {
         });
       } catch (error) {
         const kind = error instanceof OAuthRefreshError ? error.kind : 'transient';
-        const message = error instanceof Error ? error.message : String(error);
+        // Upstream error bodies are not safe persistence/log material: an OAuth
+        // server may echo credential input. Classification is all operators need.
+        const message = kind === 'terminal'
+          ? 'OAuth grant rejected; re-authentication required'
+          : 'OAuth refresh temporarily unavailable';
         this.backoffUntil.set(
           account.slot,
           this.deps.now() + (kind === 'terminal' ? TERMINAL_BACKOFF_MS : TRANSIENT_BACKOFF_MS),

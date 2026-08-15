@@ -340,6 +340,18 @@ test('a missing balancer degrades to a line instead of an exception', () => {
   assert.match(out, /balancer/);
 });
 
+test('refresh warnings use the existing width-bounded status note', () => {
+  const model = {
+    modelName: 'Claude', accounts: [], balancerUnknown: false, sessionAttributed: false,
+    warnings: ['refresh slot 123 backing off with an intentionally very long safe diagnostic'],
+  };
+  for (const width of [20, 40, 80]) {
+    for (const line of render(model, { width, color: false }, NOW).split('\n')) {
+      assert.ok(visibleWidth(line) <= width, `warning overflowed ${width} columns: ${line}`);
+    }
+  }
+});
+
 test('the rendered line fits the terminal it was told about', () => {
   const { stateRoot, authswapRoot } = world([
     { slot: '1', email: 'info@nad.com', u5h: 0.34, u7d: 0.07 },

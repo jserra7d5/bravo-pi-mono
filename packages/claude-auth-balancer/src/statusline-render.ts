@@ -453,6 +453,9 @@ export function render(
   const lines: string[] = [];
   const context = renderContextLine(model, opts);
   if (context) lines.push(context);
+  for (const warning of model.warnings ?? []) {
+    lines.push(note(`warning: ${warning}`, opts));
+  }
 
   if (model.accounts.length === 0) {
     lines.push(note(model.balancerUnknown ? 'no accounts found' : 'unavailable', opts));

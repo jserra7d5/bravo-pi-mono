@@ -19,6 +19,7 @@ import { parseClaims } from '../src/claims.js';
 import { computeHeadroom, selectAccount } from '../src/policy.js';
 import type { AccountState } from '../src/policy.js';
 import { MAX_PENDING_FRAME_BYTES, UsageCollector } from '../src/usage.js';
+import { GATEWAY_API_KEY_SENTINEL } from '../src/client-launch.js';
 
 const cleanups: (() => void)[] = [];
 after(() => {
@@ -508,11 +509,11 @@ test('a stray x-api-key is not forwarded alongside the substituted bearer', asyn
 
   await fetch(`http://127.0.0.1:${port}/v1/messages`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': 'sk-ant-api-CONSOLE-KEY' },
+    headers: { 'content-type': 'application/json', 'x-api-key': GATEWAY_API_KEY_SENTINEL },
     body: JSON.stringify({ model: 'claude-opus-5' }),
   });
 
-  assert.equal(sawApiKey, undefined, 'a console API key would bill at full list price');
+  assert.equal(sawApiKey, undefined, 'the non-secret gateway selector must never leave localhost');
   assert.equal(sawAuth, 'Bearer tok-1');
 });
 

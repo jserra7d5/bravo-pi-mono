@@ -28,6 +28,7 @@ import {
 import { claimHasReset } from './claims.js';
 import type { Claim } from './claims.js';
 import { DEFAULT_EVACUATE_UTILIZATION, DEFAULT_EVACUATION_HORIZON_MS } from './policy.js';
+import { conciseWarnings, readAuthWarnings } from './health.js';
 
 /**
  * The subset of Claude Code's statusline payload this uses.
@@ -112,6 +113,8 @@ export type StatuslineModel = {
    * ambiguity resolves the wrong way: the user assumes the balancer is working.
    */
   sessionAttributed: boolean;
+  /** Persisted credential/refresh warnings, already sanitized for display. */
+  warnings?: string[];
 };
 
 /**
@@ -320,6 +323,7 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
     accounts,
     balancerUnknown,
     sessionAttributed: accounts.some(a => a.active),
+    warnings: conciseWarnings(readAuthWarnings(stateRoot)),
   };
 }
 
