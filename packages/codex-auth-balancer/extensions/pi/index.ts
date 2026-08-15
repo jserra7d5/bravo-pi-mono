@@ -40,12 +40,6 @@ const API = 'openai-codex-responses' as const;
 const DEFAULT_EXPECTED_RUNTIME_MS = 10 * 60_000;
 const DEFAULT_TTL_SAFETY_BUFFER_MS = 60_000;
 
-const GPT_5_6_CODEX_MODEL_IDS = new Set([
-  'gpt-5.6-sol',
-  'gpt-5.6-terra',
-  'gpt-5.6-luna',
-]);
-const GPT_5_6_CODEX_CONTEXT_WINDOW = 372000;
 const PI_CODING_AGENT_PACKAGE = '@earendil-works/pi-coding-agent';
 const PI_AI_PACKAGE = '@earendil-works/pi-ai';
 
@@ -633,13 +627,13 @@ async function runBalanced(
   }
 }
 
+/**
+ * Re-badge the upstream Codex catalog under this provider. Context metadata is passed
+ * through as upstream reports it (272k for the GPT-5.6 family) — the balancer no longer
+ * opts these models into the extended window.
+ */
 export function mapBalancedCodexModels(models: Model<typeof API>[]): Model<typeof API>[] {
-  return models.map((upstream) => {
-    const corrected = GPT_5_6_CODEX_MODEL_IDS.has(upstreamModelId(upstream))
-      ? { ...upstream, contextWindow: GPT_5_6_CODEX_CONTEXT_WINDOW }
-      : upstream;
-    return publicModel(corrected);
-  });
+  return models.map(publicModel);
 }
 
 export function getBalancedCodexModels(models: Model<typeof API>[] = hostingOpenAICodexCatalog): Model<typeof API>[] {

@@ -575,7 +575,11 @@ test('non-Pi consumers retain an injected local runtime seam', async () => {
   assert.equal(runtime.streamSimpleOpenAICodexResponses, stream);
 });
 
-test('repo-local Pi loads the extension using its own older host catalog', async () => {
+test('repo-local Pi loads the extension and lists the GPT-5.6 family at the upstream 272k window', async () => {
+  // End-to-end through the real pi binary: the resolver unit tests above prove the extension
+  // binds to its host's pi-ai, this proves the whole path actually loads and what a user sees.
+  // It also guards the context cap at the surface it is read from — the balancer must not
+  // re-apply the retired 372k extended-window override.
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
   const localPi = path.join(repoRoot, 'node_modules', '.bin', 'pi');
   const extension = path.join(repoRoot, 'packages', 'codex-auth-balancer', 'dist', 'extensions', 'pi', 'index.js');
@@ -585,7 +589,10 @@ test('repo-local Pi loads the extension using its own older host catalog', async
   ], { timeout: 15_000 });
   const output = `${stdout}\n${stderr}`;
   assert.match(output, /bravo-codex-balanced\/gpt-5\.5\s/);
-  assert.doesNotMatch(output, /^bravo-codex-balanced\s+bravo-codex-balanced\/gpt-5\.6-/m);
+  for (const id of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    assert.match(output, new RegExp(`bravo-codex-balanced/${id.replace(/\./g, '\\.')}\\s+272K\\s`), `${id} should list at the upstream 272k window`);
+  }
+  assert.doesNotMatch(output, /\s372K\s/);
 });
 
 test('balanced provider mirrors the installed openai-codex catalog exactly', () => {
@@ -598,7 +605,7 @@ test('balanced provider mirrors the installed openai-codex catalog exactly', () 
   );
 });
 
-test('balanced catalog transform corrects only native Codex GPT-5.6 context metadata', () => {
+test('balanced catalog transform re-badges native Codex models and passes context metadata through', () => {
   const native = [
     { id: 'gpt-5.5', name: 'GPT-5.5', contextWindow: 272000, maxTokens: 128000, cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 } },
     { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', contextWindow: 272000, maxTokens: 128000, cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 } },
@@ -615,7 +622,6 @@ test('balanced catalog transform corrects only native Codex GPT-5.6 context meta
     input: ['text', 'image'],
   })) as any;
 
-  const correctedIds = new Set(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
   const balanced = mapBalancedCodexModels(native);
   assert.deepEqual(balanced.map(model => model.id), native.map((model: any) => `bravo-codex-balanced/${model.id}`));
   for (const [index, model] of balanced.entries()) {
@@ -625,8 +631,12 @@ test('balanced catalog transform corrects only native Codex GPT-5.6 context meta
       id: `bravo-codex-balanced/${upstream.id}`,
       provider: 'bravo-codex-balanced',
       api: 'openai-codex-responses',
-      contextWindow: correctedIds.has(upstream.id) ? 372000 : upstream.contextWindow,
     });
+  }
+  // The GPT-5.6 family stays on the 272k window upstream advertises; the balancer must not
+  // re-introduce the 372k extended-window override it used to apply here.
+  for (const model of balanced) {
+    if (/gpt-5\.6-(sol|terra|luna)$/.test(model.id)) assert.equal(model.contextWindow, 272000);
   }
 });
 
