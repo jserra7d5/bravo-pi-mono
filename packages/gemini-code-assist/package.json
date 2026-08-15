@@ -8,6 +8,10 @@
   "bin": {
     "gemini-code-assist-spike": "./dist/src/spike.js"
   },
+  "//exports": "Lets built-in agent templates name this extension as `@bravo/gemini-code-assist/extensions/pi` instead of an absolute path, so a template is portable across checkouts. Points at TypeScript source because pi loads extensions through jiti.",
+  "exports": {
+    "./extensions/pi": "./extensions/pi/index.ts"
+  },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",

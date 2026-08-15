@@ -197,7 +197,7 @@ Enable it in `~/.async-subagents/config.json`:
   "codexAuthBalancer": {
     "enabled": true,
     "provider": "bravo",
-    "stateDir": "/home/joe/.bravo/codex-auth-balancer",
+    "stateDir": "~/.bravo/codex-auth-balancer",
     "mode": "process-env",
     "timeoutMs": 10000,
     "failClosed": true,
@@ -374,7 +374,51 @@ underlying run files and delivery state, not terminal rendering pixels.
 async-subagents --help
 ```
 
-The CLI exposes the supervisor entrypoint used by async child runs.
+One binary carries the whole surface: the operator subcommands (`agents`, `start`, `run`, `watch`,
+`status`, `wait`, `result`, `continue`, `message`, `pause`, `cancel`, `archive`, `install`) and the
+internal entrypoints async child runs use (`supervisor`, `claude-child-mcp`).
+
+All commands emit JSON on stdout; `watch` emits NDJSON. Errors are also JSON on stdout with a
+non-zero exit, so a caller reading stdout can never mistake a failed `start` for a silent success.
+Redirect stderr with `2>/dev/null` rather than `2>&1` when parsing: node prepends an
+`ExperimentalWarning: SQLite` banner that will break `jq`.
+
+## Agent templates
+
+Five built-in role templates ship in `agents/`: `scout`, `planner`, `worker`, `reviewer`,
+`generalist`. Discovery layers three sources, later ones shadowing earlier by name:
+
+| Source | Location |
+| --- | --- |
+| `builtin` | `packages/async-subagents/agents/*.md` |
+| `user` | `$ASYNC_SUBAGENTS_HOME/agents/*.md` (default `~/.async-subagents/agents`) |
+| `project` | `<repo>/.agents/*.md` and `<repo>/.agents/subagents/*.md` |
+
+`async-subagents agents --cwd "$PWD"` prints the resolved catalog with each entry's `source`.
+
+A template names Pi extensions in frontmatter. Prefer a **package specifier**
+(`@bravo/web-evidence-cache/extensions/pi`) over an absolute path: the child receives extensions
+verbatim as `-e <value>` resolved against its own cwd, so an absolute path pins the template to one
+machine's checkout. Specifiers are resolved to absolute paths at definition-load time. Absolute
+paths and bare extension names still pass through untouched.
+
+Overriding a built-in means copying it to the `user` or `project` layer — but note that a copy stops
+tracking the shipped template, and your machine then exercises a path nobody else runs. Prefer
+editing the built-in.
+
+## Install
+
+```sh
+npm install && npm run build --workspace @bravo/async-subagents
+node packages/async-subagents/dist/src/cli.js install
+```
+
+`install` symlinks `skills/pi-async-subagents` into `~/.claude/skills/` (override the destination
+with `--claude-dir`). A symlink rather than a copy so the documented flags and the parsed flags can
+never drift. It refuses to replace a real directory unless you pass `--force`; an existing symlink is
+reclaimed silently.
+
+Put the binary on PATH (`npm link`, or add `node_modules/.bin`) so the skill's commands resolve.
 
 ## Validation
 

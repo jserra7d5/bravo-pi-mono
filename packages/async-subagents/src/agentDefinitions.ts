@@ -157,6 +157,35 @@ function isPathCapability(value: string): boolean {
   return value.startsWith(".") || value.startsWith("/") || value.includes("/") || value.includes("\\");
 }
 
+/**
+ * Turn a declared Pi extension into a path the child can actually load.
+ *
+ * The child launches with `--no-extensions` and each extension is passed verbatim as
+ * `-e <value>`, resolved against the CHILD's cwd — the target repo, not this package. So a
+ * built-in template cannot name an extension by relative path, and an absolute path would
+ * pin the template to one machine's checkout. Package subpath specifiers
+ * (`@bravo/web-evidence-cache/extensions/pi`) resolve here, at definition-load time,
+ * through normal node resolution, which makes a built-in template portable.
+ *
+ * Absolute paths, relative paths, and bare names pass through untouched: user- and
+ * project-scoped definitions that already name a file, and pi's own named extensions,
+ * keep working exactly as before.
+ */
+function resolveExtensionSpecifier(value: string, field: string, path: string): string {
+  // Absolute and relative paths, and bare names (an opaque extension identifier pi resolves
+  // itself), are not ours to touch. Only a package subpath specifier gets resolved.
+  if (value.startsWith("/") || value.startsWith(".") || !value.includes("/")) return value;
+  try {
+    return fileURLToPath(import.meta.resolve(value));
+  } catch (error) {
+    throw new SubagentError("INVALID_AGENT_DEFINITION", `${field} could not resolve Pi extension ${value} in ${path}: ${error instanceof Error ? error.message : String(error)}`, {
+      path,
+      specifier: value,
+      hint: "Declare an extension as an absolute path, or as a package specifier whose package exports that subpath (for example @bravo/web-evidence-cache/extensions/pi).",
+    });
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -213,7 +242,7 @@ function parseAgentVariant(name: string, value: unknown, path: string): AgentDef
     effort: optionalString(value.effort, `variants.${name}.effort`, path),
     tools: value.tools === undefined ? undefined : stringArray(value.tools, `variants.${name}.tools`, path),
     skills: value.skills === undefined ? undefined : stringArray(value.skills, `variants.${name}.skills`, path),
-    extensions: value.extensions === undefined ? undefined : stringArray(value.extensions, `variants.${name}.extensions`, path),
+    extensions: value.extensions === undefined ? undefined : stringArray(value.extensions, `variants.${name}.extensions`, path).map((entry) => resolveExtensionSpecifier(entry, `variants.${name}.extensions`, path)),
     includes: value.includes === undefined ? undefined : stringArray(value.includes, `variants.${name}.includes`, path),
     mode: optionalEnum(value.mode, `variants.${name}.mode`, ["oneshot", "interactive"] as const, path),
     claude: parseClaudeOptions(value.claude, `variants.${name}.claude`, path),
@@ -296,7 +325,7 @@ export function parseAgentDefinitionFile(path: string, source: AgentDefinitionSo
   const description = optionalString(parsed.data.description, "description", path);
   if (!description) throw new SubagentError("INVALID_AGENT_DEFINITION", `description is required in ${path}`);
   const skills = stringArray(parsed.data.skills, "skills", path);
-  const extensions = stringArray(parsed.data.extensions, "extensions", path);
+  const extensions = stringArray(parsed.data.extensions, "extensions", path).map((entry) => resolveExtensionSpecifier(entry, "extensions", path));
   const variants = parseAgentVariants(parsed.data.variants, path);
   if (parsed.data.maxRunMs !== undefined) throw new SubagentError("INVALID_AGENT_DEFINITION", `maxRunMs has been replaced by maxRunSeconds in ${path}; use seconds, for example maxRunSeconds: 1800`);
   if (source === "project" && !options.allowProjectPathCapabilities) {

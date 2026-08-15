@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
@@ -59,20 +59,55 @@ Snake body.
   assert.equal(definition.thinkingLevel, "medium");
 });
 
-test("built-in worker, reviewer, and scout expose Claude variants", () => {
+test("built-in templates are discoverable and declare a Pi harness with a model", () => {
+  // Asserts the shipped catalog loads and is well-formed. It deliberately does NOT assert which
+  // variants a template offers: variant CONTENT is template authoring, and pinning it here made
+  // editing a shipped template fail unrelated harness-boundary tests. The harness-boundary rules
+  // themselves are covered below against purpose-built fixtures.
   const w = workspace();
   const definitions = discoverAgentDefinitions({ cwd: w.root, userHome: w.userHome, env: { ...process.env, ASYNC_SUBAGENTS_HOME: w.userHome } });
-  for (const name of ["worker", "reviewer", "scout"]) {
+  for (const name of ["scout", "planner", "worker", "reviewer", "generalist"]) {
     const definition = definitions.get(name);
     assert.ok(definition, `missing built-in ${name}`);
-    const claude = applyAgentVariant(definition, "claude");
-    assert.equal(claude.harness, "claude", name);
-    assert.equal(claude.mode, "interactive", name);
-    assert.equal(claude.model, "claude-sonnet-5", name);
-    assert.deepEqual(claude.tools, [], name);
-    assert.deepEqual(claude.extensions, [], name);
-    assert.equal(claude.thinkingLevel, undefined, name);
+    assert.equal(definition.source, "builtin", name);
+    assert.equal(definition.harness, "pi", name);
+    assert.ok(definition.model, `built-in ${name} should pin a model`);
+    assert.ok(definition.description.length > 0, name);
+    // Every extension a shipped template names must already be a loadable absolute path: the
+    // child receives these verbatim as `-e <value>` and cannot resolve a package specifier.
+    for (const extension of definition.extensions) {
+      assert.ok(extension.startsWith("/"), `built-in ${name} extension should resolve to an absolute path, got ${extension}`);
+      assert.ok(existsSync(extension), `built-in ${name} extension should exist on disk: ${extension}`);
+    }
   }
+});
+
+test("a Claude variant on a built-in-shaped definition drops Pi-only execution fields", () => {
+  const w = workspace();
+  const path = join(w.userHome, "agents", "dual.md");
+  writeFileSync(path, `---
+description: Dual-harness template
+harnessNeutral: true
+model: bravo-codex-balanced/gpt-5.6-sol
+tools: [read, grep, bash]
+thinkingLevel: high
+variants:
+  claude:
+    harness: claude
+    model: claude-sonnet-5
+    effort: low
+    mode: interactive
+---
+
+Dual body.
+`);
+  const claude = applyAgentVariant(parseAgentDefinitionFile(path, "user"), "claude");
+  assert.equal(claude.harness, "claude");
+  assert.equal(claude.mode, "interactive");
+  assert.equal(claude.model, "claude-sonnet-5");
+  assert.deepEqual(claude.tools, []);
+  assert.deepEqual(claude.extensions, []);
+  assert.equal(claude.thinkingLevel, undefined);
 });
 
 test("agent parser accepts nested variants", () => {
@@ -274,4 +309,63 @@ claude:
 Bad body.
 `);
   assert.throws(() => parseAgentDefinitionFile(nested, "user"), (err: unknown) => err instanceof Error && (err as { code?: unknown }).code === "EXTRA_MCP_UNSUPPORTED");
+});
+
+test("agent parser resolves package-specifier Pi extensions to loadable absolute paths", () => {
+  const w = workspace();
+  const path = join(w.userHome, "agents", "specifier.md");
+  writeFileSync(path, `---
+description: Uses a workspace extension by package specifier
+extensions: [@bravo/web-evidence-cache/extensions/pi]
+variants:
+  gemini:
+    extensions: [@bravo/gemini-code-assist/extensions/pi]
+---
+
+Specifier body.
+`);
+  const definition = parseAgentDefinitionFile(path, "user");
+  // Built-in templates ship inside the package and must not name a machine-specific checkout.
+  // The child gets these verbatim as `-e <value>`, so resolution has to happen here.
+  assert.equal(definition.extensions.length, 1);
+  assert.ok(definition.extensions[0]!.startsWith("/"), `expected an absolute path, got ${definition.extensions[0]}`);
+  assert.ok(existsSync(definition.extensions[0]!), `resolved extension should exist on disk: ${definition.extensions[0]}`);
+  assert.ok(definition.extensions[0]!.endsWith("/packages/web-evidence-cache/extensions/pi/index.ts"));
+
+  const gemini = applyAgentVariant(definition, "gemini");
+  assert.equal(gemini.extensions.length, 1);
+  assert.ok(existsSync(gemini.extensions[0]!), `resolved variant extension should exist on disk: ${gemini.extensions[0]}`);
+  assert.ok(gemini.extensions[0]!.endsWith("/packages/gemini-code-assist/extensions/pi/index.ts"));
+});
+
+test("agent parser passes absolute Pi extension paths through untouched", () => {
+  const w = workspace();
+  const absolute = join(w.root, "some", "extension", "index.ts");
+  const path = join(w.userHome, "agents", "absolute.md");
+  writeFileSync(path, `---
+description: Uses an absolute extension path
+extensions: [${absolute}]
+---
+
+Absolute body.
+`);
+  assert.deepEqual(parseAgentDefinitionFile(path, "user").extensions, [absolute]);
+});
+
+test("agent parser fails loudly on an unresolvable extension specifier", () => {
+  const w = workspace();
+  const path = join(w.userHome, "agents", "missing.md");
+  writeFileSync(path, `---
+description: Names an extension that does not exist
+extensions: [@bravo/definitely-not-a-real-package/extensions/pi]
+---
+
+Missing body.
+`);
+  assert.throws(
+    () => parseAgentDefinitionFile(path, "user"),
+    (err: unknown) => err instanceof Error
+      && (err as { code?: unknown }).code === "INVALID_AGENT_DEFINITION"
+      && /definitely-not-a-real-package/.test(err.message),
+  );
 });
