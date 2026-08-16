@@ -81,6 +81,67 @@ async-subagents run --cwd "$PWD" --agent scout \
 
 It should come back with `@bravo/async-subagents`.
 
+## 5. Teach Claude when to delegate
+
+**This step is what makes the rest of it worth installing.** Everything above gives Claude the
+*ability* to delegate. Nothing so far gives it the *bias* to. Without this, the skill sits unused and
+Claude keeps doing the work itself.
+
+The skill is only loaded once Claude decides to delegate, so the routing rules have to live somewhere
+Claude reads unprompted — your global `~/.claude/CLAUDE.md`. Append this:
+
+```markdown
+## Picking models for workflows and subagents
+
+Delegate implementation, planning, diagnosis, repository investigation, and code-level
+review to a GPT-5.6 Sol lane via the `/pi-async-subagents` skill — provided the task is
+verifiable and well-briefed. Prefer its named `scout`/`planner`/`worker`/`reviewer`/
+`generalist` templates over a hand-authored raw Pi prompt; use the narrowest that fits.
+
+That proviso is the rule, not a footnote. Sol's usefulness assumes external verification:
+it fabricates completions, games vague success criteria (the highest eval-gaming rate METR
+has measured), and does not abandon a failing approach on its own. So the question is never
+"is this big enough to delegate" — it is "can I state the success criterion precisely
+enough that I could check it without trusting the agent?"
+
+- Yes → delegate. Size is irrelevant; a ten-line fix with a named test is a fine lane.
+- No → tighten the brief until it is, or keep it inline. Never hand out work that is
+  ambiguous, self-graded, or unverifiable. More reasoning does not fix a gameable brief;
+  it games it harder. Put a fails-twice guardrail in every implement brief.
+
+Never bank a lane's self-report. `completed` means the process exited, not that the work is
+right. Re-run the gates and read the diff yourself. Judge a reviewer lane by its parsed
+SEVERITY findings, never by how well the report reads — Sol's prose is polished regardless
+of depth. An implausibly short run is a claim to disprove.
+
+Three kinds of work stay in a Claude lane, as routing rather than preference:
+
+- Frontend/UI implementation — Sol's documented weak zone (generic output, element
+  over-generation, callout spam). Keep Sol on the backing logic, route the UI to Claude.
+- Voice, copy, interaction feel, visual polish — taste is the success criterion, and taste
+  is not verifiable by a gate.
+- "Was this built the right way?" — Sol hunts bugs and edge cases well, but judging intent
+  (in the spirit of the spec, the simplest way it could be done) is a different job. On
+  anything that matters, run both a Sol reviewer and a Claude reviewer.
+
+On multi-step builds, act as the lead: own the plan, the briefs, the seam design, and the
+integration yourself; delegate the implement and review passes. A child is never another
+orchestrator — a brief that says "figure out what to do and then do it" describes your job,
+not a lane's.
+
+Escalate a `scout` to `planner`/`generalist` only when the work needs judgment —
+classifying, comparing against a baseline, weighing designs, diagnosing — rather than
+finding and reporting what is there. A brief spanning dozens of files is normal scout work
+and is not a reason to re-route.
+
+Omit `--thinking`; the templates encode sane levels. Raise it only when the bounded task is
+genuinely harder than the role's norm, and only after the brief is already tight.
+```
+
+Adjust it to your own habits — it is a starting bias, not a contract. Keep two rules, though, because
+dropping them is how people end up distrusting the tool: **verifiable-and-briefed** is what keeps Sol
+inside its competence, and **never bank the self-report** is what catches it when it strays anyway.
+
 ## The roles
 
 | Role | For | Model |
