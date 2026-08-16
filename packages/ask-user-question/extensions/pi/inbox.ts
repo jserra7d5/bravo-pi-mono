@@ -7,7 +7,7 @@ export function badge(requests: QuestionRequest[]): { text?: string; urgency?: U
   if (!pending.length) return {};
   const rank = { low: 0, normal: 1, high: 2 } as const;
   const urgency = pending.reduce<Urgency>((max, r) => rank[r.urgency] > rank[max] ? r.urgency : max, "low");
-  return { text: `[${pending.length}${pending.some((r) => r.delivery === "blocking") ? " ?" : ""} user-questions]`, urgency };
+  return { text: `[${pending.length}${pending.some((r) => r.delivery === "blocking") ? " ?" : ""} user-questions · type /q to view]`, urgency };
 }
 
 export class QuestionInboxComponent implements Component {

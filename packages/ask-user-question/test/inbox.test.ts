@@ -19,9 +19,9 @@ function pendingRequest(header = "LongTopic"): QuestionRequest {
 test("badge derives count, blocking marker, and maximum urgency", () => {
   const service = new QuestionService();
   for (const [id, delivery, urgency] of [["a", "non_blocking", "low"], ["b", "blocking", "high"]] as const) service.apply(service.create(id, input(delivery, urgency))!);
-  assert.deepEqual(badge(service.all()), { text: "[2 ? user-questions]", urgency: "high" });
+  assert.deepEqual(badge(service.all()), { text: "[2 ? user-questions · type /q to view]", urgency: "high" });
   service.apply(service.withdraw(service.pending()[0].requestId)!);
-  assert.deepEqual(badge(service.all()), { text: "[1 user-questions]", urgency: "low" });
+  assert.deepEqual(badge(service.all()), { text: "[1 user-questions · type /q to view]", urgency: "low" });
 });
 
 test("inbox uses full rounded container chrome and attention title", () => {

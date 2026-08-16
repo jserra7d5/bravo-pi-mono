@@ -5,7 +5,7 @@ import { QuestionSchema } from "../extensions/pi/schema.js";
 import { harness } from "./harness.js";
 const params = { questions: [{ question: "Choose?", header: "Choice", options: [{ label: "A" }, { label: "B" }], multiSelect: false }], delivery: "non_blocking", urgency: "high" };
 
-test("real extension registers exact tools, command, shortcut, and prompt", async () => { const h = harness(); assert.deepEqual([...h.tools.keys()], ["ask_user_question", "wait_for_user_question", "withdraw_user_question"]); assert.ok(h.commands.has("questions")); assert.equal(h.shortcuts.length, 1); const hook = h.hooks.get("before_agent_start")![0]; const value = await hook({ systemPrompt: "base" }, h.ctx); assert.match(value.systemPrompt, /continue useful independent work/); });
+test("real extension registers exact tools, command aliases, shortcut, and prompt", async () => { const h = harness(); assert.deepEqual([...h.tools.keys()], ["ask_user_question", "wait_for_user_question", "withdraw_user_question"]); assert.ok(h.commands.has("questions")); assert.ok(h.commands.has("q")); assert.equal(h.shortcuts.length, 1); const hook = h.hooks.get("before_agent_start")![0]; const value = await hook({ systemPrompt: "base" }, h.ctx); assert.match(value.systemPrompt, /continue useful independent work/); });
 test("non-blocking creation appends before returning and duplicate execution reuses request", async () => { const h = harness(); const first = await h.execute("ask_user_question", params, "same"); const second = await h.execute("ask_user_question", params, "same"); assert.equal(h.entries.filter((e) => e.data.type === "question.created").length, 1); assert.equal(first.details.request_id, second.details.request_id); assert.equal(h.order[0], "append"); });
 test("blocking creation persists before UI; Escape withdraws and releases the tool", async () => {
   const h = harness();
@@ -51,24 +51,41 @@ test("wait_for Escape withdraws the escalated request and releases the tool", as
   assert.equal(result.details.state, "withdrawn");
   assert.deepEqual(h.entries.map((entry) => entry.data.type), ["question.created", "question.escalated", "question.withdrawn", "question.answer_delivered"]);
 });
-test("question headers allow 20 characters but reject 21", () => {
+test("question text, header, and option labels are nonempty and headers cap at 20", () => {
   const candidate = { question: "Choose?", options: [{ label: "A" }, { label: "B" }], multiSelect: false };
   assert.equal(Value.Check(QuestionSchema, { ...candidate, header: "x".repeat(20) }), true);
   assert.equal(Value.Check(QuestionSchema, { ...candidate, header: "x".repeat(21) }), false);
+  assert.equal(Value.Check(QuestionSchema, { ...candidate, question: "", header: "Choice" }), false);
+  assert.equal(Value.Check(QuestionSchema, { ...candidate, question: "   ", header: "Choice" }), false);
+  assert.equal(Value.Check(QuestionSchema, { ...candidate, header: "" }), false);
+  assert.equal(Value.Check(QuestionSchema, { ...candidate, header: "   " }), false);
+  assert.equal(Value.Check(QuestionSchema, { ...candidate, header: "Choice", options: [{ label: "" }, { label: "B" }] }), false);
+  assert.equal(Value.Check(QuestionSchema, { ...candidate, header: "Choice", options: [{ label: "   " }, { label: "B" }] }), false);
 });
 test("non-interactive invocation creates no state and disables all question tools and prompt", async () => { const h = harness(false); await h.execute("ask_user_question", params); assert.equal(h.entries.length, 0); assert.ok(!h.active().some((name) => name.includes("user_question"))); const value = await h.hooks.get("before_agent_start")![0]({ systemPrompt: "base" }, h.ctx); assert.equal(value, undefined); });
-test("invalid duplicate input creates no event", async () => { const h = harness(); await h.execute("ask_user_question", { ...params, questions: [params.questions[0], params.questions[0]] }); assert.equal(h.entries.length, 0); });
+test("invalid input is rejected at the registered boundary before uniqueness and creates no event", async () => {
+  for (const value of [
+    { ...params, questions: [] },
+    { ...params, questions: [{ ...params.questions[0], question: "" }] },
+    { ...params, questions: [{ ...params.questions[0], question: "   " }] },
+    { ...params, questions: [{ ...params.questions[0], header: "" }] },
+    { ...params, questions: [{ ...params.questions[0], header: "   " }] },
+    { ...params, questions: [{ ...params.questions[0], options: [{ label: "" }, { label: "B" }] }] },
+    { ...params, questions: [{ ...params.questions[0], options: [{ label: "   " }, { label: "B" }] }] },
+  ]) { const h = harness(); const result = await h.execute("ask_user_question", value); assert.match(result.content[0].text, /invalid/); assert.equal(h.entries.length, 0); }
+  const h = harness(); await h.execute("ask_user_question", { ...params, questions: [params.questions[0], params.questions[0]] }); assert.equal(h.entries.length, 0);
+});
 test("status uses maximum-urgency theme styling and gates unchanged styled values", async () => {
   const h = harness();
   await h.execute("ask_user_question", { ...params, urgency: "low" }, "low");
-  assert.equal(h.statuses.at(-1)?.[1], "<dim>[1 user-questions]</dim>");
+  assert.equal(h.statuses.at(-1)?.[1], "<dim>[1 user-questions · type /q to view]</dim>");
   const calls = h.statuses.length;
   await h.execute("ask_user_question", { ...params, urgency: "low" }, "low");
   assert.equal(h.statuses.length, calls);
   await h.execute("ask_user_question", { ...params, urgency: "normal" }, "normal");
-  assert.equal(h.statuses.at(-1)?.[1], "<warning>[2 user-questions]</warning>");
+  assert.equal(h.statuses.at(-1)?.[1], "<warning>[2 user-questions · type /q to view]</warning>");
   await h.execute("ask_user_question", { ...params, urgency: "high" }, "high");
-  assert.equal(h.statuses.at(-1)?.[1], "<error>[3 user-questions]</error>");
+  assert.equal(h.statuses.at(-1)?.[1], "<error>[3 user-questions · type /q to view]</error>");
 });
 test("multi-question answers render every answer on width-bounded lines", () => {
   const h = harness(); const tool = h.tools.get("ask_user_question");

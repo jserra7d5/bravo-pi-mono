@@ -4,13 +4,13 @@ export const DeliverySchema = Type.Union([Type.Literal("blocking"), Type.Literal
 export const UrgencySchema = Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high")]);
 
 export const OptionSchema = Type.Object({
-  id: Type.Optional(Type.String({ minLength: 1 })),
-  label: Type.String({ description: "Concise display label" }),
+  id: Type.Optional(Type.String({ minLength: 1, pattern: "\\S" })),
+  label: Type.String({ minLength: 1, pattern: "\\S", description: "Concise display label" }),
   description: Type.Optional(Type.String()),
 });
 export const QuestionSchema = Type.Object({
-  question: Type.String(),
-  header: Type.String({ maxLength: 20, description: "Compact topic label (maximum 20 characters)" }),
+  question: Type.String({ minLength: 1, pattern: "\\S" }),
+  header: Type.String({ minLength: 1, maxLength: 20, pattern: "\\S", description: "Compact topic label (maximum 20 characters)" }),
   options: Type.Array(OptionSchema, { minItems: 2, maxItems: 4 }),
   multiSelect: Type.Boolean(),
 });
@@ -66,6 +66,20 @@ export type PickerOutcome =
   | { kind: "submitted"; answers: Answer[] }
   | { kind: "declined" }
   | { kind: "closed" };
+
+/** Process-local, JSON-serializable picker state. Never written to session entries. */
+export type PickerDraft = {
+  activeTab: number;
+  questions: Array<{
+    cursorIndex: number;
+    selectedIndex: number | null;
+    selectedIndices: number[];
+    confirmed: boolean;
+    freeTextValue: string | null;
+    inEditMode: boolean;
+    editorText?: string;
+  }>;
+};
 
 // Durable entry payloads. Each transition has a deterministic event identity.
 type EventBase = { version: 1; eventId: string; requestId: string; occurredAt: string };

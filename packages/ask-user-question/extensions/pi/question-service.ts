@@ -6,29 +6,51 @@ const stableId = (prefix: string, value: string) => `${prefix}_${createHash("sha
 export const requestIdFor = (toolCallId: string) => stableId("uq", toolCallId);
 const eventIdFor = (requestId: string, transition: string) => stableId("uqe", `${requestId}:${transition}`);
 
-function validString(value: unknown): value is string { return typeof value === "string" && value.length > 0; }
+function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
+function exact(value: Record<string, unknown>, required: string[], optional: string[] = []): boolean {
+  const keys = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key)) && keys.every((key) => required.includes(key) || optional.includes(key));
+}
+function validString(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
+function validTimestamp(value: unknown): value is string {
+  if (!validString(value)) return false;
+  try { return new Date(value).toISOString() === value; } catch { return false; }
+}
 function validAnswer(value: unknown): value is Answer {
-  if (!value || typeof value !== "object") return false;
-  const answer = value as Record<string, unknown>;
-  return validString(answer.question) && Array.isArray(answer.selected_option_ids) && answer.selected_option_ids.every(validString) && new Set(answer.selected_option_ids).size === answer.selected_option_ids.length && Array.isArray(answer.selected_labels) && answer.selected_labels.every(validString) && answer.selected_labels.length === answer.selected_option_ids.length && (answer.free_text === undefined || typeof answer.free_text === "string");
+  if (!record(value) || !exact(value, ["question", "selected_option_ids", "selected_labels"], ["free_text"])) return false;
+  return validString(value.question) && Array.isArray(value.selected_option_ids) && value.selected_option_ids.every(validString) && new Set(value.selected_option_ids).size === value.selected_option_ids.length && Array.isArray(value.selected_labels) && value.selected_labels.every(validString) && value.selected_labels.length === value.selected_option_ids.length && (value.free_text === undefined || typeof value.free_text === "string");
 }
 function validQuestion(value: unknown): value is NormalizedQuestion {
-  if (!value || typeof value !== "object") return false;
-  const question = value as Record<string, unknown>;
-  if (!validString(question.question) || !validString(question.header) || question.header.length > 20 || typeof question.multiSelect !== "boolean" || !Array.isArray(question.options) || question.options.length < 2 || question.options.length > 4) return false;
+  if (!record(value) || !exact(value, ["question", "header", "options", "multiSelect"])) return false;
+  if (!validString(value.question) || !validString(value.header) || value.header.length > 20 || typeof value.multiSelect !== "boolean" || !Array.isArray(value.options) || value.options.length < 2 || value.options.length > 4) return false;
   const ids = new Set<string>();
-  return question.options.every((value) => { if (!value || typeof value !== "object") return false; const option = value as Record<string, unknown>; if (!validString(option.id) || !validString(option.label) || ids.has(option.id) || (option.description !== undefined && typeof option.description !== "string")) return false; ids.add(option.id); return true; });
+  return value.options.every((option) => {
+    if (!record(option) || !exact(option, ["id", "label"], ["description"]) || !validString(option.id) || !validString(option.label) || ids.has(option.id) || (option.description !== undefined && typeof option.description !== "string")) return false;
+    ids.add(option.id); return true;
+  });
 }
 function validEvent(value: unknown): value is QuestionEvent {
-  if (!value || typeof value !== "object") return false;
-  const e = value as Record<string, unknown>;
-  if (e.version !== 1 || !validString(e.eventId) || !validString(e.requestId) || !validString(e.occurredAt) || !validString(e.type) || !e.payload || typeof e.payload !== "object") return false;
-  const payload = e.payload as Record<string, unknown>;
-  if (e.type === "question.created") return validString(payload.originatingToolCallId) && (payload.delivery === "blocking" || payload.delivery === "non_blocking") && (payload.urgency === "low" || payload.urgency === "normal" || payload.urgency === "high") && Array.isArray(payload.questions) && payload.questions.length >= 1 && payload.questions.length <= 4 && payload.questions.every(validQuestion);
-  if (e.type === "question.answered") return Array.isArray(payload.answers) && payload.answers.every(validAnswer);
-  if (e.type === "question.withdrawn") return payload.reason === undefined || typeof payload.reason === "string";
-  if (e.type === "question.answer_delivered") return validString(payload.terminalEventId);
-  return e.type === "question.escalated" || e.type === "question.declined";
+  if (!record(value) || !exact(value, ["version", "eventId", "requestId", "occurredAt", "type", "payload"])) return false;
+  if (value.version !== 1 || !validString(value.eventId) || !validString(value.requestId) || !validTimestamp(value.occurredAt) || !validString(value.type) || !record(value.payload)) return false;
+  const payload = value.payload;
+  let identity: string;
+  if (value.type === "question.created") {
+    if (!exact(payload, ["originatingToolCallId", "delivery", "urgency", "questions"]) || !validString(payload.originatingToolCallId) || value.requestId !== requestIdFor(payload.originatingToolCallId) || (payload.delivery !== "blocking" && payload.delivery !== "non_blocking") || (payload.urgency !== "low" && payload.urgency !== "normal" && payload.urgency !== "high") || !Array.isArray(payload.questions) || payload.questions.length < 1 || payload.questions.length > 4 || !payload.questions.every(validQuestion)) return false;
+    identity = "created";
+  } else if (value.type === "question.answered") {
+    if (!exact(payload, ["answers"]) || !Array.isArray(payload.answers) || !payload.answers.every(validAnswer)) return false;
+    identity = "answered";
+  } else if (value.type === "question.withdrawn") {
+    if (!exact(payload, [], ["reason"]) || (payload.reason !== undefined && typeof payload.reason !== "string")) return false;
+    identity = "withdrawn";
+  } else if (value.type === "question.answer_delivered") {
+    if (!exact(payload, ["terminalEventId"]) || !validString(payload.terminalEventId)) return false;
+    identity = `delivered:${payload.terminalEventId}`;
+  } else if (value.type === "question.escalated" || value.type === "question.declined") {
+    if (!exact(payload, [])) return false;
+    identity = value.type === "question.escalated" ? "escalated" : "declined";
+  } else return false;
+  return value.eventId === eventIdFor(value.requestId, identity);
 }
 
 export class QuestionService {
@@ -90,7 +112,7 @@ export class QuestionService {
     return this.all().filter((r) => r.state === "pending").sort((a, b) => Number(a.delivery !== "blocking") - Number(b.delivery !== "blocking") || urgency[a.urgency] - urgency[b.urgency] || a.createdAt.localeCompare(b.createdAt));
   }
 
-  create(toolCallId: string, input: AskInput): QuestionEvent | undefined {
+  create(toolCallId: string, input: AskInput): Extract<QuestionEvent, { type: "question.created" }> | undefined {
     const requestId = requestIdFor(toolCallId); if (this.get(requestId)) return undefined;
     const questions: NormalizedQuestion[] = input.questions.map((q, qi) => ({ ...q, options: q.options.map((o, oi) => ({ ...o, id: o.id ?? stableId("opt", `${requestId}:${qi}:${oi}`) })) }));
     return { version: 1, type: "question.created", eventId: eventIdFor(requestId, "created"), requestId, occurredAt: iso(), payload: { originatingToolCallId: toolCallId, delivery: input.delivery ?? "blocking", urgency: input.urgency ?? "normal", questions } };

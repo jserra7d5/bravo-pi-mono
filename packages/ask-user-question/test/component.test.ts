@@ -66,6 +66,15 @@ test("multi-question tabs preserve selections and block incomplete Submit", () =
   assert.equal(outcomes.length, 1); assert.equal(outcomes[0].kind, "submitted");
 });
 
+test("picker draft snapshot is serializable and restores review state", () => {
+  const first = make([question]); first.handleInput(input.down); first.handleInput(input.enter);
+  const draft = JSON.parse(JSON.stringify(first.snapshot()));
+  const outcomes: PickerOutcome[] = []; const restored = new AskUserQuestionComponent([question], tui, theme, (outcome) => outcomes.push(outcome), "close", draft);
+  assert.ok(restored.render(80).some((line) => line.includes("Ready to submit")));
+  restored.handleInput(input.enter);
+  assert.deepEqual(outcomes, [{ kind: "submitted", answers: [{ question: "Which DB?", selected_option_ids: ["sq"], selected_labels: ["SQLite"] }] }]);
+});
+
 test("single free text is trimmed, reviewed, and explicitly submitted", () => {
   const outcomes: PickerOutcome[] = []; const component = make([question], (outcome) => outcomes.push(outcome));
   component.handleInput(input.down); component.handleInput(input.down); component.handleInput(input.space);

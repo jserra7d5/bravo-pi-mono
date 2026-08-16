@@ -1,6 +1,6 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, TruncatedText, truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { Value } from "typebox/value";
 import { QUESTION_PROMPT } from "./prompt.js";
 import { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { InputSchema, RequestIdInputSchema, type RequestEnvelope, WithdrawInputSchema } from "./schema.js";
@@ -34,6 +34,7 @@ export default function (pi: ExtensionAPI) {
     name: "ask_user_question", label: "Ask User", description: "Create a durable structured user-question request. Use non_blocking when independent work can continue.", parameters: InputSchema,
     async execute(toolCallId, params, _signal, _update, ctx) {
       if (!requireUI(ctx)) return { content: [{ type: "text", text: "Error: user-question tools require an interactive session and are now disabled." }], details: undefined };
+      if (!Value.Check(InputSchema, params)) return { content: [{ type: "text", text: "Error: invalid ask_user_question input" }], details: undefined };
       const error = validateUniqueness(params.questions); if (error) return { content: [{ type: "text", text: `Error: ${error}` }], details: undefined };
       return result(await coordinator.ask(toolCallId, params, ctx));
     },
@@ -49,7 +50,9 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, _signal, _update, ctx) { if (!requireUI(ctx)) return { content: [{ type: "text", text: "Error: user-question tools require an interactive session and are now disabled." }], details: undefined }; try { return result(coordinator.withdraw(params.request_id, params.reason)); } catch (e) { return { content: [{ type: "text", text: `Error: ${e instanceof Error ? e.message : String(e)}` }], details: undefined }; } },
     renderCall: renderCall("withdraw user question"), renderResult,
   });
-  pi.registerCommand("questions", { description: "Open pending user questions", handler: async (_args, ctx) => coordinator.openInbox(ctx) });
+  const openQuestions = async (_args: string, ctx: ExtensionCommandContext) => coordinator.openInbox(ctx);
+  pi.registerCommand("questions", { description: "Open pending user questions", handler: openQuestions });
+  pi.registerCommand("q", { description: "Open pending user questions", handler: openQuestions });
   pi.registerShortcut(Key.ctrlShift("u"), { description: "Open pending user questions", handler: (ctx) => coordinator.openInbox(ctx) });
   pi.on("session_start", async (_event, ctx) => coordinator.rebuild(ctx));
   pi.on("session_shutdown", async () => coordinator.shutdown());

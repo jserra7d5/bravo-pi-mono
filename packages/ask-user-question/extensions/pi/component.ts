@@ -9,7 +9,7 @@ import {
   truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { Answer, Option, PickerOutcome, Question } from "./schema.js";
+import type { Answer, Option, PickerDraft, PickerOutcome, Question } from "./schema.js";
 
 // ── TUILike ───────────────────────────────────────────────────────────────────
 // Minimal interface satisfied by both the real TUI and a test stub.
@@ -60,6 +60,7 @@ export class AskUserQuestionComponent implements Component {
     theme: Theme,
     done: (result: PickerOutcome) => void,
     escapeLabel: "close" | "cancel" = "close",
+    draft?: PickerDraft,
   ) {
     this.questions = questions;
     this.tui = tui;
@@ -94,6 +95,20 @@ export class AskUserQuestionComponent implements Component {
       this.tui.requestRender();
     };
 
+    if (draft && draft.questions.length === questions.length) {
+      this.activeTab = Math.max(0, Math.min(questions.length, draft.activeTab));
+      this.states = draft.questions.map((state, index) => ({
+        cursorIndex: Math.max(0, Math.min(questions[index].options.length, state.cursorIndex)),
+        selectedIndex: state.selectedIndex === null ? null : Math.max(0, Math.min(questions[index].options.length - 1, state.selectedIndex)),
+        selectedIndices: new Set(state.selectedIndices.filter((value) => Number.isInteger(value) && value >= 0 && value < questions[index].options.length)),
+        confirmed: state.confirmed,
+        freeTextValue: state.freeTextValue,
+        inEditMode: state.inEditMode,
+      }));
+      const active = this.states[this.activeTab];
+      if (active?.inEditMode) this.editor.setText(draft.questions[this.activeTab].editorText ?? active.freeTextValue ?? "");
+    }
+
     this.invalidate();
   }
 
@@ -123,6 +138,21 @@ export class AskUserQuestionComponent implements Component {
   invalidate(): void {
     this.cachedWidth = undefined;
     this.cachedLines = undefined;
+  }
+
+  snapshot(): PickerDraft {
+    return {
+      activeTab: this.activeTab,
+      questions: this.states.map((state, index) => ({
+        cursorIndex: state.cursorIndex,
+        selectedIndex: state.selectedIndex,
+        selectedIndices: [...state.selectedIndices].sort((a, b) => a - b),
+        confirmed: state.confirmed,
+        freeTextValue: state.freeTextValue,
+        inEditMode: state.inEditMode,
+        ...(state.inEditMode && index === this.activeTab ? { editorText: this.editor.getText() } : {}),
+      })),
+    };
   }
 
   // ── render() ────────────────────────────────────────────────────────────────

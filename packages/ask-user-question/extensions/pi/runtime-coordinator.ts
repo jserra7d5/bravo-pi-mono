@@ -2,12 +2,13 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { AskUserQuestionComponent } from "./component.js";
 import { badge, QuestionInboxComponent } from "./inbox.js";
 import { envelope, QuestionService, requestIdFor } from "./question-service.js";
-import type { AskInput, PickerOutcome, QuestionEvent, QuestionRequest, RequestEnvelope } from "./schema.js";
+import type { AskInput, PickerDraft, PickerOutcome, QuestionEvent, QuestionRequest, RequestEnvelope } from "./schema.js";
 
 export class RuntimeCoordinator {
   readonly service = new QuestionService();
   private waiters = new Map<string, { promise: Promise<RequestEnvelope>; resolve: (value: RequestEnvelope) => void }>();
   private lastStatus: string | undefined;
+  private drafts = new Map<string, PickerDraft>();
   private ctx?: ExtensionContext;
   constructor(private readonly pi: ExtensionAPI) {}
 
@@ -28,10 +29,12 @@ export class RuntimeCoordinator {
   rebuild(ctx: ExtensionContext): void {
     this.ctx = ctx; this.waiters.clear(); this.lastStatus = undefined;
     const events = ctx.sessionManager.getBranch().flatMap((entry) => entry.type === "custom" && entry.customType === "async-user-question" ? [entry.data] : []);
-    this.service.project(events); this.refresh();
+    this.service.project(events);
+    for (const id of this.drafts.keys()) if (this.service.get(id)?.state !== "pending") this.drafts.delete(id);
+    this.refresh();
     for (const request of this.service.all()) if (request.state !== "pending" && !request.answerDelivered) this.deliver(request);
   }
-  shutdown(): void { this.waiters.clear(); }
+  shutdown(): void { this.waiters.clear(); this.drafts.clear(); }
 
   async ask(toolCallId: string, input: AskInput, ctx: ExtensionContext): Promise<RequestEnvelope> {
     this.ctx = ctx;
@@ -50,16 +53,24 @@ export class RuntimeCoordinator {
   withdraw(id: string, reason?: string): RequestEnvelope {
     const request = this.service.get(id); if (!request) throw new Error(`Unknown question request: ${id}`);
     const event = this.service.withdraw(id, reason); if (event) this.append(event);
-    const current = this.service.get(id)!; if (event) this.resolveOrDeliver(current); return envelope(current);
+    const current = this.service.get(id)!; if (event) { this.drafts.delete(id); this.resolveOrDeliver(current); } return envelope(current);
   }
   private wait(id: string): Promise<RequestEnvelope> {
     const existing = this.waiters.get(id); if (existing) return existing.promise;
     let resolve!: (value: RequestEnvelope) => void; const promise = new Promise<RequestEnvelope>((r) => { resolve = r; });
     this.waiters.set(id, { promise, resolve }); return promise;
   }
-  private openPicker(request: QuestionRequest, ctx: ExtensionContext, onClosed?: () => void, escapeLabel: "close" | "cancel" = "close"): void {
-    void ctx.ui.custom<PickerOutcome>((tui, theme, _kb, done) => new AskUserQuestionComponent(request.questions, tui, theme, done, escapeLabel)).then((outcome) => {
-      if (outcome.kind === "closed") { onClosed?.(); return; }
+  private openPicker(request: QuestionRequest, ctx: ExtensionContext, onClosed?: () => void, escapeLabel: "close" | "cancel" = "close", preserveDraft = false): void {
+    let component: AskUserQuestionComponent;
+    void ctx.ui.custom<PickerOutcome>((tui, theme, _kb, done) => {
+      component = new AskUserQuestionComponent(request.questions, tui, theme, done, escapeLabel, preserveDraft ? this.drafts.get(request.requestId) : undefined);
+      return component;
+    }).then((outcome) => {
+      if (outcome.kind === "closed") {
+        if (preserveDraft) this.drafts.set(request.requestId, component.snapshot());
+        onClosed?.(); return;
+      }
+      this.drafts.delete(request.requestId);
       const event = outcome.kind === "submitted" ? this.service.answer(request.requestId, outcome.answers) : this.service.decline(request.requestId);
       if (!event) return; this.append(event); this.resolveOrDeliver(this.service.get(request.requestId)!);
     });
@@ -68,7 +79,7 @@ export class RuntimeCoordinator {
     const event = this.service.withdraw(id, "Closed by user");
     if (event) this.append(event);
     const request = this.service.get(id);
-    if (request && request.state !== "pending") this.resolveOrDeliver(request);
+    if (request && request.state !== "pending") { this.drafts.delete(id); this.resolveOrDeliver(request); }
   }
   private resolveOrDeliver(request: QuestionRequest): void {
     const waiter = this.waiters.get(request.requestId);
@@ -99,6 +110,6 @@ export class RuntimeCoordinator {
     void ctx.ui.custom<string | undefined>((tui, theme, _kb, done) => new QuestionInboxComponent(pending, theme, done, () => tui.requestRender()), {
       overlay: true,
       overlayOptions: { anchor: "bottom-center", width: "80%", maxHeight: "70%", margin: { right: 2, bottom: 3, left: 2 } },
-    }).then((id) => { const request = id && this.service.get(id); if (request) this.openPicker(request, ctx, () => this.openInbox(ctx)); });
+    }).then((id) => { const request = id && this.service.get(id); if (request) this.openPicker(request, ctx, () => this.openInbox(ctx), "close", true); });
   }
 }

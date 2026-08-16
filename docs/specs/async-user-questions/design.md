@@ -1,6 +1,6 @@
 # Async User Questions Design
 
-Status: Approved design, implementation pending
+Status: Implemented and validated
 Package: `packages/ask-user-question`
 
 ## Goal

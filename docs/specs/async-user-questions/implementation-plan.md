@@ -1,6 +1,6 @@
 # Async User Questions Implementation Plan
 
-Status: Implementation-ready after Gate 0 is resolved
+Status: Implemented and validated
 Package: `packages/ask-user-question`
 Source of truth: [`design.md`](design.md), [`lifecycle.md`](lifecycle.md), [`tools-and-prompting.md`](tools-and-prompting.md), [`tui.md`](tui.md), and [`verification.md`](verification.md). This plan sequences their implementation and does not supersede their contracts.
 
