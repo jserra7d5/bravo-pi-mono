@@ -192,7 +192,7 @@ test("startSubagent drives a detached fake child lifecycle", async () => {
   assert.ok(existsSync(join(started.runDir, "logs", "launch.json")));
 
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
-  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 25 });
+  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 30_000, pollIntervalMs: 25 });
   assert.equal(waited.state, "ready");
   assert.equal(waited.results[0]?.state, "completed");
   assert.match(waited.results[0]?.body ?? "", /Fake child completed/);
@@ -245,6 +245,15 @@ Claude scout body.
   );
 });
 
+// The tmux tests below budget 30s of wall clock, not because anything here should take 30s, but
+// because they race real tmux session startup and a spawned fake Claude binary. At the previous 5s
+// ceiling a loaded CI runner pushed the run past its own maxRunSeconds, so it finalized `expired`
+// and the assertions failed on state rather than on the behaviour under test — observed as three
+// tests passing and failing across two runs three minutes apart on identical trees.
+//
+// The delays these tests actually exercise (FAKE_CLAUDE_WAIT_MS, FAKE_TMUX_DISPLAY_DELAY_MS,
+// FAKE_CLAUDE_COMPLETE_DELAY_MS) are unchanged. The budget is headroom, never the assertion: none
+// of these tests should be made to pass by waiting longer for a wrong answer.
 test("Claude interactive tmux lifecycle completes from MCP result", { skip: !(await hasTmux()) }, async () => {
   const w = workspace();
   const fakeBin = writeFakeClaudeBin(w.root);
@@ -253,7 +262,7 @@ description: Claude scout.
 harness: claude
 model: sonnet
 mode: interactive
-maxRunSeconds: 5
+maxRunSeconds: 30
 claude:
   authHome: operator-home
 ---
@@ -272,7 +281,7 @@ Claude scout body.
   // Start returns as soon as the run is handed to the tmux adapter; pane claim may still be pending.
   assert.ok(["queued", "running"].includes(started.state), `unexpected start state: ${started.state}`);
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
-  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
+  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 30_000, pollIntervalMs: 50 });
   assert.equal(waited.state, "ready");
   assert.equal(waited.results[0]?.state, "completed");
   assert.equal(waited.results[0]?.summary, "MCP completed");
@@ -291,7 +300,7 @@ description: Claude scout.
 harness: claude
 model: sonnet
 mode: interactive
-maxRunSeconds: 5
+maxRunSeconds: 30
 claude:
   authHome: operator-home
 ---
@@ -299,7 +308,7 @@ Claude scout body.
 `, "utf8");
   const started = await startSubagent({ agent: "claude-scout", task: "Complete", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_test", env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FAKE_CLAUDE_EXIT_DELAY_MS: "0" } });
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
-  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
+  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 30_000, pollIntervalMs: 50 });
   assert.equal(waited.results[0]?.state, "completed");
   await new Promise((resolve) => setTimeout(resolve, 500));
   assert.equal(store.readResult(started.runId)?.summary, "MCP completed");
@@ -314,7 +323,7 @@ description: Claude scout.
 harness: claude
 model: sonnet
 mode: interactive
-maxRunSeconds: 5
+maxRunSeconds: 30
 claude:
   authHome: operator-home
 ---
@@ -325,9 +334,9 @@ Claude scout body.
   await new Promise((resolve) => setTimeout(resolve, 250));
   const sent = sendSubagentMessage(store, { runId: started.runId, fromRunId: "root_test", body: "hello", requiresAck: true });
   assert.equal(sent.liveDelivered, true);
-  const ack = await waitForMessageAck(store, { runId: started.runId, messageId: sent.messageId, timeoutMs: 5000, pollIntervalMs: 50 });
+  const ack = await waitForMessageAck(store, { runId: started.runId, messageId: sent.messageId, timeoutMs: 30_000, pollIntervalMs: 50 });
   assert.ok(ack);
-  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
+  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 30_000, pollIntervalMs: 50 });
   assert.equal(waited.results[0]?.state, "completed");
 });
 
@@ -342,7 +351,7 @@ description: Claude scout.
 harness: claude
 model: sonnet
 mode: interactive
-maxRunSeconds: 5
+maxRunSeconds: 30
 claude:
   authHome: operator-home
 ---
@@ -350,7 +359,7 @@ Claude scout body.
 `, "utf8");
     const started = await startSubagent({ agent: "claude-scout", task: "Complete before supervisor start write", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_test", env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FAKE_TMUX_DISPLAY_DELAY_MS: "300", FAKE_CLAUDE_EXIT_DELAY_MS: "0" } });
     const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
-    const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
+    const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 30_000, pollIntervalMs: 50 });
     assert.equal(waited.results[0]?.state, "completed");
     await new Promise((resolve) => setTimeout(resolve, 600));
     assert.equal(store.readStatus(started.runId).state, "completed");
@@ -395,7 +404,7 @@ description: Claude scout.
 harness: claude
 model: sonnet
 mode: interactive
-maxRunSeconds: 5
+maxRunSeconds: 30
 claude:
   authHome: operator-home
 ---
@@ -403,7 +412,7 @@ Claude scout body.
 `, "utf8");
     const started = await startSubagent({ agent: "claude-scout", task: "Complete during tmux death grace", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_test", env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FAKE_CLAUDE_COMPLETE_DELAY_MS: "300", FAKE_CLAUDE_EXIT_DELAY_MS: "0" } });
     const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
-    const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 50 });
+    const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 30_000, pollIntervalMs: 50 });
     assert.equal(waited.results[0]?.state, "completed");
     assert.equal(store.readResult(started.runId)?.summary, "MCP completed");
     assert.equal(store.readStatus(started.runId).state, "completed");
@@ -1056,7 +1065,7 @@ test("spawn failure still records a terminal result after creating the run direc
   });
 
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
-  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 5000, pollIntervalMs: 25 });
+  const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 30_000, pollIntervalMs: 25 });
   assert.equal(waited.state, "ready");
   assert.equal(waited.results[0]?.state, "failed");
   assert.equal(waited.results[0]?.error?.code, "SPAWN_FAILED");
