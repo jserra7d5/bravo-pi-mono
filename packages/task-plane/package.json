@@ -6,7 +6,7 @@
   "description": "Unified managed background work and external-state monitors for Pi.",
   "keywords": ["pi-package"],
   "scripts": {"build":"tsc -p tsconfig.json","check":"tsc -p tsconfig.json --noEmit","test":"npm run build && node --test dist/test/*.test.js"},
-  "dependencies": {"@bravo/render-clock":"0.1.0"},
+  "dependencies": {"@bravo/render-clock":"file:../render-clock"},
   "devDependencies": {"@types/node":"latest","typescript":"latest"},
   "peerDependencies": {"@earendil-works/pi-ai":"*","@earendil-works/pi-coding-agent":"*","typebox":"*"},
   "pi": {"extensions":["./src/index.ts"]}
