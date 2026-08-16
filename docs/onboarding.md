@@ -1,32 +1,37 @@
 # Onboarding: running the async-subagents setup
 
-This gets you from a fresh clone to delegating work to GPT-5.6 role agents from Claude Code.
+This gets you to delegating work to GPT-5.6 role agents from Claude Code.
+
+Use it as a **user** if you just want the tools. Use the [contributor setup](#contributor-setup) if
+you are going to change them.
 
 ## What you need
 
 - Node >= 22.13
-- A ChatGPT/Codex subscription (your own — see [Codex auth](#codex-auth) below)
+- A ChatGPT/Codex subscription (your own — see [Codex auth](#2-codex-auth) below)
 - Claude Code, if you want to drive the agents from Claude rather than the CLI
 
-## 1. Install pi and the workspace
-
-The pi version here is pinned deliberately. The `pi` on your PATH and the copy the workspace
-type-checks against must match, or extensions compile clean and fail at runtime — see
-[the pi pin](#the-pi-pin).
+## 1. Install
 
 ```sh
 npm i -g @earendil-works/pi-coding-agent@0.84.2
-git clone https://github.com/jserra7d5/bravo-pi-mono.git
-cd bravo-pi-mono
-npm install
-npm run build
+pi install git:github.com/jserra7d5/bravo-pi-mono
 ```
+
+That is the whole install. pi clones the repo into its own package directory, runs the build, and
+registers the extensions listed in the root `pi.extensions`: async-subagents, the Codex balancer,
+web-evidence-cache, and gemini-code-assist.
+
+**Do not add a `#ref` to that source.** A ref makes pi treat the package as pinned and it stops
+checking for updates — the no-ref form tracks the repo's default branch, which is the release
+channel. See [updates](#updates).
 
 Verify:
 
 ```sh
-pi --version                      # 0.84.2
-npm run check                     # whole workspace type-checks
+pi --version                                   # 0.84.2
+pi list                                        # the package is registered
+pi --list-models bravo-codex-balanced          # the balancer's models resolve
 ```
 
 ## 2. Codex auth
@@ -47,19 +52,19 @@ With a single subscription, rotation is a no-op — you still get serialized tok
 what stops the weekly re-auth breakage) and per-account usage tracking. Multiple accounts enable
 cache-affinity routing across them.
 
-## 3. Install the skill
+## 3. Install the Claude Code skill
+
+pi registers extensions for pi. The `pi-async-subagents` skill is for Claude Code, so it needs one
+more step:
 
 ```sh
-node packages/async-subagents/dist/src/cli.js install
+PKG="$(pi list | awk '/bravo-pi-mono/{getline; print $1; exit}')"
+node "$PKG/packages/async-subagents/dist/src/cli.js" install
+ln -sf "$PKG/packages/async-subagents/dist/src/cli.js" ~/.local/bin/async-subagents
 ```
 
-This symlinks `packages/async-subagents/skills/pi-async-subagents` into `~/.claude/skills/`, so
-Claude Code picks up `/pi-async-subagents`. Put the CLI on PATH so the skill's commands resolve:
-
-```sh
-npm link --workspace @bravo/async-subagents   # or add ./node_modules/.bin to PATH
-async-subagents --help
-```
+`install` **symlinks** the skill rather than copying it, so it points into the copy pi manages. That
+means `pi update` refreshes the skill too — you do not re-run this after an update.
 
 ## 4. Smoke test
 
@@ -92,6 +97,62 @@ task, so a large read surface is not a reason to escalate.
 Read `~/.claude/skills/pi-async-subagents/SKILL.md` before driving these — it carries the operating
 rules that matter (write-scope contracts, why you must capture `runId` from `start`, why two write
 lanes in one checkout corrupt the tree, and how to judge Sol's output).
+
+## Updates
+
+pi checks its installed packages for updates when an interactive session starts and tells you which
+ones have one waiting. To take it:
+
+```sh
+pi update --extensions
+```
+
+That fetches, resets to the new commit, reinstalls, and rebuilds. The Claude Code skill comes along
+because it is a symlink into the same tree.
+
+What you are tracking is the `release` branch — the repo's default branch — not `main`. Work lands
+on `main` continuously; `release` only moves when a tag passes the full gates in CI. So an update
+appearing means a release was cut, not that someone pushed.
+
+Two things break this, both silent:
+
+- **Installing with a `#ref`.** pi marks a ref-carrying source as pinned and drops it from the
+  update check entirely. You would never be told an update exists. Install with no ref.
+- **An install made before the default branch changed.** An existing clone keeps whatever branch it
+  originally tracked; flipping the default branch does not rewrite it. Check with
+  `git -C "$PKG" rev-parse --abbrev-ref HEAD` — it should say `release`. If it says something else,
+  reinstall: `pi remove git:github.com/jserra7d5/bravo-pi-mono && pi install git:github.com/jserra7d5/bravo-pi-mono`.
+
+## Contributor setup
+
+If you are changing the packages rather than just using them, work from a normal clone:
+
+```sh
+git clone https://github.com/jserra7d5/bravo-pi-mono.git
+cd bravo-pi-mono
+git checkout main          # `release` is the default branch; develop on main
+npm install                # `prepare` builds the bundle
+npm run check && npm run build
+npm test --workspaces
+```
+
+Point pi at your working copy instead of the published one so you test what you are editing:
+
+```sh
+pi remove git:github.com/jserra7d5/bravo-pi-mono
+pi install ./path/to/bravo-pi-mono
+```
+
+### Cutting a release
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The Release workflow runs the same gates as CI against that commit, rehearses the consumer install
+(`npm install --omit=dev`, then asserts the supervisor binary exists), and only then fast-forwards
+`release`. A tag that fails the gates never reaches anyone — `release` does not move and installs
+stay on the last good commit. `workflow_dispatch` takes a ref if you need to release without tagging.
 
 ## The pi pin
 
