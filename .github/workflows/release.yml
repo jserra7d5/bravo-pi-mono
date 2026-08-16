@@ -3,7 +3,7 @@ name: Release
 # Publishing only. This workflow runs no tests, no type-check, and no build —
 # by design. Validation happens locally before you tag:
 #
-#   npm run check && npm test --workspaces
+#   npm run check && npm test --workspaces --if-present
 #
 # What it does is move the `release` branch, which is the ref coworkers' pi
 # installs track:

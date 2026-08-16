@@ -194,7 +194,7 @@ cd bravo-pi-mono
 git checkout main          # `release` is the default branch; develop on main
 npm install                # `prepare` builds the bundle
 npm run check && npm run build
-npm test --workspaces
+npm test --workspaces --if-present
 ```
 
 Point pi at your working copy instead of the published one so you test what you are editing:
@@ -209,7 +209,7 @@ pi install ./path/to/bravo-pi-mono
 Validate locally first — CI does not do it for you:
 
 ```sh
-npm run check && npm test --workspaces
+npm run check && npm test --workspaces --if-present
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
