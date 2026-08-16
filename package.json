@@ -8,7 +8,23 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "check": "npm run check --workspaces --if-present"
+    "check": "npm run check --workspaces --if-present",
+    "build:bundle": "npm run build --workspace @bravo/async-subagents --workspace @bravo/codex-auth-balancer --workspace @bravo/web-evidence-cache --workspace @bravo/gemini-code-assist",
+    "prepare": "node scripts/prepare-install.mjs"
+  },
+  "//pi-bundle": "`pi install git:github.com/jserra7d5/bravo-pi-mono#release` reads the `pi.extensions` list below. It is the dependency closure of the shipped async-subagents role templates, not the whole monorepo: async-subagents itself, the balancer that serves every template's `bravo-codex-balanced/*` model id, and the two extensions the templates name in frontmatter. Adding another package to the bundle is one line here plus a `--workspace` in build:bundle. Everything else in packages/ stays a local-only tool.",
+  "pi": {
+    "extensions": [
+      "./packages/async-subagents/extensions/pi",
+      "./packages/codex-auth-balancer/extensions/pi",
+      "./packages/web-evidence-cache/extensions/pi",
+      "./packages/gemini-code-assist/extensions/pi"
+    ]
+  },
+  "//pi-install-toolchain": "typescript and @types/node are runtime `dependencies`, not devDependencies, on purpose. pi installs a git source with `npm install --omit=dev` and then runs the `prepare` lifecycle, so anything the build needs must survive that flag. async-subagents in particular cannot run from source alone: it spawns its detached supervisor as `node dist/src/cli.js`, and refuses to start when that file is missing.",
+  "dependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
   },
   "//pi-pin": "Every package declares the pi runtime as a `*` peer, so without an explicit root pin the hoisted copy they type-check against drifts from the `pi` on PATH they actually run against. Keep these in lockstep with the installed pi; packages/codex-auth-balancer/scripts/check-pi-ai-drift.mjs fails the build when they diverge. NOTE these copies are for TYPE-CHECKING only. From 0.84.2 pi-coding-agent nests its whole dependency tree privately, so the pi-ai here is a different file from the pi-ai the host runs. That is fine at runtime because pi's extension loader aliases `@earendil-works/pi-ai*` to the host's own copy — but ONLY for extensions it pulls through jiti, i.e. the TypeScript entry named in a package's `pi.extensions`. A test that loads a compiled dist entry instead bypasses the alias and gets a second pi-ai instance, which silently breaks anything built on pi-ai's module-local state (see packages/task-plane/test/host.test.ts).",
   "devDependencies": {
