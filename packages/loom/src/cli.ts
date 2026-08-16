@@ -5,7 +5,12 @@ import { homedir, tmpdir, hostname } from 'node:os';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '0.1.0';
+// Read from the manifest, not a literal: `npm run version:set` owns the repo-wide version,
+// and a constant here would be one more place to forget.
+const VERSION: string = (() => {
+  const manifest = resolve(dirname(fileURLToPath(import.meta.url)), '../../package.json');
+  try { return JSON.parse(readFileSync(manifest, 'utf8')).version ?? '0.0.0'; } catch { return '0.0.0'; }
+})();
 type Obj = Record<string, any>;
 type Ctx = { root: string; container: string; loom: string; config: Obj };
 

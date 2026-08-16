@@ -18,7 +18,15 @@ import { waitSubagents } from "./wait.js";
 import { watchSubagents } from "./watch.js";
 import { buildSubagentTools } from "../extensions/pi/tools.js";
 
-const VERSION = "0.1.0";
+/**
+ * Read from the manifest rather than a literal, so `--version` cannot claim a release the
+ * repo did not cut. `npm run version:set` writes every manifest at once; a constant here
+ * would be an eighteenth place to remember.
+ */
+const VERSION: string = (() => {
+  const manifest = join(packageRootFrom(fileURLToPath(import.meta.url)), "package.json");
+  return (JSON.parse(readFileSync(manifest, "utf8")) as { version?: string }).version ?? "0.0.0";
+})();
 const SKILL_NAME = "pi-async-subagents";
 
 const USAGE = `async-subagents ${VERSION}

@@ -216,16 +216,24 @@ pi install ./path/to/bravo-pi-mono
 
 ### Cutting a release
 
-Validate locally first — CI does not do it for you:
+The repo carries **one version**, in the root `package.json`, and every workspace matches it. Bump it
+with the script — never by hand:
 
 ```sh
+npm run version:set -- 0.2.2          # rewrites all 18 manifests
 npm run check && npm test --workspaces --if-present
-git tag v0.2.0 && git push origin v0.2.0
+git commit -am 'chore: 0.2.2'
+git tag v0.2.2 && git push origin main v0.2.2
 ```
 
-The Release workflow publishes only: it checks out the tag and fast-forwards `release`. No tests, no
-type-check, no build run in CI. Whatever you tag reaches everyone on their next `pi update`, so tag
-commits you have actually run. `workflow_dispatch` takes a ref if you need to release without tagging.
+`npm run check` fails on any workspace whose version drifts from the root, and the Release workflow
+refuses to publish a tag that disagrees with the committed version — so `v0.2.2` can only ever mean
+the tree that says `0.2.2`. That check is about the release request, not the code: CI still runs no
+tests, no type-check, and no build.
+
+Whatever you tag reaches everyone on their next `pi update`, so tag commits you have actually run.
+`workflow_dispatch` takes a raw ref if you need to release without tagging; it warns rather than
+failing, since a bare commit has no version to agree with.
 
 If a bad release does go out, the fix is another release — move `release` back by dispatching the
 workflow against the last good commit.

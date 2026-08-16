@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,6 +81,16 @@ test("the installed launcher actually executes the CLI", () => {
   const stdout = execFileSync(launcher, ["--help"], { encoding: "utf8" });
   assert.match(stdout, /Usage:/);
   assert.match(stdout, /async-subagents start --agent NAME/);
+});
+
+test("--version reports the manifest version, not a literal", () => {
+  const manifest = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as { version: string };
+  const stdout = execFileSync(process.execPath, [CLI, "--version"], { encoding: "utf8" });
+
+  // The repo carries one version and the Release workflow refuses a tag that disagrees
+  // with it, so a CLI reporting its own literal would be the one place drift could hide.
+  assert.equal(stdout.trim(), manifest.version);
+  assert.notEqual(manifest.version, undefined);
 });
 
 test("install is idempotent and re-points a stale launcher", () => {

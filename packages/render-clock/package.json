@@ -1,6 +1,6 @@
 {
   "name": "@bravo/render-clock",
-  "version": "0.1.0",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "description": "Single shared, change-aware render clock for Pi extensions: one timer, per-subscriber intervals, deterministic test injection.",

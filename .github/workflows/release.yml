@@ -44,6 +44,31 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.ref }}
           fetch-depth: 0
 
+      # Not a test gate -- this validates the release request itself. A tag that disagrees
+      # with the committed version publishes a mislabeled release, and the label is the
+      # only thing anyone can see from the outside.
+      - name: Check the tag matches the committed version
+        run: |
+          set -euo pipefail
+          committed="$(jq -r .version package.json)"
+          ref="${{ github.event.inputs.ref || github.ref_name }}"
+          case "$ref" in
+            v*)
+              tagged="${ref#v}"
+              if [ "$tagged" != "$committed" ]; then
+                echo "::error::tag $ref does not match package.json version $committed."
+                echo "::error::Run 'npm run version:set -- $tagged', commit, and re-tag."
+                exit 1
+              fi
+              echo "tag $ref matches the committed version"
+              ;;
+            *)
+              # A dispatch against a raw commit has no version to agree with; say so rather
+              # than pretending it was checked.
+              echo "::warning::releasing '$ref' unversioned -- committed version is $committed"
+              ;;
+          esac
+
       - name: Move the release branch
         run: |
           set -euo pipefail
