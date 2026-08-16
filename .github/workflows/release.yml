@@ -1,17 +1,23 @@
 name: Release
 
-# Cutting a release means moving the `release` branch, because that is the ref
-# coworkers' pi installs track:
+# Publishing only. This workflow runs no tests, no type-check, and no build —
+# by design. Validation happens locally before you tag:
 #
-#   pi install git:github.com/jserra7d5/bravo-pi-mono#release
+#   npm run check && npm test --workspaces
 #
-# pi compares their local HEAD against that ref, so `release` moving IS the release.
-# Nothing is published to a registry. Tag when you mean it:
+# What it does is move the `release` branch, which is the ref coworkers' pi
+# installs track:
+#
+#   pi install git:github.com/jserra7d5/bravo-pi-mono
+#
+# `release` is the repo's default branch, so a no-ref install follows it. pi
+# compares their local HEAD against it and surfaces an available update on
+# startup, so `release` moving IS the release.
 #
 #   git tag v0.2.0 && git push origin v0.2.0
 #
-# The gates run against the tagged commit first. A tag that fails them never reaches
-# anyone — `release` simply does not move, and installs stay on the last good commit.
+# Because nothing is gated here, whatever you tag reaches everyone. Tag commits
+# you have actually run.
 
 on:
   push:
@@ -27,9 +33,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -37,40 +43,6 @@ jobs:
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
           fetch-depth: 0
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          cache: npm
-
-      # Same gates as CI. A release is not a separate quality bar, it is the same bar
-      # applied to the commit that coworkers will actually run.
-      - name: Install
-        run: npm ci
-
-      - name: Type-check
-        run: npm run check
-
-      - name: Build
-        run: npm run build
-
-      - name: Test
-        run: npm test --workspaces --if-present
-
-      # Proves the thing being released can actually be consumed the way coworkers
-      # consume it: a clean `npm install --omit=dev` plus the prepare hook, ending in
-      # the supervisor binary async-subagents refuses to start without. This is the
-      # check that would have caught a devDependency creeping into the build path.
-      - name: Verify the install path a coworker gets
-        run: |
-          set -euo pipefail
-          consumer="$(mktemp -d)"
-          git clone --depth 1 --no-local "$GITHUB_WORKSPACE" "$consumer"
-          cd "$consumer"
-          npm install --omit=dev
-          test -f packages/async-subagents/dist/src/cli.js \
-            || { echo "::error::supervisor CLI missing after --omit=dev install; async-subagents would refuse to start"; exit 1; }
-          node packages/async-subagents/dist/src/cli.js --version
 
       - name: Move the release branch
         run: |
@@ -89,4 +61,6 @@ jobs:
             echo '```sh'
             echo 'pi update --extensions'
             echo '```'
+            echo
+            echo "_No gates ran. This is whatever was tagged._"
           } >> "$GITHUB_STEP_SUMMARY"

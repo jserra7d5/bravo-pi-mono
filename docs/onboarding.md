@@ -145,14 +145,19 @@ pi install ./path/to/bravo-pi-mono
 
 ### Cutting a release
 
+Validate locally first — CI does not do it for you:
+
 ```sh
+npm run check && npm test --workspaces
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-The Release workflow runs the same gates as CI against that commit, rehearses the consumer install
-(`npm install --omit=dev`, then asserts the supervisor binary exists), and only then fast-forwards
-`release`. A tag that fails the gates never reaches anyone — `release` does not move and installs
-stay on the last good commit. `workflow_dispatch` takes a ref if you need to release without tagging.
+The Release workflow publishes only: it checks out the tag and fast-forwards `release`. No tests, no
+type-check, no build run in CI. Whatever you tag reaches everyone on their next `pi update`, so tag
+commits you have actually run. `workflow_dispatch` takes a ref if you need to release without tagging.
+
+If a bad release does go out, the fix is another release — move `release` back by dispatching the
+workflow against the last good commit.
 
 ## The pi pin
 

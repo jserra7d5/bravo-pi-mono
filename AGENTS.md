@@ -22,7 +22,7 @@ This repository contains personal agent tooling, pi packages, extensions, roles,
 - `docs/specs/` contains design specs. Each spec should live under a slug directory, e.g. `docs/specs/tango-v1/design.md`.
 - `docs/onboarding.md` is the setup path for both users (`pi install git:github.com/jserra7d5/bravo-pi-mono`) and contributors (clone `main`). Keep it true when install, auth, or the release flow changes.
 - This repo is consumed as a pi package. The root `pi.extensions` list is the shipped bundle, and the root `prepare` hook builds it — pi installs a git source with `npm install --omit=dev`, so anything the build needs must be a real dependency, and `prepare` must not build workspaces whose toolchain is a devDependency (tango's vite dashboard). Adding a package to the bundle means editing both the `pi.extensions` list and `build:bundle`.
-- `release` is the default branch and the channel coworkers track; develop on `main`. Only a tag that passes the Release workflow's gates moves `release`. Never tell anyone to install with a `#ref` — pi treats a ref-carrying source as pinned and silently stops offering updates.
+- `release` is the default branch and the channel coworkers track; develop on `main`. Tagging `v*` moves `release` to that commit. CI publishes only — it runs no tests, type-check, or build — so run `npm run check && npm test --workspaces` locally before tagging; whatever you tag reaches everyone. Never tell anyone to install with a `#ref`: pi treats a ref-carrying source as pinned and silently stops offering updates.
 - Package-specific source, docs, roles, includes, and extensions should live inside the relevant package directory.
 
 ## Development Guidelines
