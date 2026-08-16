@@ -60,22 +60,32 @@ more step:
 ```sh
 PKG="$(pi list | awk '/bravo-pi-mono/{getline; print $1; exit}')"
 node "$PKG/packages/async-subagents/dist/src/cli.js" install
-ln -sf "$PKG/packages/async-subagents/dist/src/cli.js" ~/.local/bin/async-subagents
 ```
 
-`install` **symlinks** the skill rather than copying it, so it points into the copy pi manages. That
-means `pi update` refreshes the skill too — you do not re-run this after an update.
+That makes two symlinks, both pointing into the copy pi manages, so `pi update` refreshes them and
+you never re-run this:
+
+- `~/.claude/skills/pi-async-subagents` → the skill Claude loads
+- `~/.async-subagents/bin/async-subagents` → the CLI
+
+The CLI is deliberately **not** put on your PATH. The skill names that launcher path literally, which
+is the same string on every machine, so nothing depends on your shell config. If you want it on PATH
+for your own use, that is yours to add:
+
+```sh
+ln -sf ~/.async-subagents/bin/async-subagents ~/.local/bin/async-subagents
+```
 
 ## 4. Smoke test
 
 ```sh
-async-subagents agents --cwd "$PWD"
+~/.async-subagents/bin/async-subagents agents --cwd "$PWD"
 ```
 
 All five roles should list with `"source": "builtin"`. Then run one:
 
 ```sh
-async-subagents run --cwd "$PWD" --agent scout \
+~/.async-subagents/bin/async-subagents run --cwd "$PWD" --agent scout \
   --task 'Report the "name" field in packages/async-subagents/package.json. One line.'
 ```
 

@@ -413,12 +413,22 @@ npm install && npm run build --workspace @bravo/async-subagents
 node packages/async-subagents/dist/src/cli.js install
 ```
 
-`install` symlinks `skills/pi-async-subagents` into `~/.claude/skills/` (override the destination
-with `--claude-dir`). A symlink rather than a copy so the documented flags and the parsed flags can
-never drift. It refuses to replace a real directory unless you pass `--force`; an existing symlink is
-reclaimed silently.
+`install` makes two symlinks into this checkout — symlinks rather than copies so the documented flags
+and the parsed flags can never drift:
 
-Put the binary on PATH (`npm link`, or add `node_modules/.bin`) so the skill's commands resolve.
+| Link | Points at | Override |
+| --- | --- | --- |
+| `~/.claude/skills/pi-async-subagents` | `skills/pi-async-subagents` | `--claude-dir` |
+| `~/.async-subagents/bin/async-subagents` | `dist/src/cli.js` | `--home` |
+
+Either link refuses to replace a real directory or file unless you pass `--force`; an existing
+symlink is reclaimed silently.
+
+The CLI is intentionally left off PATH. `SKILL.md` names the launcher path literally, because the two
+alternatives both fail: a bare `async-subagents` assumes a PATH entry nothing guarantees, and an
+absolute install path differs per machine so it cannot be committed. `~/.async-subagents/bin/` is the
+same string everywhere and needs no shell config. Adding it to PATH for interactive use is fine and
+changes nothing for the skill.
 
 ## Validation
 

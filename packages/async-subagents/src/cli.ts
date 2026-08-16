@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,7 +35,8 @@ Usage:
   async-subagents message --run-id ID (--task TEXT|--task-file PATH) [--type answer|instruction|context] [--file PATH]
   async-subagents pause|cancel --run-id ID [--reason TEXT] [--cwd DIR]
   async-subagents archive [--older-than-days N (default 7)] [--cap N] [--dry-run]   (global across all projects)
-  async-subagents install [--claude-dir DIR] [--force]
+  async-subagents install [--claude-dir DIR] [--home DIR] [--force]
+    links the skill into ~/.claude/skills and the CLI to ~/.async-subagents/bin/async-subagents
 
   async-subagents supervisor --input PATH          (internal: child lifecycle entrypoint)
   async-subagents claude-child-mcp --run-dir DIR   (internal)
@@ -99,10 +100,17 @@ function numberOption(value: unknown, field: string): number | undefined {
 }
 
 /**
- * Link the packaged skill into the Claude skills directory.
+ * Link the packaged skill into the Claude skills directory, and the CLI to a fixed
+ * launcher path.
  *
- * A symlink rather than a copy so the skill and the CLI it documents can never drift:
+ * Symlinks rather than copies so the skill and the CLI it documents can never drift:
  * the flags in SKILL.md are the flags this binary parses, in the same commit.
+ *
+ * The launcher exists because SKILL.md has to name the CLI somehow, and neither
+ * available option works: a bare `async-subagents` assumes a PATH entry nobody
+ * guarantees, and an absolute install path differs per machine so it cannot be
+ * committed. `~/.async-subagents/bin/async-subagents` is the same string everywhere
+ * and needs no PATH, so the skill can name it literally.
  */
 function install(args: ParsedArgs, packageRoot: string): unknown {
   const claudeDir = typeof args.claudeDir === "string" ? resolve(args.claudeDir) : join(homedir(), ".claude");
@@ -127,9 +135,34 @@ function install(args: ParsedArgs, packageRoot: string): unknown {
     skill: SKILL_NAME,
     linked: { from: target, to: source },
     replaced,
-    cli: process.argv[1],
-    note: "Ensure the async-subagents binary is on PATH (npm link, or add node_modules/.bin to PATH).",
+    ...installLauncher(args, packageRoot),
   };
+}
+
+/**
+ * Point the fixed launcher path at this checkout's CLI.
+ *
+ * Refuses to clobber a real file: that is either a hand-written wrapper or another
+ * install's copy, and replacing it silently would redirect every skill invocation
+ * on the machine.
+ */
+function installLauncher(args: ParsedArgs, packageRoot: string): Record<string, unknown> {
+  const home = typeof args.home === "string" ? resolve(args.home) : homedir();
+  const cli = join(packageRoot, "dist", "src", "cli.js");
+  if (!existsSync(cli)) throw new Error(`the CLI is not built: ${cli} (run \`npm run build\`)`);
+  const binDir = join(home, ".async-subagents", "bin");
+  const launcher = join(binDir, "async-subagents");
+  mkdirSync(binDir, { recursive: true });
+  let replacedLauncher: string | undefined;
+  if (existsSync(launcher) || isSymlink(launcher)) {
+    if (!isSymlink(launcher) && args.force !== true) {
+      throw new Error(`${launcher} exists and is not a symlink; move it aside or pass --force`);
+    }
+    replacedLauncher = isSymlink(launcher) ? "symlink" : "file";
+    rmSync(launcher, { force: true });
+  }
+  symlinkSync(cli, launcher, "file");
+  return { launcher: { from: launcher, to: cli }, replacedLauncher };
 }
 
 function isSymlink(path: string): boolean {
@@ -349,7 +382,25 @@ function fail(error: unknown): never {
   process.exit(1);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+/**
+ * Compare real paths, not raw strings.
+ *
+ * The documented entrypoint is a symlink (`~/.async-subagents/bin/async-subagents`), so
+ * `process.argv[1]` is the link while `import.meta.url` is what Node resolved it to. A
+ * string compare fails, `main()` never runs, and every command exits 0 having printed
+ * nothing — which reads as a silent success.
+ */
+function isEntrypoint(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) {
   process.on("unhandledRejection", fail);
   process.on("uncaughtException", fail);
   main().catch(fail);

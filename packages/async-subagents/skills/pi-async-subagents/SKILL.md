@@ -5,17 +5,20 @@ description: Launch and orchestrate named, role-scoped GPT/Pi agents through the
 
 # Pi Async Subagents
 
-Delegate to named role templates through the `async-subagents` CLI (run from the target repo or pass
-`--cwd`). All commands emit JSON; `watch` emits NDJSON. Flag reference: `--help`.
+Delegate to named role templates through the CLI at the fixed launcher path below (run from the
+target repo or pass `--cwd`). All commands emit JSON; `watch` emits NDJSON. Flag reference: `--help`.
 
 ```bash
-async-subagents --help
+~/.async-subagents/bin/async-subagents --help
 ```
 
-If `async-subagents` is not on PATH, the install step was skipped — see the package README
-(`packages/async-subagents/README.md`) for `async-subagents install`.
+**Always invoke it by that path — never as a bare `async-subagents`.** The CLI is not on PATH. The
+launcher is a symlink that `install` creates pointing into whichever checkout pi manages; if it is
+missing, the install step was skipped — see `packages/async-subagents/README.md`. Do not substitute a
+shell variable for the path: each command runs in a fresh shell, so a binding made in one call is
+gone by the next.
 
-**Roles — pick the narrowest.** `scout` retrieval/source summaries (pinned to Luna deliberately: retrieval is not a judgment task, so a large read surface is never a reason to escalate); `planner` designs/specs/sequencing; `worker` bounded implementation; `reviewer` merge-risk review against an accepted contract; `generalist` only when nothing narrower fits. A child is never another orchestrator. `async-subagents agents --cwd "$PWD"` lists the live catalog.
+**Roles — pick the narrowest.** `scout` retrieval/source summaries (pinned to Luna deliberately: retrieval is not a judgment task, so a large read surface is never a reason to escalate); `planner` designs/specs/sequencing; `worker` bounded implementation; `reviewer` merge-risk review against an accepted contract; `generalist` only when nothing narrower fits. A child is never another orchestrator. `~/.async-subagents/bin/async-subagents agents --cwd "$PWD"` lists the live catalog.
 
 ## Brief and write scope
 
@@ -31,7 +34,7 @@ A child needing an out-of-scope path doesn't die — it emits a `blocked` attent
 
 ```bash
 S=$(mktemp)
-async-subagents start --cwd "$PWD" --agent worker --task-file brief.md --file 'src/**' > "$S" 2>/dev/null
+~/.async-subagents/bin/async-subagents start --cwd "$PWD" --agent worker --task-file brief.md --file 'src/**' > "$S" 2>/dev/null
 RID=$(grep -oE '"runId": *"[^"]+"' "$S" | head -1 | grep -oE 'run_[A-Za-z0-9_-]+')
 ```
 
@@ -42,7 +45,7 @@ Redirect stderr with `2>/dev/null`, **not `2>&1`**: node prepends an `Experiment
 **Recover a lost runId** — `status` with no `--run-id` lists this project's runs, newest first, each with its live state read from `status.json`:
 
 ```bash
-async-subagents status --cwd "$PWD" --limit 10 2>/dev/null
+~/.async-subagents/bin/async-subagents status --cwd "$PWD" --limit 10 2>/dev/null
 ```
 
 Add `--all` to sweep every project (each cwd hashes to its own project directory, so a lane started in another worktree is invisible without it). Then `status --run-id` every candidate and `cancel` any `running` lane you did not intend — do this BEFORE re-dispatching, not after. Don't go hunting in `~/.async-subagents/runs/`: that tree exists but holds unrelated tooling runs (`cwd: /tmp/async-subagents-tools-*`) and will convince you your lane never started. Real runs live under `~/.async-subagents/projects/<hash>/runs/` — the listing gives the exact path as `runDir`.
@@ -50,7 +53,7 @@ Add `--all` to sweep every project (each cwd hashes to its own project directory
 Pass one `--root-session-id` across sibling lanes. There is no push channel under a CLI parent (start returns `delivery.mode:"none"`) — the completion signal is `watch`, wrapped in ONE Monitor covering every lane:
 
 ```bash
-async-subagents watch --cwd "$PWD" --run-id RUN_A --run-id RUN_B
+~/.async-subagents/bin/async-subagents watch --cwd "$PWD" --run-id RUN_A --run-id RUN_B
 ```
 
 One NDJSON line per lifecycle transition; exits when all runs are terminal-or-attention. Act on `bucket`:
@@ -89,6 +92,6 @@ system card, METR, Artificial Analysis); shape briefs and judge output according
 
 ## Housekeeping
 
-Terminal runs untouched for 7 days auto-archive (opportunistic capped sweep on `start`; disable with `ASYNC_SUBAGENTS_NO_AUTO_ARCHIVE=1`) to `~/.async-subagents/archive/YYYY-MM/<runId>.tar.zst`, indexed in `archive/archive-index.jsonl`, and leave the live tree. Archived runs can't be continued in place — extract the tarball if an old transcript matters. Manual: `async-subagents archive [--older-than-days N] [--cap N] [--dry-run]` (global, no `--cwd`).
+Terminal runs untouched for 7 days auto-archive (opportunistic capped sweep on `start`; disable with `ASYNC_SUBAGENTS_NO_AUTO_ARCHIVE=1`) to `~/.async-subagents/archive/YYYY-MM/<runId>.tar.zst`, indexed in `archive/archive-index.jsonl`, and leave the live tree. Archived runs can't be continued in place — extract the tarball if an old transcript matters. Manual: `~/.async-subagents/bin/async-subagents archive [--older-than-days N] [--cap N] [--dry-run]` (global, no `--cwd`).
 
 Raw Pi (`pi-agent-usage`) is a low-level escape hatch only: no named role fits, an ephemeral no-session analysis is explicitly wanted, or debugging Pi/provider flags.
