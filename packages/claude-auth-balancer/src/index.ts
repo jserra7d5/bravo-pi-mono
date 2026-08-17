@@ -6,6 +6,7 @@ export * from './accounts.js';
 export * from './affinity.js';
 export * from './oauth.js';
 export * from './refresh.js';
+export * from './usage-probe.js';
 export * from './daemon.js';
 export * from './statusline.js';
 export * from './statusline-render.js';

@@ -12,6 +12,8 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { after, test } from 'node:test';
 
+import { writeSlotObservation } from '../src/accounts.js';
+import { AffinityStore } from '../src/affinity.js';
 import { MetricsStore } from '../src/metrics.js';
 import { SESSION_HEADER, startProxy } from '../src/proxy.js';
 
@@ -68,8 +70,10 @@ function sseBody(model: string, cacheRead: number, output: number): string {
 /** A local stand-in for api.anthropic.com. `handler` decides each response. */
 async function upstream(
   handler: (call: UpstreamCall, res: http.ServerResponse) => void,
-): Promise<{ url: string; calls: UpstreamCall[] }> {
+  usageHandler?: (call: UpstreamCall, res: http.ServerResponse) => void,
+): Promise<{ url: string; calls: UpstreamCall[]; probes: UpstreamCall[] }> {
   const calls: UpstreamCall[] = [];
+  const probes: UpstreamCall[] = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', c => chunks.push(c as Buffer));
@@ -79,6 +83,19 @@ async function upstream(
         path: req.url ?? '/',
         body: Buffer.concat(chunks).toString('utf8'),
       };
+      if (call.path === '/api/oauth/usage') {
+        probes.push(call);
+        if (usageHandler) {
+          usageHandler(call, res);
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          five_hour: { utilization: 10, resets_at: new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString() },
+          seven_day: { utilization: 10, resets_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() },
+        }));
+        return;
+      }
       calls.push(call);
       handler(call, res);
     });
@@ -86,7 +103,7 @@ async function upstream(
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
   cleanups.push(() => server.close());
   const port = (server.address() as { port: number }).port;
-  return { url: `http://127.0.0.1:${port}`, calls };
+  return { url: `http://127.0.0.1:${port}`, calls, probes };
 }
 
 async function boot(options: {
@@ -95,8 +112,9 @@ async function boot(options: {
   allowOverage?: boolean;
   metrics?: boolean;
   upstreamHeaderTimeoutMs?: number;
+  stateRoot?: string;
 }): Promise<{ url: string; stateRoot: string }> {
-  const stateRoot = tmpRoot('cab-state-');
+  const stateRoot = options.stateRoot ?? tmpRoot('cab-state-');
   const { server, url } = await startProxy({
     port: 0,
     upstream: options.upstreamUrl,
@@ -216,31 +234,84 @@ test('a session sticks to one account across many requests', async () => {
   assert.equal(tokens.size, 1, `expected one account, saw ${[...tokens].join(', ')}`);
 });
 
-test('distinct sessions are free to land on different accounts', async () => {
+test('fresh-session routing waits for due probes and uses their mapping', async () => {
   const authswapRoot = fakeAuthswap([
     { slot: '1', email: 'a@x.com', token: 'tok-1' },
     { slot: '2', email: 'b@x.com', token: 'tok-2' },
   ]);
   // slot 1 nearly spent, slot 2 fresh -> a new session should prefer slot 2
-  const up = await upstream((call, res) => {
+  const up = await upstream((_call, res) => {
+    res.writeHead(200, OK_HEADERS).end('{}');
+  }, (call, res) => {
     const busy = call.authorization === 'Bearer tok-1';
-    res.writeHead(200, {
-      'anthropic-ratelimit-unified-5h-utilization': busy ? '0.80' : '0.01',
-      'anthropic-ratelimit-unified-7d-utilization': busy ? '0.80' : '0.01',
-    });
-    res.end('{}');
+    const reset = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+      five_hour: { utilization: busy ? 80 : 1, resets_at: reset },
+      seven_day: { utilization: busy ? 80 : 1, resets_at: reset },
+    }));
   });
   const { url } = await boot({ authswapRoot, upstreamUrl: up.url });
 
   await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 's1' });
-  await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 's2' });
-  await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 's3' });
 
-  const last = up.calls.at(-1)!;
-  assert.equal(last.authorization, 'Bearer tok-2', 'new sessions route to the healthier account');
+  assert.equal(up.calls[0]!.authorization, 'Bearer tok-2', 'fresh routing used probe state before pinning');
+  assert.equal(up.probes.length, 2);
+  assert.ok(up.probes.every(call => call.body === ''), 'probe made no messages/body call');
 });
 
 // --- injected faults ------------------------------------------------------
+
+test('a crossed persisted reset triggers a probe before fresh lease selection', async () => {
+  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
+  const stateRoot = tmpRoot('cab-reset-probe-');
+  const now = Date.now();
+  writeSlotObservation(stateRoot, {
+    slot: '1',
+    observedAt: now - 1,
+    claims: { byId: { '5h': { id: '5h', utilization: 0.9, reset: (now - 1000) / 1000 } } },
+  });
+  const order: string[] = [];
+  const up = await upstream((_call, res) => {
+    order.push('messages');
+    res.writeHead(200, OK_HEADERS).end('{}');
+  }, (_call, res) => {
+    order.push('usage');
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+      five_hour: { utilization: 10, resets_at: new Date(now + 5 * 60 * 60 * 1000).toISOString() },
+    }));
+  });
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, stateRoot });
+
+  assert.equal((await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'reset-session' })).status, 200);
+  assert.deepEqual(order, ['usage', 'messages']);
+});
+
+test('an evacuating fallback that preserves affinity never waits for or sends a due probe', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  const stateRoot = tmpRoot('cab-affinity-fallback-');
+  const reset = (Date.now() + 2 * 60 * 60 * 1000) / 1000;
+  for (const slot of ['1', '2']) {
+    writeSlotObservation(stateRoot, {
+      slot,
+      observedAt: 0,
+      claims: { byId: { '7d': { id: '7d', utilization: 0.96, reset } } },
+    });
+  }
+  new AffinityStore({ stateRoot }).touch('hot-session', '2', 'claude-opus-5');
+  const up = await upstream((call, res) => {
+    assert.equal(call.authorization, 'Bearer tok-2');
+    res.writeHead(200, OK_HEADERS).end('{}');
+  }, (_call, _res) => { /* a probe would stall until its absolute deadline */ });
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, stateRoot });
+  const started = Date.now();
+
+  assert.equal((await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'hot-session' })).status, 200);
+  assert.ok(Date.now() - started < 500, 'affinity-preserving fallback did not wait on probe timeout');
+  assert.equal(up.probes.length, 0);
+});
 
 test('a 429 rotates to the other account within the same client request', async () => {
   const authswapRoot = fakeAuthswap([

@@ -24,10 +24,11 @@ import { DEFAULT_RAW_RETENTION_DAYS, MetricsStore } from './metrics.js';
 import { UsageCollector, usageFromJsonBody } from './usage.js';
 import type { Usage } from './usage.js';
 import { hasClaims, parseClaims } from './claims.js';
-import { discoverAccounts, loadAccountStates, readOAuth, recordObservation, resolveAuthswapRoot, resolveStateRoot, tokenFingerprint } from './accounts.js';
+import { discoverAccounts, loadAccountStates, readOAuth, readSlotObservation, recordObservation, resolveAuthswapRoot, resolveStateRoot, tokenFingerprint } from './accounts.js';
 import type { Account } from './accounts.js';
 import { selectAccount } from './policy.js';
 import { REFRESH_SWEEP_INTERVAL_MS, TokenRefresher } from './refresh.js';
+import { UsageProbe } from './usage-probe.js';
 
 export const SESSION_HEADER = 'x-claude-code-session-id';
 export const DEFAULT_UPSTREAM = 'https://api.anthropic.com';
@@ -115,6 +116,8 @@ export type ProxyOptions = {
   metricsRetentionDays?: number;
   /** Maximum connect/TLS/header wait. Streaming after headers is not limited. */
   upstreamHeaderTimeoutMs?: number;
+  /** Package-test seam; production defaults to probing enabled. */
+  usageProbe?: boolean;
   now?: () => number;
   log?: (event: ProxyLogEvent) => void;
 };
@@ -137,6 +140,7 @@ function resolveOptions(options: ProxyOptions): Resolved {
     metrics: options.metrics ?? true,
     metricsRetentionDays: options.metricsRetentionDays ?? DEFAULT_RAW_RETENTION_DAYS,
     upstreamHeaderTimeoutMs: options.upstreamHeaderTimeoutMs ?? DEFAULT_UPSTREAM_HEADER_TIMEOUT_MS,
+    usageProbe: options.usageProbe ?? true,
     now: options.now ?? Date.now,
     log: options.log ?? (() => {}),
   };
@@ -430,6 +434,18 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
       }),
   });
 
+  const usageProbe = new UsageProbe({
+    upstream: opts.upstream,
+    stateRoot: opts.stateRoot,
+    now: opts.now,
+    prepare: async account => {
+      const outcome = await refresher.ensureFresh(account);
+      if (outcome.status === 'failed' || outcome.status === 'skipped') {
+        throw new Error('slot token could not be prepared for usage probe');
+      }
+    },
+  });
+
   // Idle slots are the whole point. Reactive refresh only ever touches accounts
   // that are being selected, and an account is not selected precisely when it
   // has gone stale — so without this sweep the balancer degenerates to whichever
@@ -505,20 +521,45 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
 
     const attempt = async (excluded: Set<string>): Promise<boolean> => {
       const now = opts.now();
-      const { states, accounts } = loadAccountStates({
+      let loaded = loadAccountStates({
         stateRoot: opts.stateRoot,
         authswapRoot: opts.authswapRoot,
         nowMs: now,
       });
-      const candidates = states.filter(s => !excluded.has(s.slot));
+      let candidates = loaded.states.filter(s => !excluded.has(s.slot));
       const affinitySlot = sessionId ? affinity.lookup(sessionId, model) : undefined;
-      const selection = selectAccount({
+      const select = () => selectAccount({
         accounts: candidates,
         model,
         affinitySlot: affinitySlot && !excluded.has(affinitySlot) ? affinitySlot : undefined,
-        nowMs: now,
+        nowMs: opts.now(),
         allowOverage: opts.allowOverage,
       });
+      let selection = select();
+
+      // A warm, serviceable affinity is the expensive thing this proxy exists
+      // to preserve, so it never waits on bookkeeping. Fresh selection and a
+      // move/exhaustion decision do wait briefly for due usage readings, then
+      // run the exact same policy once more before the lease is pinned.
+      const preservingAffinity = affinitySlot !== undefined && selection.slot === affinitySlot;
+      if (opts.usageProbe && !preservingAffinity) {
+        const due = candidates.filter(state =>
+          usageProbe.isDue(readSlotObservation(opts.stateRoot, state.slot)),
+        );
+        if (due.length > 0) {
+          await Promise.all(due.map(state => {
+            const account = loaded.accounts.get(state.slot);
+            return account ? usageProbe.probe(account) : Promise.resolve('failed' as const);
+          }));
+          loaded = loadAccountStates({
+            stateRoot: opts.stateRoot,
+            authswapRoot: opts.authswapRoot,
+            nowMs: opts.now(),
+          });
+          candidates = loaded.states.filter(s => !excluded.has(s.slot));
+          selection = select();
+        }
+      }
 
       if (!selection.slot) {
         opts.log({
@@ -543,7 +584,7 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
         return true;
       }
 
-      const account = accounts.get(selection.slot) as Account | undefined;
+      const account = loaded.accounts.get(selection.slot) as Account | undefined;
       if (!account) {
         excluded.add(selection.slot);
         return false;

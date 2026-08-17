@@ -97,6 +97,7 @@ test('an absolute-form request target cannot exfiltrate an account token', async
     stateRoot: tmp('cab-sec-st-'),
     authswapRoot,
     metrics: false,
+    usageProbe: false,
   });
   cleanups.push(() => server.close());
 
@@ -126,6 +127,7 @@ test('a protocol-relative target is refused for the same reason', async () => {
     stateRoot: tmp('cab-sec-st-'),
     authswapRoot,
     metrics: false,
+    usageProbe: false,
   });
   cleanups.push(() => server.close());
 
@@ -239,6 +241,7 @@ test('every account is tried before reporting exhaustion', async () => {
     stateRoot: tmp('cab-sec-st-'),
     authswapRoot: root,
     metrics: false,
+    usageProbe: false,
   });
   cleanups.push(() => server.close());
 
@@ -283,6 +286,7 @@ test('concurrent opening requests for one session land on the same account', asy
     stateRoot: tmp('cab-sec-st-'),
     authswapRoot: root,
     metrics: false,
+    usageProbe: false,
   });
   cleanups.push(() => server.close());
 
@@ -319,6 +323,7 @@ test('an upstream that dies mid-body does not hang the client forever', async ()
     stateRoot: tmp('cab-sec-st-'),
     authswapRoot,
     metrics: false,
+    usageProbe: false,
   });
   cleanups.push(() => server.close());
 
@@ -361,6 +366,7 @@ test('the response body is forwarded with its bytes unchanged', async () => {
     stateRoot: tmp('cab-sec-st-'),
     authswapRoot,
     metrics: false,
+    usageProbe: false,
   });
   cleanups.push(() => server.close());
 
@@ -504,6 +510,7 @@ test('a stray x-api-key is not forwarded alongside the substituted bearer', asyn
     stateRoot: tmp('cab-sec-st-'),
     authswapRoot,
     metrics: false,
+    usageProbe: false,
   });
   cleanups.push(() => server.close());
 
@@ -555,6 +562,7 @@ test('a short retry-after is waited out rather than paying a cache re-create', a
     stateRoot: tmp('cab-sec-st-'),
     authswapRoot: root,
     metrics: false,
+    usageProbe: false,
   });
   cleanups.push(() => server.close());
 

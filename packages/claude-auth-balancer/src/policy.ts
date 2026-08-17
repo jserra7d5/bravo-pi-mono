@@ -15,7 +15,7 @@
 // session for a marginal headroom gain.
 
 import type { Claim, ClaimId, Claims } from './claims.js';
-import { claimHasReset } from './claims.js';
+import { claimHasReset, projectExpiredClaims } from './claims.js';
 
 /** General-quota claims every request burns, regardless of model. */
 export const GENERAL_CLAIMS: ClaimId[] = ['5h', '7d'];
@@ -155,8 +155,9 @@ export function computeHeadroom(
   evacuationHorizonMs: number = DEFAULT_EVACUATION_HORIZON_MS,
 ): HeadroomBreakdown {
   const quota = quotaForModel(model);
+  const claims = projectExpiredClaims(account.claims, nowMs);
   let evacuationTriggered = false;
-  const overage = account.claims?.byId['overage'];
+  const overage = claims?.byId['overage'];
   const overageAvailable = overage?.status === 'allowed';
 
   const base: HeadroomBreakdown = {
@@ -177,7 +178,7 @@ export function computeHeadroom(
   const ids = [...GENERAL_CLAIMS, ...(quota.extraClaim ? [quota.extraClaim] : [])];
   // The response's own value wins; the model table supplies the fallback.
   const subBudget =
-    account.claims?.fallbackPercentage ?? quota.subBudgetFraction ?? 1;
+    claims?.fallbackPercentage ?? quota.subBudgetFraction ?? 1;
 
   let min = Number.POSITIVE_INFINITY;
   let minSpendable = Number.POSITIVE_INFINITY;
@@ -186,7 +187,7 @@ export function computeHeadroom(
   let sawAny = false;
 
   for (const id of ids) {
-    const claim = account.claims?.byId[id];
+    const claim = claims?.byId[id];
     const raw = claimHeadroom(claim, nowMs);
     if (raw === undefined) continue;
     sawAny = true;

@@ -96,6 +96,42 @@ The 95% evacuation threshold reads **raw utilization**, not model-scaled
 headroom: "is this account nearly spent?" is a question about the plan's meter,
 not about how fast the requested model happens to burn it.
 
+### Usage refresh and reset projection
+
+Inference response headers are authoritative quota observations. Before a fresh
+session is pinned—or stale/absent quota would cause an evacuation or exhaustion
+decision—the proxy may refresh due slots with:
+
+```
+GET /api/oauth/usage
+Authorization: Bearer <that slot's canonical OAuth token>
+anthropic-beta: oauth-2025-04-20
+```
+
+This is a small account-usage read, not an LLM/messages call, so it spends no
+model tokens. The selected slot is token-refreshed first and its canonical
+credential is reread before the GET. Probes have an absolute wall-clock deadline covering headers and
+the complete response body, plus a body-size limit. Concurrent requests for one
+slot share one in-flight probe, and failures or 429s persist a per-slot backoff.
+They never fail an otherwise serviceable client request. Any selection that
+preserves a serviceable warm affinity never waits for a probe.
+
+The probe maps only known legacy `five_hour` and `seven_day` windows into the
+existing `5h` and `7d` claims, converting the endpoint's validated 0..100
+percentage points into internal 0..1 fractions. A window with invalid or missing
+utilization/reset is skipped rather than partially overwriting a prior claim.
+Model-specific legacy buckets are not assigned invented semantics. A response-header
+observation wins over any older probe that finishes later.
+
+When a persisted known window has passed its reset, the balancer projects its
+utilization to zero and advances its reset by the known 5-hour or 7-day cadence.
+Crossing a persisted known-window reset makes a probe due even when the
+observation timestamp itself is recent. The projected next reset still
+participates in spendable-headroom pacing. Thus
+a just-reset account is available again, but is not incorrectly treated as if
+its entire new window should be spent immediately. This is a projection until
+a probe or inference response supplies a fresh server observation.
+
 ## Usage metrics
 
 Every proxied request is recorded to SQLite at

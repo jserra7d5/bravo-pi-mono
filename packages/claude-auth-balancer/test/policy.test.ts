@@ -129,6 +129,7 @@ test('a claim whose window already reset counts as empty, not as last seen', () 
   const after = 1_786_780_000_000;
   const h = computeHeadroom(account, 'claude-opus-5', after);
   assert.equal(h.headroom, 1);
+  assert.ok(h.spendableHeadroom < 1, 'projected next resets retain pacing after rollover');
 });
 
 test('expired tokens and reauth-needed accounts are not selectable', () => {
@@ -161,9 +162,9 @@ test('a fresh session picks the account with the most headroom', () => {
 
 test('a fresh session spends the account resetting sooner instead of stranding its quota', () => {
   const claimHeaders = (utilization: number, weeklyResetMs: number) => ({
-    // The short window has just reset and does not bind this weekly decision.
+    // No reset means the short window cannot add a pacing constraint to this
+    // test, which specifically compares weekly reset horizons.
     'anthropic-ratelimit-unified-5h-utilization': '0',
-    'anthropic-ratelimit-unified-5h-reset': String(Math.floor((NOW - 1) / 1000)),
     'anthropic-ratelimit-unified-7d-utilization': String(utilization),
     'anthropic-ratelimit-unified-7d-reset': String(Math.floor(weeklyResetMs / 1000)),
   });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { hasClaims, normalizeClaimId, parseClaims } from '../src/claims.js';
+import { hasClaims, normalizeClaimId, parseClaims, projectExpiredClaims } from '../src/claims.js';
 
 import { JOSEPH_FABLE, JOSEPH_HAIKU, NAD_FABLE } from './fixtures.js';
 
@@ -75,4 +75,22 @@ test('representative claim aliases normalize into the header id space', () => {
 test('non-numeric values do not become NaN', () => {
   const claims = parseClaims({ 'anthropic-ratelimit-unified-7d-utilization': 'n/a' });
   assert.equal(claims.byId['7d']?.utilization, undefined);
+});
+
+test('expired known windows project to zero utilization and the next cadence reset', () => {
+  const now = Date.UTC(2026, 0, 8, 12);
+  const claims = projectExpiredClaims({
+    representativeClaim: '5h',
+    reset: (now - 11 * 60 * 60 * 1000) / 1000,
+    byId: {
+      '5h': { id: '5h', status: 'rejected', utilization: 1, reset: (now - 11 * 60 * 60 * 1000) / 1000 },
+      '7d': { id: '7d', utilization: 0.4, reset: (now + 1000) / 1000 },
+      unknown: { id: 'unknown', utilization: 1, reset: (now - 1000) / 1000 },
+    },
+  }, now)!;
+  assert.equal(claims.byId['5h']?.utilization, 0);
+  assert.equal(claims.byId['5h']?.status, 'allowed');
+  assert.equal(claims.byId['5h']?.reset, (now + 4 * 60 * 60 * 1000) / 1000);
+  assert.equal(claims.reset, claims.byId['5h']?.reset);
+  assert.equal(claims.byId.unknown?.utilization, 1, 'unknown cadence is not invented');
 });

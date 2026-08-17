@@ -182,3 +182,40 @@ export function hasClaims(claims: Claims): boolean {
 export function claimHasReset(claim: Claim, nowMs: number): boolean {
   return claim.reset !== undefined && claim.reset * 1000 <= nowMs;
 }
+
+const CLAIM_CADENCE_SECONDS: Partial<Record<ClaimId, number>> = {
+  '5h': 5 * 60 * 60,
+  '7d': 7 * 24 * 60 * 60,
+  '7d_oi': 7 * 24 * 60 * 60,
+};
+
+/**
+ * Advance expired, known fixed-cadence windows without pretending that an old
+ * observation is a fresh server reading. The zero utilization is a projection;
+ * importantly, its reset is the *next* reset, so pacing does not regard a
+ * just-rolled window as fully spendable.
+ */
+export function projectExpiredClaims(claims: Claims | undefined, nowMs: number): Claims | undefined {
+  if (!claims) return undefined;
+  let changed = false;
+  const byId: Record<string, Claim> = { ...claims.byId };
+  for (const [id, cadence] of Object.entries(CLAIM_CADENCE_SECONDS)) {
+    const claim = claims.byId[id];
+    if (!claim || cadence === undefined || !claimHasReset(claim, nowMs)) continue;
+    const nowSeconds = nowMs / 1000;
+    const periods = Math.floor((nowSeconds - claim.reset!) / cadence) + 1;
+    byId[id] = {
+      ...claim,
+      status: 'allowed',
+      utilization: 0,
+      reset: claim.reset! + periods * cadence,
+    };
+    changed = true;
+  }
+  if (!changed) return claims;
+  const representative = claims.representativeClaim;
+  const reset = representative && byId[representative]?.reset !== undefined
+    ? byId[representative]!.reset
+    : claims.reset;
+  return { ...claims, reset, byId };
+}

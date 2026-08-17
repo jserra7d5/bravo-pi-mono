@@ -20,6 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { AccountState } from './policy.js';
+import { projectExpiredClaims } from './claims.js';
 import type { Claims } from './claims.js';
 
 export type ClaudeOAuth = {
@@ -170,7 +171,7 @@ export function loadAccountStates(options: {
       slot: account.slot,
       email: account.email,
       health: dead ? 'needs-reauth' : 'ok',
-      claims: prior?.claims,
+      claims: projectExpiredClaims(prior?.claims, options.nowMs),
       observedAt: prior?.observedAt,
       tokenExpiresAt: expiresAt,
     });
@@ -197,19 +198,21 @@ export function mergeClaims(prior: Claims | undefined, next: Claims): Claims {
   };
 }
 
-/** Record a fresh claims observation for one slot. */
+/** Record a claims observation unless a newer response already won the race. */
 export function recordObservation(
   stateRoot: string,
   slot: string,
   claims: Claims,
   nowMs: number,
   email?: string,
-): void {
+): boolean {
   const prior = readSlotObservation(stateRoot, slot);
+  if ((prior?.observedAt ?? Number.NEGATIVE_INFINITY) > nowMs) return false;
   writeSlotObservation(stateRoot, {
     slot,
     email: email ?? prior?.email,
     claims: mergeClaims(prior?.claims, claims),
     observedAt: nowMs,
   });
+  return true;
 }
