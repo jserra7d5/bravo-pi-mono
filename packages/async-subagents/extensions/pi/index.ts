@@ -17,7 +17,7 @@ import { renderDiscoveredAgentCatalog } from "./agentCatalog.js";
 import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
 import { ASYNC_SUBAGENT_TOOL_NAMES, TASK_TOOL_NAMES, registerSubagentTools, type ToolRuntime } from "./tools.js";
-import { isWakeupKeyHandled, markDeliveredWakeupHandled, pollWakeups } from "./wakeups.js";
+import { isWakeupKeyHandled, markWakeupKeyHandled, pollWakeups, resultDeliveryKey } from "./wakeups.js";
 
 const OWNER_ID = `pi-${process.pid}-${Date.now().toString(36)}`;
 const TASK_RUNTIME_STATE_ENTRY_TYPE = "bravo-async-subagents-task-runtime-state";
@@ -150,16 +150,15 @@ function wakeupEnvelope(wakeup: WakeupMessage): string {
   return lines.join("\n");
 }
 
-function sendWakeup(pi: ExtensionAPI, wakeup: WakeupMessage, options: { triggerTurn?: boolean } = {}): void {
+function sendWakeup(pi: ExtensionAPI, deliveryKey: string, wakeup: WakeupMessage, options: { triggerTurn?: boolean } = {}): void {
   const message = {
     customType: "async-subagent-message",
     content: wakeupEnvelope(wakeup),
     display: true,
-    details: wakeup,
+    details: { ...wakeup, deliveryKey },
   };
-  // Terminal results normally wake the parent even when it is idle; autonomous
-  // subagent flows depend on the parent receiving each result exactly once.
-  // Once-only delivery is enforced by durable delivery keys/claims in wakeups.ts.
+  // Terminal results normally wake the parent even when it is idle. Full-inline
+  // results retry until message_start acknowledges this exact delivery key.
   pi.sendMessage(message, { triggerTurn: options.triggerTurn ?? true, deliverAs: "steer" });
 }
 
@@ -167,8 +166,7 @@ function pollAndSendWakeups(pi: ExtensionAPI, store: RunStore, identity: RootSes
   if (compactionInProgress) return;
   for (const delivery of pollWakeups({ store, parentRunId: identity.parentRunId, rootSessionId: identity.rootSessionId, ownerId: OWNER_ID, modelFollowUpOnly: true, records })) {
     if (isWakeupKeyHandled(store, identity.parentRunId, delivery.deliveryKey)) continue;
-    sendWakeup(pi, delivery.message, { triggerTurn: options.triggerTurn });
-    markDeliveredWakeupHandled(store, identity.parentRunId, delivery);
+    sendWakeup(pi, delivery.deliveryKey, delivery.message, { triggerTurn: options.triggerTurn });
   }
 }
 
@@ -588,6 +586,17 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_tree", async (_event, ctx) => restoreTaskRuntimeMode(ctx));
+
+  pi.on("message_start", async (event, ctx) => {
+    const message = event.message as { role?: unknown; customType?: unknown; details?: unknown };
+    if (message.role !== "custom" || message.customType !== "async-subagent-message") return;
+    const details = message.details as (WakeupMessage & { deliveryKey?: unknown }) | undefined;
+    if (!details?.result || details.bodyTruncation?.truncated === true || typeof details.deliveryKey !== "string") return;
+    if (details.result.runId !== details.runId || details.deliveryKey !== resultDeliveryKey(details.runId, details.result)) return;
+    const cwd = cwdOf(ctx);
+    const identity = ensureRoot(cwd, piSessionIdOf(ctx));
+    markWakeupKeyHandled(new RunStore({ cwd }), identity.parentRunId, details.deliveryKey, details.runId);
+  });
 
   pi.on("session_shutdown", async () => {
     const reporter = browserWorkspaceReporter;

@@ -8,7 +8,7 @@ import { createRunResult } from "../src/result.js";
 import { RunStore } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
 import { SCHEMA_VERSION } from "../src/types.js";
-import { pollWakeups, markWakeupHandled, markDeliveredWakeupHandled, isWakeupKeyHandled, writeDeliverySubscription, resultDeliveryKey, deliveryCacheStatsForTest, resetDeliveryCacheStatsForTest } from "../extensions/pi/wakeups.js";
+import { pollWakeups, markWakeupHandled, markDeliveredWakeupHandled, isWakeupKeyHandled, writeDeliverySubscription, resultDeliveryKey, deliveryCacheStatsForTest, resetDeliveryCacheStatsForTest, TERMINAL_WAKEUP_RETRY_INTERVAL_MS } from "../extensions/pi/wakeups.js";
 
 function workspace() {
   const root = mkdtempSync(join(tmpdir(), "async-subagents-wakeups-"));
@@ -67,6 +67,24 @@ test("pollWakeups requires the owner lease and dedupes terminal results", () => 
 
   const stale = pollWakeups({ store, parentRunId: "root_test", rootSessionId: "root_test", ownerId: "owner_b" });
   assert.equal(stale.length, 0);
+});
+
+test("unacknowledged full-inline terminal wakeups retry after the retry interval", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_test";
+  const runId = createCompletedRun(store, root, parentRunId);
+  const nowMs = Date.now();
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a", ttlMs: TERMINAL_WAKEUP_RETRY_INTERVAL_MS * 2, nowMs });
+
+  const first = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", nowMs });
+  assert.equal(first.length, 1);
+  assert.equal(pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", nowMs: nowMs + TERMINAL_WAKEUP_RETRY_INTERVAL_MS - 1 }).length, 0);
+
+  const retry = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a", nowMs: nowMs + TERMINAL_WAKEUP_RETRY_INTERVAL_MS });
+  assert.equal(retry.length, 1);
+  assert.equal(retry[0]?.runId, runId);
+  assert.equal(retry[0]?.deliveryKey, first[0]?.deliveryKey);
+  assert.equal(store.readStatus(runId).resultReady, true);
 });
 
 test("pollWakeups does not parse unchanged delivery state in steady state", () => {

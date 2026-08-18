@@ -140,6 +140,7 @@ function redactedEvent(event: RunEvent): RunEvent & { bodyAvailable?: boolean } 
 }
 
 export const DEFAULT_WAKEUP_RESULT_BODY_CHAR_CAP = 32_000;
+export const TERMINAL_WAKEUP_RETRY_INTERVAL_MS = 60_000;
 
 function capBodyForWakeup(body: string | undefined, marker: string, maxChars = DEFAULT_WAKEUP_RESULT_BODY_CHAR_CAP): { body?: string; truncated: boolean; originalChars: number; returnedChars: number; maxChars: number } {
   if (body === undefined) return { body: undefined, truncated: false, originalChars: 0, returnedChars: 0, maxChars };
@@ -307,16 +308,7 @@ function releaseDeliveryClaim(store: RunStore, deliveryKey: string): void {
 
 export function markDeliveredWakeupHandled(store: RunStore, parentRunId: string, delivery: WakeupDelivery, handledAt = new Date().toISOString()): void {
   if (!delivery.message.result || delivery.message.bodyTruncation?.truncated === true) return;
-  const state = readDeliveryState(store, parentRunId);
-  state.handled[delivery.deliveryKey] = handledAt;
-  writeDeliveryState(store, state);
-  try {
-    const status = store.readStatus(delivery.runId);
-    if (status.resultReady) store.writeStatus(updateRunStatus(status, { resultReady: false }));
-  } catch {
-    // Best effort: delivery state still records the result as handled so it will
-    // not keep resurfacing after the inline body was delivered.
-  }
+  markWakeupKeyHandled(store, parentRunId, delivery.deliveryKey, delivery.runId, handledAt);
 }
 
 export function writeDeliverySubscription(store: RunStore, subscription: DeliverySubscription): void {
@@ -353,10 +345,17 @@ export function isWakeupKeyHandled(store: RunStore, parentRunId: string, deliver
   return Boolean(readDeliveryState(store, parentRunId).handled[deliveryKey]);
 }
 
-export function markWakeupKeyHandled(store: RunStore, parentRunId: string, deliveryKey: string): void {
+export function markWakeupKeyHandled(store: RunStore, parentRunId: string, deliveryKey: string, runId?: string, handledAt = new Date().toISOString()): void {
   const state = readDeliveryState(store, parentRunId);
-  state.handled[deliveryKey] = new Date().toISOString();
+  state.handled[deliveryKey] = handledAt;
   writeDeliveryState(store, state);
+  if (!deliveryKey.startsWith("terminal:") || !runId) return;
+  try {
+    const status = store.readStatus(runId);
+    if (status.resultReady) store.writeStatus(updateRunStatus(status, { resultReady: false }));
+  } catch {
+    // Best effort: handled delivery state is authoritative for suppression.
+  }
 }
 
 export function markWakeupHandled(store: RunStore, parentRunId: string, runId: string): void {
@@ -394,7 +393,14 @@ export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
     const subscription = subscriptions.get(record.runId);
     for (const delivery of pendingForRun(input.store, input.parentRunId, record.runId, subscription?.notifyOn)) {
       if (input.modelFollowUpOnly && !isActionableModelWakeup(delivery)) continue;
-      if (state.delivered[delivery.deliveryKey] || state.handled[delivery.deliveryKey]) continue;
+      if (state.handled[delivery.deliveryKey]) continue;
+      const previousAttempt = state.delivered[delivery.deliveryKey];
+      if (previousAttempt) {
+        const retryableFullInlineResult = Boolean(delivery.message.result) && delivery.message.bodyTruncation?.truncated !== true;
+        const attemptedAtMs = Date.parse(previousAttempt);
+        const retryDue = retryableFullInlineResult && Number.isFinite(attemptedAtMs) && (input.nowMs ?? Date.now()) - attemptedAtMs >= TERMINAL_WAKEUP_RETRY_INTERVAL_MS;
+        if (!retryDue) continue;
+      }
       if (delivery.message.result) {
         for (let i = deliveries.length - 1; i >= 0; i -= 1) {
           if (deliveries[i].runId === delivery.runId && !deliveries[i].message.result) deliveries.splice(i, 1);

@@ -60,6 +60,7 @@ async function withStartedExtension() {
     sent: harness.sent,
     renderers: harness.renderers,
     poll: async (ctxOverride: Record<string, unknown> = {}) => handlersMustGet(harness.handlers, "session_start")({}, { cwd, hasUI: false, sessionManager, ...ctxOverride }),
+    acknowledge: async (message: any) => handlersMustGet(harness.handlers, "message_start")({ type: "message_start", message: { role: "custom", ...message } }, { cwd, hasUI: false, sessionManager }),
     compact: async (event: Record<string, unknown> = { type: "session_compact", compactionEntry: {}, fromExtension: false }) => handlersMustGet(harness.handlers, "session_compact")(event, { cwd, hasUI: false, sessionManager }),
     shutdown: async () => {
       await handlersMustGet(harness.handlers, "session_shutdown")();
@@ -119,7 +120,13 @@ test("idle terminal result wakeups trigger the parent once", async () => {
     assert.equal(wakeup.message.details?.bodyAvailable, true);
     assert.equal(wakeup.message.details?.bodyTruncation?.truncated, false);
     assert.equal(wakeup.message.details?.result?.body, undefined);
-    assert.equal(session.store.readStatus(runId).resultReady, false);
+    assert.match(wakeup.message.details?.deliveryKey ?? "", /^terminal:/);
+    assert.equal(session.store.readStatus(runId).resultReady, true, "polling only records an attempt");
+    await session.acknowledge({ ...wakeup.message, customType: "other-extension" });
+    await session.acknowledge({ ...wakeup.message, details: { ...wakeup.message.details, deliveryKey: "terminal:wrong:key" } });
+    assert.equal(session.store.readStatus(runId).resultReady, true, "unrelated and mismatched messages do not acknowledge delivery");
+    await session.acknowledge(wakeup.message);
+    assert.equal(session.store.readStatus(runId).resultReady, false, "exact message_start acknowledges the wakeup");
     const renderer = session.renderers.get("async-subagent-message");
     assert.ok(renderer);
     const rendered = renderer(wakeup.message, {}, {}).render(80).join("\n");
@@ -128,7 +135,7 @@ test("idle terminal result wakeups trigger the parent once", async () => {
 
     const sentAfterFirstPoll = session.sent.length;
     await session.poll();
-    assert.equal(session.sent.length, sentAfterFirstPoll, "terminal result body is displayed once and not delivered again");
+    assert.equal(session.sent.length, sentAfterFirstPoll, "acknowledged terminal result is not delivered again");
   } finally {
     await session.shutdown();
   }
@@ -194,7 +201,7 @@ test("manual compaction cooldown defers wakeups without marking delivery state",
     assert.ok(wakeup);
     assert.equal(wakeup.message.details?.result?.runId, runId);
     assert.deepEqual(wakeup.options, { triggerTurn: true, deliverAs: "steer" });
-    assert.equal(session.store.readStatus(runId).resultReady, false);
+    assert.equal(session.store.readStatus(runId).resultReady, true);
   } finally {
     Date.now = realDateNow;
     await session.shutdown();
