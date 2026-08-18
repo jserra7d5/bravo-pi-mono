@@ -268,9 +268,11 @@ claude-auth-balancer uninstall-service
 Connecting, TLS negotiation, and waiting for upstream response headers are
 bounded to 90 seconds by default (`upstreamHeaderTimeoutMs` in the programmatic
 API). Once headers arrive, streaming responses are not subject to that deadline,
-so long generations remain safe. Pre-header failures log only safe diagnostics:
-phase, error code/syscall, elapsed duration, and reused-socket state. Requests
-are not blindly retried, especially `/v1/messages`, where replay could duplicate
+so long generations remain safe. HTTPS inference forwarding uses one
+proxy-owned agent with connection keep-alive disabled and TLS session caching
+disabled, guaranteeing a fresh TCP connection and full TLS handshake for every
+inference attempt. Pre-header failures log only safe diagnostics and return 502;
+they are not replayed, especially `/v1/messages`, where replay could duplicate
 work or spend quota twice.
 
 ## What the proxy does not do

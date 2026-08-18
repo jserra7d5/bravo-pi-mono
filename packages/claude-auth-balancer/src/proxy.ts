@@ -198,6 +198,7 @@ function forward(
   body: Buffer,
   token: string,
   headerTimeoutMs: number,
+  upstreamHttpsAgent: https.Agent,
 ): Promise<UpstreamResult> {
   const base = new URL(upstreamBase);
   const rawTarget = req.url ?? '/';
@@ -231,6 +232,9 @@ function forward(
         path: `${target.pathname}${target.search}`,
         method: req.method,
         headers,
+        // Only inference HTTPS uses this proxy-owned transport. HTTP test/dev
+        // upstreams and other network clients retain their existing behavior.
+        agent: target.protocol === 'https:' ? upstreamHttpsAgent : undefined,
       },
       res => {
         clearTimeout(timer);
@@ -410,6 +414,14 @@ function drain(stream: http.IncomingMessage): Promise<void> {
 export function createProxy(options: ProxyOptions = {}): http.Server {
   const opts = resolveOptions(options);
   const server_close_hooks: (() => void)[] = [];
+  // A proxy instance owns exactly one inference HTTPS agent. Disabling both
+  // socket keep-alive and the TLS session cache ensures every attempt gets a
+  // fresh TCP connection and a full TLS handshake.
+  const upstreamHttpsAgent = new https.Agent({
+    keepAlive: false,
+    maxCachedSessions: 0,
+  });
+  server_close_hooks.push(() => upstreamHttpsAgent.destroy());
   const affinity = new AffinityStore({
     stateRoot: opts.stateRoot,
     ttlMs: opts.leaseTtlMs,
@@ -636,7 +648,14 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
 
       let result: UpstreamResult;
       try {
-        result = await forward(opts.upstream, req, body, oauth.accessToken, opts.upstreamHeaderTimeoutMs);
+        result = await forward(
+          opts.upstream,
+          req,
+          body,
+          oauth.accessToken,
+          opts.upstreamHeaderTimeoutMs,
+          upstreamHttpsAgent,
+        );
       } catch (error) {
         const detail = error as NodeJS.ErrnoException & { phase?: string; durationMs?: number; reusedSocket?: boolean };
         opts.log({
