@@ -1,6 +1,6 @@
 {
   "name": "@bravo/source-search",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "description": "Pi extension for live ranked lexical source search.",

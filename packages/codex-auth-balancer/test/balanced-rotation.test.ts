@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { streamSimpleOpenAICodexResponses } from '@earendil-works/pi-ai/compat';
-import { createBalancedStreamRunner, type BalancedRunnerDeps } from '../extensions/pi/index.js';
+import { isContextOverflow, streamSimpleOpenAICodexResponses } from '@earendil-works/pi-ai/compat';
+import { createBalancedStreamRunner, estimateBalancedContextTokens, type BalancedRunnerDeps } from '../extensions/pi/index.js';
 
 const MODEL = { id: 'bravo-codex-balanced/gpt-5.5', provider: 'bravo-codex-balanced', api: 'openai-codex-responses', baseUrl: 'https://x' } as any;
 
@@ -61,6 +61,64 @@ async function collect(stream: AsyncIterable<any>) {
   for await (const e of stream) events.push(e);
   return events;
 }
+
+const HARD_LIMIT_MODEL = { ...MODEL, contextWindow: 272_000, maxTokens: 128_000 } as any;
+
+function usageMessage(totalTokens: number) {
+  return fakeMsg({
+    usage: {
+      input: 100,
+      output: 20,
+      cacheRead: totalTokens - 120,
+      cacheWrite: 0,
+      totalTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  });
+}
+
+test('272k GPT hard ceiling refuses locally before lease or upstream and Pi recognizes overflow', async () => {
+  let leaseCalls = 0;
+  let upstreamCalls = 0;
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async () => { leaseCalls++; throw new Error('must not lease'); },
+    createUpstream: (() => { upstreamCalls++; throw new Error('must not call upstream'); }) as any,
+    now: () => 1234,
+  };
+  const context = {
+    messages: [usageMessage(271_999), { role: 'user', content: '12345678', timestamp: 1 }],
+  } as any;
+
+  assert.equal(estimateBalancedContextTokens(context), 272_001, 'trailing chars/4 estimate crosses the hard ceiling');
+  const events = await collect(createBalancedStreamRunner(deps)(HARD_LIMIT_MODEL, context, { sessionId: 'hard-limit' } as any));
+  assert.equal(leaseCalls, 0);
+  assert.equal(upstreamCalls, 0);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'error');
+  assert.equal(events[0].error.provider, 'bravo-codex-balanced');
+  assert.equal(events[0].error.model, 'bravo-codex-balanced/gpt-5.5');
+  assert.equal(events[0].error.stopReason, 'error');
+  assert.match(events[0].error.errorMessage, /context_length_exceeded/);
+  assert.equal(isContextOverflow(events[0].error, 272_000), true, 'installed Pi overflow classifier accepts the local refusal');
+});
+
+test('272k GPT hard ceiling allows exact-limit requests through normal lease and upstream flow', async () => {
+  const { deps, rec } = makeDeps(() => 'ok');
+  const context = { messages: [usageMessage(272_000)] } as any;
+  const events = await collect(createBalancedStreamRunner(deps)(HARD_LIMIT_MODEL, context, { sessionId: 'at-limit' } as any));
+  assert.equal(events.at(-1)?.type, 'done');
+  assert.deepEqual(rec.leaseCalls, [undefined]);
+  assert.equal(rec.upstreamOptions?.length, 1);
+});
+
+test('hard ceiling follows model applicability instead of imposing 272k on other windows', async () => {
+  const { deps, rec } = makeDeps(() => 'ok');
+  const context = { messages: [usageMessage(300_000)] } as any;
+  const otherWindow = { ...HARD_LIMIT_MODEL, contextWindow: 400_000 } as any;
+  const events = await collect(createBalancedStreamRunner(deps)(otherWindow, context, { sessionId: 'other-window' } as any));
+  assert.equal(events.at(-1)?.type, 'done');
+  assert.deepEqual(rec.leaseCalls, [undefined]);
+});
 
 test('temporary sanitizer hides standalone OpenAI reasoning comment markers but preserves replay signatures', async () => {
   const signature = JSON.stringify({ summary: [{ text: '**Planning**\n\n<!-- -->' }], encrypted_content: 'opaque' });

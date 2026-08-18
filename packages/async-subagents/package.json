@@ -1,6 +1,6 @@
 {
   "name": "@bravo/async-subagents",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "description": "Pi-only async subagent primitive with durable run files.",

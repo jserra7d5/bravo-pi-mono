@@ -39,6 +39,72 @@ const UPSTREAM_PROVIDER = 'openai-codex';
 const API = 'openai-codex-responses' as const;
 const DEFAULT_EXPECTED_RUNTIME_MS = 10 * 60_000;
 const DEFAULT_TTL_SAFETY_BUFFER_MS = 60_000;
+const ESTIMATED_IMAGE_CHARS = 4800;
+
+function safeJsonStringify(value: unknown): string {
+  try { return JSON.stringify(value) ?? 'undefined'; }
+  catch { return '[unserializable]'; }
+}
+
+function contentChars(content: Context['messages'][number]['content']): number {
+  if (typeof content === 'string') return content.length;
+  return content.reduce((chars, block) => chars + (block.type === 'text' ? block.text.length : ESTIMATED_IMAGE_CHARS), 0);
+}
+
+/** Mirror Pi 0.84.2's chars/4 estimate for messages after authoritative provider usage. */
+export function estimateBalancedMessageTokens(message: Context['messages'][number]): number {
+  if (message.role === 'user' || message.role === 'toolResult') return Math.ceil(contentChars(message.content) / 4);
+  let chars = 0;
+  for (const block of message.content) {
+    if (block.type === 'text') chars += block.text.length;
+    else if (block.type === 'thinking') chars += block.thinking.length;
+    else chars += block.name.length + safeJsonStringify(block.arguments).length;
+  }
+  return Math.ceil(chars / 4);
+}
+
+function assistantUsageTokens(message: AssistantMessage): number {
+  return message.usage.totalTokens || message.usage.input + message.usage.output + message.usage.cacheRead + message.usage.cacheWrite;
+}
+
+/** Estimate outgoing Context using Pi 0.84.2's latest-valid-usage plus trailing-content accounting. */
+export function estimateBalancedContextTokens(context: Context): number {
+  let latestPrefixTimestamp = Number.NEGATIVE_INFINITY;
+  let usageIndex: number | undefined;
+  let usageTokens = 0;
+  for (let index = 0; index < context.messages.length; index++) {
+    const message = context.messages[index];
+    if (message.role === 'assistant') {
+      const tokens = assistantUsageTokens(message);
+      if (message.timestamp >= latestPrefixTimestamp && message.stopReason !== 'aborted' && message.stopReason !== 'error' && tokens > 0) {
+        usageIndex = index;
+        usageTokens = tokens;
+      }
+    }
+    latestPrefixTimestamp = Math.max(latestPrefixTimestamp, message.timestamp);
+  }
+
+  if (usageIndex !== undefined) {
+    const trailingMessages = context.messages.slice(usageIndex + 1);
+    const trailingTokens = trailingMessages.reduce((sum, message) => sum + estimateBalancedMessageTokens(message), 0);
+    const addedNames = new Set(trailingMessages
+      .filter((message) => message.role === 'toolResult')
+      .flatMap((message) => message.addedToolNames ?? []));
+    const addedTools = context.tools?.filter((tool) => addedNames.has(tool.name)) ?? [];
+    return usageTokens + trailingTokens + (addedTools.length ? Math.ceil(safeJsonStringify(addedTools).length / 4) : 0);
+  }
+
+  const messageTokens = context.messages.reduce((sum, message) => sum + estimateBalancedMessageTokens(message), 0);
+  const systemTokens = context.systemPrompt ? Math.ceil(context.systemPrompt.length / 4) : 0;
+  const toolTokens = context.tools?.length ? Math.ceil(safeJsonStringify(context.tools).length / 4) : 0;
+  return messageTokens + systemTokens + toolTokens;
+}
+
+function balancedHardContextLimit(model: Model<typeof API>): number | undefined {
+  const contextWindow = model.contextWindow;
+  if (model.api !== API || !/^(?:gpt-|codex-)/i.test(upstreamModelId(model))) return undefined;
+  return Number.isSafeInteger(contextWindow) && contextWindow > 0 ? contextWindow : undefined;
+}
 
 const PI_CODING_AGENT_PACKAGE = '@earendil-works/pi-coding-agent';
 const PI_AI_PACKAGE = '@earendil-works/pi-ai';
@@ -420,6 +486,35 @@ async function runBalanced(
   let activeFinish: (() => Promise<void>) | undefined;
   let lastUpstreamPartial: AssistantMessage | undefined;
   const visibleThinking = new Map<number, string>();
+
+  const hardLimit = balancedHardContextLimit(model);
+  const estimatedContextTokens = hardLimit === undefined ? 0 : estimateBalancedContextTokens(context);
+  if (hardLimit !== undefined && estimatedContextTokens > hardLimit) {
+    pushedTerminal = true;
+    stream.push({
+      type: 'error',
+      reason: 'error',
+      error: {
+        role: 'assistant',
+        content: [],
+        api: API,
+        provider: PROVIDER,
+        model: publicModelId(model),
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'error',
+        errorMessage: `context_length_exceeded: estimated context ${estimatedContextTokens} tokens exceeds the configured ${hardLimit}-token context window`,
+        timestamp: deps.now(),
+      },
+    });
+    return;
+  }
 
   // Keep the process-shared cooldown bounded: drop entries that have expired (and
   // thereby any slots that no longer exist once their cooldown lapses).
