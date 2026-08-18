@@ -1,6 +1,6 @@
 # Monitor Ergonomics v2
 
-> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions.
+> **Superseded:** `docs/specs/unified-task-plane/` is the current contract. This document is retained as historical record, not current instructions. In particular, the current Task Plane does **not** deliver nonterminal monitor stdout events: monitor notifications are terminal-only and metadata-only. stdout remains private observation input for predicates, hashes, and flood accounting; complete stdout/stderr stays in `output_path`.
 
 ## Status
 
@@ -626,9 +626,13 @@ Run pre/post if possible. The target improvement is fewer monitor-as-background-
 - Should UI alerts exist as a user/operator preference rather than a tool parameter?
 - Should command workload detection be a hard validation error, a soft warning, or prompt-only?
 
+## Current terminal-only correction
+
+The accepted unified Task Plane replaces v2's line/event wake model. Monitor stdout is a bounded notification **input API**, not conversation content: commands should emit compact decision evidence with estimated cardinality, while redraws, progress updates, and full/repeated tables belong on stderr and in `output_path`. There is no `throttle_s` agent parameter because there are no running-event notifications to throttle. Safe GitHub observation uses compact terminal commands (for example `gh run watch --exit-status >/dev/null`) or status/conclusion-only interval output, never raw full-table progress streaming.
+
 ## Decision summary
 
-Design Monitor v2 as a small, Claude-like event observer:
+Historically, Monitor v2 was designed as a small, Claude-like event observer:
 
 - `monitor_start`, `monitor_stop`, `monitor_list` only by default;
 - output path plus normal `read` for details;

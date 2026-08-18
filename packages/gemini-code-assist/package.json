@@ -1,6 +1,6 @@
 {
   "name": "@bravo/gemini-code-assist",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "type": "module",
   "description": "Headless Gemini Code Assist OAuth spike.",

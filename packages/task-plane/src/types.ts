@@ -22,7 +22,7 @@ export interface TaskRecord {
 export interface AdmissionDraft {
  type:"bash"|"monitor"; mode?:"stream"|"interval"; name?:string; command:string; cwd:string;
  owner_session_id:string; owner_session_file?:string; max_output_bytes:number; max_runtime_s?:number;
- interval_s?:number; command_timeout_s?:number; until_output_matches?:string; throttle_s?:number;
+ interval_s?:number; command_timeout_s?:number; until_output_matches?:string;
  idempotency_key?:string; deadline_at?:string; started_at?:string;
 }
 export type LeaseClaimResult=

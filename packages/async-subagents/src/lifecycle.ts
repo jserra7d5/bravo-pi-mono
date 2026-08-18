@@ -23,6 +23,7 @@ export interface ReconcileOptions {
   nowMs?: number;
   localHost?: string;
   probe?: (pid: number) => ProcessIdentitySnapshot;
+  mutationLockTimeoutMs?: number;
 }
 
 export interface FinalizeTerminalRunInput {
@@ -240,6 +241,6 @@ export async function reconcileUnderLock(store: RunStore, runId: string, options
     });
     status = store.readStatus(runId);
     return { status, supervisorAlive: "dead" as const, repairedResult, promoted: true };
-  });
+  }, { timeoutMs: options.mutationLockTimeoutMs });
   return reconciled.value;
 }

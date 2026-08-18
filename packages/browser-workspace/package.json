@@ -1,6 +1,6 @@
 {
   "name": "@bravo/browser-workspace",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "type": "module",
   "bin": { "bravo-browser-workspace": "dist/src/cli.js" },

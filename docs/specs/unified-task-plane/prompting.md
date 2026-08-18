@@ -8,16 +8,15 @@ directly.
 
 ## The decision boundary (shared module, injected once)
 
-The selection prior is taught by notification count, mirroring Claude Code's rule,
-plus pi's ownership boundary:
+The selection prior is taught by ownership and observation responsibility:
 
 > Pick by what you're waiting for:
 > - **One notification when something you own finishes** → `bash({command,
 >   run_in_background: true})`. Tests, builds, installs, migrations, dev servers,
 >   scripts. You'll be notified when it exits — do not poll, do not append `&`.
-> - **A notification per occurrence from something external** → `monitor({command})`.
->   Logs, CI/deploy status, health checks, queue depth, file conditions. Each stdout
->   line is an event; the command's exit ends the watch.
+> - **One terminal notification after observing something external** → `monitor({command})`.
+>   Logs, CI/deploy status, health checks, queue depth, file conditions. stdout is
+>   private observation input retained in `output_path`; process exit ends the watch.
 > - Nothing to wait for → plain `bash`.
 
 ## Waiting means becoming idle
@@ -41,7 +40,7 @@ session. `managed_task_list`, sleeps, and polling are inspection mechanisms, not
   events.
 - avoid_when: running a workload → background `bash`; a one-shot "wait until done"
   where a self-terminating command exists → still `monitor`, but as a stream with
-  that command (`gh run watch --exit-status`), not an interval poll.
+  that command (for example compact `gh run watch --exit-status >/dev/null`), not a noisy interval poll.
 
 ## The coverage rule (ported from Claude Code, mandatory)
 
@@ -62,7 +61,10 @@ This is the prompting half of the incident fix; the schema half is
 - Polling a task you'll be notified about; sleep-loops around failing commands.
 - Piping monitor output through buffering stages (`grep` without `--line-buffered`,
   `head`) — matches sit unseen in the buffer.
-- Expecting stderr to produce events or match `until_output_matches` — events and
+- Sending redraws, progress bars, or repeated/full tables to stdout. Estimate output
+  cardinality; stdout should contain compact decision evidence, while noisy detail
+  belongs on stderr/`output_path`.
+- Expecting stderr to match `until_output_matches` — predicates and
   the predicate see stdout only; redirect with `2>&1` if stderr matters.
 - Watching only the success marker (coverage rule above).
 - Using monitor to run workloads (also rejected).

@@ -41,7 +41,7 @@ deleted.
 
 Locked, identical for both monitor modes:
 
-- **Events are stdout lines only.** stderr never produces events.
+- **stdout is observation input only.** It never produces a nonterminal notification; stderr never affects predicates, hashes, or flood accounting.
 - **`until_output_matches` matches stdout only** (per interval execution).
 - **Change detection (interval mode) hashes `{exit_code, stdout}` only.**
 - **`output_path` receives both streams**, line-buffered per descriptor (no
@@ -79,20 +79,18 @@ descendants outside the managed process group are not supervised.
 
 ```
 monitor({
-  command: string,              // required. Observer command. stdout lines = events;
-                                // exit = terminal. Exit code 0 → completed,
+  command: string,              // required. Observer command. stdout is internal
+                                // observation input; exit = terminal. Exit code 0 → completed,
                                 // nonzero → failed.
   name?: string,
   interval_s?: number,          // min 5. Presence selects interval mode: harness
-                                // runs command every N s, emits event when stdout
-                                // changes. Absence = stream mode: command runs once,
-                                // each stdout line is an event.
+                                // runs command every N s and hashes stdout for
+                                // change detection. Absence = stream mode.
   until_output_matches?: string,// regex over stdout; interval mode only. Match →
                                 // completed. Predicate input is capped at 5 MiB
                                 // per execution; overflow → failed.
   lifespan_s?: number,          // max total watch time → timed_out. Enforced for
                                 // BOTH modes.
-  throttle_s?: number,          // min seconds between event notifications (default 1)
   cwd?: string,
   command_timeout_s?: number,   // per-execution timeout, interval mode only
   idempotency_key?: string,
@@ -202,19 +200,17 @@ follow-up turn, never as user input.
   <signal>…</signal>
   <stop_reason>timeout|output_cap|event_flood|user|interactive_prompt</stop_reason>
   <failure_reason>command_timeout</failure_reason> <!-- failed interval execution only -->
-  <!-- monitor events only (status=running): batched stdout lines, capped -->
-  <lines>…</lines>
 </task_notification>
 ```
 
 - **Terminal notifications are metadata-only** (post-f020f73 rule): never command
   text, never output content. The agent reads `output_path`.
-- **Monitor event notifications carry the batched stdout lines** — the line content
-  *is* the signal. Caps: `throttle_s` batching window, max 20 lines per
-  notification, and max **64 KiB decoded characters per line**. An oversized line
-  is delivered once as its first 64 KiB plus an explicit truncation marker; it is
-  never silently dropped, and `output_path` retains bytes according to the normal
-  output-cap policy. Flood auto-stop remains line-count based (`wiring.md`).
+- **Monitors do not emit nonterminal notifications.** stdout is an internal,
+  bounded observation API for predicates, change detection, and flood accounting;
+  stdout/stderr content remains in `output_path` and never enters the conversation.
+- Each serialized terminal `<task_notification>` is valid XML and at most **4096
+  UTF-8 bytes**. Fixed metadata is retained; variable path metadata is safely
+  escaped and truncated with an explicit marker only if required.
 - **Batching, not merging:** when multiple terminal notifications are pending in
   one dispatch flush, they are delivered as ONE follow-up message containing
   multiple complete `<task_notification>` blocks. The singular envelope is never
@@ -263,4 +259,4 @@ message text teaches the correct pattern:
 | `interval_s` with no `until_output_matches` and no `lifespan_s` | an unbounded interval monitor can only end by error or manual stop; give it a predicate or a lifespan |
 | workload command in `monitor` | monitor observes; run workloads with `bash({run_in_background:true})` |
 | `timeout < 30` on background `bash` | timeout is max runtime, not a return-quickly mechanism |
-| `wake_on_completion`, `emit`, `projection`, `wake`, `kind`, `condition` params | removed in v3; state the replacement |
+| `wake_on_completion`, `emit`, `projection`, `wake`, `kind`, `condition`, `throttle_s` params | removed in v3; `throttle_s` is obsolete because monitor notifications are terminal-only |

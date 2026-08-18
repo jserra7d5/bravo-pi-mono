@@ -65,15 +65,13 @@ All notifications flow through one dispatcher that owns cost control:
   guarantee") — claim-file one-shot + strict route validation kept verbatim.
   Metadata-only payload. Exception: session shutdown delivers nothing
   (contracts.md "Shutdown exception").
-- **Monitor events:** batched per task (`throttle_s` window, default 1s; max 20
-  lines per notification), delivered with stdout line content.
-- **Flush batching:** all notifications pending in one dispatch flush go out as a
-  single follow-up message containing complete envelopes. No aggregation or
-  summarization occurs; terminal claim accounting stays per task. If a monitor
-  produces stdout and then exits naturally before its throttle window flushes,
-  the batch preserves order with a `status=running` event envelope followed by
-  that task's metadata-only terminal envelope. Manual stop, flood stop, and
-  suspension discard pending event envelopes instead.
+- **Monitor notifications are terminal-only:** no running stdout event enters the
+  dispatcher. stdout still feeds predicates, interval hashes, and pre-batching
+  flood accounting, while complete stdout/stderr remains in `output_path`.
+- **Flush batching:** terminal notifications pending in one dispatcher flush go
+  out as a single follow-up containing complete metadata-only envelopes. Each
+  envelope is independently valid XML and bounded to 4096 UTF-8 bytes; terminal
+  claim accounting stays per task.
 - **Flood auto-stop (property, not vibe):** if a monitor emits more than
   **`flood_max_lines` (default 300) raw stdout lines within any rolling
   `flood_window_s` (default 60s)** — counted pre-batching, so throttling cannot
@@ -144,7 +142,7 @@ The interval scheduler is the v2 scheduler minus condition/triggered machinery:
 claim due records (excluding suspended, suspension-requested, closing,
 stop-requested, and outcome-pending attempts), run command, hash
 `{exit_code, stdout}` for change detection, evaluate the terminal order above,
-emit event notification on change, persist, reschedule. `lifespan_s` enforcement
+persist the changed hash and reschedule without a nonterminal notification. `lifespan_s` enforcement
 lives in the shared registry sweep so it
 covers streams too (fixes the v2 gap where stream `deadline_at` was stored but
 unenforced).

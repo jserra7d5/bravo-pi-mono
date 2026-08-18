@@ -393,6 +393,180 @@ test("Claude tmux result drain waits for the run mutation lock before treating r
   assert.equal(store.readStatus(runId).resultReady, true);
 });
 
+test("waitSubagents does not return a result before its terminal status publication is stable", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const runId = createStoredRun(store, w.root, "root_test");
+  const paths = store.pathsFor({ runId });
+  const partial = createRunResult({ runId, parentRunId: "root_test", agentName: "scout", state: "completed", summary: "published result" });
+  let release!: () => void;
+  const holder = withRunMutationLock(paths.runDir, async () => {
+    store.writeResult(partial);
+    await new Promise<void>((resolve) => { release = resolve; });
+    finalizeTerminalRun(store, { runId, parentRunId: "root_test", agentName: "scout", state: "completed", writerRole: "child-runtime", summary: "published result" });
+  });
+  while (!store.readResult(runId)) await new Promise((resolve) => setTimeout(resolve, 10));
+
+  let resolved = false;
+  const waiting = waitSubagents(store, { runIds: [runId], timeoutMs: 1000, pollIntervalMs: 10 }).then((result) => { resolved = true; return result; });
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  assert.equal(resolved, false);
+  release();
+  await holder;
+
+  const waited = await waiting;
+  assert.equal(waited.results[0]?.state, "completed");
+  assert.equal(waited.statuses[0]?.state, "completed");
+  assert.equal(store.readStatus(runId).state, "completed");
+});
+
+test("waitSubagents returns normal timeout without torn terminal claims when publication lock outlives deadline", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const runId = createStoredRun(store, w.root, "root_test");
+  const paths = store.pathsFor({ runId });
+  const partial = createRunResult({ runId, parentRunId: "root_test", agentName: "scout", state: "completed", summary: "not stable yet" });
+  let release!: () => void;
+  const holder = withRunMutationLock(paths.runDir, async () => {
+    store.writeResult(partial);
+    await new Promise<void>((resolve) => { release = resolve; });
+  });
+  while (!store.readResult(runId)) await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const startedAt = Date.now();
+  const waited = await waitSubagents(store, { runIds: [runId], timeoutMs: 100, pollIntervalMs: 10 });
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(waited.state, "timeout");
+  assert.equal(waited.timedOut, true);
+  assert.deepEqual(waited.readyRunIds, []);
+  assert.deepEqual(waited.results, []);
+  assert.deepEqual(waited.events, []);
+  assert.deepEqual(waited.remainingRunIds, [runId]);
+  assert.equal(waited.statuses[0]?.state, "running");
+  assert.ok(elapsedMs >= 75, `deadline returned too early: ${elapsedMs}ms`);
+  assert.ok(elapsedMs < 500, `lock timeout escaped caller deadline: ${elapsedMs}ms`);
+
+  release();
+  await holder;
+});
+
+test("waitSubagents suppresses an unstable all-mode result while preserving other readiness, events, and cursors", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const first = createStoredRun(store, w.root, "root_test");
+  const second = createStoredRun(store, w.root, "root_test");
+  const question = createRunEvent({ sequence: 1, runId: first, parentRunId: "root_test", type: "question", summary: "still useful", wake: true });
+  store.appendEvent(first, question);
+  const paths = store.pathsFor({ runId: second });
+  const partial = createRunResult({ runId: second, parentRunId: "root_test", agentName: "scout", state: "completed", summary: "not stable yet" });
+  let release!: () => void;
+  const holder = withRunMutationLock(paths.runDir, async () => {
+    store.writeResult(partial);
+    await new Promise<void>((resolve) => { release = resolve; });
+  });
+  while (!store.readResult(second)) await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const waited = await waitSubagents(store, { runIds: [first, second], mode: "all", timeoutMs: 80, pollIntervalMs: 10 });
+  assert.equal(waited.state, "timeout");
+  assert.deepEqual(waited.readyRunIds, [first]);
+  assert.deepEqual(waited.results, []);
+  assert.deepEqual(waited.events.map((event) => event.eventId), [question.eventId]);
+  assert.ok(waited.cursors[first]!.eventOffset > 0);
+  assert.equal(waited.cursors[second]!.eventOffset, 0);
+  assert.deepEqual(waited.remainingRunIds, [second]);
+
+  release();
+  await holder;
+});
+
+test("waitSubagents suppresses a torn terminal event when includeResult is false and the lock outlives deadline", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const runId = createStoredRun(store, w.root, "root_test");
+  const paths = store.pathsFor({ runId });
+  const partial = createRunResult({ runId, parentRunId: "root_test", agentName: "scout", state: "completed", summary: "not stable yet" });
+  const terminal = createRunEvent({ sequence: 1, runId, parentRunId: "root_test", type: "completed", summary: "not stable yet", wake: true });
+  let release!: () => void;
+  const holder = withRunMutationLock(paths.runDir, async () => {
+    store.writeResult(partial);
+    store.appendEvent(runId, terminal);
+    await new Promise<void>((resolve) => { release = resolve; });
+  });
+  while (!store.readEvents(runId).records.length) await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const startedAt = Date.now();
+  const waited = await waitSubagents(store, { runIds: [runId], until: "terminal", includeResult: false, timeoutMs: 100, pollIntervalMs: 10 });
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(waited.state, "timeout");
+  assert.equal(waited.timedOut, true);
+  assert.deepEqual(waited.readyRunIds, []);
+  assert.deepEqual(waited.results, []);
+  assert.deepEqual(waited.events, []);
+  assert.ok(waited.cursors[runId]!.eventOffset > 0);
+  assert.deepEqual(waited.remainingRunIds, [runId]);
+  assert.equal(waited.statuses[0]?.state, "running");
+  assert.ok(elapsedMs >= 75, `deadline returned too early: ${elapsedMs}ms`);
+  assert.ok(elapsedMs < 500, `lock timeout escaped caller deadline: ${elapsedMs}ms`);
+
+  release();
+  await holder;
+});
+
+test("waitSubagents stabilizes an event-only terminal publication without adding statuses", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const runId = createStoredRun(store, w.root, "root_test");
+  const paths = store.pathsFor({ runId });
+  const partial = createRunResult({ runId, parentRunId: "root_test", agentName: "scout", state: "completed", summary: "published event" });
+  const terminal = createRunEvent({ sequence: 1, runId, parentRunId: "root_test", type: "completed", summary: "published event", wake: true });
+  let release!: () => void;
+  const holder = withRunMutationLock(paths.runDir, async () => {
+    store.writeResult(partial);
+    store.appendEvent(runId, terminal);
+    await new Promise<void>((resolve) => { release = resolve; });
+    finalizeTerminalRun(store, { runId, parentRunId: "root_test", agentName: "scout", state: "completed", writerRole: "child-runtime", summary: "published event" });
+  });
+  while (!store.readEvents(runId).records.length) await new Promise((resolve) => setTimeout(resolve, 10));
+
+  let resolved = false;
+  const waiting = waitSubagents(store, { runIds: [runId], until: "terminal", includeResult: false, includeStatus: false, timeoutMs: 1000, pollIntervalMs: 10 }).then((result) => { resolved = true; return result; });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(resolved, false);
+  release();
+  await holder;
+  const waited = await waiting;
+  assert.equal(waited.state, "ready");
+  assert.deepEqual(waited.results, []);
+  assert.deepEqual(waited.events.map((event) => event.eventId), [terminal.eventId]);
+  assert.deepEqual(waited.statuses, []);
+  assert.equal(store.readStatus(runId).state, "completed");
+});
+
+test("waitSubagents stabilizes result publication without adding statuses when includeStatus is false", async () => {
+  const w = workspace();
+  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+  const runId = createStoredRun(store, w.root, "root_test");
+  const paths = store.pathsFor({ runId });
+  const partial = createRunResult({ runId, parentRunId: "root_test", agentName: "scout", state: "completed", summary: "published result" });
+  let release!: () => void;
+  const holder = withRunMutationLock(paths.runDir, async () => {
+    store.writeResult(partial);
+    await new Promise<void>((resolve) => { release = resolve; });
+    finalizeTerminalRun(store, { runId, parentRunId: "root_test", agentName: "scout", state: "completed", writerRole: "child-runtime", summary: "published result" });
+  });
+  while (!store.readResult(runId)) await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const waiting = waitSubagents(store, { runIds: [runId], includeStatus: false, timeoutMs: 1000, pollIntervalMs: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  release();
+  await holder;
+  const waited = await waiting;
+  assert.equal(waited.state, "ready");
+  assert.equal(waited.results[0]?.state, "completed");
+  assert.deepEqual(waited.statuses, []);
+  assert.equal(store.readStatus(runId).state, "completed");
+});
+
 test("Claude tmux supervisor defers dead-session failure long enough for in-flight MCP completion", async () => {
   const w = workspace();
   const fakeBin = writeFakeClaudeBin(w.root);

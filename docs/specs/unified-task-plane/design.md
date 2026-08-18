@@ -63,7 +63,7 @@ Adopted from what Claude Code's agent experience gets right, formalized via the
 ## The model, in two sentences
 
 > Run work you own with `bash({run_in_background: true})`; watch external state with
-> `monitor({command})` whose stdout lines are events and whose exit means done.
+> `monitor({command})` whose stdout is private observation input and whose exit means done.
 > You will be told when anything finishes.
 
 Everything else is wiring.
@@ -102,7 +102,7 @@ monitors terminate in exactly three ways:
 - `lifespan_s` expires → `timed_out`.
 
 The preferred spelling for lifecycle waits remains a self-terminating stream command
-(`gh run watch --exit-status`); prompting and validation-error text both teach it.
+(for example compact `gh run watch --exit-status >/dev/null`); prompting and validation-error text both teach it.
 The v2 `kind:"file"` is deleted — file conditions are one-liner interval commands
 (`test -f p && echo EXISTS`), and a dedicated kind was a second way to say the same
 thing.

@@ -1,6 +1,6 @@
 {
   "name": "@bravo/loom",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "type": "module",
   "description": "CLI-first recursive work graph for durable agent context.",
