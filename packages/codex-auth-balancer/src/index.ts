@@ -170,13 +170,18 @@ const DB_SCHEMA_VERSION = 1;
 const DEFAULT_RESERVATION_TTL_MS = 2 * 60 * 60_000;
 const WEEK_MS = 7 * 24 * 60 * 60_000;
 const POLICY = {
-  version: 1,
+  version: 2,
   hardFloorPrimaryPercent: 1,
   hardFloorSecondaryPercent: 1,
-  reservationHoldPercent: 5,
+  // In-flight reservations are a *preference* signal, never a quota deduction: a
+  // busy slot is deprioritized, but it is never excluded for being busy. The
+  // penalty stays small enough that a real quota gap outranks transient
+  // concurrency (a 12-point remaining gap is worth 7.2 score; 1-2 in-flight
+  // requests must not flip that). Genuine exhaustion is caught by the hard
+  // floors below and, at runtime, by 429 rotation.
   stalePenalty: 15,
   unknownPenalty: 25,
-  activeReservationPenalty: 10,
+  activeReservationPenalty: 2,
   limitedPenalty: 30,
   weeklyConservationPenalty: 0.5,
   selectionStaleAfterMs: DEFAULT_STALE_AFTER_MS,
@@ -556,8 +561,10 @@ function ensureAdditiveColumns(db: DatabaseSync) {
   }
 }
 function initializePolicy(db: DatabaseSync) {
-  db.prepare('INSERT OR IGNORE INTO policy(key, value) VALUES (?, ?)').run('version', String(POLICY.version));
-  db.prepare('INSERT OR IGNORE INTO policy(key, value) VALUES (?, ?)').run('json', JSON.stringify(POLICY));
+  // Upsert, not INSERT OR IGNORE: these rows are the forensic record of which
+  // selection policy is resident, so a stale row would misreport getDbStatus.
+  db.prepare('INSERT INTO policy(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('version', String(POLICY.version));
+  db.prepare('INSERT INTO policy(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('json', JSON.stringify(POLICY));
 }
 function closeDb(db: DatabaseSync) { try { db.close(); } catch { /* ignore close errors */ } }
 function migrationCompleted(db: DatabaseSync): boolean {
@@ -946,13 +953,18 @@ function activeReservationCounts(db: DatabaseSync, now = Date.now()): Record<str
 function statusOf(entry: UsageEntry | undefined): CodexAccountStatus {
   return entry?.status || (entry?.primary || entry?.secondary ? 'ok' : 'unknown');
 }
-function effectiveRemaining(window: UsageWindow | undefined, active: number): number | undefined {
-  return window?.remainingPercent == null ? undefined : clampPct(window.remainingPercent - active * POLICY.reservationHoldPercent);
-}
-function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageEntry>, activeCounts: Record<string, number>, stateRoot: string, requestedSlot: string | undefined, now: number): { account: InternalAccount; selection: SelectionMetadata } {
+/**
+ * `requestedSlotMode`:
+ *  - 'hard' (explicit `--slot`): only that slot is considered; an unusable slot is an error.
+ *  - 'soft' (session affinity / rotation hint): that slot wins when it is selectable,
+ *    otherwise selection falls back to the full account set. A preference must never
+ *    turn a usable install into `slot unavailable by policy`.
+ */
+function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageEntry>, activeCounts: Record<string, number>, stateRoot: string, requestedSlot: string | undefined, requestedSlotMode: 'hard' | 'soft', now: number): { account: InternalAccount; selection: SelectionMetadata } {
   const candidates: Array<{ account: InternalAccount; selection: SelectionMetadata }> = [];
-  const considered = requestedSlot ? accounts.filter(a => a.slot === requestedSlot) : accounts;
-  if (requestedSlot && considered.length === 0) throw new Error(`slot not found: ${requestedSlot}`);
+  const hardSlot = requestedSlotMode === 'hard' ? requestedSlot : undefined;
+  const considered = hardSlot ? accounts.filter(a => a.slot === hardSlot) : accounts;
+  if (hardSlot && considered.length === 0) throw new Error(`slot not found: ${hardSlot}`);
   for (const account of considered) {
     const entry = usage[account.slot];
     const status = statusOf(entry);
@@ -962,15 +974,15 @@ function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageE
     const generatedAt = entry?.updatedAt;
     const stale = generatedAt != null ? now - generatedAt > POLICY.selectionStaleAfterMs : true;
     const usageStale = stale || primary?.stale === true || secondary?.stale === true;
-    const effPrimary = effectiveRemaining(primary, active);
-    const effSecondary = effectiveRemaining(secondary, active);
+    const remPrimary = primary?.remainingPercent;
+    const remSecondary = secondary?.remainingPercent;
     const penalties: string[] = [];
     if (status === 'broken') { penalties.push('rejected:broken'); continue; }
-    if (!usageStale && effPrimary != null && effPrimary < POLICY.hardFloorPrimaryPercent) { penalties.push('rejected:primary_hard_floor'); continue; }
-    if (!usageStale && effSecondary != null && effSecondary < POLICY.hardFloorSecondaryPercent) { penalties.push('rejected:secondary_hard_floor'); continue; }
+    if (!usageStale && remPrimary != null && remPrimary < POLICY.hardFloorPrimaryPercent) { penalties.push('rejected:primary_hard_floor'); continue; }
+    if (!usageStale && remSecondary != null && remSecondary < POLICY.hardFloorSecondaryPercent) { penalties.push('rejected:secondary_hard_floor'); continue; }
     let score = 50;
-    if (effPrimary != null) score += effPrimary * 0.6;
-    if (effSecondary != null) score += effSecondary * 0.4;
+    if (remPrimary != null) score += remPrimary * 0.6;
+    if (remSecondary != null) score += remSecondary * 0.4;
     if (entry?.updatedAt == null && !primary && !secondary) {
       score -= POLICY.unknownPenalty;
       penalties.push('unknown_usage');
@@ -987,9 +999,9 @@ function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageE
       score -= active * POLICY.activeReservationPenalty;
       penalties.push(`active_reservations:${active}`);
     }
-    if (secondary?.resetAt && effSecondary != null && secondary.resetAt > now) {
+    if (secondary?.resetAt && remSecondary != null && secondary.resetAt > now) {
       const curve = clampPct(((secondary.resetAt - now) / WEEK_MS) * 100);
-      const deficit = Math.max(0, curve - effSecondary);
+      const deficit = Math.max(0, curve - remSecondary);
       if (deficit > 0) {
         score -= deficit * POLICY.weeklyConservationPenalty;
         penalties.push(`weekly_conservation_deficit:${deficit.toFixed(2)}`);
@@ -1015,11 +1027,19 @@ function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageE
       },
     });
   }
-  if (candidates.length === 0) throw new Error(requestedSlot ? `slot unavailable by policy: ${requestedSlot}` : 'no accounts available by policy');
+  if (candidates.length === 0) throw new Error(hardSlot ? `slot unavailable by policy: ${hardSlot}` : 'no accounts available by policy');
   candidates.sort((a, b) => b.selection.score - a.selection.score || b.selection.tie_break.localeCompare(a.selection.tie_break) || a.account.slot.localeCompare(b.account.slot));
+  if (requestedSlot && requestedSlotMode === 'soft') {
+    const preferred = candidates.find(c => c.account.slot === requestedSlot);
+    if (preferred) {
+      preferred.selection.penalties.push('preferred_slot_honored');
+      return preferred;
+    }
+    candidates[0].selection.penalties.push(`preferred_slot_unavailable:${requestedSlot}`);
+  }
   return candidates[0];
 }
-export async function chooseSlot(stateRoot = resolveStateRoot(), slot?: string, opts: { runId?: string; rootRunId?: string; reservationTtlMs?: number } = {}): Promise<ReservedAccount> {
+export async function chooseSlot(stateRoot = resolveStateRoot(), slot?: string, opts: { runId?: string; rootRunId?: string; reservationTtlMs?: number; softSlot?: boolean } = {}): Promise<ReservedAccount> {
   const accounts = await scanInternalAccounts(stateRoot);
   if (accounts.length === 0) throw new Error('no accounts found');
   const db = openDb(stateRoot);
@@ -1031,7 +1051,7 @@ export async function chooseSlot(stateRoot = resolveStateRoot(), slot?: string, 
       releaseExpiredReservations(db, now);
       const usage = latestUsageEntries(db);
       const activeCounts = activeReservationCounts(db, now);
-      const selected = selectAccount(accounts, usage, activeCounts, stateRoot, slot, now);
+      const selected = selectAccount(accounts, usage, activeCounts, stateRoot, slot, opts.softSlot ? 'soft' : 'hard', now);
       const expiresAt = now + (opts.reservationTtlMs && opts.reservationTtlMs > 0 ? opts.reservationTtlMs : DEFAULT_RESERVATION_TTL_MS);
       selected.selection.reservation_expires_at = expiresAt;
       db.prepare(`
@@ -1521,7 +1541,7 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
   const stateRoot = input.stateRoot || resolveStateRoot();
   const ttlMs = input.expected_runtime_ms + input.ttl_safety_buffer_ms;
   const preferred = input.preferred_slot || await readAffinitySlot(stateRoot, input.session_affinity_key);
-  const account = await chooseSlot(stateRoot, preferred, { reservationTtlMs: ttlMs });
+  const account = await chooseSlot(stateRoot, preferred, { reservationTtlMs: ttlMs, softSlot: true });
   if (input.abort_signal?.aborted) {
     markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'aborted_after_reservation' });
     throw new Error('token lease aborted');

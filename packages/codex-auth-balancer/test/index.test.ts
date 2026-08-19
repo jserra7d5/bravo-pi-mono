@@ -683,7 +683,7 @@ test('repo-local Pi loads the extension and lists the GPT-5.6 family at the upst
   assert.doesNotMatch(output, /\s372K\s/);
 });
 
-test('balanced provider mirrors the installed openai-codex catalog exactly', () => {
+test('balanced provider mirrors the installed openai-codex catalog IDs exactly', () => {
   const native = getModels('openai-codex');
   const balanced = getBalancedCodexModels();
   assert.ok(native.length > 0);
@@ -719,12 +719,42 @@ test('balanced catalog transform re-badges native Codex models and passes contex
       id: `bravo-codex-balanced/${upstream.id}`,
       provider: 'bravo-codex-balanced',
       api: 'openai-codex-responses',
+      ...(upstream.id === 'gpt-5.6-luna'
+        ? { thinkingLevelMap: { ...upstream.thinkingLevelMap, max: 'max' } }
+        : {}),
     });
   }
   // The GPT-5.6 family stays on the 272k window upstream advertises; the balancer must not
   // re-introduce the 372k extended-window override it used to apply here.
   for (const model of balanced) {
     if (/gpt-5\.6-(sol|terra|luna)$/.test(model.id)) assert.equal(model.contextWindow, 272000);
+  }
+});
+
+test('balanced catalog intentionally advertises max thinking only for Luna', () => {
+  const base = {
+    provider: 'openai-codex',
+    api: 'openai-codex-responses',
+    baseUrl: 'https://chatgpt.com/backend-api',
+    reasoning: true,
+    contextWindow: 272000,
+    maxTokens: 128000,
+    cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 },
+    input: ['text'],
+  };
+  const lunaWithoutMax = { ...base, id: 'gpt-5.6-luna', thinkingLevelMap: { xhigh: 'xhigh' } };
+  const lunaWithMax = { ...base, id: 'gpt-5.6-luna', thinkingLevelMap: { xhigh: 'xhigh', max: 'max' } };
+  const nonLuna = { ...base, id: 'gpt-5.6-terra', thinkingLevelMap: { xhigh: 'xhigh' } };
+
+  for (const upstreamLuna of [lunaWithoutMax, lunaWithMax]) {
+    const [luna, terra] = mapBalancedCodexModels([upstreamLuna, nonLuna] as any);
+    assert.deepEqual(luna.thinkingLevelMap, { xhigh: 'xhigh', max: 'max' });
+    assert.deepEqual(terra, {
+      ...nonLuna,
+      id: 'bravo-codex-balanced/gpt-5.6-terra',
+      provider: 'bravo-codex-balanced',
+      api: 'openai-codex-responses',
+    });
   }
 });
 
@@ -1515,4 +1545,60 @@ test('getSlotTokenHealth flags a slot whose refresh token was revoked', async ()
 test('ensureFreshTokens never throws, even when the state root is unreadable', async () => {
   const outcomes = await ensureFreshTokens({ stateRoot: path.join(await tmp(), 'does-not-exist') });
   assert.deepEqual(outcomes, []);
+});
+
+// ── selection policy: concurrency is a preference, never a quota deduction ──
+// Regression seam for the "slot unavailable by policy" failures: a slot with
+// real quota left must stay selectable while requests are in flight, and an
+// affinity pin must degrade to a preference rather than fail the lease.
+async function seedUsableSlot(root: string, slot: string, primaryRemaining: number, secondaryRemaining = 100) {
+  await writeJson(path.join(root, 'accounts', slot, 'auth.json'), { access_token: fakeCodexJwt(`acct-${slot}`), expiry_date: Date.now() + 600_000 });
+  await ingestLiveUsage({ stateRoot: root, slot, rateLimits: { rate_limits: { primary: { remaining_percent: primaryRemaining }, secondary: { remaining_percent: secondaryRemaining } } } });
+}
+const softLeaseArgs = (root: string) => ({ stateRoot: root, provider: 'bravo-codex-balanced' as const, model: 'bravo-codex-balanced/fake', purpose: 'pi-provider-request' as const, expected_runtime_ms: 1000, ttl_safety_buffer_ms: 1000 });
+
+test('in-flight reservations never push a slot with real quota below the hard floor', async () => {
+  const root = await tmp();
+  await seedUsableSlot(root, 'low', 7);
+  // Three concurrent, unfinished leases pinned to the 7%-remaining slot. Under the
+  // old flat 5-point-per-reservation hold this was 7 - 15 -> 0 -> rejected.
+  const held = [];
+  for (let i = 0; i < 3; i += 1) held.push(await startTokenLease(leaseArgs(root, 'low')));
+  assert.deepEqual(held.map(l => l.slot), ['low', 'low', 'low']);
+  const active = (await listReservations({ stateRoot: root })).filter(r => r.state === 'pending');
+  assert.equal(active.length, 3, 'all three leases must still be in flight');
+  // A fourth request while all three are open must still be served.
+  const next = await startTokenLease(leaseArgs(root, 'low'));
+  assert.equal(next.slot, 'low');
+});
+
+test('an affinity-pinned slot that fails policy falls back instead of failing the lease', async () => {
+  const root = await tmp();
+  await seedUsableSlot(root, 'drained', 0);   // below the primary hard floor
+  await seedUsableSlot(root, 'healthy', 80);
+  // Pin the session to the drained slot, then lease with affinity only.
+  const lease = await startTokenLease({ ...softLeaseArgs(root), preferred_slot: 'drained', session_affinity_key: 'sess-fallback' });
+  assert.equal(lease.slot, 'healthy', 'a soft preference must not select a hard-floored slot');
+  const next = await startTokenLease({ ...softLeaseArgs(root), session_affinity_key: 'sess-fallback' });
+  assert.equal(next.slot, 'healthy');
+});
+
+test('an explicit slot request stays hard: unusable slot is an error, not a silent fallback', async () => {
+  const root = await tmp();
+  await seedUsableSlot(root, 'drained', 0);
+  await seedUsableSlot(root, 'healthy', 80);
+  const isolated = await tmp();
+  await assert.rejects(prepareLaunch(isolated, { stateRoot: root, slot: 'drained' }), /slot unavailable by policy: drained/);
+});
+
+test('a real quota gap outranks a single in-flight reservation', async () => {
+  const root = await tmp();
+  await seedUsableSlot(root, 'more', 19);
+  await seedUsableSlot(root, 'less', 7);
+  const held = await startTokenLease(leaseArgs(root, 'more'));
+  assert.equal(held.slot, 'more');
+  // 'more' now carries one active reservation. Old policy charged it twice (a
+  // 5-point quota hold plus a 10-point score penalty) and flipped to 'less'.
+  const auto = await startTokenLease(softLeaseArgs(root));
+  assert.equal(auto.slot, 'more', 'the slot with more quota must win despite being busy');
 });
