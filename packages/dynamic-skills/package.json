@@ -1,6 +1,6 @@
 {
   "name": "@bravo/dynamic-skills",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "description": "Pi extension for dynamic subtree skill discovery.",

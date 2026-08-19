@@ -1,6 +1,6 @@
 {
   "name": "@bravo/codex-auth-balancer",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "description": "Owned-state Codex auth balancer library and CLI.",

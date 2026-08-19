@@ -1,6 +1,6 @@
 {
   "name": "@bravo/pi-extension-task-plane",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "description": "Unified managed background work and external-state monitors for Pi.",
