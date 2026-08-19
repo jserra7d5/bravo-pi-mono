@@ -13,6 +13,12 @@
 // Therefore: affinity wins by default. Non-Fable sessions only leave an account
 // when it genuinely cannot serve the request. Fable retains proactive evacuation
 // because its separately gated, faster-burning budget needs the existing guard.
+//
+// The 95% ceiling applies to FRESH picks for every model: a session with no
+// cache to lose should not be started on a near-exhausted account. It is
+// ignored when every account is above the ceiling, because at that point the
+// move buys nothing and the cheapest account is whichever ranking already
+// prefers.
 
 import type { Claim, ClaimId, Claims } from './claims.js';
 import { claimHasReset, projectExpiredClaims } from './claims.js';
@@ -80,8 +86,10 @@ export type AccountState = {
 };
 
 /**
- * Utilization at which a Fable account is proactively evacuated. Non-Fable
- * routing drains an account to genuine exhaustion instead.
+ * Utilization at which an account stops taking fresh sessions, and at which a
+ * warm Fable session is proactively evacuated. A warm non-Fable session holds
+ * through it and drains to genuine exhaustion, because moving it costs a full
+ * cache re-create.
  *
  * This is a raw-utilization threshold, deliberately not a headroom one.
  */
@@ -103,7 +111,11 @@ export type HeadroomBreakdown = {
   projectedWeeklyResetAt?: number;
   /** Highest raw utilization across the claims this model touches, unscaled. */
   peakUtilization?: number;
-  /** True when peakUtilization crossed the evacuation threshold. */
+  /**
+   * True when peakUtilization crossed the threshold on a claim this model
+   * touches, and that claim does not refill within the cache horizon. Fresh
+   * picks avoid such accounts for any model; warm Fable sessions leave them.
+   */
   evacuating: boolean;
   /** True when serving this request would require spending overage. */
   requiresOverage: boolean;
@@ -237,7 +249,10 @@ export function computeHeadroom(
 
   const headroom = sawAny ? min : UNKNOWN_HEADROOM;
   const spendableHeadroom = sawAny ? minSpendable : UNKNOWN_HEADROOM;
-  const evacuating = quota.extraClaim !== undefined && evacuationTriggered;
+  // Model-agnostic: `evacuationTriggered` already only saw the claims this
+  // model is gated on. What differs by model is the CONSEQUENCE — see
+  // `selectAccount`, where a warm non-Fable session holds through it.
+  const evacuating = evacuationTriggered;
   return {
     ...base,
     headroom,
@@ -268,7 +283,10 @@ export type SelectInput = {
    * affinity holds through every positive amount of model-relevant quota.
    */
   affinityFloor?: number;
-  /** Raw utilization at or above which a Fable account is evacuated. */
+  /**
+   * Raw utilization at or above which an account stops taking fresh sessions
+   * (all models) and a warm Fable session is evacuated.
+   */
   evacuateThreshold?: number;
 };
 
@@ -306,7 +324,13 @@ export function selectAccount(input: SelectInput): Selection {
   const bySlot = new Map(breakdown.map(b => [b.slot, b]));
 
   const serviceable = breakdown.filter(b => b.headroom > (fable ? floor : 0) && !b.requiresOverage);
-  const healthy = fable ? serviceable.filter(b => !b.evacuating) : serviceable;
+  // The ceiling applies to fresh picks for every model, but only while it
+  // leaves somewhere to go. When every serviceable account is above it, the
+  // move is pure cost, so the ceiling is dropped and ranking decides.
+  const belowCeiling = serviceable.filter(b => !b.evacuating);
+  // Fable keeps its dedicated all-evacuating path below, which prefers the
+  // sticky slot's cache. Non-Fable has no such path, so it falls back here.
+  const healthy = fable || belowCeiling.length > 0 ? belowCeiling : serviceable;
   const rankFable = (pool: HeadroomBreakdown[]) =>
     [...pool].sort((a, b) =>
       b.spendableHeadroom - a.spendableHeadroom ||
@@ -339,7 +363,7 @@ export function selectAccount(input: SelectInput): Selection {
       }
       // Fable evacuation remains proactive, but never pays a cache re-create
       // when every alternative is also evacuating.
-      if (healthy.length === 0) {
+      if (belowCeiling.length === 0) {
         return {
           slot: held.slot,
           decision: 'evacuating-fallback',
@@ -350,6 +374,7 @@ export function selectAccount(input: SelectInput): Selection {
     }
   }
 
+  const allAboveCeiling = belowCeiling.length === 0 && serviceable.length > 0;
   const pick = rank(healthy)[0];
   if (pick) {
     const broke = Boolean(input.affinitySlot && input.affinitySlot !== pick.slot);
@@ -363,9 +388,11 @@ export function selectAccount(input: SelectInput): Selection {
           : `sticky slot ${input.affinitySlot} could not serve; moved to ${pick.slot} (one cache re-create)`
         : fable
           ? `most spendable Fable headroom (${pick.spendableHeadroom.toFixed(3)} conserved, ${pick.headroom.toFixed(3)} raw on ${pick.bindingClaim ?? 'unknown'})`
-          : pick.projectedWeeklyResetAt === undefined
-            ? `draining ${pick.slot}; general 7d reset unknown (stable slot order)`
-            : `draining ${pick.slot}; earliest projected general 7d reset ${new Date(pick.projectedWeeklyResetAt).toISOString()}`,
+          : allAboveCeiling
+            ? `every account at or above ${(threshold * 100).toFixed(0)}%; draining ${pick.slot} anyway (moving buys nothing)`
+            : pick.projectedWeeklyResetAt === undefined
+              ? `draining ${pick.slot}; general 7d reset unknown (stable slot order)`
+              : `draining ${pick.slot}; earliest projected general 7d reset ${new Date(pick.projectedWeeklyResetAt).toISOString()}`,
       breakdown,
     };
   }

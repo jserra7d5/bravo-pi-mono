@@ -143,20 +143,25 @@ function futureReset(claim: Claim | undefined, nowMs: number): number | undefine
 }
 
 /**
- * Evacuation, computed the way `computeHeadroom` computes it.
+ * The threshold marker, computed the way `computeHeadroom` computes it.
  *
- * Two divergences would otherwise make the badge a liar in both directions: a
- * claim that refills within the cache horizon does NOT trigger a move (moving
- * costs 20x and saves nothing), and `7d_oi` — the Fable-only weekly — does
- * trigger one, despite not being one of the two bars on the line.
+ * It means "no fresh session starts here" for every model, and additionally
+ * "a warm session leaves here" for Fable. Two divergences would otherwise make
+ * the badge a liar in both directions: a claim that refills within the cache
+ * horizon does NOT trigger a move (moving costs 20x and saves nothing), and
+ * `7d_oi` — the Fable-only weekly — does trigger one for Fable, despite not
+ * being one of the two bars on the line. It is ignored for other models,
+ * whose quota it does not gate.
  */
 function isEvacuating(
   claims: Record<string, Claim> | undefined,
   nowMs: number,
   model: string | undefined,
 ): boolean {
-  if (!claims || quotaForModel(model).extraClaim === undefined) return false;
-  for (const id of ['5h', '7d', '7d_oi']) {
+  if (!claims) return false;
+  const quota = quotaForModel(model);
+  const ids = ['5h', '7d', ...(quota.extraClaim ? [quota.extraClaim] : [])];
+  for (const id of ids) {
     const claim = claims[id];
     if (!claim || claim.utilization === undefined) continue;
     if (claimHasReset(claim, nowMs)) continue;

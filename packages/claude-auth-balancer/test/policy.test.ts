@@ -360,3 +360,97 @@ test('non-Fable known resets sort before missing resets and ties use stable slot
     assert.equal(s.slot, '2', 'canonical numeric-aware ordering puts slot 2 before slot 10');
   }
 });
+
+// --- the fresh-pick ceiling ------------------------------------------------
+//
+// Reproduces the observed live state on 2026-08-19: slot 2 at 97% weekly with
+// the earlier reset, slot 1 at 40% with the later one. Drain-first ranking on
+// its own sends every fresh session to the 97% account.
+
+const CEILING_HOT = {
+  'anthropic-ratelimit-unified-7d-status': 'allowed_warning',
+  'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + 2 * 86400),
+  'anthropic-ratelimit-unified-7d-utilization': '0.97',
+};
+
+const CEILING_COOL = {
+  'anthropic-ratelimit-unified-7d-status': 'allowed',
+  'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + 5 * 86400),
+  'anthropic-ratelimit-unified-7d-utilization': '0.40',
+};
+
+test('a fresh non-Fable session skips a 97% account even when it resets first', () => {
+  const s = selectAccount({
+    accounts: [nad(CEILING_COOL), joseph(CEILING_HOT)],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(s.slot, '1', 'drain-first must not start a cacheless session on a 97% account');
+  assert.equal(s.decision, 'fresh');
+});
+
+test('a warm non-Fable session on a 97% account still holds through the ceiling', () => {
+  const s = selectAccount({
+    accounts: [nad(CEILING_COOL), joseph(CEILING_HOT)],
+    model: 'claude-opus-5',
+    affinitySlot: '2',
+    nowMs: NOW,
+  });
+  assert.equal(s.slot, '2', 'the cache is worth more than the 3% left elsewhere');
+  assert.equal(s.decision, 'affinity-hold');
+});
+
+test('with every non-Fable account above the ceiling, drain-first decides again', () => {
+  const s = selectAccount({
+    accounts: [nad({ ...CEILING_HOT, 'anthropic-ratelimit-unified-7d-utilization': '0.96' }), joseph(CEILING_HOT)],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  // Both resets are equal here, so the tie breaks on slot order; what matters
+  // is that a slot was returned at all rather than an `exhausted` verdict.
+  assert.equal(s.decision, 'fresh');
+  assert.equal(s.slot, '1');
+  assert.match(s.reason, /every account at or above 95%/);
+});
+
+test('the fresh-pick ceiling still prefers the earliest reset among cool accounts', () => {
+  const earlier = { ...CEILING_COOL, 'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + 3 * 86400) };
+  const s = selectAccount({
+    accounts: [nad(CEILING_COOL), { ...joseph(earlier), slot: '3' }],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(s.slot, '3', 'the ceiling filters the pool; it does not replace the ranking');
+});
+
+test('a non-Fable session whose slot exhausted lands below the ceiling, not on the hottest', () => {
+  const spent: AccountState = {
+    slot: '3',
+    health: 'ok',
+    claims: parseClaims({ 'anthropic-ratelimit-unified-7d-utilization': '1.0' }),
+  };
+  const s = selectAccount({
+    accounts: [spent, nad(CEILING_COOL), joseph(CEILING_HOT)],
+    model: 'claude-opus-5',
+    affinitySlot: '3',
+    nowMs: NOW,
+  });
+  assert.equal(s.slot, '1');
+  assert.equal(s.decision, 'affinity-broken');
+});
+
+test('a 5h window refilling within the cache horizon does not block a fresh non-Fable pick', () => {
+  const soon = {
+    'anthropic-ratelimit-unified-5h-status': 'allowed_warning',
+    'anthropic-ratelimit-unified-5h-reset': String(Math.floor(NOW / 1000) + 7 * 60),
+    'anthropic-ratelimit-unified-5h-utilization': '0.98',
+    ...CEILING_HOT,
+    'anthropic-ratelimit-unified-7d-utilization': '0.10',
+  };
+  const s = selectAccount({
+    accounts: [joseph(soon), nad(CEILING_COOL)],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(s.slot, '2', 'a bucket that refills before the cache expires is not a reason to move');
+});
