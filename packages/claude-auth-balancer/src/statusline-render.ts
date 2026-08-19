@@ -25,6 +25,7 @@ const RED = '\u001b[31m';
 const GREEN = '\u001b[32m';
 const CYAN = '\u001b[36m';
 const YELLOW = '\u001b[33m';
+const MAGENTA = '\u001b[35m';
 
 /**
  * Glyphs.
@@ -320,6 +321,20 @@ function note(text: string, opts: Required<RenderOptions>): string {
   return paint(fitted, DIM, opts.color);
 }
 
+function effortSegment(effort: StatuslineModel['effort'], enabled: boolean): string | undefined {
+  if (effort === undefined) return undefined;
+  let style: string;
+  switch (effort.level) {
+    case 'low': style = DIM; break;
+    case 'medium': style = GREEN; break;
+    case 'high': style = CYAN; break;
+    case 'xhigh': style = YELLOW; break;
+    case 'max': style = `${BOLD}${MAGENTA}`; break;
+    default: return paint('effort ?', DIM, enabled);
+  }
+  return `${paint('effort', DIM, enabled)} ${paint(effort.level, style, enabled)}`;
+}
+
 function renderContextLine(model: StatuslineModel, opts: Required<RenderOptions>): string {
   const c = opts.color;
   const g = opts.glyphs;
@@ -345,6 +360,8 @@ function renderContextLine(model: StatuslineModel, opts: Required<RenderOptions>
   // on a light-theme terminal, so the thing marked most important is the one
   // thing that disappears.
   if (model.modelName) tail.push(model.modelName);
+  const effort = effortSegment(model.effort, c);
+  if (effort) tail.push(effort);
   if (model.agentType && model.agentType !== 'main') {
     tail.push(paint(`[${model.agentType}]`, CYAN, c));
   }

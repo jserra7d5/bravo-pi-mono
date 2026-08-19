@@ -6,7 +6,7 @@ import { after, test } from 'node:test';
 
 import { AffinityStore } from '../src/affinity.js';
 import { contextUsage, gather, parsePayload, shortLabel } from '../src/statusline.js';
-import type { StatuslinePayload } from '../src/statusline.js';
+import type { StatuslineModel, StatuslinePayload } from '../src/statusline.js';
 import {
   ASCII_GLYPHS,
   bar,
@@ -222,6 +222,94 @@ test('account labels lead with the slot and drop the domain', () => {
   assert.equal(shortLabel('info@notanotherdashboard.com', '1'), '1 info');
   assert.equal(shortLabel('joseph.b.serra@gmail.com', '2'), '2 joseph.b.se…');
   assert.equal(shortLabel(undefined, '3'), '3');
+});
+
+function effortLine(effort: StatuslineModel['effort'], color = false, width = 120): string {
+  return render(
+    {
+      modelName: 'Sonnet 4.6',
+      effort,
+      contextPercent: 64,
+      contextTokens: 128_000,
+      contextWindow: 200_000,
+      project: 'bravo-pi-mono',
+      costUsd: 1.24,
+      accounts: [],
+      balancerUnknown: false,
+      sessionAttributed: false,
+    },
+    { width, color },
+    NOW,
+  ).split('\n')[0]!;
+}
+
+test('gather preserves absent effort and propagates present valid or invalid runtime values', () => {
+  const options = { stateRoot: tmp(), authswapRoot: tmp(), nowMs: NOW };
+  assert.equal(gather({}, options).effort, undefined);
+  assert.deepEqual(gather({ effort: { level: 'high' } }, options).effort, { level: 'high' });
+  assert.deepEqual(gather(parsePayload('{"effort":{"level":42}}'), options).effort, { level: null });
+  assert.deepEqual(gather(parsePayload('{"effort":null}'), options).effort, { level: null });
+});
+
+test('all official effort values render immediately after model with the approved colour ramp', () => {
+  const styles: Record<string, string> = {
+    low: `${ESC}[2m`,
+    medium: `${ESC}[32m`,
+    high: `${ESC}[36m`,
+    xhigh: `${ESC}[33m`,
+    max: `${ESC}[1m${ESC}[35m`,
+  };
+  for (const [level, style] of Object.entries(styles)) {
+    const line = effortLine({ level }, true);
+    assert.ok(
+      line.includes(`Sonnet 4.6  ${ESC}[2meffort${ESC}[0m ${style}${level}${ESC}[0m`),
+      `${level} effort did not use its canonical style: ${JSON.stringify(line)}`,
+    );
+  }
+  const max = effortLine({ level: 'max' }, true);
+  assert.ok(max.includes(`${ESC}[1m${ESC}[35mmax${ESC}[0m`), 'max must be bold magenta');
+  assert.ok(!max.includes(`${ESC}[31m`), 'max intensity is not an error and must never be red');
+});
+
+test('absent effort renders nothing while unsupported and non-string values render a dim question mark', () => {
+  assert.doesNotMatch(effortLine(undefined), /effort/);
+  for (const level of ['future', '__proto__', 'constructor', 'toString']) {
+    assert.match(effortLine({ level }), /Sonnet 4\.6  effort \?/, `${level} must be unsupported`);
+  }
+  assert.ok(
+    effortLine({ level: null }, true).includes(`${ESC}[2meffort ?${ESC}[0m`),
+    'invalid runtime input is neutral and dim',
+  );
+});
+
+test('no-color effort output has canonical text and no ANSI escapes', () => {
+  for (const level of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    const line = effortLine({ level });
+    assert.match(line, new RegExp(`Sonnet 4\\.6  effort ${level}`));
+    assert.ok(!line.includes(ESC));
+  }
+});
+
+test('effort is one responsive segment and tails drop cost, project, effort, then model', () => {
+  const all = effortLine({ level: 'high' }, false, 74);
+  assert.match(all, /Sonnet 4\.6  effort high  bravo-pi-mono  \$1\.24$/);
+
+  const noCost = effortLine({ level: 'high' }, false, 69);
+  assert.match(noCost, /Sonnet 4\.6  effort high  bravo-pi-mono$/);
+  assert.doesNotMatch(noCost, /\$1\.24/);
+
+  const noProject = effortLine({ level: 'high' }, false, 55);
+  assert.match(noProject, /Sonnet 4\.6  effort high$/);
+  assert.doesNotMatch(noProject, /bravo-pi-mono|\$1\.24/);
+
+  const noEffort = effortLine({ level: 'high' }, false, 45);
+  assert.match(noEffort, /Sonnet 4\.6$/);
+  assert.doesNotMatch(noEffort, /effort|bravo-pi-mono|\$1\.24/);
+
+  assert.ok(visibleWidth(all) <= 74);
+  assert.ok(visibleWidth(noCost) <= 69);
+  assert.ok(visibleWidth(noProject) <= 55);
+  assert.ok(visibleWidth(noEffort) <= 45);
 });
 
 // ---------------------------------------------------------------------------

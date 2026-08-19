@@ -58,6 +58,7 @@ export type StatuslinePayload = {
   cost?: { total_cost_usd?: number };
   exceeds_200k_tokens?: boolean;
   output_style?: { name?: string };
+  effort?: { level?: string };
 };
 
 export type AccountView = {
@@ -96,6 +97,8 @@ export const OBSERVATION_STALE_MS = 10 * 60 * 60 * 1000;
 
 export type StatuslineModel = {
   modelName?: string;
+  /** Absent means no payload field; null means the present field was invalid. */
+  effort?: { level: string | null };
   project?: string;
   agentType?: string;
   contextPercent?: number;
@@ -316,8 +319,20 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
     accounts = [];
   }
 
+  const effort = Object.prototype.hasOwnProperty.call(payload, 'effort')
+    ? {
+        level:
+          payload.effort !== null &&
+          typeof payload.effort === 'object' &&
+          typeof payload.effort.level === 'string'
+            ? payload.effort.level
+            : null,
+      }
+    : undefined;
+
   return {
     modelName: payload.model?.display_name ?? payload.model?.id,
+    effort,
     project: projectName(payload),
     agentType: payload.agent_type,
     contextPercent: ctx.percent,
