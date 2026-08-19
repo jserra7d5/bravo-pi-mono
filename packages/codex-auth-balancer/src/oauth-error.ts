@@ -39,7 +39,11 @@ export function classifyOAuthRefreshError(message: string): OAuthErrorKind {
 
 // JWTs (three base64url segments) and Bearer headers must never be persisted to
 // the reservation event log or written to stderr.
-const JWT_RE = /[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
+// Anchored on the `eyJ` header prefix: every JWT header is base64url-encoded JSON, so it
+// always begins with the encoding of `{"`. Without the anchor this pattern matched ANY three
+// dot-separated alphanumeric runs — including every hostname — and silently replaced the host
+// in error URLs with [REDACTED_TOKEN], destroying the diagnostics it was meant to protect.
+const JWT_RE = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
 const BEARER_RE = /Bearer\s+\S+/gi;
 const OPENAI_KEY_RE = /\bsk-[A-Za-z0-9_-]+/g;
 

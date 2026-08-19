@@ -38,3 +38,17 @@ test('redactSecretsInText scrubs JWTs and Bearer headers', () => {
   assert.equal(redactSecretsInText('token=eyJabc.eyJdef.sigghi end'), 'token=[REDACTED_TOKEN] end');
   assert.equal(redactSecretsInText('auth: Bearer sk-xyz123'), 'auth: Bearer [REDACTED]');
 });
+
+test('redactSecretsInText leaves hostnames and dotted identifiers intact', () => {
+  // Regression: the JWT pattern was unanchored, so any three dot-separated alphanumeric
+  // runs matched. Real error text from an upstream prompt-flag lost its hostname.
+  const flagged = 'Invalid prompt: your prompt was flagged. See https://platform.openai.com/docs/guides/reasoning#advice-on-prompting';
+  assert.equal(redactSecretsInText(flagged), flagged);
+  assert.equal(redactSecretsInText('at src.index.ts:42'), 'at src.index.ts:42');
+  assert.equal(redactSecretsInText('host auth.openai.com refused'), 'host auth.openai.com refused');
+  // Still redacts an actual JWT, including one embedded in a sentence with a URL.
+  assert.equal(
+    redactSecretsInText('token eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.sig at https://auth.openai.com/oauth/token'),
+    'token [REDACTED_TOKEN] at https://auth.openai.com/oauth/token',
+  );
+});
