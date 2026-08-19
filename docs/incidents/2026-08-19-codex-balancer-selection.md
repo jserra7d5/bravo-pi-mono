@@ -27,7 +27,7 @@ Anything marked **unverified** is a second-hand report I did not confirm myself.
 | 13 | `task` CLI documented but absent | async-subagents | medium | open |
 | 14 | Remaining quota invisible at dispatch | async-subagents | medium | open |
 | 15 | Cross-session `pkill -f` kills sibling builds | operational | medium | open |
-| 16 | Content filter flags injected review rubrics | operational | low | open |
+| 16 | Content filter flags security-review remediation briefs | operational | medium | open |
 | 17 | 30-minute run wall expires broad briefs | async-subagents | low | open |
 
 ---
@@ -270,18 +270,40 @@ it with `setsid make --directory data check`, which only dodges the pattern.
 
 Cleanup patterns need to be scoped to the session's own process group.
 
-### 16. Content filter flags injected review rubrics
+### 16. Content filter flags security-review remediation briefs
 
-Two sessions lost lanes to upstream moderation. One died on an `--type answer`
-message carrying a code-review severity rubric — dense with "security-relevant",
-"forbidden", "refuses", "attack" — injected without the surrounding code context
-that would frame it as review guidance. The other saw two flags in the same
-continuation lineage, since a continuation carries its accumulated transcript
-into the moderation check.
+Three lanes lost to upstream moderation across two sessions, all on the same
+mechanism: **text describing a security defect reads to a moderation classifier
+like an attempt to cause one.**
 
-Practical mitigations: put rubrics in the initial brief rather than injecting
-them mid-run, and start a fresh lane with a summarized brief rather than
-continuing a lineage that has been flagged twice.
+- A `--type answer` message carrying a code-review severity rubric —
+  "security-relevant", "forbidden", "refuses", "attack" — injected mid-run
+  without the surrounding code context that would frame it as review guidance.
+- Two flags in one continuation lineage, since a continuation carries its
+  accumulated transcript into the moderation check.
+- `run_mt027mim_9Bfjk2gsbjo`, a remediation lane pointed at a review brief
+  containing "always refuses", "silently drops its filter", "sanitization
+  leaked".
+
+This is not incidental. The adversarial-review → remediation loop is a standard
+workflow here, and a remediation brief is *by construction* a list of security
+defects written in the vocabulary that trips the classifier. Expect it to recur
+on any lane whose brief is review output, and note that severity scales with how
+security-focused the review was — the better the review, the likelier the
+remediation lane is refused.
+
+Practical mitigations, in order of how well they have held up:
+
+1. Do not continue a lineage that has been flagged. Start a fresh lane with a
+   summarized brief; a continuation re-submits the whole flagged transcript.
+2. Put rubrics in the initial brief, where task context frames them, rather than
+   injecting them as a bare mid-run message.
+3. In remediation briefs, describe findings by location and required outcome
+   rather than by quoting the attack narrative — "input filter drops a case at
+   handler.ts:88; make it total" rather than "sanitization leaked".
+
+Worth considering whether remediation lanes should route to a provider without
+this classifier rather than being reworded around it.
 
 ---
 
