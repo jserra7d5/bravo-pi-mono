@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { hostname, tmpdir } from "node:os";
-import { currentProcessIdentityToken, probeProcessIdentity, withRunMutationLock } from "../src/runLock.js";
+import { currentProcessIdentityToken, probeProcessIdentity, withFileMutationLockSync, withRunMutationLock } from "../src/runLock.js";
 
 function workspace(): string {
   return mkdtempSync(join(tmpdir(), "async-subagents-lock-"));
@@ -66,6 +66,64 @@ test("process identity probe returns the current process start token and livenes
   assert.equal(snapshot.alive, true);
   assert.equal(snapshot.identity, currentProcessIdentityToken());
   assert.ok(snapshot.identity);
+});
+
+test("withFileMutationLockSync serializes read-modify-write across processes", async () => {
+  const root = workspace();
+  const lockDir = join(root, "counter.lock");
+  const counterPath = join(root, "counter.json");
+  writeFileSync(counterPath, JSON.stringify({ count: 0 }), "utf8");
+  const moduleUrl = new URL("../src/runLock.js", import.meta.url).href;
+  const script = `
+    import { readFileSync, writeFileSync } from "node:fs";
+    import { withFileMutationLockSync } from ${JSON.stringify(moduleUrl)};
+    const [lockDir, counterPath] = process.argv.slice(1);
+    for (let i = 0; i < 20; i += 1) withFileMutationLockSync(lockDir, () => {
+      const value = JSON.parse(readFileSync(counterPath, "utf8"));
+      writeFileSync(counterPath, JSON.stringify({ count: value.count + 1 }), "utf8");
+    });
+  `;
+  const workers = Array.from({ length: 6 }, () => new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script, lockDir, counterPath], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`worker exited ${code}: ${stderr}`)));
+  }));
+  await Promise.all(workers);
+  assert.equal(JSON.parse(readFileSync(counterPath, "utf8")).count, 120);
+});
+
+test("withFileMutationLockSync never admits simultaneous cross-process critical sections", async () => {
+  const root = workspace();
+  const lockDir = join(root, "exclusive.lock");
+  const activeDir = join(root, "active");
+  const violationPath = join(root, "overlap");
+  const moduleUrl = new URL("../src/runLock.js", import.meta.url).href;
+  const script = `
+    import { mkdirSync, rmdirSync, writeFileSync } from "node:fs";
+    import { withFileMutationLockSync } from ${JSON.stringify(moduleUrl)};
+    const [lockDir, activeDir, violationPath] = process.argv.slice(1);
+    const signal = new Int32Array(new SharedArrayBuffer(4));
+    for (let i = 0; i < 30; i += 1) withFileMutationLockSync(lockDir, () => {
+      try { mkdirSync(activeDir); } catch { writeFileSync(violationPath, "overlap"); throw new Error("simultaneous entry"); }
+      try { Atomics.wait(signal, 0, 0, 2); } finally { rmdirSync(activeDir); }
+    });
+  `;
+  await Promise.all(Array.from({ length: 8 }, () => new Promise<void>((resolveWorker, rejectWorker) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script, lockDir, activeDir, violationPath], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.once("error", rejectWorker);
+    child.once("exit", (code) => code === 0 ? resolveWorker() : rejectWorker(new Error(`worker exited ${code}: ${stderr}`)));
+  })));
+  assert.equal(existsSync(violationPath), false);
+});
+
+test("withFileMutationLockSync releases its lock when mutation throws", () => {
+  const lockDir = join(workspace(), "file.lock");
+  assert.throws(() => withFileMutationLockSync(lockDir, () => { throw new Error("fault"); }), /fault/);
+  assert.equal(withFileMutationLockSync(lockDir, () => "recovered").value, "recovered");
 });
 
 test("withRunMutationLock serializes concurrent mutations", async () => {

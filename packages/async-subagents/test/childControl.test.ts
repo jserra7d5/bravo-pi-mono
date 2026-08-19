@@ -428,8 +428,9 @@ test("child-control establishes poll when pre-existing inbox is malformed", asyn
   }
 });
 
-test("child-control does not resend when bookkeeping event append fails after delivery", async () => {
+test("child-control durably resumes a blocked answer after receipt event storage fails without replay", async () => {
   const fixture = childControlFixture();
+  fixture.store.writeStatus({ ...fixture.store.readStatus(fixture.runId), state: "blocked", needs: "parent answer", summary: "Waiting for parent answer" });
   const scheduler = makeScheduler();
   const clock = createRenderClock({ baseIntervalMs: 1000, scheduler });
   const originalError = console.error;
@@ -449,20 +450,68 @@ test("child-control does not resend when bookkeeping event append fails after de
         mkdirSync(fixture.paths.eventsPath);
         fixture.store.appendInboxMessage(
           fixture.runId,
-          createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", body: "Bookkeeping may fail" }),
+          createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", type: "answer", body: "Scope approved" }),
         );
 
         scheduler.advance(1000);
         await tick(clock);
         assert.equal(fixture.sentUserMessages.length, 1);
-        assert.match(String(fixture.sentUserMessages[0]?.content), /Bookkeeping may fail/);
+        assert.match(String(fixture.sentUserMessages[0]?.content), /Scope approved/);
         assert.equal(errors.length, 1);
+        const status = fixture.store.readStatus(fixture.runId);
+        const summary = fixture.store.readRunSummary(fixture.runId);
+        assert.equal(status.state, "running");
+        assert.equal(status.needs, null);
+        assert.equal(summary?.state, "running");
+        assert.equal(summary?.summary, status.summary);
 
         scheduler.advance(1000);
         await tick(clock);
         assert.equal(fixture.sentUserMessages.length, 1, "post-send event append failure must not cause a resend");
         assert.equal(errors.length, 1);
 
+        await fixture.handlers.get("session_shutdown")?.();
+      },
+    );
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("child-control does not resume a blocked context message when receipt event storage fails", async () => {
+  const fixture = childControlFixture();
+  fixture.store.writeStatus({ ...fixture.store.readStatus(fixture.runId), state: "blocked", needs: "parent answer", summary: "Waiting for parent answer" });
+  const scheduler = makeScheduler();
+  const clock = createRenderClock({ baseIntervalMs: 1000, scheduler });
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    await withEnv(
+      {
+        ASYNC_SUBAGENTS_RUN_ID: fixture.runId,
+        ASYNC_SUBAGENTS_RUN_DIR: fixture.paths.runDir,
+        ASYNC_SUBAGENTS_PARENT_RUN_ID: "root_test",
+      },
+      async () => {
+        await startChild(fixture, clock);
+        rmSync(fixture.paths.eventsPath, { force: true });
+        mkdirSync(fixture.paths.eventsPath);
+        fixture.store.appendInboxMessage(
+          fixture.runId,
+          createInboxMessage({ toRunId: fixture.runId, fromRunId: "root_test", type: "context", body: "FYI only" }),
+        );
+
+        scheduler.advance(1000);
+        await tick(clock);
+        assert.equal(fixture.sentUserMessages.length, 1);
+        const status = fixture.store.readStatus(fixture.runId);
+        assert.equal(status.state, "blocked");
+        assert.equal(status.needs, "parent answer");
+        assert.equal(fixture.store.readRunSummary(fixture.runId)?.summary, status.summary);
+
+        scheduler.advance(1000);
+        await tick(clock);
+        assert.equal(fixture.sentUserMessages.length, 1);
         await fixture.handlers.get("session_shutdown")?.();
       },
     );
@@ -585,8 +634,12 @@ test("child-control restores running state when an answer unsticks a blocked chi
       childControlExtension(pi as never);
       await handlers.get("session_start")?.();
       const status = store.readStatus(runId);
+      const received = store.readEvents(runId).records.at(-1);
       assert.equal(status.state, "running");
       assert.equal(status.needs, null);
+      assert.equal(received?.type, "message.received");
+      assert.equal(status.lastEventId, received?.eventId);
+      assert.equal(status.summary, received?.summary);
       await handlers.get("session_shutdown")?.();
     },
   );
@@ -671,7 +724,11 @@ test("child-control leaves running state untouched for context messages", async 
     async () => {
       childControlExtension(pi as never);
       await handlers.get("session_start")?.();
-      assert.equal(store.readStatus(runId).state, "blocked");
+      const status = store.readStatus(runId);
+      const received = store.readEvents(runId).records.at(-1);
+      assert.equal(status.state, "blocked");
+      assert.equal(status.lastEventId, received?.eventId);
+      assert.equal(status.summary, received?.summary);
       await handlers.get("session_shutdown")?.();
     },
   );

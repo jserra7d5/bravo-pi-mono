@@ -924,15 +924,18 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       effectiveMaxRunMs,
     };
     const supervisorInputPath = writeSupervisorInput(paths.runDir, supervisorInput);
+    let started: boolean;
     if (input.fake?.mode === "immediate") {
       await runSupervisor({ ...supervisorInput, supervisorAdapter: "stdio", fake: input.fake });
+      started = true;
     } else {
       const spawnError = await spawnDetachedSupervisor(supervisorInputPath);
       if (spawnError && !store.readResult(runId)) writeLauncherFailure(store, supervisorInput, spawnError);
+      const launchResult = store.readResult(runId);
+      started = !spawnError || (!!launchResult && launchResult.error?.code !== "SUPERVISOR_LAUNCH_FAILED");
       for (let i = 0; i < 20 && store.readStatus(runId).state === "queued" && !store.readResult(runId); i++) await delay(50);
     }
     const status = store.readStatus(runId);
-    const terminal = ["completed", "failed", "cancelled", "expired"].includes(status.state);
     scheduleAutoArchive(store, paths.logsDir, { ...process.env, ...(input.env ?? {}) });
     return {
       runId,
@@ -975,7 +978,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
       tmuxSession: status.tmuxSession,
       tmuxPane: status.tmuxPane,
       transcriptPath: status.transcriptPath,
-      started: status.state === "running" || terminal,
+      started,
       waited: false,
       contextPolicy: status.contextPolicy,
       sessionPolicy: status.sessionPolicy,
@@ -1113,15 +1116,18 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   };
   const supervisorInputPath = writeSupervisorInput(paths.runDir, supervisorInput);
 
+  let started: boolean;
   if (input.fake?.mode === "immediate") {
     await runSupervisor(supervisorInput);
+    started = true;
   } else {
     const spawnError = await spawnDetachedSupervisor(supervisorInputPath);
     if (spawnError && !store.readResult(runId)) writeLauncherFailure(store, supervisorInput, spawnError);
+    const launchResult = store.readResult(runId);
+    started = !spawnError || (!!launchResult && launchResult.error?.code !== "SUPERVISOR_LAUNCH_FAILED");
   }
 
   const status = store.readStatus(runId);
-  const terminal = ["completed", "failed", "cancelled", "expired"].includes(status.state);
   scheduleAutoArchive(store, paths.logsDir, { ...process.env, ...(input.env ?? {}) });
   return {
     runId,
@@ -1133,7 +1139,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     state: status.state,
     model: status.model,
     thinkingLevel: status.thinkingLevel,
-    started: status.state === "running" || terminal,
+    started,
     waited: false,
     contextPolicy: status.contextPolicy,
     sessionPolicy: status.sessionPolicy,

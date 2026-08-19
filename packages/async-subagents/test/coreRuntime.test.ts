@@ -158,6 +158,21 @@ async function waitForStatusState(store: RunStore, runId: string, state: string,
   assert.equal(store.readStatus(runId).state, state);
 }
 
+async function waitForClaudeTmuxTransport(store: RunStore, runId: string, timeoutMs = 5000): Promise<void> {
+  const ready = () => {
+    const status = store.readStatus(runId);
+    return status.state === "running"
+      && status.harness === "claude"
+      && status.claudeTransport === "mcp"
+      && Boolean(status.tmuxSocket && status.tmuxSession && status.tmuxPane && status.transcriptPath);
+  };
+  const startedAt = Date.now();
+  while (!ready() && Date.now() - startedAt < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(ready(), true, `Claude tmux transport did not become ready: ${JSON.stringify(store.readStatus(runId))}`);
+}
+
 async function waitForPidExit(pid: number, timeoutMs = 1500): Promise<boolean> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -205,6 +220,49 @@ test("startSubagent drives a detached fake child lifecycle", async () => {
   const launch = JSON.parse(readFileSync(join(started.runDir, "logs", "launch.json"), "utf8"));
   assert.equal(launch.args.includes("--thinking"), false);
   assert.equal(Object.hasOwn(launch, "thinkingLevel"), false);
+});
+
+test("detached start reports handed-off queued run as started before delayed supervisor ownership", async () => {
+  const w = workspace();
+  const runId = "run_delayed_ownership";
+  const runDir = join(w.runRoot, runId);
+  mkdirSync(runDir, { recursive: true });
+
+  let releaseLock!: () => void;
+  let signalAcquired!: () => void;
+  const lockReleased = new Promise<void>((resolve) => { releaseLock = resolve; });
+  const lockAcquired = new Promise<void>((resolve) => { signalAcquired = resolve; });
+  const heldLock = withRunMutationLock(runDir, async () => {
+    signalAcquired();
+    await lockReleased;
+  });
+  await lockAcquired;
+
+  try {
+    const started = await startSubagent({
+      runId,
+      agent: "scout",
+      task: "Complete after delayed supervisor ownership",
+      cwd: w.root,
+      runRoot: w.runRoot,
+      parentRunId: "root_test",
+      fake: { mode: "child", env: { ASYNC_SUBAGENTS_FAKE_DELAY_MS: "50" } },
+    });
+
+    assert.equal(started.state, "queued");
+    assert.equal(started.started, true);
+    const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
+    assert.equal(store.readStatus(runId).state, "queued");
+
+    releaseLock();
+    await heldLock;
+    const waited = await waitSubagents(store, { runIds: [runId], timeoutMs: 30_000, pollIntervalMs: 25 });
+    assert.equal(waited.state, "ready");
+    assert.equal(waited.results[0]?.state, "completed");
+  } finally {
+    releaseLock();
+    await heldLock;
+  }
 });
 
 test("Claude start resolves requested skill directories before preparing Claude home", async () => {
@@ -280,6 +338,7 @@ Claude scout body.
 
   // Start returns as soon as the run is handed to the tmux adapter; pane claim may still be pending.
   assert.ok(["queued", "running"].includes(started.state), `unexpected start state: ${started.state}`);
+  assert.equal(started.started, true);
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
   const waited = await waitSubagents(store, { runIds: [started.runId], timeoutMs: 30_000, pollIntervalMs: 50 });
   assert.equal(waited.state, "ready");
@@ -331,7 +390,7 @@ Claude scout body.
 `, "utf8");
   const started = await startSubagent({ agent: "claude-scout", task: "Read message", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_test", env: { PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FAKE_CLAUDE_WAIT_MS: "500", FAKE_CLAUDE_EXIT_DELAY_MS: "100" } });
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
-  await new Promise((resolve) => setTimeout(resolve, 250));
+  await waitForClaudeTmuxTransport(store, started.runId);
   const sent = sendSubagentMessage(store, { runId: started.runId, fromRunId: "root_test", body: "hello", requiresAck: true });
   assert.equal(sent.liveDelivered, true);
   const ack = await waitForMessageAck(store, { runId: started.runId, messageId: sent.messageId, timeoutMs: 30_000, pollIntervalMs: 50 });
@@ -787,6 +846,7 @@ Gemini scout body.
   const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
   const result = store.readResult(started.runId);
   assert.equal(started.state, "failed");
+  assert.equal(started.started, false);
   assert.equal(result?.error?.code, "MODEL_PREFLIGHT_FAILED");
   assert.match(result?.body ?? "", /provider extension/);
   assert.ok(existsSync(join(started.runDir, "logs", "model-preflight.json")));

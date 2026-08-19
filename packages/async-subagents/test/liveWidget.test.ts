@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { __resetRenderClockForTest, renderClock } from "@bravo/render-clock";
 import asyncSubagentsPiExtension from "../extensions/pi/index.js";
 import { clearLiveWidget, deriveAsyncSubagentsActivityState, hasTimeDependentLiveWidgetItem, readAsyncSubagentsActivityState, readRunningSubagentCount, renderLiveWidget, updateLiveWidget, type LiveWidgetSnapshot } from "../extensions/pi/liveWidget.js";
@@ -10,6 +10,8 @@ import { RUN_STATES } from "../src/schemas.js";
 import { markWakeupHandled } from "../extensions/pi/wakeups.js";
 import { visWidth } from "../extensions/pi/renderers.js";
 import { RunStore } from "../src/runStore.js";
+import { currentProcessIdentityToken } from "../src/runLock.js";
+import { finalizeTerminalRun } from "../src/lifecycle.js";
 import { readRootSession } from "../src/rootSession.js";
 import { TaskStore } from "../src/taskStore.js";
 import { resetTaskStateDerivationStatsForTest, taskStateDerivationStatsForTest } from "../src/taskState.js";
@@ -20,6 +22,10 @@ import type { RunMetrics, RunState } from "../src/types.js";
 
 function isoAgo(ms: number): string {
   return new Date(Date.now() - ms).toISOString();
+}
+
+async function flushReconciliation(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 30));
 }
 
 function withFakeNow<T>(nowMs: number, fn: () => T): T {
@@ -148,11 +154,17 @@ test("running count projection counts exactly running across every RunState", ()
   rmSync(w.root, { recursive: true, force: true });
 });
 
-test("running count reconciles a dead recorded running process before counting", () => {
+test("running count schedules dead-process reconciliation and observes it on the next refresh", async () => {
   const w = workspace();
   const runId = addRun({ ...w, displayName: "dead", state: "running", summary: "working", pid: 4242, processHealth: "alive" });
-  assert.equal(readRunningSubagentCount({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, pidProber: () => "dead" }), 0);
+  const input = { store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, pidProber: () => "dead" as const };
+  assert.equal(readRunningSubagentCount(input), 1, "current refresh must render durable state");
+  assert.equal(w.store.readStatus(runId).state, "running", "presentation must not synchronously terminalize");
+  await flushReconciliation();
+  assert.equal(readRunningSubagentCount(input), 0);
   assert.equal(w.store.readStatus(runId).state, "failed");
+  assert.equal(w.store.readResult(runId)?.state, "failed");
+  assert.equal(w.store.readEvents(runId).records.at(-1)?.type, "failed");
   rmSync(w.root, { recursive: true, force: true });
 });
 
@@ -183,7 +195,7 @@ test("async activity state does not keep handled terminal results active", () =>
   assert.equal(state.activeCount, 0);
 });
 
-test("async activity state reconciles dead process-owned rows before deriving active state", () => {
+test("async activity state observes asynchronously reconciled dead process-owned rows", async () => {
   const w = workspace();
   const old = isoAgo(10 * 60_000);
   const runId = addRun({
@@ -202,13 +214,17 @@ test("async activity state reconciles dead process-owned rows before deriving ac
     rootSessionId: w.parentRunId,
     pidProber: () => "dead",
   });
-  assert.equal(state.active, false);
-  assert.equal(state.activeCount, 0);
+  assert.equal(state.active, true);
+  assert.equal(state.activeCount, 1);
+  assert.equal(w.store.readStatus(runId).state, "running");
 
+  await flushReconciliation();
+  const refreshed = readAsyncSubagentsActivityState({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, pidProber: () => "dead" });
+  assert.equal(refreshed.active, true, "terminal result remains active until collected");
   const status = w.store.readStatus(runId);
   assert.equal(status.state, "failed");
   assert.equal(status.processHealth, "dead");
-  assert.equal(status.resultReady, false);
+  assert.equal(status.resultReady, true);
 });
 
 test("live widget renders the chrome card with header, rows, and +N tail", () => {
@@ -314,7 +330,7 @@ test("live widget honors an explicit longer completed visibility horizon", () =>
   assert.ok(body.includes("@OldDone"));
 });
 
-test("live widget reconciles old dead cancel-request rows so they do not remain active", () => {
+test("live widget schedules old dead cancel-request reconciliation with coherent artifacts", async () => {
   const w = workspace();
   const old = isoAgo(10 * 60_000);
   const runId = addRun({
@@ -328,17 +344,48 @@ test("live widget reconciles old dead cancel-request rows so they do not remain 
   });
 
   const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72 });
-  assert.deepEqual(lines, []);
+  assert.ok(lines.map(stripAnsi).join("\n").includes("@Harper"));
+  assert.equal(w.store.readStatus(runId).state, "running");
 
+  await flushReconciliation();
   const status = w.store.readStatus(runId);
   assert.equal(status.state, "cancelled");
   assert.equal(status.processHealth, "dead");
-  assert.equal(status.resultReady, false);
-  assert.equal(status.updatedAt, old);
-  assert.equal(w.store.readResult(runId), undefined);
+  assert.equal(status.resultReady, true);
+  assert.equal(w.store.readResult(runId)?.state, "cancelled");
+  assert.equal(w.store.readEvents(runId).records.at(-1)?.type, "cancelled");
 });
 
-test("live widget finalizes dead process-owned non-cancel rows from the render path", () => {
+test("live widget delegates dead child publication while its recorded supervisor is alive", async () => {
+  const w = workspace();
+  const runId = addRun({ ...w, displayName: "Draining", state: "running", summary: "finishing", pid: 4242, processHealth: "alive" });
+  const status = w.store.readStatus(runId);
+  w.store.writeStatus({
+    ...status,
+    supervisorPid: process.pid,
+    supervisorHost: hostname(),
+    supervisorStartedAtToken: currentProcessIdentityToken(),
+  });
+
+  const input = { store: w.store, parentRunId: w.parentRunId, width: 72, pidProber: () => "dead" as const };
+  assert.ok(renderLiveWidget(input).map(stripAnsi).join("\n").includes("@Draining"));
+  await flushReconciliation();
+  assert.equal(w.store.readStatus(runId).state, "running");
+  assert.equal(w.store.readResult(runId), undefined);
+
+  finalizeTerminalRun(w.store, {
+    runId,
+    parentRunId: w.parentRunId,
+    agentName: "scout",
+    state: "completed",
+    writerRole: "child-runtime",
+    summary: "Completion won",
+  });
+  assert.equal(w.store.readResult(runId)?.state, "completed");
+  assert.deepEqual(w.store.readEvents(runId).records.map((event) => event.type), ["result", "completed"]);
+});
+
+test("live widget does not finalize dead process-owned rows from the render path", async () => {
   const w = workspace();
   const old = isoAgo(10 * 60_000);
   const runId = addRun({
@@ -352,14 +399,16 @@ test("live widget finalizes dead process-owned non-cancel rows from the render p
   });
 
   const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72, pidProber: () => "dead" });
-  assert.deepEqual(lines, []);
+  assert.ok(lines.map(stripAnsi).join("\n").includes("@Alex"));
+  assert.equal(w.store.readStatus(runId).state, "running");
+  assert.equal(w.store.readResult(runId), undefined);
 
+  await flushReconciliation();
   const status = w.store.readStatus(runId);
   assert.equal(status.state, "failed");
   assert.equal(status.processHealth, "dead");
-  assert.equal(status.resultReady, false);
-  assert.equal(status.updatedAt, old);
-  assert.equal(w.store.readResult(runId), undefined);
+  assert.equal(status.resultReady, true);
+  assert.equal(w.store.readResult(runId)?.state, "failed");
 });
 
 test("live widget preserves unknown, alive, missing-pid, non-owned-state, and bad-timestamp cancel rows", () => {
@@ -407,7 +456,7 @@ test("live widget preserves unknown, alive, missing-pid, non-owned-state, and ba
   }
 });
 
-test("live widget retries dead process finalization after a filesystem write fault", () => {
+test("live widget retries dead process finalization after a filesystem write fault", async () => {
   const w = workspace();
   const old = isoAgo(10 * 60_000);
   const runId = addRun({
@@ -419,19 +468,18 @@ test("live widget retries dead process finalization after a filesystem write fau
     pid: 5150,
     processHealth: "alive",
   });
-  const runDir = w.store.pathsFor({ runId }).runDir;
+  const originalWriteResult = w.store.writeResult;
+  w.store.writeResult = (() => { throw new Error("simulated write fault"); }) as RunStore["writeResult"];
+  assert.doesNotThrow(() => renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72, pidProber: () => "dead" }));
+  await flushReconciliation();
+  assert.equal(w.store.readStatus(runId).state, "running");
 
-  try {
-    chmodSync(runDir, 0o500);
-    assert.doesNotThrow(() => renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72, pidProber: () => "dead" }));
-    assert.equal(w.store.readStatus(runId).state, "running");
-  } finally {
-    chmodSync(runDir, 0o700);
-  }
-
+  w.store.writeResult = originalWriteResult;
   const lines = renderLiveWidget({ store: w.store, parentRunId: w.parentRunId, width: 72, pidProber: () => "dead" });
-  assert.deepEqual(lines, []);
+  assert.ok(lines.map(stripAnsi).join("\n").includes("@Retry"));
+  await flushReconciliation();
   assert.equal(w.store.readStatus(runId).state, "failed");
+  assert.equal(w.store.readResult(runId)?.state, "failed");
 });
 
 test("live widget leaves recent dead cancel requests for the supervisor to finalize", () => {

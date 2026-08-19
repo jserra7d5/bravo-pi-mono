@@ -552,7 +552,7 @@ export class RunStore {
     const cache = rebuilt.cache;
     this.writeIndexCache(cache);
     for (const record of cache.records) {
-      const summary = this.rebuildSummaryByRunDir(record.runDir, this.readSummaryByRunDir(record.runDir));
+      const summary = this.rebuildSummaryByRunDir(record.runDir);
       if (summary) {
         const path = summaryPathForRunDir(record.runDir);
         atomicWriteJson(path, summary);
@@ -603,12 +603,16 @@ export class RunStore {
     return latest.runDir;
   }
 
-  private rebuildSummaryByRunDir(runDir: string, previous?: RunSummaryReadModel): RunSummaryReadModel | undefined {
+  private rebuildSummaryByRunDir(runDir: string): RunSummaryReadModel | undefined {
     const paths = this.pathsFor({ runDir });
     if (!existsSync(paths.statusPath)) return undefined;
-    let summary = summaryFromStatus(JSON.parse(readFileSync(paths.statusPath, "utf8")) as RunStatus, runDir, previous);
+    // status.json is canonical. Never seed a rebuild from a possibly stale or
+    // corrupt derived summary; events restore only monotonic activity and wake metadata.
+    const status = JSON.parse(readFileSync(paths.statusPath, "utf8")) as RunStatus;
+    let summary = summaryFromStatus(status, runDir);
     if (existsSync(paths.eventsPath)) {
-      for (const event of readJsonl<RunEvent>(paths.eventsPath).records) summary = applyEventToSummary(summary, event);
+      const canonicalFloor = { updatedAt: status.updatedAt, lastActivityAt: status.lastActivityAt };
+      for (const event of readJsonl<RunEvent>(paths.eventsPath).records) summary = applyEventToSummary(summary, event, canonicalFloor);
     }
     if (existsSync(paths.resultPath)) summary = applyResultToSummary(summary, JSON.parse(readFileSync(paths.resultPath, "utf8")) as RunResult);
     return summary;

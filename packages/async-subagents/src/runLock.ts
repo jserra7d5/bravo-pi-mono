@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 export interface RunMutationLockOptions {
   timeoutMs?: number;
@@ -36,6 +36,12 @@ const DEFAULT_RETRY_MS = 10;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sleepSync(ms: number): void {
+  if (ms <= 0) return;
+  const signal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(signal, 0, 0, ms);
 }
 
 function lockDirForRun(runDir: string): string {
@@ -206,8 +212,10 @@ function rmdirIfEmpty(path: string): boolean {
 function cleanupStaleOrphanFiles(lockDir: string, staleMs: number, nowMs: number): boolean {
   let removed = false;
   let hasFreshEntry = false;
+  let entryCount = 0;
   try {
     for (const name of readdirSync(lockDir)) {
+      entryCount += 1;
       const path = join(lockDir, name);
       try {
         const stat = statSync(path);
@@ -225,6 +233,16 @@ function cleanupStaleOrphanFiles(lockDir: string, staleMs: number, nowMs: number
     return false;
   }
   if (hasFreshEntry) return removed;
+  if (entryCount === 0) {
+    try {
+      // mkdir and owner publication are separate operations. A contender must
+      // not remove the freshly-created empty directory in that acquisition
+      // window; only an actually stale orphan directory is reclaimable.
+      if (nowMs - statSync(lockDir).mtimeMs < staleMs) return false;
+    } catch {
+      return false;
+    }
+  }
   return rmdirIfEmpty(lockDir) || removed;
 }
 
@@ -280,6 +298,88 @@ function describeCurrentOwners(lockDir: string): string | undefined {
   return records.map((record) => record.owner ? JSON.stringify(record.owner) : `unparseable:${record.path}`).join(",");
 }
 
+function acquisitionIntentPath(lockDir: string): string {
+  return `${lockDir}.acquiring`;
+}
+
+function cleanupStaleAcquisitionIntent(lockDir: string, staleMs: number, nowMs: number): void {
+  const path = acquisitionIntentPath(lockDir);
+  const record = readOwnerRecord(path);
+  if (!record) return;
+  // readOwnerRecord intentionally rejects the non-owner filename while still
+  // retaining mtime. A parseable intent gets richer same-host liveness checks.
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as LockOwner;
+    if (typeof parsed.pid === "number" && typeof parsed.token === "string" && typeof parsed.host === "string") record.owner = parsed;
+  } catch {
+    // Age-based cleanup handles malformed/crash-truncated intents.
+  }
+  if (ownerIsStale(record, staleMs, nowMs)) unlinkIfExists(path);
+}
+
+function tryAcquireLock(lockDir: string): LockOwner | undefined {
+  const candidate = newOwner();
+  const intentPath = acquisitionIntentPath(lockDir);
+  try {
+    // Publish process identity before mkdir. Stale cleanup can therefore never
+    // mistake the owner-publication window for an abandoned empty lock and let
+    // two processes believe they acquired the same domain.
+    writeFileSync(intentPath, JSON.stringify(candidate), { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+    throw error;
+  }
+  let createdLockDir = false;
+  try {
+    mkdirSync(lockDir);
+    createdLockDir = true;
+    renameSync(intentPath, ownerPath(lockDir, candidate));
+    return candidate;
+  } catch (error) {
+    unlinkIfExists(intentPath);
+    // A contender that observed EEXIST must never remove the directory: the
+    // owner may release and a new acquirer may create its publication window
+    // before this catch block runs.
+    if (createdLockDir) rmdirIfEmpty(lockDir);
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST" || code === "ENOENT" || code === "ENOTDIR") return undefined;
+    throw error;
+  }
+}
+
+/**
+ * Synchronous cross-process mutation lock for short file read/merge/write
+ * transactions. Callers provide a dedicated lock-directory path so unrelated
+ * records can use separate lock domains.
+ */
+export function withFileMutationLockSync<T>(lockDir: string, fn: () => T, options: RunMutationLockOptions = {}): RunMutationLockResult<T> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
+  const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
+  const started = Date.now();
+  let owner: LockOwner | undefined;
+  mkdirSync(dirname(lockDir), { recursive: true });
+
+  while (!owner) {
+    const now = Date.now();
+    cleanupStaleAcquisitionIntent(lockDir, staleMs, now);
+    owner = tryAcquireLock(lockDir);
+    if (owner) break;
+    if (!existsSync(acquisitionIntentPath(lockDir))) tryRemoveStaleLock(lockDir, staleMs, now);
+    if (now - started >= timeoutMs) {
+      const currentOwners = describeCurrentOwners(lockDir);
+      throw new Error(`timed out waiting for file mutation lock after ${timeoutMs}ms${currentOwners ? `; owners=${currentOwners}` : ""}`);
+    }
+    sleepSync(Math.min(retryMs, Math.max(1, timeoutMs - (now - started))));
+  }
+
+  try {
+    return { value: fn(), waitedMs: Date.now() - started };
+  } finally {
+    releaseOwnedLock(lockDir, owner);
+  }
+}
+
 export async function withRunMutationLock<T>(runDir: string, fn: () => T | Promise<T>, options: RunMutationLockOptions = {}): Promise<RunMutationLockResult<T>> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
@@ -290,33 +390,16 @@ export async function withRunMutationLock<T>(runDir: string, fn: () => T | Promi
   let owner: LockOwner | undefined;
 
   while (!owner) {
-    try {
-      mkdirSync(lockDir);
-      const candidate = newOwner();
-      try {
-        writeOwner(lockDir, candidate);
-        owner = candidate;
-        break;
-      } catch (error) {
-        rmdirIfEmpty(lockDir);
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code === "ENOENT" || code === "ENOTDIR") {
-          await sleep(retryMs);
-          continue;
-        }
-        throw error;
-      }
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") throw error;
-      const now = Date.now();
-      tryRemoveStaleLock(lockDir, staleMs, now);
-      if (now - started >= timeoutMs) {
-        const currentOwners = describeCurrentOwners(lockDir);
-        throw new Error(`timed out waiting for run mutation lock after ${timeoutMs}ms${currentOwners ? `; owners=${currentOwners}` : ""}`);
-      }
-      await sleep(Math.min(retryMs, Math.max(1, timeoutMs - (now - started))));
+    const now = Date.now();
+    cleanupStaleAcquisitionIntent(lockDir, staleMs, now);
+    owner = tryAcquireLock(lockDir);
+    if (owner) break;
+    if (!existsSync(acquisitionIntentPath(lockDir))) tryRemoveStaleLock(lockDir, staleMs, now);
+    if (now - started >= timeoutMs) {
+      const currentOwners = describeCurrentOwners(lockDir);
+      throw new Error(`timed out waiting for run mutation lock after ${timeoutMs}ms${currentOwners ? `; owners=${currentOwners}` : ""}`);
     }
+    await sleep(Math.min(retryMs, Math.max(1, timeoutMs - (now - started))));
   }
 
   const heartbeat = startHeartbeat(lockDir, owner, heartbeatMs);

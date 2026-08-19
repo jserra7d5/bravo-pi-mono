@@ -1,10 +1,10 @@
 import { readFastTrackState } from "../../src/fastTrack.js";
+import { reconcileDeadProcessUnderLock } from "../../src/lifecycle.js";
 import { RunStore } from "../../src/runStore.js";
 import type { DerivedTaskState, RunIndexRecord, TaskRecord } from "../../src/types.js";
 import { readWatcherSnapshot, type RunSummaryRow } from "../../src/watcher.js";
 import { renderWidgetCard, widgetRowFromSummary, type WidgetRowInput } from "./renderers.js";
 import { isResultWakeupCurrent } from "./wakeups.js";
-import { updateRunStatus } from "../../src/status.js";
 import { TaskStore } from "../../src/taskStore.js";
 import { deriveTaskStates, unresolvedDependencyIdsByTask } from "../../src/taskState.js";
 
@@ -159,6 +159,28 @@ function cancelRequestAtMs(row: RunSummaryRow): number | undefined {
 }
 
 const PROCESS_OWNED_ACTIVE_STATES = new Set(["running", "idle", "stalled"]);
+const reconciliationInFlight = new WeakMap<RunStore, Set<string>>();
+
+function scheduleDeadProcessReconciliation(input: LiveWidgetInput, row: RunSummaryRow, now: number, terminalCompletedVisibleMs: number): void {
+  let inFlight = reconciliationInFlight.get(input.store);
+  if (!inFlight) {
+    inFlight = new Set();
+    reconciliationInFlight.set(input.store, inFlight);
+  }
+  if (inFlight.has(row.runId)) return;
+  inFlight.add(row.runId);
+  // Defer the lifecycle mutation beyond snapshot/render construction. The
+  // current refresh renders only the durable row it read; the next refresh
+  // observes the canonical terminal artifacts.
+  void Promise.resolve()
+    .then(() => reconcileDeadProcessUnderLock(input.store, row.runId, {
+      nowMs: now,
+      cancellationGraceMs: terminalCompletedVisibleMs,
+      probe: input.pidProber,
+    }))
+    .catch(() => undefined)
+    .finally(() => inFlight?.delete(row.runId));
+}
 
 function reconcileDeadProcessOwnedLiveRow(input: LiveWidgetInput, row: RunSummaryRow, now: number, terminalCompletedVisibleMs: number): RunSummaryRow {
   if (isTerminal(row)) return row;
@@ -169,57 +191,17 @@ function reconcileDeadProcessOwnedLiveRow(input: LiveWidgetInput, row: RunSummar
   } catch {
     return row;
   }
-
   if (TERMINAL_STATES.has(status.state)) return row;
 
   const health = processHealth(status.pid, input.pidProber);
   const isCancelRequest = isCancelRequestRow(row);
   const cancelAtMs = isCancelRequest ? cancelRequestAtMs(row) : undefined;
   const staleCancelRequest = cancelAtMs !== undefined && now - cancelAtMs > terminalCompletedVisibleMs;
-
-  if (isCancelRequest) {
-    if (health !== "dead" || cancelAtMs === undefined || !staleCancelRequest) return row;
-  } else if (!PROCESS_OWNED_ACTIVE_STATES.has(status.state) || health !== "dead") {
-    return row;
-  }
-
-  const finalState = isCancelRequest ? "cancelled" : "failed";
-  const summary = isCancelRequest
-    ? "Cancelled after recorded child process exited before supervisor finalization"
-    : "Failed after recorded child process exited before supervisor finalization";
-  const error = {
-    code: isCancelRequest ? "PARENT_CANCELLED_PROCESS_EXITED" : "PARENT_PROCESS_EXITED_WITHOUT_TERMINAL_STATUS",
-    message: summary,
-    details: { pid: status.pid, processHealth: "dead" },
-  };
-
-  try {
-    input.store.writeStatus({
-      ...updateRunStatus(status, {
-        state: finalState,
-        writerRole: "parent-runtime",
-        processHealth: "dead",
-        resultReady: false,
-        lastActivityAt: row.updatedAt,
-        summary,
-        error,
-      }),
-      updatedAt: row.updatedAt,
-    });
-    const updated = input.store.readRunSummary(row.runId);
-    return {
-      ...row,
-      state: finalState,
-      summary: updated?.summary ?? summary,
-      resultReady: false,
-      updatedAt: updated?.updatedAt ?? row.updatedAt,
-      lastActivityAt: updated?.lastActivityAt ?? row.updatedAt,
-      result: undefined,
-      metrics: updated?.metrics ?? row.metrics,
-    };
-  } catch {
-    return row;
-  }
+  const eligible = isCancelRequest
+    ? health === "dead" && cancelAtMs !== undefined && staleCancelRequest
+    : PROCESS_OWNED_ACTIVE_STATES.has(status.state) && health === "dead";
+  if (eligible) scheduleDeadProcessReconciliation(input, row, now, terminalCompletedVisibleMs);
+  return row;
 }
 
 function totalCostForRows(rows: RunSummaryRow[]): number | undefined {

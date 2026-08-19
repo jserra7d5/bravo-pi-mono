@@ -82,7 +82,9 @@ test("expiration error summary wins while harmless stderr remains the body", asy
     cwd,
     parentRunId,
     agentName: "scout",
-    effectiveMaxRunMs: 100,
+    // Leave enough scheduling headroom for the spawned process to flush stderr
+    // under the parallel suite; expiration itself, not its exact timing, is asserted.
+    effectiveMaxRunMs: 500,
     command: {
       command: process.execPath,
       args: ["-e", `console.error(${JSON.stringify(warning)}); setInterval(() => {}, 1000);`],

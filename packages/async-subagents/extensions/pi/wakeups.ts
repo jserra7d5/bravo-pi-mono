@@ -1,9 +1,11 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { atomicWriteJson } from "../../src/jsonl.js";
 import { ownsRootSessionLease } from "../../src/leases.js";
 import { isInterestingEvent } from "../../src/schemas.js";
 import { RunStore } from "../../src/runStore.js";
+import { withFileMutationLockSync } from "../../src/runLock.js";
 import { updateRunStatus } from "../../src/status.js";
 import type { DeliverySubscription, EventType, RunEvent, RunIndexRecord, RunResult } from "../../src/types.js";
 import { SCHEMA_VERSION } from "../../src/types.js";
@@ -43,6 +45,19 @@ function subscriptionsPath(store: RunStore, parentRunId: string): string {
 
 function claimPath(store: RunStore, deliveryKey: string): string {
   return join(resolve(store.runRoot, ".."), "delivery", "claims", `${deliveryKey.replace(/[^A-Za-z0-9_.-]/g, "_")}.json`);
+}
+
+function parentLockKey(parentRunId: string): string {
+  const readable = parentRunId.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 48);
+  return `${readable}.${createHash("sha256").update(parentRunId).digest("hex").slice(0, 16)}`;
+}
+
+function deliveryLockPath(store: RunStore, parentRunId: string): string {
+  return join(resolve(store.runRoot, ".."), "delivery", "locks", `${parentLockKey(parentRunId)}.delivery.lock`);
+}
+
+function subscriptionsLockPath(store: RunStore, parentRunId: string): string {
+  return join(resolve(store.runRoot, ".."), "delivery", "locks", `${parentLockKey(parentRunId)}.subscriptions.lock`);
 }
 
 interface DeliveryFileState { path: string; exists: boolean; size: number; mtimeMs: number; ctimeMs: number; dev: number; ino: number }
@@ -109,16 +124,23 @@ function readDeliveryState(store: RunStore, parentRunId: string): DeliveryState 
   }
 }
 
-function writeDeliveryState(store: RunStore, state: DeliveryState): void {
+function readDeliveryStateFresh(store: RunStore, parentRunId: string): DeliveryState {
+  invalidateDeliveryStateCache(deliveryPath(store, parentRunId));
+  return readDeliveryState(store, parentRunId);
+}
+
+function writeDeliveryStateUnlocked(store: RunStore, state: DeliveryState): void {
   const path = deliveryPath(store, state.parentRunId);
-  const existing = readDeliveryState(store, state.parentRunId);
-  atomicWriteJson(path, {
-    schemaVersion: SCHEMA_VERSION,
-    parentRunId: state.parentRunId,
-    delivered: { ...existing.delivered, ...state.delivered },
-    handled: { ...existing.handled, ...state.handled },
-  });
+  atomicWriteJson(path, state);
   invalidateDeliveryStateCache(path);
+}
+
+function mutateDeliveryState(store: RunStore, parentRunId: string, mutate: (state: DeliveryState) => void): void {
+  withFileMutationLockSync(deliveryLockPath(store, parentRunId), () => {
+    const state = readDeliveryStateFresh(store, parentRunId);
+    mutate(state);
+    writeDeliveryStateUnlocked(store, state);
+  });
 }
 
 export function resultDeliveryKey(runId: string, result: RunResult): string {
@@ -270,7 +292,15 @@ function pendingForRun(store: RunStore, parentRunId: string, runId: string, noti
   const shouldScanEvents = !allowed || [...allowed].some((type) => !["result", "completed", "failed", "cancelled", "expired"].includes(type));
   const status = shouldScanEvents ? statusForRun(store, runId) : undefined;
   if (shouldScanEvents) {
-    for (const event of store.readEvents(runId).records) {
+    const events = store.readEvents(runId).records;
+    let resolvedThrough = -1;
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index];
+      if (event.type === "message.received" && (event.data?.messageType === "answer" || event.data?.messageType === "instruction")) resolvedThrough = index;
+    }
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index];
+      if (index <= resolvedThrough && (event.type === "question" || event.type === "blocked")) continue;
       if (!isDeliverableAttentionEvent(event) || (allowed && !allowed.has(event.type))) continue;
       deliveries.push(eventDelivery(event, status));
     }
@@ -282,6 +312,7 @@ const DELIVERY_CLAIM_TTL_MS = 60_000;
 
 function claimDelivery(store: RunStore, deliveryKey: string, ownerId: string, nowMs?: number): boolean {
   const path = claimPath(store, deliveryKey);
+  let created = false;
   try {
     mkdirSync(dirname(path), { recursive: true });
     if (existsSync(path)) {
@@ -291,6 +322,7 @@ function claimDelivery(store: RunStore, deliveryKey: string, ownerId: string, no
       } catch { rmSync(path, { force: true }); }
     }
     const fd = openSync(path, "wx");
+    created = true;
     try {
       writeFileSync(fd, `${JSON.stringify({ schemaVersion: SCHEMA_VERSION, deliveryKey, ownerId, claimedAt: new Date(nowMs ?? Date.now()).toISOString() })}\n`, "utf8");
     } finally {
@@ -298,6 +330,7 @@ function claimDelivery(store: RunStore, deliveryKey: string, ownerId: string, no
     }
     return true;
   } catch {
+    if (created) rmSync(path, { force: true });
     return false;
   }
 }
@@ -313,10 +346,13 @@ export function markDeliveredWakeupHandled(store: RunStore, parentRunId: string,
 
 export function writeDeliverySubscription(store: RunStore, subscription: DeliverySubscription): void {
   const path = subscriptionsPath(store, subscription.parentRunId);
-  const subscriptions = readDeliverySubscriptions(store, subscription.parentRunId).filter((item) => item.runId !== subscription.runId);
-  subscriptions.push(subscription);
-  atomicWriteJson(path, { schemaVersion: SCHEMA_VERSION, parentRunId: subscription.parentRunId, subscriptions });
-  invalidateDeliverySubscriptionsCache(path);
+  withFileMutationLockSync(subscriptionsLockPath(store, subscription.parentRunId), () => {
+    invalidateDeliverySubscriptionsCache(path);
+    const subscriptions = readDeliverySubscriptions(store, subscription.parentRunId).filter((item) => item.runId !== subscription.runId);
+    subscriptions.push(subscription);
+    atomicWriteJson(path, { schemaVersion: SCHEMA_VERSION, parentRunId: subscription.parentRunId, subscriptions });
+    invalidateDeliverySubscriptionsCache(path);
+  });
 }
 
 export function readDeliverySubscriptions(store: RunStore, parentRunId: string): DeliverySubscription[] {
@@ -346,9 +382,7 @@ export function isWakeupKeyHandled(store: RunStore, parentRunId: string, deliver
 }
 
 export function markWakeupKeyHandled(store: RunStore, parentRunId: string, deliveryKey: string, runId?: string, handledAt = new Date().toISOString()): void {
-  const state = readDeliveryState(store, parentRunId);
-  state.handled[deliveryKey] = handledAt;
-  writeDeliveryState(store, state);
+  mutateDeliveryState(store, parentRunId, (state) => { state.handled[deliveryKey] = handledAt; });
   if (!deliveryKey.startsWith("terminal:") || !runId) return;
   try {
     const status = store.readStatus(runId);
@@ -359,73 +393,95 @@ export function markWakeupKeyHandled(store: RunStore, parentRunId: string, deliv
 }
 
 export function markWakeupHandled(store: RunStore, parentRunId: string, runId: string): void {
-  const state = readDeliveryState(store, parentRunId);
   const result = store.readResult(runId);
-  if (result) state.handled[resultDeliveryKey(runId, result)] = new Date().toISOString();
-  for (const key of Object.keys(state.delivered)) {
-    if (key.includes(`:${runId}:`)) state.handled[key] = new Date().toISOString();
-  }
-  writeDeliveryState(store, state);
+  const handledAt = new Date().toISOString();
+  mutateDeliveryState(store, parentRunId, (state) => {
+    if (result) state.handled[resultDeliveryKey(runId, result)] = handledAt;
+    for (const key of Object.keys(state.delivered)) {
+      if (key.includes(`:${runId}:`)) state.handled[key] = handledAt;
+    }
+  });
 }
 
 export function pollWakeups(input: WakeupPollInput): WakeupDelivery[] {
-  if (
-    !ownsRootSessionLease({
-      cwd: input.store.cwd,
-      rootSessionId: input.rootSessionId,
-      ownerId: input.ownerId,
-      nowMs: input.nowMs,
-    })
-  ) {
-    return [];
-  }
+  if (!ownsRootSessionLease({ cwd: input.store.cwd, rootSessionId: input.rootSessionId, ownerId: input.ownerId, nowMs: input.nowMs })) return [];
 
-  const state = readDeliveryState(input.store, input.parentRunId);
-  const deliveries: WakeupDelivery[] = [];
-  const deliveredKeys: string[] = [];
-  let stateChanged = false;
+  // Expensive run/event discovery deliberately stays outside the parent-key
+  // delivery lock. Every candidate is re-read and committed under that lock.
+  const cachedState = readDeliveryState(input.store, input.parentRunId);
   const subscriptions = new Map(readDeliverySubscriptions(input.store, input.parentRunId).map((item) => [item.runId, item]));
-  const suppressedRunIds = new Set(deliveries.filter((delivery) => delivery.message.result).map((delivery) => delivery.runId));
-  const records = deliveries.length >= (input.limit ?? 5) ? [] : subscriptions.size
-    ? (input.records ?? input.store.listDirectChildren(input.parentRunId)).filter((record) => subscriptions.has(record.runId) && !suppressedRunIds.has(record.runId))
+  const records = subscriptions.size
+    ? (input.records ?? input.store.listDirectChildren(input.parentRunId)).filter((record) => subscriptions.has(record.runId))
     : [];
+  const discovered: WakeupDelivery[] = [];
   for (const record of records) {
     const subscription = subscriptions.get(record.runId);
     for (const delivery of pendingForRun(input.store, input.parentRunId, record.runId, subscription?.notifyOn)) {
       if (input.modelFollowUpOnly && !isActionableModelWakeup(delivery)) continue;
-      if (state.handled[delivery.deliveryKey]) continue;
-      const previousAttempt = state.delivered[delivery.deliveryKey];
+      if (cachedState.handled[delivery.deliveryKey]) continue;
+      const previousAttempt = cachedState.delivered[delivery.deliveryKey];
       if (previousAttempt) {
         const retryableFullInlineResult = Boolean(delivery.message.result) && delivery.message.bodyTruncation?.truncated !== true;
         const attemptedAtMs = Date.parse(previousAttempt);
-        const retryDue = retryableFullInlineResult && Number.isFinite(attemptedAtMs) && (input.nowMs ?? Date.now()) - attemptedAtMs >= TERMINAL_WAKEUP_RETRY_INTERVAL_MS;
+        const retryDue = retryableFullInlineResult && Number.isFinite(attemptedAtMs)
+          && (input.nowMs ?? Date.now()) - attemptedAtMs >= TERMINAL_WAKEUP_RETRY_INTERVAL_MS;
         if (!retryDue) continue;
       }
-      if (delivery.message.result) {
-        for (let i = deliveries.length - 1; i >= 0; i -= 1) {
-          if (deliveries[i].runId === delivery.runId && !deliveries[i].message.result) deliveries.splice(i, 1);
+      discovered.push(delivery);
+    }
+  }
+
+  const deliveries: WakeupDelivery[] = [];
+  const limit = input.limit ?? 5;
+  for (const candidate of discovered) {
+    if (deliveries.length >= limit) break;
+    if (!claimDelivery(input.store, candidate.deliveryKey, input.ownerId, input.nowMs)) continue;
+    try {
+      const committed = withFileMutationLockSync(deliveryLockPath(input.store, input.parentRunId), () => {
+        const subscription = readDeliverySubscriptions(input.store, input.parentRunId).find((item) => item.runId === candidate.runId);
+        if (!subscription) return undefined;
+        const current = candidate.message.result
+          ? (isResultWakeupCurrent(input.store, input.parentRunId, candidate.runId, candidate.message.result) ? candidate : undefined)
+          : pendingForRun(input.store, input.parentRunId, candidate.runId, subscription.notifyOn)
+            .find((delivery) => delivery.deliveryKey === candidate.deliveryKey);
+        if (!current || (input.modelFollowUpOnly && !isActionableModelWakeup(current))) return undefined;
+
+        const state = readDeliveryStateFresh(input.store, input.parentRunId);
+        if (state.handled[current.deliveryKey]) return undefined;
+        const previousAttempt = state.delivered[current.deliveryKey];
+        if (previousAttempt) {
+          const retryableFullInlineResult = Boolean(current.message.result) && current.message.bodyTruncation?.truncated !== true;
+          const attemptedAtMs = Date.parse(previousAttempt);
+          const retryDue = retryableFullInlineResult && Number.isFinite(attemptedAtMs)
+            && (input.nowMs ?? Date.now()) - attemptedAtMs >= TERMINAL_WAKEUP_RETRY_INTERVAL_MS;
+          if (!retryDue) return undefined;
         }
-      } else if (deliveries.some((item) => item.runId === delivery.runId && item.message.result)) {
+
+        // Discovery may race lease takeover. Ownership must still be current at
+        // the serialization point immediately before delivery-state mutation.
+        if (!ownsRootSessionLease({ cwd: input.store.cwd, rootSessionId: input.rootSessionId, ownerId: input.ownerId, nowMs: input.nowMs })) return undefined;
+        const deliveredAt = new Date(input.nowMs ?? Date.now()).toISOString();
+        state.delivered[current.deliveryKey] = deliveredAt;
+        if (current.message.result) {
+          for (const event of input.store.readEvents(current.runId).records) {
+            if (isDeliverableAttentionEvent(event)) state.handled[eventDeliveryKey(event)] = deliveredAt;
+          }
+        }
+        writeDeliveryStateUnlocked(input.store, state);
+        return current;
+      }).value;
+      if (!committed) continue;
+      if (committed.message.result) {
+        for (let index = deliveries.length - 1; index >= 0; index -= 1) {
+          if (deliveries[index].runId === committed.runId && !deliveries[index].message.result) deliveries.splice(index, 1);
+        }
+      } else if (deliveries.some((delivery) => delivery.runId === committed.runId && delivery.message.result)) {
         continue;
       }
-      if (!claimDelivery(input.store, delivery.deliveryKey, input.ownerId, input.nowMs)) continue;
-      if (isWakeupKeyHandled(input.store, input.parentRunId, delivery.deliveryKey)) continue;
-      deliveries.push(delivery);
-      const deliveredAt = new Date(input.nowMs ?? Date.now()).toISOString();
-      state.delivered[delivery.deliveryKey] = deliveredAt;
-      if (delivery.message.result) {
-        for (const event of input.store.readEvents(delivery.runId).records) {
-          if (isDeliverableAttentionEvent(event)) state.handled[eventDeliveryKey(event)] = deliveredAt;
-        }
-      }
-      stateChanged = true;
-      deliveredKeys.push(delivery.deliveryKey);
-      if (deliveries.length >= (input.limit ?? 5)) break;
+      deliveries.push(committed);
+    } finally {
+      releaseDeliveryClaim(input.store, candidate.deliveryKey);
     }
-    if (deliveries.length >= (input.limit ?? 5)) break;
   }
-  if (stateChanged) writeDeliveryState(input.store, state);
-  for (const key of deliveredKeys) releaseDeliveryClaim(input.store, key);
-  const resultRunIds = new Set(deliveries.filter((delivery) => delivery.message.result).map((delivery) => delivery.runId));
-  return resultRunIds.size ? deliveries.filter((delivery) => delivery.message.result || !resultRunIds.has(delivery.runId)) : deliveries;
+  return deliveries;
 }

@@ -1,20 +1,19 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { dirname, join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { renderClock } from "@bravo/render-clock";
 import { Type } from "typebox";
-import { appendJsonl, atomicWriteJson, readJsonl } from "../../src/jsonl.js";
-import { withRunMutationLock } from "../../src/runLock.js";
-import { isTerminalRunState } from "../../src/schemas.js";
-import { SCHEMA_VERSION, type EventType, type InboxMessage, type RunEvent, type RunStatus } from "../../src/types.js";
+import { readJsonl } from "../../src/jsonl.js";
+import { mutateNonterminalRun, mutateNonterminalStatus } from "../../src/lifecycle.js";
+import { RunStore } from "../../src/runStore.js";
+import type { EventType, InboxMessage, RunEvent } from "../../src/types.js";
 
 type ChildControlState = {
   runId: string;
   runDir: string;
   parentRunId: string;
   rootSessionId?: string;
+  store: RunStore;
   cursor: number;
 };
 
@@ -33,56 +32,42 @@ function childStateFromEnv(): ChildControlState | undefined {
   const runDir = env("ASYNC_SUBAGENTS_RUN_DIR");
   const parentRunId = env("ASYNC_SUBAGENTS_PARENT_RUN_ID");
   if (!runId || !runDir || !parentRunId) return undefined;
-  return { runId, runDir, parentRunId, rootSessionId: env("ASYNC_SUBAGENTS_ROOT_SESSION_ID"), cursor: 0 };
+  return {
+    runId,
+    runDir,
+    parentRunId,
+    rootSessionId: env("ASYNC_SUBAGENTS_ROOT_SESSION_ID"),
+    store: new RunStore({ cwd: process.cwd(), runRoot: dirname(runDir) }),
+    cursor: 0,
+  };
 }
 
-function eventId(): string {
-  return `evt_${Date.now().toString(36)}_${randomBytes(5).toString("base64url")}`;
-}
-
-async function appendEvent(state: ChildControlState, input: { type: EventType; summary?: string; body?: string; wake?: boolean; data?: Record<string, unknown> }): Promise<RunEvent> {
-  const event: RunEvent = {
-    schemaVersion: SCHEMA_VERSION,
-    eventId: eventId(),
+async function appendEvent(
+  state: ChildControlState,
+  input: { type: EventType; summary?: string; body?: string; wake?: boolean; data?: Record<string, unknown> },
+  options: { terminalBehavior?: "noop" | "reject"; receipt?: InboxMessage } = {},
+): Promise<RunEvent | undefined> {
+  const result = await mutateNonterminalRun(state.store, {
     runId: state.runId,
-    parentRunId: state.parentRunId,
     type: input.type,
-    level: "info",
-    createdAt: new Date().toISOString(),
     summary: input.summary,
     body: input.body,
     wake: input.wake ?? WAKE_TYPES.has(input.type),
     data: input.data ?? {},
-  };
-  appendJsonl(join(state.runDir, "events.jsonl"), event);
-  await updateStatusFromEvent(state, event);
-  return event;
-}
-
-async function updateStatusFromEvent(state: ChildControlState, event: RunEvent): Promise<void> {
-  const statusPath = join(state.runDir, "status.json");
-  try {
-    await withRunMutationLock(state.runDir, () => {
-      const status = JSON.parse(readFileSync(statusPath, "utf8")) as RunStatus;
-      if (isTerminalRunState(status.state)) return;
-      const nextState =
-        event.type === "question" ? "waiting_for_input" :
-        event.type === "blocked" ? "blocked" :
-        status.state;
-      atomicWriteJson(statusPath, {
-        ...status,
-        state: nextState,
-        writerRole: "child-runtime",
-        updatedAt: event.createdAt,
-        lastActivityAt: event.createdAt,
-        lastEventId: event.eventId,
-        summary: event.summary ?? status.summary,
-        needs: event.type === "question" || event.type === "blocked" ? event.summary ?? event.body ?? null : status.needs,
-      });
-    });
-  } catch {
-    // Status is best-effort here. The durable event is the communication contract.
-  }
+    writerRole: "child-runtime",
+    terminalBehavior: options.terminalBehavior,
+    statusPatch: options.receipt
+      ? (status) => {
+          const resumes =
+            (options.receipt?.type === "answer" || options.receipt?.type === "instruction") &&
+            (status.state === "blocked" || status.state === "waiting_for_input");
+          return resumes
+            ? { state: "running", needs: null }
+            : { state: status.state, needs: status.needs };
+        }
+      : undefined,
+  });
+  return result.applied ? result.event : undefined;
 }
 
 function parentMessageText(message: InboxMessage): string {
@@ -95,25 +80,17 @@ function parentMessageText(message: InboxMessage): string {
   return `${prefix} (${message.messageId}, ${message.type}):\n\n${message.body}`;
 }
 
-async function restoreRunningAfterAnswer(state: ChildControlState, message: InboxMessage): Promise<void> {
+async function restoreDeliveredReceiptProjection(state: ChildControlState, message: InboxMessage, summary: string): Promise<void> {
   if (message.type !== "answer" && message.type !== "instruction") return;
-  const statusPath = join(state.runDir, "status.json");
-  try {
-    await withRunMutationLock(state.runDir, () => {
-      const status = JSON.parse(readFileSync(statusPath, "utf8")) as RunStatus;
-      if (isTerminalRunState(status.state) || (status.state !== "blocked" && status.state !== "waiting_for_input")) return;
-      atomicWriteJson(statusPath, {
-        ...status,
-        state: "running",
-        writerRole: "child-runtime",
-        updatedAt: new Date().toISOString(),
-        needs: null,
-        summary: `Resumed after parent ${message.type}`,
-      });
-    });
-  } catch {
-    // Status restore is best-effort; the delivered message is the contract.
-  }
+  await mutateNonterminalStatus(state.store, {
+    runId: state.runId,
+    writerRole: "child-runtime",
+    terminalBehavior: "noop",
+    statusPatch: (status) =>
+      status.state === "blocked" || status.state === "waiting_for_input"
+        ? { state: "running", needs: null, summary }
+        : {},
+  });
 }
 
 async function deliverInbox(pi: ExtensionAPI, state: ChildControlState): Promise<void> {
@@ -123,18 +100,29 @@ async function deliverInbox(pi: ExtensionAPI, state: ChildControlState): Promise
     if (!message) break;
     if (message.thinkingLevel) pi.setThinkingLevel(message.thinkingLevel);
     pi.sendUserMessage(parentMessageText(message), { deliverAs: message.type === "cancel" ? "followUp" : "steer" });
-    await restoreRunningAfterAnswer(state, message);
+    // Delivery succeeded, so never replay this message even if lifecycle bookkeeping fails.
     state.cursor = read.nextOffset;
+    const receiptSummary = `Received ${message.type} from parent`;
     try {
       await appendEvent(state, {
         type: "message.received",
-        summary: `Received ${message.type} from parent`,
+        summary: receiptSummary,
         body: message.body,
         wake: false,
         data: { messageId: message.messageId, messageType: message.type, requiresAck: message.requiresAck, thinkingLevel: message.thinkingLevel },
-      });
+      }, { terminalBehavior: "noop", receipt: message });
     } catch (error) {
-      console.error("[async-subagents child-control] failed to record received inbox message", error);
+      if (message.type !== "answer" && message.type !== "instruction") {
+        console.error("[async-subagents child-control] failed to record received inbox message", error);
+        continue;
+      }
+      try {
+        await restoreDeliveredReceiptProjection(state, message, receiptSummary);
+      } catch (projectionError) {
+        console.error("[async-subagents child-control] failed to record or project received inbox message", error, projectionError);
+        continue;
+      }
+      console.error("[async-subagents child-control] failed to record received inbox message; restored status projection", error);
     }
   }
 }
@@ -173,6 +161,7 @@ export default function childControlExtension(pi: ExtensionAPI, options?: { cloc
         wake: typeof params.wake === "boolean" ? params.wake : undefined,
         data: params.data as Record<string, unknown> | undefined,
       });
+      if (!event) throw new Error("run is terminal");
       return {
         content: [{ type: "text" as const, text: `Event ${event.eventId} emitted` }],
         details: { event },

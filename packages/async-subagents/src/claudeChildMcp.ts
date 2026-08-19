@@ -2,13 +2,11 @@ import { createInterface } from "node:readline";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, realpathSync, readFileSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve } from "node:path";
 import { defaultRunRoot } from "./config.js";
-import { createRunEvent } from "./events.js";
-import { finalizeTerminalRun } from "./lifecycle.js";
+import { finalizeTerminalRun, mutateNonterminalRun } from "./lifecycle.js";
 import { withRunMutationLock } from "./runLock.js";
 import { RunStore } from "./runStore.js";
 import { isTerminalRunState } from "./schemas.js";
-import { updateRunStatus } from "./status.js";
-import type { ClaudeLivenessState, EventType, InboxMessage, RunEvent, RunStatus, TerminalRunState } from "./types.js";
+import type { ClaudeLivenessState, EventType, InboxMessage, RunStatus, TerminalRunState } from "./types.js";
 
 interface JsonRpcRequest {
   jsonrpc?: string;
@@ -102,31 +100,22 @@ export function createClaudeChildMcpContext(runDirInput: string, options: { env?
   return { runDir: realRunDir, runId: status.runId, store };
 }
 
-function nextSequence(store: RunStore, runId: string): number {
-  return store.readEvents(runId).records.length + 1;
-}
-
-function appendStatusEvent(ctx: ClaudeChildMcpContext, input: { type: EventType; summary: string; body?: string; wake?: boolean; data?: Record<string, unknown>; patch?: Partial<RunStatus> }): RunEvent {
-  const status = ctx.store.readStatus(ctx.runId);
-  if (isTerminalRunState(status.state)) throw new Error("run is terminal");
-  const event = createRunEvent({
-    sequence: nextSequence(ctx.store, ctx.runId),
+async function appendStatusEvent(ctx: ClaudeChildMcpContext, input: { type: EventType; summary: string; body?: string; wake?: boolean; data?: Record<string, unknown>; patch?: Partial<RunStatus> | ((status: RunStatus) => Partial<RunStatus>) }) {
+  const result = await mutateNonterminalRun(ctx.store, {
     runId: ctx.runId,
-    parentRunId: status.parentRunId,
     type: input.type,
     summary: input.summary,
     body: input.body,
     wake: input.wake,
     data: input.data,
+    writerRole: "child-runtime",
+    statusPatch: (status, event) => ({
+      lastMcpCallAt: event.createdAt,
+      ...(typeof input.patch === "function" ? input.patch(status) : input.patch),
+    }),
   });
-  ctx.store.appendEvent(ctx.runId, event);
-
-  const patch: Partial<RunStatus> = { writerRole: "child-runtime", lastActivityAt: event.createdAt, lastMcpCallAt: event.createdAt, lastEventId: event.eventId, summary: input.summary, ...input.patch };
-  if (input.type === "question") Object.assign(patch, { state: "waiting_for_input", needs: input.summary });
-  if (input.type === "blocked") Object.assign(patch, { state: "blocked", needs: input.summary });
-  if (input.type === "progress" || input.type === "status" || input.type === "artifact" || input.type === "liveness") Object.assign(patch, { state: status.state === "created" || status.state === "queued" ? "running" : status.state });
-  ctx.store.writeStatus(updateRunStatus(status, patch));
-  return event;
+  if (!result.applied) throw new Error("run is terminal");
+  return result.event;
 }
 
 const LIVENESS_STATES: readonly ClaudeLivenessState[] = ["starting", "running", "idle", "waiting_for_input", "ack_pending", "rate_limited", "comatose", "stale_transport", "orphaned_process", "paused", "completed", "failed", "cancelled", "expired"];
@@ -158,33 +147,38 @@ function livenessShouldWake(state: ClaudeLivenessState | undefined): boolean {
 }
 
 async function callTool(ctx: ClaudeChildMcpContext, name: ToolName, args: Record<string, unknown>): Promise<unknown> {
-  const { value } = await withRunMutationLock(ctx.runDir, () => {
-    switch (name) {
+  let value: unknown;
+  switch (name) {
       case "subagent_event": {
         const type = asString(args.type, "type") as EventType;
         if (!["progress", "status", "question", "blocked", "artifact"].includes(type)) throw new Error("invalid event type");
-        const event = appendStatusEvent(ctx, { type, summary: asString(args.summary, "summary"), body: optionalString(args.body, "body"), wake: args.wake === true, data: optionalRecord(args.data, "data") });
-        return { eventId: event.eventId };
+        const event = await appendStatusEvent(ctx, { type, summary: asString(args.summary, "summary"), body: optionalString(args.body, "body"), wake: args.wake === true, data: optionalRecord(args.data, "data") });
+        value = { eventId: event.eventId };
+        break;
       }
       case "subagent_read_inbox": {
         const cursor = typeof args.cursor === "number" ? { eventOffset: args.cursor } : undefined;
         const receivedIds = new Set(ctx.store.readEvents(ctx.runId).records.filter((event) => event.type === "message.received").map((event) => String(event.data?.messageId ?? "")));
         const read = ctx.store.readInbox(ctx.runId, cursor);
         const messages = cursor ? read.records : read.records.filter((message) => !receivedIds.has(message.messageId));
-        const status = ctx.store.readStatus(ctx.runId);
-        if (isTerminalRunState(status.state)) throw new Error("run is terminal");
+        if (isTerminalRunState(ctx.store.readStatus(ctx.runId).state)) throw new Error("run is terminal");
         const events: string[] = [];
-        let sequence = nextSequence(ctx.store, ctx.runId);
-        let lastEvent: RunEvent | undefined;
         for (const message of messages) {
-          const event = createRunEvent({ sequence: sequence++, runId: ctx.runId, parentRunId: status.parentRunId, type: "message.received", summary: `Received parent message ${message.messageId}`, data: { messageId: message.messageId, fromRunId: message.fromRunId, messageType: message.type } });
-          ctx.store.appendEvent(ctx.runId, event);
-          lastEvent = event;
+          const event = await appendStatusEvent(ctx, {
+            type: "message.received",
+            summary: `Received parent message ${message.messageId}`,
+            data: { messageId: message.messageId, fromRunId: message.fromRunId, messageType: message.type },
+            patch: (status) => {
+              const resumes =
+                (message.type === "answer" || message.type === "instruction") &&
+                (status.state === "blocked" || status.state === "waiting_for_input");
+              return resumes ? { state: "running", needs: null } : { state: status.state, needs: status.needs };
+            },
+          });
           events.push(event.eventId);
         }
-        const activityAt = lastEvent?.createdAt ?? new Date().toISOString();
-        ctx.store.writeStatus(updateRunStatus(status, { writerRole: "child-runtime", lastActivityAt: activityAt, lastMcpCallAt: activityAt, lastEventId: lastEvent?.eventId ?? status.lastEventId }));
-        return { messages, cursor: read.cursor.eventOffset, receivedEventIds: events };
+        value = { messages, cursor: read.cursor.eventOffset, receivedEventIds: events };
+        break;
       }
       case "subagent_ack_inbox": {
         const messageId = asString(args.messageId, "messageId");
@@ -194,36 +188,48 @@ async function callTool(ctx: ClaudeChildMcpContext, name: ToolName, args: Record
         if (!known) throw new Error(`unknown message id: ${messageId}`);
         const hasReceived = ctx.store.readEvents(ctx.runId).records.some((event) => event.type === "message.received" && event.data?.messageId === messageId);
         if (!hasReceived) {
-          const status = ctx.store.readStatus(ctx.runId);
-          if (isTerminalRunState(status.state)) throw new Error("run is terminal");
-          const received = createRunEvent({ sequence: nextSequence(ctx.store, ctx.runId), runId: ctx.runId, parentRunId: status.parentRunId, type: "message.received", summary: `Received parent message ${messageId}`, data: { messageId, fromRunId: known.fromRunId, messageType: known.type } });
-          ctx.store.appendEvent(ctx.runId, received);
-          ctx.store.writeStatus(updateRunStatus(status, { writerRole: "child-runtime", lastActivityAt: received.createdAt, lastMcpCallAt: received.createdAt, lastEventId: received.eventId }));
+          await appendStatusEvent(ctx, {
+            type: "message.received",
+            summary: `Received parent message ${messageId}`,
+            data: { messageId, fromRunId: known.fromRunId, messageType: known.type },
+            patch: (status) => {
+              const resumes =
+                (known.type === "answer" || known.type === "instruction") &&
+                (status.state === "blocked" || status.state === "waiting_for_input");
+              return resumes ? { state: "running", needs: null } : { state: status.state, needs: status.needs };
+            },
+          });
         }
-        const event = appendStatusEvent(ctx, { type: disposition === "handled" ? "message.handled" : "message.rejected", summary: optionalString(args.summary, "summary") ?? `${disposition} parent message ${messageId}`, data: { messageId, disposition } });
-        return { eventId: event.eventId };
+        const event = await appendStatusEvent(ctx, { type: disposition === "handled" ? "message.handled" : "message.rejected", summary: optionalString(args.summary, "summary") ?? `${disposition} parent message ${messageId}`, data: { messageId, disposition } });
+        value = { eventId: event.eventId };
+        break;
       }
       case "subagent_complete": {
-        const status = ctx.store.readStatus(ctx.runId);
-        const alreadyCompleted = Boolean(ctx.store.readResult(ctx.runId));
-        const outcome = optionalString(args.outcome, "outcome");
-        const requestedState: TerminalRunState = outcome === "failed" || outcome === "cancelled" || outcome === "expired" ? outcome : "completed";
-        const state: TerminalRunState = isTerminalRunState(status.state) ? status.state : requestedState;
-        const result = finalizeTerminalRun(ctx.store, { runId: ctx.runId, parentRunId: status.parentRunId, agentName: status.agent.name, state, writerRole: "child-runtime", summary: optionalString(args.summary, "summary") ?? status.summary ?? `Run ${state}`, body: optionalString(args.body, "body") });
-        return { result, idempotent: alreadyCompleted || isTerminalRunState(status.state) };
+        const { value: completed } = await withRunMutationLock(ctx.runDir, () => {
+          const status = ctx.store.readStatus(ctx.runId);
+          const alreadyCompleted = Boolean(ctx.store.readResult(ctx.runId));
+          const outcome = optionalString(args.outcome, "outcome");
+          const requestedState: TerminalRunState = outcome === "failed" || outcome === "cancelled" || outcome === "expired" ? outcome : "completed";
+          const state: TerminalRunState = isTerminalRunState(status.state) ? status.state : requestedState;
+          const result = finalizeTerminalRun(ctx.store, { runId: ctx.runId, parentRunId: status.parentRunId, agentName: status.agent.name, state, writerRole: "child-runtime", summary: optionalString(args.summary, "summary") ?? status.summary ?? `Run ${state}`, body: optionalString(args.body, "body") });
+          return { result, idempotent: alreadyCompleted || isTerminalRunState(status.state) };
+        });
+        value = completed;
+        break;
       }
       case "subagent_block": {
-        const event = appendStatusEvent(ctx, { type: "blocked", summary: asString(args.reason, "reason"), data: { checkpoint: optionalString(args.checkpoint, "checkpoint") } });
-        return { eventId: event.eventId };
+        const event = await appendStatusEvent(ctx, { type: "blocked", summary: asString(args.reason, "reason"), data: { checkpoint: optionalString(args.checkpoint, "checkpoint") } });
+        value = { eventId: event.eventId };
+        break;
       }
       case "subagent_liveness": {
         const state = asLivenessState(args.state);
         const details = optionalRecord(args.details, "details");
-        const event = appendStatusEvent(ctx, { type: "liveness", summary: state ?? "liveness", wake: livenessShouldWake(state), data: { state, details }, patch: { livenessState: state, livenessReason: typeof details?.reason === "string" ? details.reason : null } });
-        return { eventId: event.eventId };
+        const event = await appendStatusEvent(ctx, { type: "liveness", summary: state ?? "liveness", wake: livenessShouldWake(state), data: { state, details }, patch: { livenessState: state, livenessReason: typeof details?.reason === "string" ? details.reason : null } });
+        value = { eventId: event.eventId };
+        break;
       }
-    }
-  });
+  }
   return mcpToolResult(value);
 }
 

@@ -248,13 +248,32 @@ test("rebuildDerivedIndexes restores latest wake event metadata", () => {
   assert.equal(summary?.hasWakeEvents, true);
 });
 
-test("corrupt summary falls back to canonical status", () => {
-  const w = workspace();
-  const runId = addRun(w.store, w.root, w.parentRunId, "running");
-  writeFileSync(w.store.summaryPath(runId), "{not json", "utf8");
-  const summary = w.store.readRunSummary(runId);
-  assert.equal(summary?.runId, runId);
-  assert.equal(summary?.state, "running");
+test("missing or corrupt summary rebuild is monotonic across status and out-of-time-order JSONL events", () => {
+  for (const summaryState of ["missing", "corrupt"] as const) {
+    const w = workspace();
+    const runId = addRun(w.store, w.root, w.parentRunId, "blocked");
+    const status = w.store.readStatus(runId);
+    const canonicalAt = "2026-01-01T00:00:00.000Z";
+    const latestActivityAt = "2026-03-01T00:00:00.000Z";
+    w.store.writeStatus({ ...status, state: "waiting_for_input", summary: "canonical current", needs: "current answer", updatedAt: canonicalAt, lastActivityAt: canonicalAt });
+    const eventsPath = w.store.pathsFor({ runId }).eventsPath;
+    const historical = [
+      { schemaVersion: SCHEMA_VERSION, eventId: "evt_march", runId, parentRunId: w.parentRunId, type: "blocked", createdAt: latestActivityAt, summary: "March activity", wake: true, data: {} },
+      { schemaVersion: SCHEMA_VERSION, eventId: "evt_february_latest_append", runId, parentRunId: w.parentRunId, type: "question", createdAt: "2026-02-01T00:00:00.000Z", summary: "February activity", wake: true, data: {} },
+    ];
+    writeFileSync(eventsPath, historical.map((event) => JSON.stringify(event)).join("\n") + "\n", "utf8");
+    if (summaryState === "missing") unlinkSync(w.store.summaryPath(runId));
+    else writeFileSync(w.store.summaryPath(runId), "{not json", "utf8");
+
+    const summary = w.store.readRunSummary(runId);
+    assert.equal(summary?.state, "waiting_for_input", summaryState);
+    assert.equal(summary?.summary, "March activity", summaryState);
+    assert.equal(summary?.needs, "current answer", summaryState);
+    assert.equal(summary?.updatedAt, latestActivityAt, summaryState);
+    assert.equal(summary?.lastActivityAt, latestActivityAt, summaryState);
+    assert.equal(summary?.latestWakeEvent?.eventId, "evt_february_latest_append", summaryState);
+    assert.equal(summary?.hasWakeEvents, true, summaryState);
+  }
 });
 
 test("wakeup polling reads full result and scans only that run's events for terminal attention suppression", () => {

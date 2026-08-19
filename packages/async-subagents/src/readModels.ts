@@ -133,12 +133,32 @@ export function summaryFromStatus(status: RunStatus, runDir: string, previous?: 
   };
 }
 
-export function applyEventToSummary(summary: RunSummaryReadModel, event: RunEvent): RunSummaryReadModel {
+function isAtLeastAsRecent(candidate: string, current: string | undefined): boolean {
+  const candidateMs = Date.parse(candidate);
+  if (!Number.isFinite(candidateMs)) return false;
+  if (!current) return true;
+  const currentMs = Date.parse(current);
+  return !Number.isFinite(currentMs) || candidateMs >= currentMs;
+}
+
+export function applyEventToSummary(
+  summary: RunSummaryReadModel,
+  event: RunEvent,
+  canonicalFloor: { updatedAt?: string; lastActivityAt?: string } = {},
+): RunSummaryReadModel {
+  // JSONL append order, not timestamps, determines which wake event is latest.
+  // Timestamps only guard canonical status projections from older history. An
+  // event must be strictly newer than the canonical floor; ties between events
+  // are then resolved by their JSONL append order.
+  const newerThanUpdatedFloor = !canonicalFloor.updatedAt || Date.parse(event.createdAt) > Date.parse(canonicalFloor.updatedAt);
+  const newerThanActivityFloor = !canonicalFloor.lastActivityAt || Date.parse(event.createdAt) > Date.parse(canonicalFloor.lastActivityAt);
+  const advancesStatusProjection = newerThanUpdatedFloor && isAtLeastAsRecent(event.createdAt, summary.updatedAt);
+  const advancesActivity = newerThanActivityFloor && isAtLeastAsRecent(event.createdAt, summary.lastActivityAt);
   const next: RunSummaryReadModel = {
     ...summary,
-    updatedAt: event.createdAt,
-    lastActivityAt: event.createdAt,
-    summary: event.summary ?? summary.summary,
+    updatedAt: advancesStatusProjection ? event.createdAt : summary.updatedAt,
+    lastActivityAt: advancesActivity ? event.createdAt : summary.lastActivityAt,
+    summary: advancesStatusProjection ? (event.summary ?? summary.summary) : summary.summary,
   };
   if (isInterestingEvent(event.type, event.wake) && !["result", "completed", "failed", "cancelled", "expired"].includes(event.type)) {
     next.latestWakeEvent = event;
@@ -150,8 +170,8 @@ export function applyEventToSummary(summary: RunSummaryReadModel, event: RunEven
 export function applyResultToSummary(summary: RunSummaryReadModel, result: RunResult): RunSummaryReadModel {
   return {
     ...summary,
-    updatedAt: result.createdAt,
-    lastActivityAt: result.createdAt,
+    updatedAt: isAtLeastAsRecent(result.createdAt, summary.updatedAt) ? result.createdAt : summary.updatedAt,
+    lastActivityAt: isAtLeastAsRecent(result.createdAt, summary.lastActivityAt) ? result.createdAt : summary.lastActivityAt,
     state: result.state,
     bucket: bucketForState(result.state),
     summary: result.summary ?? summary.summary,

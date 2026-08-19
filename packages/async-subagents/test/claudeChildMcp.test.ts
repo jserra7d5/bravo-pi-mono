@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createClaudeChildMcpContext, handleClaudeChildMcpRequest } from "../src/claudeChildMcp.js";
+import { finalizeTerminalRun } from "../src/lifecycle.js";
+import { withRunMutationLock } from "../src/runLock.js";
 import { EVENT_TYPES } from "../src/schemas.js";
 import { createInboxMessage, findMessageAck } from "../src/message.js";
 import { RunStore } from "../src/runStore.js";
@@ -89,6 +91,54 @@ test("Claude child MCP ack synthesizes a received event when the child handles a
 
   const events = run.store.readEvents(run.runId).records.filter((event) => event.data?.messageId === message.messageId);
   assert.deepEqual(events.map((event) => event.type), ["message.received", "message.handled"]);
+});
+
+test("Claude child MCP inbox receipts resume only blocked/waiting answer or instruction runs and keep status aligned", async () => {
+  const cases = [
+    { type: "answer", initialState: "blocked", expectedState: "running", expectedNeeds: null },
+    { type: "instruction", initialState: "waiting_for_input", expectedState: "running", expectedNeeds: null },
+    { type: "context", initialState: "blocked", expectedState: "blocked", expectedNeeds: "parent input" },
+    { type: "answer", initialState: "running", expectedState: "running", expectedNeeds: "parent input" },
+  ] as const;
+  for (const item of cases) {
+    const run = addRun();
+    run.store.writeStatus({ ...run.store.readStatus(run.runId), state: item.initialState, needs: "parent input" });
+    const ctx = createClaudeChildMcpContext(run.runDir);
+    const message = createInboxMessage({ toRunId: run.runId, fromRunId: "root_parent", type: item.type, body: `${item.type} body` });
+    run.store.appendInboxMessage(run.runId, message);
+
+    await call(ctx, "subagent_read_inbox");
+
+    const status = run.store.readStatus(run.runId);
+    const received = run.store.readEvents(run.runId).records.at(-1);
+    assert.equal(status.state, item.expectedState);
+    assert.equal(status.needs, item.expectedNeeds);
+    assert.equal(status.lastEventId, received?.eventId);
+    assert.equal(status.summary, received?.summary);
+  }
+});
+
+test("Claude child MCP event racing terminal finalization cannot resurrect the run", async () => {
+  const run = addRun();
+  const ctx = createClaudeChildMcpContext(run.runDir);
+  let release!: () => void;
+  let locked!: () => void;
+  const entered = new Promise<void>((resolve) => { locked = resolve; });
+  const holder = withRunMutationLock(run.runDir, async () => {
+    finalizeTerminalRun(run.store, { runId: run.runId, parentRunId: "root_parent", agentName: "claude-worker", state: "completed", writerRole: "child-runtime", summary: "Finished" });
+    locked();
+    await new Promise<void>((resolve) => { release = resolve; });
+  });
+  await entered;
+
+  const late = call(ctx, "subagent_event", { type: "progress", summary: "late progress" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  release();
+  await holder;
+  await assert.rejects(late, /run is terminal/);
+  assert.equal(run.store.readStatus(run.runId).state, "completed");
+  assert.equal(run.store.readStatus(run.runId).summary, "Finished");
+  assert.equal(run.store.readEvents(run.runId).records.some((event) => event.summary === "late progress"), false);
 });
 
 test("Claude child MCP validates bad tool requests and runDir containment", async () => {
