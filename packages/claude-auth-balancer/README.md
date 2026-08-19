@@ -69,7 +69,16 @@ session on one account until it genuinely cannot serve.
    on the warm account rather than paying a cache re-create to dodge a few
    seconds. Only a long or absent `Retry-After` rotates. Either way the client
    never sees the 429.
-6. **The session is pinned at selection time**, not after the response, so a
+6. **A broken connection is re-sent on the same account.** A transport failure
+   at `phase=pre-header` — no status line reached the client, so nothing can be
+   duplicated — is retried up to twice with a 150ms/600ms backoff, on the same
+   slot: the socket failed, not the account, and rotating would pay a cache
+   re-create for it. A header TIMEOUT is excluded despite sharing that phase,
+   because the inference may still be running upstream and re-sending would bill
+   a second one; unclassified error codes are terminal too. Measured provenance:
+   34 such failures in two days (33 `bad record mac`, one `ECONNRESET`), each
+   previously surfacing to the client as a hard 502.
+7. **The session is pinned at selection time**, not after the response, so a
    session's concurrent opening requests (`/v1/messages` and `count_tokens` fire
    ~20ms apart) cannot split across two accounts and both pay a full cache write.
 
@@ -284,9 +293,17 @@ API). Once headers arrive, streaming responses are not subject to that deadline,
 so long generations remain safe. HTTPS inference forwarding uses one
 proxy-owned agent with connection keep-alive disabled and TLS session caching
 disabled, guaranteeing a fresh TCP connection and full TLS handshake for every
-inference attempt. Pre-header failures log only safe diagnostics and return 502;
-they are not replayed, especially `/v1/messages`, where replay could duplicate
-work or spend quota twice.
+inference attempt. Pre-header failures log only safe diagnostics. A failure
+whose code shows the connection itself broke is re-sent on the same account (see
+routing rule 6); everything else — a header timeout above all — returns 502
+without replay, because `/v1/messages` is not idempotent and the inference may
+already be running upstream.
+
+Observed on this deployment at ~0.16% of requests, on both accounts, at every
+hour, and on freshly started processes as well as long-lived ones — 74 of 76
+failing within 400ms of connect, i.e. on the first records read after the
+handshake. It did not reproduce outside the balancer: 3,400 requests and 0.6 GB
+of TLS reads over the same host and path produced zero MAC failures.
 
 ## What the proxy does not do
 
