@@ -10,9 +10,9 @@
 // $2.60 vs $0.13 for a 260k prefix) plus a full prefill. Caches are per-account
 // and per-model with no escape hatch.
 //
-// Therefore: affinity wins by default. We only break a session's account when
-// that account genuinely cannot serve the request. We never rebalance a live
-// session for a marginal headroom gain.
+// Therefore: affinity wins by default. Non-Fable sessions only leave an account
+// when it genuinely cannot serve the request. Fable retains proactive evacuation
+// because its separately gated, faster-burning budget needs the existing guard.
 
 import type { Claim, ClaimId, Claims } from './claims.js';
 import { claimHasReset, projectExpiredClaims } from './claims.js';
@@ -80,13 +80,10 @@ export type AccountState = {
 };
 
 /**
- * Utilization at which an account is evacuated: any session on it moves to
- * another account, and no new session is routed to it — unless every account
- * is at or above this line, in which case there is nowhere better to go.
+ * Utilization at which a Fable account is proactively evacuated. Non-Fable
+ * routing drains an account to genuine exhaustion instead.
  *
- * This is a raw-utilization threshold, deliberately not a headroom one. The
- * question "is this account nearly spent?" is about the plan's own meter, not
- * about how fast the requested model happens to burn it.
+ * This is a raw-utilization threshold, deliberately not a headroom one.
  */
 export const DEFAULT_EVACUATE_UTILIZATION = 0.95;
 
@@ -102,6 +99,8 @@ export type HeadroomBreakdown = {
   spendableHeadroom: number;
   /** Which claim is binding. */
   bindingClaim?: ClaimId;
+  /** Projected reset of the general 7d claim, in milliseconds. */
+  projectedWeeklyResetAt?: number;
   /** Highest raw utilization across the claims this model touches, unscaled. */
   peakUtilization?: number;
   /** True when peakUtilization crossed the evacuation threshold. */
@@ -159,11 +158,13 @@ export function computeHeadroom(
   let evacuationTriggered = false;
   const overage = claims?.byId['overage'];
   const overageAvailable = overage?.status === 'allowed';
+  const weeklyReset = claims?.byId['7d']?.reset;
 
   const base: HeadroomBreakdown = {
     slot: account.slot,
     headroom: 0,
     spendableHeadroom: 0,
+    projectedWeeklyResetAt: weeklyReset === undefined ? undefined : weeklyReset * 1000,
     evacuating: false,
     requiresOverage: false,
     overageAvailable,
@@ -236,7 +237,7 @@ export function computeHeadroom(
 
   const headroom = sawAny ? min : UNKNOWN_HEADROOM;
   const spendableHeadroom = sawAny ? minSpendable : UNKNOWN_HEADROOM;
-  const evacuating = evacuationTriggered;
+  const evacuating = quota.extraClaim !== undefined && evacuationTriggered;
   return {
     ...base,
     headroom,
@@ -263,16 +264,11 @@ export type SelectInput = {
    */
   allowOverage?: boolean;
   /**
-   * Headroom below which a sticky session is moved anyway. Deliberately tiny —
-   * breaking affinity costs 20x on the next request, so we hold on until the
-   * account is effectively done.
+   * Headroom below which a sticky Fable session is moved anyway. Non-Fable
+   * affinity holds through every positive amount of model-relevant quota.
    */
   affinityFloor?: number;
-  /**
-   * Raw utilization at or above which an account is evacuated. Overrides
-   * affinity: a session on a 95%-spent account moves, because riding it to
-   * exhaustion strands the session mid-conversation with nowhere to go.
-   */
+  /** Raw utilization at or above which a Fable account is evacuated. */
   evacuateThreshold?: number;
 };
 
@@ -295,51 +291,59 @@ const DEFAULT_AFFINITY_FLOOR = 0.001;
 /**
  * Choose the account to serve one request.
  *
- * Order:
- *  1. Hold the session's existing account while it has any real headroom.
- *  2. Otherwise take the eligible non-overage account with the most headroom.
- *  3. Otherwise, only if allowed, fall back to an overage-capable account.
- *  4. Otherwise report exhaustion so the caller can surface a 429 honestly.
+ * Non-Fable fresh sessions drain the account with the earliest known projected
+ * general-weekly reset, and affinity holds until hard exhaustion. Fable keeps
+ * spendable-headroom ranking and proactive evacuation. Overage remains last.
  */
 export function selectAccount(input: SelectInput): Selection {
   const floor = input.affinityFloor ?? DEFAULT_AFFINITY_FLOOR;
   const allowOverage = input.allowOverage ?? false;
   const threshold = input.evacuateThreshold ?? DEFAULT_EVACUATE_UTILIZATION;
+  const fable = quotaForModel(input.model).extraClaim !== undefined;
   const breakdown = input.accounts.map(a =>
     computeHeadroom(a, input.model, input.nowMs, threshold),
   );
   const bySlot = new Map(breakdown.map(b => [b.slot, b]));
 
-  const serviceable = breakdown.filter(b => b.headroom > floor && !b.requiresOverage);
-  const healthy = serviceable.filter(b => !b.evacuating);
-  const rank = (pool: HeadroomBreakdown[]) =>
+  const serviceable = breakdown.filter(b => b.headroom > (fable ? floor : 0) && !b.requiresOverage);
+  const healthy = fable ? serviceable.filter(b => !b.evacuating) : serviceable;
+  const rankFable = (pool: HeadroomBreakdown[]) =>
     [...pool].sort((a, b) =>
       b.spendableHeadroom - a.spendableHeadroom ||
       b.headroom - a.headroom ||
       a.slot.localeCompare(b.slot),
     );
+  const rankDrainFirst = (pool: HeadroomBreakdown[]) =>
+    [...pool].sort((a, b) => {
+      const aReset = a.projectedWeeklyResetAt;
+      const bReset = b.projectedWeeklyResetAt;
+      if (aReset !== undefined && bReset !== undefined && aReset !== bReset) return aReset - bReset;
+      if (aReset !== undefined && bReset === undefined) return -1;
+      if (aReset === undefined && bReset !== undefined) return 1;
+      return a.slot.localeCompare(b.slot, undefined, { numeric: true });
+    });
+  const rank = fable ? rankFable : rankDrainFirst;
 
-  // Affinity holds only on an account that is not evacuating. Once an account
-  // crosses the threshold we move the session while a move is still cheap and
-  // another account is still available to move to.
   if (input.affinitySlot) {
     const held = bySlot.get(input.affinitySlot);
-    if (held && held.headroom > floor && !held.requiresOverage) {
-      if (!held.evacuating) {
+    if (held && held.headroom > (fable ? floor : 0) && !held.requiresOverage) {
+      if (!fable || !held.evacuating) {
         return {
           slot: held.slot,
           decision: 'affinity-hold',
-          reason: `holding session affinity (headroom ${held.headroom.toFixed(3)} on ${held.bindingClaim ?? 'unknown'})`,
+          reason: fable
+            ? `holding Fable session affinity (headroom ${held.headroom.toFixed(3)} on ${held.bindingClaim ?? 'unknown'})`
+            : `holding non-Fable session affinity until quota exhaustion (headroom ${held.headroom.toFixed(3)} on ${held.bindingClaim ?? 'unknown'})`,
           breakdown,
         };
       }
-      // Evacuating — but if nothing better exists, staying put is strictly
-      // better than paying a cache re-create for no quota gain.
+      // Fable evacuation remains proactive, but never pays a cache re-create
+      // when every alternative is also evacuating.
       if (healthy.length === 0) {
         return {
           slot: held.slot,
           decision: 'evacuating-fallback',
-          reason: `all accounts at or above ${(threshold * 100).toFixed(0)}%; staying on ${held.slot} to keep its cache`,
+          reason: `all Fable accounts at or above ${(threshold * 100).toFixed(0)}%; staying on ${held.slot} to keep its cache`,
           breakdown,
         };
       }
@@ -347,25 +351,28 @@ export function selectAccount(input: SelectInput): Selection {
   }
 
   const pick = rank(healthy)[0];
-
   if (pick) {
     const broke = Boolean(input.affinitySlot && input.affinitySlot !== pick.slot);
-    const evacuated = broke && bySlot.get(input.affinitySlot!)?.evacuating === true;
+    const evacuated = fable && broke && bySlot.get(input.affinitySlot!)?.evacuating === true;
     return {
       slot: pick.slot,
       decision: broke ? 'affinity-broken' : 'fresh',
       reason: broke
         ? evacuated
-          ? `sticky slot ${input.affinitySlot} at ${((bySlot.get(input.affinitySlot!)?.peakUtilization ?? 0) * 100).toFixed(1)}%; evacuated to ${pick.slot}`
+          ? `sticky Fable slot ${input.affinitySlot} at ${((bySlot.get(input.affinitySlot!)?.peakUtilization ?? 0) * 100).toFixed(1)}%; evacuated to ${pick.slot}`
           : `sticky slot ${input.affinitySlot} could not serve; moved to ${pick.slot} (one cache re-create)`
-        : `most spendable headroom (${pick.spendableHeadroom.toFixed(3)} conserved, ${pick.headroom.toFixed(3)} raw on ${pick.bindingClaim ?? 'unknown'})`,
+        : fable
+          ? `most spendable Fable headroom (${pick.spendableHeadroom.toFixed(3)} conserved, ${pick.headroom.toFixed(3)} raw on ${pick.bindingClaim ?? 'unknown'})`
+          : pick.projectedWeeklyResetAt === undefined
+            ? `draining ${pick.slot}; general 7d reset unknown (stable slot order)`
+            : `draining ${pick.slot}; earliest projected general 7d reset ${new Date(pick.projectedWeeklyResetAt).toISOString()}`,
       breakdown,
     };
   }
 
-  // Everything left is evacuating. Prefer the sticky slot — its cache is the
-  // only thing of value still on the table.
-  const evacuatingPool = rank(serviceable);
+  // Only Fable has an evacuating pool. Prefer its sticky slot because its cache
+  // is the only thing of value still on the table.
+  const evacuatingPool = fable ? rank(serviceable) : [];
   const stickyEvacuating = input.affinitySlot
     ? evacuatingPool.find(b => b.slot === input.affinitySlot)
     : undefined;
@@ -374,19 +381,15 @@ export function selectAccount(input: SelectInput): Selection {
     return {
       slot: fallback.slot,
       decision: 'evacuating-fallback',
-      reason: `all accounts at or above ${(threshold * 100).toFixed(0)}%; using ${fallback.slot}`,
+      reason: `all Fable accounts at or above ${(threshold * 100).toFixed(0)}%; using ${fallback.slot}`,
       breakdown,
     };
   }
 
   if (allowOverage) {
-    // Filter on the structured predicate, never on the human-readable `reason`
-    // string: a new disqualifying early-return would otherwise silently make an
-    // unusable account an overage candidate and send an expired token upstream.
     const overage = breakdown
       .filter(b => b.eligible && b.overageAvailable)
       .sort((a, b) => a.slot.localeCompare(b.slot));
-    // Prefer the sticky slot even here — it is the only one holding a warm cache.
     const held = input.affinitySlot ? overage.find(b => b.slot === input.affinitySlot) : undefined;
     const chosen = held ?? overage[0];
     if (chosen) {

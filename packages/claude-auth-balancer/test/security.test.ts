@@ -453,7 +453,7 @@ test('a 5h window that refills before the cache expires does not trigger a paid 
   assert.equal(s.slot, '1');
 });
 
-test('a weekly window still beyond the cache horizon does evacuate at 95%', () => {
+test('a Fable weekly window still beyond the cache horizon evacuates at 95%', () => {
   const now = 2_000_000_000_000;
   const account: AccountState = {
     slot: '1',
@@ -463,11 +463,11 @@ test('a weekly window still beyond the cache horizon does evacuate at 95%', () =
       'anthropic-ratelimit-unified-7d-reset': String(Math.floor((now + 3 * 86_400_000) / 1000)),
     }),
   };
-  assert.equal(computeHeadroom(account, 'claude-opus-5', now).evacuating, true);
+  assert.equal(computeHeadroom(account, 'claude-fable-5', now).evacuating, true);
 
   const s = selectAccount({
     accounts: [account, { slot: '2', health: 'ok' }],
-    model: 'claude-opus-5',
+    model: 'claude-fable-5',
     affinitySlot: '1',
     nowMs: now,
   });

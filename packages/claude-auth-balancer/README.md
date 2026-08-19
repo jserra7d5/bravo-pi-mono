@@ -44,15 +44,18 @@ session on one account until it genuinely cannot serve.
    model's budget must not move another model's warm prefix.
 2. **The lease expires exactly when the cache does** (1 hour, sliding on each
    request). Past that the prefix is gone, so an idle session is a *free*
-   rebalancing point. Fresh sessions rank accounts by spendable headroom: raw
-   remaining quota minus the fraction of each server window still left. This
-   spends quota that resets sooner instead of stranding it while consuming an
-   account whose reset is days farther away.
-3. **Evacuate at 95%, but only when it buys something.** An account at or above
-   95% raw utilization stops taking new sessions and existing ones move off —
-   *unless* that window resets within the cache TTL, in which case moving pays
-   20x to conserve a bucket that refills on its own. If *every* account is at
-   95%+, sessions stay put for the same reason.
+   rebalancing point. Fresh non-Fable sessions pick the healthy, non-overage
+   account with the earliest known projected general `7d` reset and keep
+   draining it until it cannot serve. Known resets sort before missing resets;
+   ties use stable slot order. The `5h` and `7d` claims remain hard gates, but
+   their utilization, headroom, and `5h` reset do not rank fresh non-Fable work.
+3. **Non-Fable affinity drains to exhaustion; Fable still evacuates.** Existing
+   non-Fable `(session, model)` leases hold through every positive amount of
+   model-relevant quota, including 95% and 99%, and move only on exhaustion,
+   rejection, or unusable auth/token state. Fable preserves spendable-headroom
+   ranking and proactive evacuation at 95%, including its `7d_oi` gate. Fable
+   does not pay a cache rebuild when the hot window resets within the cache TTL
+   or every alternative is also at 95%+.
 4. **Overage is never spent silently.** Accounts with `overage-status: allowed`
    can bill real money past 100%; that path requires `--allow-overage`.
 5. **429 waits before it rotates.** With a short `Retry-After`, the proxy waits
@@ -92,9 +95,10 @@ half-sized budget as full-sized and reads **4x too generous** on Fable — and
 makes cross-account ranking meaningless whenever one account binds on `7d_oi`
 and another on `7d`.
 
-The 95% evacuation threshold reads **raw utilization**, not model-scaled
-headroom: "is this account nearly spent?" is a question about the plan's meter,
-not about how fast the requested model happens to burn it.
+For Fable, the 95% evacuation threshold reads **raw utilization**, not
+model-scaled headroom: "is this account nearly spent?" is a question about the
+plan's meter, not about how fast the requested model happens to burn it.
+Non-Fable models do not proactively evacuate.
 
 ### Usage refresh and reset projection
 

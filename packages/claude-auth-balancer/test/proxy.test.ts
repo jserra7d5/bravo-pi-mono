@@ -234,29 +234,65 @@ test('a session sticks to one account across many requests', async () => {
   assert.equal(tokens.size, 1, `expected one account, saw ${[...tokens].join(', ')}`);
 });
 
-test('fresh-session routing waits for due probes and uses their mapping', async () => {
+test('fresh non-Fable routing waits for probes and drains the earliest weekly reset', async () => {
   const authswapRoot = fakeAuthswap([
     { slot: '1', email: 'a@x.com', token: 'tok-1' },
     { slot: '2', email: 'b@x.com', token: 'tok-2' },
   ]);
-  // slot 1 nearly spent, slot 2 fresh -> a new session should prefer slot 2
   const up = await upstream((_call, res) => {
     res.writeHead(200, OK_HEADERS).end('{}');
   }, (call, res) => {
     const busy = call.authorization === 'Bearer tok-1';
-    const reset = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
+    const fiveHourReset = new Date(Date.now() + (busy ? 5 : 1) * 60 * 60 * 1000).toISOString();
+    const weeklyReset = new Date(Date.now() + (busy ? 24 : 144) * 60 * 60 * 1000).toISOString();
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
-      five_hour: { utilization: busy ? 80 : 1, resets_at: reset },
-      seven_day: { utilization: busy ? 80 : 1, resets_at: reset },
+      five_hour: { utilization: busy ? 80 : 1, resets_at: fiveHourReset },
+      seven_day: { utilization: busy ? 80 : 1, resets_at: weeklyReset },
     }));
   });
   const { url } = await boot({ authswapRoot, upstreamUrl: up.url });
 
   await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 's1' });
 
-  assert.equal(up.calls[0]!.authorization, 'Bearer tok-2', 'fresh routing used probe state before pinning');
+  assert.equal(
+    up.calls[0]!.authorization,
+    'Bearer tok-1',
+    'earlier weekly reset wins despite worse utilization, headroom, and 5h reset',
+  );
   assert.equal(up.probes.length, 2);
   assert.ok(up.probes.every(call => call.body === ''), 'probe made no messages/body call');
+});
+
+test('real proxy retains non-Fable affinity at 99% then switches on hard exhaustion', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  const stateRoot = tmpRoot('cab-drain-affinity-');
+  const reset = (Date.now() + 24 * 60 * 60 * 1000) / 1000;
+  writeSlotObservation(stateRoot, {
+    slot: '1',
+    observedAt: Date.now(),
+    claims: { byId: { '7d': { id: '7d', utilization: 0.99, reset } } },
+  });
+  writeSlotObservation(stateRoot, {
+    slot: '2',
+    observedAt: Date.now(),
+    claims: { byId: { '7d': { id: '7d', utilization: 0.1, reset: reset + 86_400 } } },
+  });
+  new AffinityStore({ stateRoot }).touch('drain-session', '1', 'claude-opus-5');
+  const up = await upstream((call, res) => {
+    const exhausted = call.authorization === 'Bearer tok-1';
+    res.writeHead(200, {
+      ...OK_HEADERS,
+      'anthropic-ratelimit-unified-7d-utilization': exhausted ? '1.0' : '0.10',
+    }).end('{}');
+  });
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, stateRoot });
+
+  assert.equal((await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'drain-session' })).status, 200);
+  assert.equal((await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'drain-session' })).status, 200);
+  assert.deepEqual(up.calls.map(call => call.authorization), ['Bearer tok-1', 'Bearer tok-2']);
 });
 
 // --- injected faults ------------------------------------------------------

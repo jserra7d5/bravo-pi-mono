@@ -27,7 +27,7 @@ import {
 } from './accounts.js';
 import { claimHasReset } from './claims.js';
 import type { Claim } from './claims.js';
-import { DEFAULT_EVACUATE_UTILIZATION, DEFAULT_EVACUATION_HORIZON_MS } from './policy.js';
+import { DEFAULT_EVACUATE_UTILIZATION, DEFAULT_EVACUATION_HORIZON_MS, quotaForModel } from './policy.js';
 import { conciseWarnings, readAuthWarnings } from './health.js';
 
 /**
@@ -147,8 +147,12 @@ function futureReset(claim: Claim | undefined, nowMs: number): number | undefine
  * costs 20x and saves nothing), and `7d_oi` — the Fable-only weekly — does
  * trigger one, despite not being one of the two bars on the line.
  */
-function isEvacuating(claims: Record<string, Claim> | undefined, nowMs: number): boolean {
-  if (!claims) return false;
+function isEvacuating(
+  claims: Record<string, Claim> | undefined,
+  nowMs: number,
+  model: string | undefined,
+): boolean {
+  if (!claims || quotaForModel(model).extraClaim === undefined) return false;
   for (const id of ['5h', '7d', '7d_oi']) {
     const claim = claims[id];
     if (!claim || claim.utilization === undefined) continue;
@@ -305,7 +309,7 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
           observed !== undefined &&
           observed.observedAt !== undefined &&
           nowMs - observed.observedAt > OBSERVATION_STALE_MS,
-        evacuating: isEvacuating(byId, nowMs),
+        evacuating: isEvacuating(byId, nowMs, payload.model?.id),
       };
     });
   } catch {

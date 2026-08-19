@@ -123,9 +123,9 @@ function paint(text: string, color: string, enabled: boolean): string {
  * green/yellow/red for context — so the same "fine" state wore two colours and
  * neither could be learned. Low is green, high is red, everywhere.
  *
- * 90 is red because the balancer evacuates at 95: the user should see an
- * account going hot slightly before routing reacts to it, not at the same
- * moment.
+ * 90 is red because Fable routing evacuates at 95, while non-Fable routing
+ * deliberately drains through it. Either way the operator should see an
+ * account going hot before it reaches the hard limit.
  *
  * Colour is redundant here, never the sole carrier — the bar length and the
  * printed percentage say the same thing — which matters because green and red

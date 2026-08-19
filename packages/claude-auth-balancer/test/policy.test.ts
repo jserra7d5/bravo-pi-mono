@@ -150,17 +150,18 @@ test('expired tokens and reauth-needed accounts are not selectable', () => {
 // Selection
 // ---------------------------------------------------------------------------
 
-test('a fresh session picks the account with the most headroom', () => {
+test('a fresh non-Fable session picks the earliest known projected weekly reset', () => {
   const s = selectAccount({
-    accounts: [joseph(JOSEPH_HAIKU), nad(NAD_FABLE)],
+    accounts: [nad(NAD_FABLE), joseph(JOSEPH_HAIKU)],
     model: 'claude-opus-5',
     nowMs: NOW,
   });
-  assert.equal(s.slot, '1', 'nad at 1% beats joseph at 91%');
+  assert.equal(s.slot, '2', 'the 91%-used account resets first and is drained first');
   assert.equal(s.decision, 'fresh');
+  assert.match(s.reason, /earliest projected general 7d reset/);
 });
 
-test('a fresh session spends the account resetting sooner instead of stranding its quota', () => {
+test('non-Fable earliest-reset ranking ignores headroom and 5h pacing', () => {
   const claimHeaders = (utilization: number, weeklyResetMs: number) => ({
     // No reset means the short window cannot add a pacing constraint to this
     // test, which specifically compares weekly reset horizons.
@@ -178,7 +179,7 @@ test('a fresh session spends the account resetting sooner instead of stranding i
     s.breakdown.find(account => account.slot === '1')!.spendableHeadroom >
       s.breakdown.find(account => account.slot === '2')!.spendableHeadroom,
   );
-  assert.match(s.reason, /spendable headroom/);
+  assert.match(s.reason, /earliest projected general 7d reset/);
 });
 
 test('affinity is held even when another account has far more headroom', () => {
@@ -208,7 +209,26 @@ test('affinity breaks once the sticky account is exhausted', () => {
   assert.equal(s.decision, 'affinity-broken');
 });
 
-test('an account at 95% is evacuated even though it still has headroom', () => {
+test('non-Fable affinity holds at 95% and 99% while quota remains positive', () => {
+  for (const utilization of ['0.95', '0.99', '0.9999']) {
+    const hot: AccountState = {
+      slot: '2',
+      health: 'ok',
+      claims: parseClaims({ 'anthropic-ratelimit-unified-7d-utilization': utilization }),
+    };
+    const s = selectAccount({
+      accounts: [hot, nad(NAD_FABLE)],
+      model: 'claude-opus-5',
+      affinitySlot: '2',
+      nowMs: NOW,
+    });
+    assert.equal(s.slot, '2');
+    assert.equal(s.decision, 'affinity-hold');
+    assert.match(s.reason, /until quota exhaustion/);
+  }
+});
+
+test('Fable preserves proactive evacuation at 95%', () => {
   const hot: AccountState = {
     slot: '2',
     health: 'ok',
@@ -216,7 +236,7 @@ test('an account at 95% is evacuated even though it still has headroom', () => {
   };
   const s = selectAccount({
     accounts: [hot, nad(NAD_FABLE)],
-    model: 'claude-opus-5',
+    model: 'claude-fable-5',
     affinitySlot: '2',
     nowMs: NOW,
   });
@@ -235,7 +255,7 @@ test('91% does not evacuate — an allowed_warning is not the threshold', () => 
   assert.equal(s.decision, 'affinity-hold', 'the server warned, but the session stays');
 });
 
-test('when every account is at 95%+ the session stays put and keeps its cache', () => {
+test('when every Fable account is at 95%+ the session stays put and keeps its cache', () => {
   const hotA: AccountState = {
     slot: '1',
     health: 'ok',
@@ -248,7 +268,7 @@ test('when every account is at 95%+ the session stays put and keeps its cache', 
   };
   const s = selectAccount({
     accounts: [hotA, hotB],
-    model: 'claude-opus-5',
+    model: 'claude-fable-5',
     affinitySlot: '2',
     nowMs: NOW,
   });
@@ -256,7 +276,7 @@ test('when every account is at 95%+ the session stays put and keeps its cache', 
   assert.equal(s.decision, 'evacuating-fallback');
 });
 
-test('with all accounts hot and no affinity, the least-spent one wins', () => {
+test('with all Fable accounts hot and no affinity, the least-spent one wins', () => {
   const hotA: AccountState = {
     slot: '1',
     health: 'ok',
@@ -267,7 +287,7 @@ test('with all accounts hot and no affinity, the least-spent one wins', () => {
     health: 'ok',
     claims: parseClaims({ 'anthropic-ratelimit-unified-7d-utilization': '0.96' }),
   };
-  const s = selectAccount({ accounts: [hotA, hotB], model: 'claude-opus-5', nowMs: NOW });
+  const s = selectAccount({ accounts: [hotA, hotB], model: 'claude-fable-5', nowMs: NOW });
   assert.equal(s.slot, '2');
   assert.equal(s.decision, 'evacuating-fallback');
 });
@@ -324,11 +344,19 @@ test('an org with overage disabled is never used as an overage fallback', () => 
   assert.equal(s.decision, 'exhausted');
 });
 
-test('selection is deterministic when headroom ties', () => {
-  const a: AccountState = { slot: '2', health: 'ok' };
-  const b: AccountState = { slot: '1', health: 'ok' };
+test('non-Fable known resets sort before missing resets and ties use stable slot order', () => {
+  const missing: AccountState = { slot: '0', health: 'ok' };
+  const reset = String((NOW + 24 * 60 * 60 * 1000) / 1000);
+  const known10: AccountState = { slot: '10', health: 'ok', claims: parseClaims({
+    'anthropic-ratelimit-unified-7d-utilization': '0.9',
+    'anthropic-ratelimit-unified-7d-reset': reset,
+  }) };
+  const known2: AccountState = { slot: '2', health: 'ok', claims: parseClaims({
+    'anthropic-ratelimit-unified-7d-utilization': '0.1',
+    'anthropic-ratelimit-unified-7d-reset': reset,
+  }) };
   for (let i = 0; i < 5; i += 1) {
-    const s = selectAccount({ accounts: [a, b], model: 'claude-opus-5', nowMs: NOW });
-    assert.equal(s.slot, '1', 'stable slot-id tie-break');
+    const s = selectAccount({ accounts: [missing, known10, known2], model: 'claude-opus-5', nowMs: NOW });
+    assert.equal(s.slot, '2', 'canonical numeric-aware ordering puts slot 2 before slot 10');
   }
 });

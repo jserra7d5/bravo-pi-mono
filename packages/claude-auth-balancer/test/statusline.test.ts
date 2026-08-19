@@ -233,7 +233,10 @@ test('every balanced account appears, not just the one that served last', () => 
     { slot: '1', email: 'info@nad.com', u5h: 0.34, u7d: 0.07 },
     { slot: '2', email: 'joseph@gmail.com', u5h: 0, u7d: 0.96, overage: 'allowed' },
   ]);
-  const model = gather({}, { stateRoot, authswapRoot, nowMs: NOW });
+  const model = gather(
+    { model: { id: 'claude-fable-5' } },
+    { stateRoot, authswapRoot, nowMs: NOW },
+  );
   assert.equal(model.accounts.length, 2);
   assert.deepEqual(model.accounts.map(a => a.slot), ['1', '2']);
   assert.equal(model.accounts[0]!.fiveHour, 34);
@@ -256,9 +259,14 @@ test('an active evacuating account keeps its active glyph but turns it red', () 
   const { stateRoot, authswapRoot } = world([
     { slot: '1', email: 'hot@nad.com', u5h: 0.1, u7d: 0.96 },
   ]);
-  new AffinityStore({ stateRoot, now: () => NOW }).touch('sess-hot', '1', 'claude-opus-5');
-  const model = gather({ session_id: 'sess-hot' }, { stateRoot, authswapRoot, nowMs: NOW });
-  const line = render(model, { width: 120, color: true }, NOW).split('\n')[0]!;
+  new AffinityStore({ stateRoot, now: () => NOW }).touch('sess-hot', '1', 'claude-fable-5');
+  const model = gather(
+    { session_id: 'sess-hot', model: { id: 'claude-fable-5' } },
+    { stateRoot, authswapRoot, nowMs: NOW },
+  );
+  const line = render(model, { width: 120, color: true }, NOW)
+    .split('\n')
+    .find(row => row.includes('1 hot'))!;
 
   assert.ok(
     line.startsWith(`${ESC}[1m${ESC}[31m▸${ESC}[0m`),
@@ -441,11 +449,14 @@ test('the evacuation marker follows the router and spares a window refilling wit
   const soon = world([{ slot: '1', email: 'a@b.com', u5h: 0.97, u7d: 0.2, reset5h: 600 }]);
   const later = world([{ slot: '1', email: 'a@b.com', u5h: 0.97, u7d: 0.2, reset5h: 6 * 3600 }]);
   assert.equal(
-    gather({}, { ...soon, nowMs: NOW }).accounts[0]!.evacuating,
+    gather({ model: { id: 'claude-fable-5' } }, { ...soon, nowMs: NOW }).accounts[0]!.evacuating,
     false,
     'a window that refills inside the cache horizon must not trigger a move',
   );
-  assert.equal(gather({}, { ...later, nowMs: NOW }).accounts[0]!.evacuating, true);
+  assert.equal(
+    gather({ model: { id: 'claude-fable-5' } }, { ...later, nowMs: NOW }).accounts[0]!.evacuating,
+    true,
+  );
 });
 
 test('the evacuation marker fires on the Fable-only weekly, which has no bar of its own', () => {
@@ -454,7 +465,13 @@ test('the evacuation marker fires on the Fable-only weekly, which has no bar of 
   const { stateRoot, authswapRoot } = world([
     { slot: '1', email: 'a@b.com', u5h: 0.1, u7d: 0.1, u7dOi: 0.99 },
   ]);
-  assert.equal(gather({}, { stateRoot, authswapRoot, nowMs: NOW }).accounts[0]!.evacuating, true);
+  assert.equal(
+    gather(
+      { model: { id: 'claude-fable-5' } },
+      { stateRoot, authswapRoot, nowMs: NOW },
+    ).accounts[0]!.evacuating,
+    true,
+  );
 });
 
 test('an account with no live refresh token behind an expired one is flagged for re-auth', () => {
