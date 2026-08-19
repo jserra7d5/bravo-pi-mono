@@ -19,13 +19,15 @@ function makeUsage(resetAt: number): CodexUsage {
 			status: "ok",
 			usage: {
 				primary: {
-					label: "5h",
+					label: "primary",
 					remainingPercent: 80,
+					windowMinutes: 10_080,
 					resetAt,
 				},
 				secondary: {
-					label: "wk",
+					label: "secondary",
 					remainingPercent: 55,
+					windowMinutes: 300,
 					resetAt: resetAt + 24 * 60 * 60 * 1000,
 				},
 				updatedAt: resetAt - 1000,
@@ -50,6 +52,15 @@ test("footer reset bucket signature is stable inside a rendered bucket and chang
 
 	assert.equal(twoMinutesBucketA, twoMinutesBucketB);
 	assert.notEqual(twoMinutesBucketB, oneMinuteBucket);
+});
+
+test("footer reset signature changes when only truthful window duration semantics change", () => {
+	const resetAt = 1_700_000_000_000;
+	const usage = makeUsage(resetAt);
+	const before = footerResetBucketSignature(usage, resetAt - 120_000);
+	usage.accounts[0].usage!.primary!.windowMinutes = 300;
+	const after = footerResetBucketSignature(usage, resetAt - 120_000);
+	assert.notEqual(before, after);
 });
 
 test("footer reset bucket signature is always a string when codex state is absent", () => {

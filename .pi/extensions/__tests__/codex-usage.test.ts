@@ -15,6 +15,7 @@ import codexUsageExtension, {
 	costSegment,
 	ctxSegment,
 	formatTokens,
+	formatUsageWindowLabel,
 	identityColor,
 	identitySlot,
 	parseFastCommand,
@@ -52,8 +53,10 @@ function makeState(overrides: Partial<FooterRenderState> = {}): FooterRenderStat
 		sub: true,
 		codex: {
 			primary: 80,
+			primaryLabel: "5h",
 			primaryReset: "4h",
 			secondary: 55,
+			secondaryLabel: "wk",
 			secondaryReset: "4d",
 		},
 		...overrides,
@@ -282,6 +285,17 @@ test("costSegment with $0 still renders", () => {
 	assert.equal(stripAnsi(out!), "$0.000 sub");
 });
 
+test("formatUsageWindowLabel uses truthful exact durations and neutral fallbacks", () => {
+	assert.equal(formatUsageWindowLabel(300, "primary"), "5h");
+	assert.equal(formatUsageWindowLabel(10_080, "secondary"), "wk");
+	assert.equal(formatUsageWindowLabel(60, "primary"), "1h");
+	assert.equal(formatUsageWindowLabel(1_440, "secondary"), "1d");
+	assert.equal(formatUsageWindowLabel(20_160, "primary"), "2wk");
+	assert.equal(formatUsageWindowLabel(90, "secondary"), "90m");
+	assert.equal(formatUsageWindowLabel(undefined, "primary"), "pri");
+	assert.equal(formatUsageWindowLabel(Number.NaN, "secondary"), "sec");
+});
+
 test("codexWindowSegment renders nothing when remainingPct is null", () => {
 	assert.equal(codexWindowSegment("5h", null, "1h", 10), null);
 });
@@ -319,7 +333,7 @@ test("renderStatsLine drops codex windows right-to-left when line would overflow
 
 test("renderStatsLine drops only wk when 5h still fits", () => {
 	// craft a width that fits ctx + cost + 5h but not wk
-	const state = makeState({ codex: { primary: 80, primaryReset: "4h", secondary: 55, secondaryReset: "4d" } });
+	const state = makeState({ codex: { primary: 80, primaryLabel: "5h", primaryReset: "4h", secondary: 55, secondaryLabel: "wk", secondaryReset: "4d" } });
 	for (let width = 50; width <= 120; width++) {
 		const line = renderStatsLine(width, state);
 		const plain = stripAnsi(line);
@@ -644,8 +658,8 @@ function validCodexUsagePayload(overrides: Record<string, unknown> = {}): Record
 			active_codex: true,
 			status: "ok",
 			usage: {
-				primary: { name: "primary", label: "5h", remaining_percent: 72, reset_in_seconds: 3600 },
-				secondary: { name: "secondary", label: "wk", remaining_percent: 41, reset_at: 10_000 },
+				primary: { name: "primary", label: "primary", remaining_percent: 72, window_minutes: 10_080, reset_in_seconds: 3600 },
+				secondary: { name: "secondary", label: "secondary", remaining_percent: 41, windowMinutes: 300, reset_at: 10_000 },
 				updated_at: 900,
 				source: "cache",
 			},
@@ -658,6 +672,8 @@ test("parseCodexUsage parses cache-only multi-account schema", () => {
 	const parsed = parseCodexUsage(validCodexUsagePayload({ cache_path: "/tmp/usage.json", refreshed_slots: ["work"], failures: [] }), 1_000);
 	assert.equal(parsed?.accounts.length, 1);
 	assert.equal(parsed?.accounts[0].usage?.primary?.remainingPercent, 72);
+	assert.equal(parsed?.accounts[0].usage?.primary?.windowMinutes, 10_080);
+	assert.equal(parsed?.accounts[0].usage?.secondary?.windowMinutes, 300);
 	assert.equal(parsed?.accounts[0].activeCodex, true);
 });
 
@@ -681,10 +697,33 @@ test("parseCodexUsage strictly rejects malformed documented schema", () => {
 	for (const payload of invalids) assert.equal(parseCodexUsage(payload), undefined);
 });
 
+test("renderStatsLine uses actual reversed durations and remains responsive", () => {
+	const state = makeState({ codex: { accounts: [{
+		slot: "work", label: "work", active: true, status: "ok", primary: 64,
+		primaryWindowLabel: "wk", primaryReset: "1h", secondary: 25,
+		secondaryWindowLabel: "5h", secondaryReset: "2h", stale: false, expiry: null,
+	}] } });
+	const wide = stripAnsi(renderStatsLine(160, state));
+	assert.match(wide, /wk .*64%/);
+	assert.match(wide, /5h 25%/);
+	for (const width of [40, 60, 80, 120, 160]) assert.ok(visWidth(renderStatsLine(width, state)) <= width);
+});
+
+test("renderStatsLine never claims canonical durations when duration metadata is missing", () => {
+	const line = stripAnsi(renderStatsLine(160, makeState({ codex: { accounts: [{
+		slot: "work", label: "work", active: true, status: "ok", primary: 72,
+		primaryWindowLabel: "pri", primaryReset: null, secondary: 41,
+		secondaryWindowLabel: "sec", secondaryReset: null, stale: false, expiry: null,
+	}] } })));
+	assert.match(line, /pri .*72%/);
+	assert.match(line, /sec 41%/);
+	assert.doesNotMatch(line, /5h|wk/);
+});
+
 test("renderStatsLine renders compact multi-account Codex usage with active marker", () => {
-	const line = stripAnsi(renderStatsLine(120, makeState({ codex: { accounts: [
-		{ label: "work", active: true, status: "ok", primary: 72, primaryReset: "1h", secondary: 41, secondaryReset: "2d", stale: false },
-		{ label: "alt", active: false, status: "limited", primary: 8, primaryReset: "10m", secondary: null, secondaryReset: null, stale: true },
+	const line = stripAnsi(renderStatsLine(160, makeState({ codex: { accounts: [
+		{ label: "work", active: true, status: "ok", primary: 72, primaryWindowLabel: "5h", primaryReset: "1h", secondary: 41, secondaryWindowLabel: "wk", secondaryReset: "2d", stale: false },
+		{ label: "alt", active: false, status: "limited", primary: 8, primaryWindowLabel: "5h", primaryReset: "10m", secondary: null, secondaryWindowLabel: "wk", secondaryReset: null, stale: true },
 	] } } as any)));
 	assert.ok(line.includes("cx*"));
 	assert.ok(line.includes("work"));

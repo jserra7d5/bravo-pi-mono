@@ -97,16 +97,18 @@ function hasOnlyKeys(r: Record<string, unknown>, allowed: readonly string[]): bo
 
 function parseUsageWindow(value: unknown): UsageWindow | undefined {
 	const r = asRecord(value);
-	if (!r || !hasOnlyKeys(r, ["label", "name", "remaining_percent", "reset_at", "reset_in_seconds", "stale"])) return undefined;
+	if (!r || !hasOnlyKeys(r, ["label", "name", "remaining_percent", "window_minutes", "windowMinutes", "reset_at", "reset_in_seconds", "stale"])) return undefined;
 	if (!("remaining_percent" in r)) return undefined;
 	const remaining = asNumber(r.remaining_percent);
 	if (remaining == null || remaining < 0 || remaining > 100) return undefined;
 	const label = typeof r.label === "string" ? r.label : typeof r.name === "string" ? r.name : "usage";
+	const windowMinutes = "window_minutes" in r ? asNumber(r.window_minutes) : "windowMinutes" in r ? asNumber(r.windowMinutes) : undefined;
+	if (("window_minutes" in r || "windowMinutes" in r) && (windowMinutes == null || !Number.isInteger(windowMinutes) || windowMinutes <= 0)) return undefined;
 	const resetAt = "reset_at" in r ? asNumber(r.reset_at) : undefined;
 	const resetInSeconds = "reset_in_seconds" in r ? asNumber(r.reset_in_seconds) : undefined;
 	if (("reset_at" in r && resetAt == null) || ("reset_in_seconds" in r && resetInSeconds == null)) return undefined;
 	if ("stale" in r && typeof r.stale !== "boolean") return undefined;
-	return { label, remainingPercent: remaining, resetAt, resetInSeconds, stale: r.stale === true };
+	return { label, remainingPercent: remaining, windowMinutes, resetAt, resetInSeconds, stale: r.stale === true };
 }
 
 export function redactCodexAccountLabel(account: Pick<CodexAccountSlot, "slot" | "label" | "email" | "accountIdHash">): string {
@@ -482,10 +484,12 @@ export interface FooterRenderState {
 	sub: boolean;
 	codex: {
 		primary?: number | null;
+		primaryLabel?: string;
 		primaryReset?: string | null;
 		secondary?: number | null;
+		secondaryLabel?: string;
 		secondaryReset?: string | null;
-		accounts?: Array<{ slot: string; label: string; active: boolean; status: CodexAccountStatus; primary: number | null; primaryReset: string | null; secondary: number | null; secondaryReset: string | null; stale: boolean; expiry: CodexExpiryWarning | null }>;
+		accounts?: Array<{ slot: string; label: string; active: boolean; status: CodexAccountStatus; primary: number | null; primaryWindowLabel: string; primaryReset: string | null; secondary: number | null; secondaryWindowLabel: string; secondaryReset: string | null; stale: boolean; expiry: CodexExpiryWarning | null }>;
 		unavailable?: boolean;
 		stale?: boolean;
 	} | null;
@@ -556,6 +560,17 @@ export function costSegment(cost: number | null, sub: boolean): string | null {
 	return sub ? `${dollar} ${c.sub}sub${R}` : dollar;
 }
 
+export function formatUsageWindowLabel(windowMinutes: number | undefined, position: "primary" | "secondary"): string {
+	if (windowMinutes == null || !Number.isInteger(windowMinutes) || windowMinutes <= 0) return position === "primary" ? "pri" : "sec";
+	if (windowMinutes % 10_080 === 0) {
+		const weeks = windowMinutes / 10_080;
+		return weeks === 1 ? "wk" : `${weeks}wk`;
+	}
+	if (windowMinutes % 1_440 === 0) return `${windowMinutes / 1_440}d`;
+	if (windowMinutes % 60 === 0) return `${windowMinutes / 60}h`;
+	return `${windowMinutes}m`;
+}
+
 export function codexWindowSegment(
 	label: string,
 	remainingPct: number | null,
@@ -569,13 +584,14 @@ export function codexWindowSegment(
 }
 
 function codexAccountPrimarySegment(
+	windowLabel: string,
 	remainingPct: number | null,
 	resetIn: string | null,
 	barW: number,
 ): string {
-	if (remainingPct == null) return ` ${c.dim}5h${R} ?`;
+	if (remainingPct == null) return ` ${c.dim}${windowLabel}${R} ?`;
 	const col = codexThreshold(remainingPct);
-	return ` ${c.dim}5h${R} ${bar(remainingPct, barW, col)} ${col}${Math.round(remainingPct)}%${R}${resetIn ? `${c.dim}/${resetIn}${R}` : ""}`;
+	return ` ${c.dim}${windowLabel}${R} ${bar(remainingPct, barW, col)} ${col}${Math.round(remainingPct)}%${R}${resetIn ? `${c.dim}/${resetIn}${R}` : ""}`;
 }
 
 export function renderStatsLine(width: number, s: FooterRenderState, extensionStatuses: readonly string[] = []): string {
@@ -589,8 +605,8 @@ export function renderStatsLine(width: number, s: FooterRenderState, extensionSt
 
 	if (s.codex) {
 		if (!s.codex.accounts && (s.codex.primary != null || s.codex.secondary != null)) {
-			const p = codexWindowSegment("5h", s.codex.primary ?? null, s.codex.primaryReset ?? null, codexBar);
-			const sec = codexWindowSegment("wk", s.codex.secondary ?? null, s.codex.secondaryReset ?? null, codexBar);
+			const p = codexWindowSegment(s.codex.primaryLabel ?? "pri", s.codex.primary ?? null, s.codex.primaryReset ?? null, codexBar);
+			const sec = codexWindowSegment(s.codex.secondaryLabel ?? "sec", s.codex.secondary ?? null, s.codex.secondaryReset ?? null, codexBar);
 			if (p) parts.push(p);
 			if (sec) parts.push(sec);
 		} else if (s.codex.unavailable) {
@@ -615,12 +631,14 @@ export function renderStatsLine(width: number, s: FooterRenderState, extensionSt
 						const head = `${c.dim}cx${mark}${R}${status}${c.text}${account.label}${R}${expiry}`;
 						if (mode === "identity") return `${head}${stale}`;
 						const p = account.primary == null ? "?" : `${Math.round(account.primary)}%`;
+						const primaryWindowLabel = account.primaryWindowLabel ?? "pri";
+						const secondaryWindowLabel = account.secondaryWindowLabel ?? "sec";
 						const primary = mode === "full" && account.active
-							? codexAccountPrimarySegment(account.primary, account.primaryReset, codexBar)
-							: ` ${c.dim}5h${R} ${p}${account.primaryReset ? `${c.dim}/${account.primaryReset}${R}` : ""}`;
+							? codexAccountPrimarySegment(primaryWindowLabel, account.primary, account.primaryReset, codexBar)
+							: ` ${c.dim}${primaryWindowLabel}${R} ${p}${account.primaryReset ? `${c.dim}/${account.primaryReset}${R}` : ""}`;
 						if (mode === "noSecondary") return `${head}${primary}${stale}`;
 						const sec = account.secondary == null ? "?" : `${Math.round(account.secondary)}%`;
-						return `${head}${primary} ${c.dim}wk${R} ${sec}${account.secondaryReset ? `${c.dim}/${account.secondaryReset}${R}` : ""}${stale}`;
+						return `${head}${primary} ${c.dim}${secondaryWindowLabel}${R} ${sec}${account.secondaryReset ? `${c.dim}/${account.secondaryReset}${R}` : ""}${stale}`;
 					});
 			};
 			parts.push(...renderAccounts("full", false));
@@ -718,8 +736,10 @@ function buildCodexState(
 		active: a.slot === balancedAffinitySlot || a.activeCodex || a.activePi,
 		status: a.status,
 		primary: a.usage?.primary?.remainingPercent ?? null,
+		primaryWindowLabel: formatUsageWindowLabel(a.usage?.primary?.windowMinutes, "primary"),
 		primaryReset: resetFor(a.usage?.primary, now),
 		secondary: a.usage?.secondary?.remainingPercent ?? null,
+		secondaryWindowLabel: formatUsageWindowLabel(a.usage?.secondary?.windowMinutes, "secondary"),
 		secondaryReset: resetFor(a.usage?.secondary, now),
 		stale: usage.error === "stale" || a.usage?.primary?.stale === true || a.usage?.secondary?.stale === true,
 		expiry: codexExpiryWarning(a.tokenExpiresAt, now),
@@ -732,6 +752,7 @@ function codexWindowSemanticKey(window: UsageWindow | undefined): unknown {
 	return {
 		label: window.label,
 		remainingPercent: window.remainingPercent,
+		windowMinutes: window.windowMinutes ?? null,
 		resetAt: window.resetAt ?? null,
 		resetInSeconds: window.resetInSeconds ?? null,
 		stale: window.stale === true,

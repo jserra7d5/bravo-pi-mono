@@ -11,6 +11,7 @@ import { classifyOAuthRefreshError, redactSecretsInText, type OAuthErrorKind } f
 export type UsageWindow = {
   label: 'primary' | 'secondary' | string;
   remainingPercent?: number;
+  windowMinutes?: number;
   resetAt?: number;
   resetInSeconds?: number;
   stale?: boolean;
@@ -135,8 +136,8 @@ export type FinishTokenLeaseResult = { schema_version: 1; ok: true; lease_id: st
 type LegacyUsageEntry = UsageEntry & { windows?: { primary?: UsageWindow; secondary?: UsageWindow } };
 type UsageCache = { schema_version: 2; generated_at: number; accounts: Record<string, LegacyUsageEntry> };
 type ProbeRateLimits = {
-  primary?: { used_percent?: number; remaining_percent?: number; remainingPercent?: number; window_minutes?: number; resets_at?: number; resetsAt?: number; reset_at?: number; resetAt?: number; reset_in_seconds?: number; resetInSeconds?: number };
-  secondary?: { used_percent?: number; remaining_percent?: number; remainingPercent?: number; window_minutes?: number; resets_at?: number; resetsAt?: number; reset_at?: number; resetAt?: number; reset_in_seconds?: number; resetInSeconds?: number };
+  primary?: { used_percent?: number; remaining_percent?: number; remainingPercent?: number; window_minutes?: number; windowMinutes?: number; resets_at?: number; resetsAt?: number; reset_at?: number; resetAt?: number; reset_in_seconds?: number; resetInSeconds?: number };
+  secondary?: { used_percent?: number; remaining_percent?: number; remainingPercent?: number; window_minutes?: number; windowMinutes?: number; resets_at?: number; resetsAt?: number; reset_at?: number; resetAt?: number; reset_in_seconds?: number; resetInSeconds?: number };
   plan_type?: string | null;
   rate_limit_reached_type?: string | null;
 };
@@ -213,6 +214,10 @@ function asNumber(value: unknown): number | undefined { return typeof value === 
 function rowNumber(value: unknown): number | undefined { return typeof value === 'number' ? value : typeof value === 'bigint' ? Number(value) : undefined; }
 function rowString(value: unknown): string | undefined { return typeof value === 'string' ? value : undefined; }
 function clampPct(value: number): number { return Math.max(0, Math.min(100, value)); }
+function normalizeWindowMinutes(value: unknown): number | undefined {
+  const minutes = asNumberish(value);
+  return minutes != null && Number.isInteger(minutes) && minutes > 0 ? minutes : undefined;
+}
 function epochSecondsOrMs(value: number): number {
   // Codex/OpenAI-style reset fields may arrive as epoch seconds or millis.
   return value < 10_000_000_000 ? value * 1000 : value;
@@ -226,11 +231,13 @@ function persistedResetAtMs(value: number): number {
 function normalizeWindow(label: string, value: unknown): UsageWindow | undefined {
   if (!isRecord(value)) return undefined;
   const remaining = asNumber(value.remainingPercent) ?? asNumber(value.remaining_percent);
+  const windowMinutes = normalizeWindowMinutes(value.windowMinutes) ?? normalizeWindowMinutes(value.window_minutes);
   const resetAt = asNumber(value.resetAt) ?? asNumber(value.reset_at);
   const resetInSeconds = asNumber(value.resetInSeconds) ?? asNumber(value.reset_in_seconds);
   return {
     label: typeof value.label === 'string' ? value.label : label,
     remainingPercent: remaining == null ? undefined : clampPct(remaining),
+    windowMinutes,
     resetAt: resetAt == null ? undefined : persistedResetAtMs(resetAt),
     resetInSeconds,
     stale: value.stale === true,
@@ -248,18 +255,20 @@ function windowFromRateLimit(label: string, value: ProbeRateLimits['primary']): 
   if (!value) return undefined;
   const remaining = asNumberish(value.remaining_percent) ?? asNumberish(value.remainingPercent);
   const used = asNumberish(value.used_percent);
+  const windowMinutes = normalizeWindowMinutes(value.window_minutes) ?? normalizeWindowMinutes((value as Record<string, unknown>).windowMinutes);
   const resetAt = asNumberish(value.reset_at) ?? asNumberish(value.resetAt);
   const resetsAt = asNumberish(value.resets_at) ?? asNumberish(value.resetsAt);
   const resetInSeconds = asNumberish(value.reset_in_seconds) ?? asNumberish(value.resetInSeconds);
   return {
     label,
     remainingPercent: remaining != null ? clampPct(remaining) : used == null ? undefined : clampPct(100 - used),
+    windowMinutes,
     resetAt: resetAt != null ? epochSecondsOrMs(resetAt) : resetsAt != null ? epochSecondsOrMs(resetsAt) : undefined,
     resetInSeconds,
   };
 }
 function hasWindowSignal(window: UsageWindow | undefined): boolean {
-  return window?.remainingPercent != null || window?.resetAt != null || window?.resetInSeconds != null;
+  return window?.remainingPercent != null || window?.windowMinutes != null || window?.resetAt != null || window?.resetInSeconds != null;
 }
 function normalizeLiveRateLimits(metadata: unknown): { primary?: UsageWindow; secondary?: UsageWindow; status: CodexAccountStatus } | undefined {
   const rateLimits = findRateLimits(metadata);
@@ -301,6 +310,7 @@ function liveRateLimitsFromHeaders(headers: Record<string, unknown> | undefined)
     };
     copy('used_percent', `${prefix}_used_percent`, `codex_${prefix}_used_percent`, `ratelimit_${prefix}_used_percent`, `rate_limit_${prefix}_used_percent`);
     copy('remaining_percent', `${prefix}_remaining_percent`, `codex_${prefix}_remaining_percent`, `ratelimit_${prefix}_remaining_percent`, `rate_limit_${prefix}_remaining_percent`);
+    copy('window_minutes', `${prefix}_window_minutes`, `${prefix}_windowminutes`, `codex_${prefix}_window_minutes`, `codex_${prefix}_windowminutes`, `ratelimit_${prefix}_window_minutes`, `rate_limit_${prefix}_window_minutes`);
     copy('resets_at', `${prefix}_resets_at`, `codex_${prefix}_resets_at`, `ratelimit_${prefix}_resets_at`, `rate_limit_${prefix}_resets_at`);
     copy('reset_at', `${prefix}_reset_at`, `codex_${prefix}_reset_at`, `ratelimit_${prefix}_reset_at`, `rate_limit_${prefix}_reset_at`);
     copy('reset_in_seconds', `${prefix}_reset_in_seconds`, `codex_${prefix}_reset_in_seconds`, `ratelimit_${prefix}_reset_in_seconds`, `rate_limit_${prefix}_reset_in_seconds`);
@@ -440,6 +450,14 @@ function openDb(stateRoot: string): DatabaseSync {
   mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(path.join(stateRoot, 'balancer.sqlite3'));
   db.exec('PRAGMA busy_timeout = 5000');
+  const preflightPragmaVersion = rowNumber(db.prepare('PRAGMA user_version').get()?.user_version) ?? 0;
+  const hasMetadataTable = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_metadata'").get();
+  const preflightMetadataRow = hasMetadataTable ? db.prepare('SELECT value FROM schema_metadata WHERE key = ?').get('schema_version') as SqlRow | undefined : undefined;
+  const preflightMetadataVersion = preflightMetadataRow ? Number(preflightMetadataRow.value) : 0;
+  if (preflightMetadataVersion > DB_SCHEMA_VERSION || preflightPragmaVersion > DB_SCHEMA_VERSION) {
+    closeDb(db);
+    throw new Error(`unsupported balancer sqlite schema version: ${Math.max(preflightMetadataVersion, preflightPragmaVersion)}`);
+  }
   db.exec('PRAGMA foreign_keys = ON');
   db.exec('PRAGMA journal_mode = WAL');
   db.exec(`
@@ -475,6 +493,7 @@ function openDb(stateRoot: string): DatabaseSync {
       remaining_percent REAL,
       reset_at INTEGER,
       reset_in_seconds INTEGER,
+      window_minutes INTEGER,
       stale INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (snapshot_id, label)
     );
@@ -505,18 +524,36 @@ function openDb(stateRoot: string): DatabaseSync {
     );
   `);
   const row = db.prepare('SELECT value FROM schema_metadata WHERE key = ?').get('schema_version') as SqlRow | undefined;
-  if (!row) {
-    db.exec(`PRAGMA user_version = ${DB_SCHEMA_VERSION}`);
-    initializePolicy(db);
-    migrateUsageCacheSync(db, stateRoot);
-    db.prepare('INSERT OR IGNORE INTO schema_metadata(key, value) VALUES (?, ?)').run('schema_version', String(DB_SCHEMA_VERSION));
-  } else if (Number(row.value) !== DB_SCHEMA_VERSION) {
-    throw new Error(`unsupported balancer sqlite schema version: ${String(row.value)}`);
-  } else {
-    initializePolicy(db);
-    migrateUsageCacheSync(db, stateRoot);
+  const metadataVersion = row ? Number(row.value) : 0;
+  const pragmaVersion = rowNumber(db.prepare('PRAGMA user_version').get()?.user_version) ?? 0;
+  if (metadataVersion !== pragmaVersion && metadataVersion !== 0 && pragmaVersion !== 0) {
+    closeDb(db);
+    throw new Error(`inconsistent balancer sqlite schema versions: metadata=${metadataVersion}, user_version=${pragmaVersion}`);
   }
+  ensureAdditiveColumns(db);
+  if (metadataVersion !== DB_SCHEMA_VERSION || pragmaVersion !== DB_SCHEMA_VERSION) {
+    db.prepare('INSERT OR REPLACE INTO schema_metadata(key, value) VALUES (?, ?)').run('schema_version', String(DB_SCHEMA_VERSION));
+    db.exec(`PRAGMA user_version = ${DB_SCHEMA_VERSION}`);
+  }
+  initializePolicy(db);
+  migrateUsageCacheSync(db, stateRoot);
   return db;
+}
+// Nullable columns older builds neither write nor read. Adding one is invisible to
+// them, so it must NOT bump DB_SCHEMA_VERSION: a bump makes every already-running
+// process that holds the previous build in memory reject the file it is sharing.
+function ensureAdditiveColumns(db: DatabaseSync) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const columns = db.prepare('PRAGMA table_info(usage_windows)').all() as SqlRow[];
+    if (!columns.some(column => rowString(column.name) === 'window_minutes')) {
+      db.exec('ALTER TABLE usage_windows ADD COLUMN window_minutes INTEGER');
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }
 function initializePolicy(db: DatabaseSync) {
   db.prepare('INSERT OR IGNORE INTO policy(key, value) VALUES (?, ?)').run('version', String(POLICY.version));
@@ -576,13 +613,14 @@ function syncAccountInventory(db: DatabaseSync, accounts: InternalAccount[]) {
 }
 function writeWindow(db: DatabaseSync, snapshotId: number, slot: string, label: string, window: UsageWindow | undefined) {
   if (!window) return;
-  db.prepare(`INSERT INTO usage_windows(snapshot_id, slot, label, remaining_percent, reset_at, reset_in_seconds, stale) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+  db.prepare(`INSERT INTO usage_windows(snapshot_id, slot, label, remaining_percent, reset_at, reset_in_seconds, window_minutes, stale) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
     snapshotId,
     slot,
     window.label || label,
     window.remainingPercent ?? null,
     window.resetAt ?? null,
     window.resetInSeconds ?? null,
+    window.windowMinutes ?? null,
     window.stale ? 1 : 0,
   );
 }
@@ -620,6 +658,7 @@ function latestUsageEntries(db: DatabaseSync): Record<string, UsageEntry> {
       const window: UsageWindow = {
         label,
         remainingPercent: rowNumber(w.remaining_percent),
+        windowMinutes: rowNumber(w.window_minutes),
         resetAt: (() => { const resetAt = rowNumber(w.reset_at); return resetAt == null ? undefined : persistedResetAtMs(resetAt); })(),
         resetInSeconds: rowNumber(w.reset_in_seconds),
         stale: Number(w.stale) === 1,

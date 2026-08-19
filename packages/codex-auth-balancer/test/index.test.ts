@@ -257,11 +257,13 @@ test('usage cache migration preserves legacy windows shape', async () => {
   await writeJson(path.join(root, 'cache', 'usage.json'), {
     schema_version: 2,
     generated_at: Date.now(),
-    accounts: { s1: { slot: 's1', windows: { primary: { label: 'primary', remainingPercent: 55 }, secondary: { label: 'secondary', remaining_percent: 66 } } } },
+    accounts: { s1: { slot: 's1', windows: { primary: { label: 'primary', remainingPercent: 55, windowMinutes: 300 }, secondary: { label: 'secondary', remaining_percent: 66, window_minutes: 10_080 } } } },
   });
   const usage = await getUsage({ stateRoot: root });
   assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 55);
+  assert.equal(usage.accounts[0].usage?.primary?.windowMinutes, 300);
   assert.equal(usage.accounts[0].usage?.secondary?.remainingPercent, 66);
+  assert.equal(usage.accounts[0].usage?.secondary?.windowMinutes, 10_080);
 });
 
 test('usage cache migration accepts raw legacy slot map', async () => {
@@ -276,17 +278,81 @@ test('usage cache migration accepts raw legacy slot map', async () => {
   assert.ok(usage.generatedAt > 0);
 });
 
-test('ingestLiveUsage normalizes live metadata for an explicit slot', async () => {
+test('ingestLiveUsage normalizes and persists truthful reversed window durations', async () => {
   const root = await tmp();
   await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
-  const result = await ingestLiveUsage({ stateRoot: root, slot: 's1', rateLimits: { rate_limits: { primary: { remaining_percent: 64, reset_at: 1_780_000_000_000 }, secondary: { remaining_percent: 25, reset_in_seconds: 99 } } } });
+  const result = await ingestLiveUsage({ stateRoot: root, slot: 's1', rateLimits: { rate_limits: { primary: { used_percent: 36, window_minutes: 10_080, reset_at: 1_780_000_000_000 }, secondary: { remaining_percent: 25, windowMinutes: 300, reset_in_seconds: 99 } } } });
   assert.deepEqual(result, { ok: true, ingested: true, slot: 's1' });
   const usage = await getUsage({ stateRoot: root });
   assert.equal(usage.accounts[0].usage?.source, 'live');
-  assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 64);
+  assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 64, 'used percent must invert to remaining quota');
+  assert.equal(usage.accounts[0].usage?.primary?.windowMinutes, 10_080);
   assert.equal(usage.accounts[0].usage?.primary?.resetAt, 1_780_000_000_000);
   assert.equal(usage.accounts[0].usage?.secondary?.remainingPercent, 25);
+  assert.equal(usage.accounts[0].usage?.secondary?.windowMinutes, 300);
   assert.equal(usage.accounts[0].usage?.secondary?.resetInSeconds, 99);
+  const reloaded = await getUsage({ stateRoot: root });
+  assert.equal(reloaded.accounts[0].usage?.primary?.windowMinutes, 10_080);
+  assert.equal(reloaded.accounts[0].usage?.secondary?.windowMinutes, 300);
+});
+
+test('a pre-existing db without window_minutes gains it additively, keeping schema version 1', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
+  const dbPath = path.join(root, 'balancer.sqlite3');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE schema_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO schema_metadata VALUES ('schema_version', '1');
+    PRAGMA user_version = 1;
+    CREATE TABLE accounts (slot TEXT PRIMARY KEY, id_hash TEXT, account_id_hash TEXT, auth_hash TEXT, auth_path TEXT, pi_auth_path TEXT, active_pi INTEGER NOT NULL DEFAULT 0, active_codex INTEGER NOT NULL DEFAULT 0, first_seen_at INTEGER NOT NULL DEFAULT 0, last_seen_at INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE usage_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, slot TEXT NOT NULL REFERENCES accounts(slot) ON DELETE CASCADE, generated_at INTEGER NOT NULL, updated_at INTEGER, source TEXT NOT NULL, status TEXT NOT NULL, problem_code TEXT, problem_message TEXT, created_at INTEGER NOT NULL);
+    CREATE TABLE usage_windows (snapshot_id INTEGER NOT NULL REFERENCES usage_snapshots(id) ON DELETE CASCADE, slot TEXT NOT NULL, label TEXT NOT NULL, remaining_percent REAL, reset_at INTEGER, reset_in_seconds INTEGER, stale INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (snapshot_id, label));
+    INSERT INTO accounts(slot) VALUES ('s1');
+    INSERT INTO usage_snapshots(slot, generated_at, source, status, created_at) VALUES ('s1', 1234, 'cache', 'ok', 1234);
+    INSERT INTO usage_windows(snapshot_id, slot, label, remaining_percent, stale) VALUES (1, 's1', 'primary', 42, 0);
+  `);
+  db.close();
+  const usage = await getUsage({ stateRoot: root, staleAfterMs: Number.MAX_SAFE_INTEGER });
+  assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 42);
+  const migrated = new DatabaseSync(dbPath);
+  assert.equal((migrated.prepare('PRAGMA user_version').get() as any).user_version, 1, 'an additive column must not bump the schema version out from under running builds');
+  assert.equal((migrated.prepare("SELECT value FROM schema_metadata WHERE key='schema_version'").get() as any).value, '1');
+  assert.ok((migrated.prepare('PRAGMA table_info(usage_windows)').all() as any[]).some(column => column.name === 'window_minutes'));
+  migrated.close();
+  // Re-opening must be idempotent: the ALTER cannot run twice.
+  const again = await getUsage({ stateRoot: root, staleAfterMs: Number.MAX_SAFE_INTEGER });
+  assert.equal(again.unavailable, undefined);
+  assert.equal(again.accounts[0].usage?.primary?.remainingPercent, 42);
+});
+
+test('a db written by a window_minutes build stays readable by a build that predates it', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
+  await ingestLiveUsage({ stateRoot: root, slot: 's1', rateLimits: { rate_limits: { primary: { remaining_percent: 64, window_minutes: 10_080 } } } });
+  // An older build names its columns explicitly and never mentions window_minutes.
+  const legacy = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  assert.equal((legacy.prepare('PRAGMA user_version').get() as any).user_version, 1);
+  const snapshotId = (legacy.prepare('SELECT id FROM usage_snapshots ORDER BY id DESC LIMIT 1').get() as any).id;
+  legacy.prepare('INSERT OR REPLACE INTO usage_windows(snapshot_id, slot, label, remaining_percent, reset_at, reset_in_seconds, stale) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(snapshotId, 's1', 'secondary', 12, null, null, 0);
+  assert.equal((legacy.prepare("SELECT remaining_percent FROM usage_windows WHERE label='secondary'").get() as any).remaining_percent, 12);
+  legacy.close();
+  const usage = await getUsage({ stateRoot: root, staleAfterMs: Number.MAX_SAFE_INTEGER });
+  assert.equal(usage.accounts[0].usage?.primary?.windowMinutes, 10_080);
+  assert.equal(usage.accounts[0].usage?.secondary?.remainingPercent, 12);
+  assert.equal(usage.accounts[0].usage?.secondary?.windowMinutes, undefined);
+});
+
+test('unknown future sqlite schema versions are rejected', async () => {
+  const root = await tmp();
+  await fs.mkdir(root, { recursive: true });
+  const db = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  db.exec('PRAGMA user_version = 99');
+  db.close();
+  const usage = await getUsage({ stateRoot: root });
+  assert.equal(usage.unavailable, true);
+  assert.match(usage.error ?? '', /unsupported balancer sqlite schema version: 99/);
 });
 
 test('ingestLiveUsage normalizes camelCase live reset timestamps at write boundary', async () => {
@@ -308,17 +374,37 @@ test('ingestLiveUsage converts used_percent and accepts JSON rate-limit headers'
     slot: 's1',
     headers: {
       authorization: 'Bearer live-secret-token',
-      'x-codex-rate-limits': JSON.stringify({ rate_limits: { primary: { used_percent: 12.5, resets_at: 2000 }, secondary: { used_percent: 100, resets_at: 2_000_000_000_000 } } }),
+      'x-codex-rate-limits': JSON.stringify({ rate_limits: { primary: { used_percent: 12.5, window_minutes: 300, resets_at: 2000 }, secondary: { used_percent: 100, windowMinutes: 10_080, resets_at: 2_000_000_000_000 } } }),
     },
   });
   const usage = await getUsage({ stateRoot: root });
   assert.equal(usage.accounts[0].usage?.primary?.remainingPercent, 87.5);
+  assert.equal(usage.accounts[0].usage?.primary?.windowMinutes, 300);
   assert.equal(usage.accounts[0].usage?.primary?.resetAt, 2_000_000);
   assert.equal(usage.accounts[0].usage?.secondary?.remainingPercent, 0);
+  assert.equal(usage.accounts[0].usage?.secondary?.windowMinutes, 10_080);
   assert.equal(usage.accounts[0].usage?.secondary?.resetAt, 2_000_000_000_000);
   const dbBytes = await fs.readFile(path.join(root, 'balancer.sqlite3'));
   assert.equal(dbBytes.includes(Buffer.from('live-secret-token')), false);
   assert.equal(dbBytes.includes(Buffer.from('authorization')), false);
+});
+
+test('ingestLiveUsage accepts recognized window duration header fields', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok' });
+  await ingestLiveUsage({
+    stateRoot: root,
+    slot: 's1',
+    headers: {
+      'x-primary-remaining-percent': '70',
+      'x-primary-window-minutes': '10080',
+      'x-secondary-remaining-percent': '20',
+      'x-secondary-window-minutes': '300',
+    },
+  });
+  const usage = await getUsage({ stateRoot: root });
+  assert.equal(usage.accounts[0].usage?.primary?.windowMinutes, 10_080);
+  assert.equal(usage.accounts[0].usage?.secondary?.windowMinutes, 300);
 });
 
 test('ingestLiveUsage attributes by reservation/launch and skips ambiguous unattributed live data', async () => {
@@ -349,8 +435,10 @@ test('refreshUsage probes Codex CLI for both slots and stores remaining percent'
     for (const account of usage.accounts) {
       assert.equal(account.status, 'ok');
       assert.equal(account.usage?.primary?.remainingPercent, 77);
+      assert.equal(account.usage?.primary?.windowMinutes, 300);
       assert.equal(account.usage?.primary?.resetAt, 2_000_000);
       assert.equal(account.usage?.secondary?.remainingPercent, 16);
+      assert.equal(account.usage?.secondary?.windowMinutes, 10_080);
       assert.equal(account.usage?.secondary?.resetAt, 3_000_000);
     }
     const status = await getDbStatus({ stateRoot: root });
