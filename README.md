@@ -6,7 +6,7 @@ Personal pi/agent tooling monorepo.
 
 - `packages/tango` — CLI-first native/tmux agent orchestrator with Pi, Claude Code, and generic harnesses.
 - `packages/loom` — CLI-first durable recursive work graph for research, design, planning, decisions, inboxes, and Tango-compatible agent coordination.
-- `packages/async-subagents` — Pi-only async subagent primitive with durable run files and parent/child tools.
+- `packages/async-subagents` — durable Pi/Claude child runs, Pi milestone tasks, and optional budget-auto-swarm orchestration.
 - `packages/bravo-goals` — Pi-first durable goal workspaces with task receipts, phase boundaries, HUD status, and Judge contracts.
 - `packages/caveman` — Pi extension for session-scoped terse response mode.
 - `packages/tui-enhancements` — Pi extension for Tab-triggered inline slash completion, multi-skill inline `/skill:name` expansion, and terminal link helpers (`/links`, `/copy-link`).
@@ -79,7 +79,11 @@ npm test --workspace @bravo/async-subagents
 pi install /home/joe/Documents/projects/bravo-pi-mono/packages/async-subagents
 ```
 
-The async-subagents Pi package exposes the parent tools for starting, waiting on, messaging, and collecting durable Pi child agents. It replaces the old Tango/Loom Pi package install path for async Pi subagent work.
+The async-subagents package exposes parent tools and a CLI for starting, watching, messaging, and collecting durable children over one canonical store. Pi can enable sticky `/budget-auto-swarm on`; Claude Code can explicitly invoke the installed `/budget-auto-swarm` skill. The Claude model/effort override is invocation-turn scoped, not a persistent model toggle.
+
+Incident ledgers:
+
+- `docs/incidents/2026-08-19-codex-balancer-selection.md` — the night lease selection starved the fleet: two fixed defects, thirteen open findings across codex-auth-balancer, async-subagents, and operations.
 
 Design/spec docs:
 
