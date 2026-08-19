@@ -176,7 +176,20 @@ type SqlRow = Record<string, string | number | bigint | Buffer | null>;
 type ReservationState = 'pending' | 'prepared' | 'completed' | 'released' | 'failed' | 'conflict' | 'expired';
 
 const DEFAULT_STALE_AFTER_MS = 5 * 60_000;
-const PROBE_MODEL = process.env.CODEX_AUTH_BALANCER_PROBE_MODEL || 'gpt-5.3-codex-spark';
+/**
+ * The probe model decides WHICH QUOTA POOL is measured, not just what it costs.
+ *
+ * `gpt-5.3-codex-spark` reports a separate tier — 5h + weekly windows that the fleet
+ * never spends — so it read ~98% for every account regardless of real position, and
+ * near-identically across accounts because nobody uses that tier. Adding a third
+ * account ran `refresh-usage --all`, which replaced every slot's accurate live data
+ * with it and left two nearly-exhausted accounts looking untouched.
+ *
+ * This MUST name a model in the same pool the fleet runs on. Verified against all
+ * three live accounts: luna reports the weekly window with distinct per-account usage
+ * (95% / 91% / 0%), matching the live rate-limit headers.
+ */
+export const PROBE_MODEL = process.env.CODEX_AUTH_BALANCER_PROBE_MODEL || 'gpt-5.6-luna';
 const PROBE_TIMEOUT_MS = Number(process.env.CODEX_AUTH_BALANCER_PROBE_TIMEOUT_MS || 60_000);
 const PROBE_PROMPT = 'Reply exactly: OK';
 const DB_SCHEMA_VERSION = 1;
@@ -982,7 +995,7 @@ async function probeUsageForAccount(account: InternalAccount): Promise<UsageEntr
   }
 }
 
-export async function refreshUsage(options: { stateRoot?: string; all?: boolean; slot?: string } | string = {}, opts: { all?: boolean; slot?: string } = {}) {
+export async function refreshUsage(options: { stateRoot?: string; all?: boolean; slot?: string; force?: boolean } | string = {}, opts: { all?: boolean; slot?: string; force?: boolean } = {}) {
   const stateRoot = typeof options === 'string' ? options : options.stateRoot || resolveStateRoot();
   const o = typeof options === 'string' ? opts : options;
   const accounts = await loadInternalAccounts(stateRoot);
@@ -993,12 +1006,30 @@ export async function refreshUsage(options: { stateRoot?: string; all?: boolean;
     probed.push(await probeUsageForAccount(account));
   }
   const db = openDb(stateRoot);
+  const deferred: string[] = [];
   try {
     syncAccountInventory(db, accounts);
     const generatedAt = Date.now();
     db.exec('BEGIN IMMEDIATE');
     try {
-      for (const entry of probed) writeUsageSnapshot(db, entry, generatedAt);
+      for (const entry of probed) {
+        // A probe must not overwrite a still-fresh LIVE reading. Live data comes from
+        // rate-limit headers on requests the fleet actually made, so it is ground truth
+        // for the pool being spent; a probe is a fallback for slots that have not served
+        // a request lately. The skip is what stops one bad probe from destroying good
+        // data across every slot at once, which is how a routine `refresh-usage --all`
+        // left two exhausted accounts reading as untouched.
+        //
+        // Deliberately enforced on WRITE, not on read: a resident process running older
+        // code selects on MAX(id) and would not honour a read-side preference.
+        if (!o.force && hasFreshLiveSnapshot(db, entry.slot, generatedAt)) {
+          deferred.push(entry.slot);
+          db.prepare('INSERT INTO launch_events(slot, event_type, created_at, details_json) VALUES (?, ?, ?, ?)')
+            .run(entry.slot, 'probe_deferred_to_live', generatedAt, JSON.stringify({ reason: 'fresh_live_snapshot', probe_model: PROBE_MODEL }));
+          continue;
+        }
+        writeUsageSnapshot(db, entry, generatedAt);
+      }
       db.exec('COMMIT');
     } catch (error) {
       db.exec('ROLLBACK');
@@ -1007,7 +1038,24 @@ export async function refreshUsage(options: { stateRoot?: string; all?: boolean;
   } finally {
     closeDb(db);
   }
-  return getUsage({ stateRoot });
+  return { ...(await getUsage({ stateRoot })), deferredToLive: deferred };
+}
+
+/**
+ * True when this slot's newest snapshot came from live rate-limit headers and is still
+ * inside the selection freshness window.
+ *
+ * This defers a FAILED probe too. A slot that served real traffic seconds ago is
+ * demonstrably working, so a probe that cannot run — no codex binary, a timeout, a
+ * sandbox refusal — must not be allowed to mark it broken. It is self-correcting: a
+ * genuinely bricked credential stops producing live readings, the live snapshot ages
+ * out, and the next probe records the breakage. `--force` overrides.
+ */
+function hasFreshLiveSnapshot(db: DatabaseSync, slot: string, now: number): boolean {
+  const row = db.prepare('SELECT source, generated_at FROM usage_snapshots WHERE slot = ? ORDER BY id DESC LIMIT 1').get(slot) as SqlRow | undefined;
+  if (!row || rowString(row.source) !== 'live') return false;
+  const generatedAt = rowNumber(row.generated_at);
+  return generatedAt != null && now - generatedAt <= POLICY.selectionStaleAfterMs;
 }
 
 function attributableSlot(db: DatabaseSync, input: LiveUsageIngestInput): string | undefined {

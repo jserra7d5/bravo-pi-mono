@@ -23,7 +23,7 @@ async function main() {
   switch (cmd) {
     case 'usage': needJson(); out({ schema_version: 1, ...(await getUsage({ stateRoot })) }); break;
     case 'list': needJson(); out({ schema_version: 1, stateRoot, accounts: (await loadAccounts(stateRoot)).map(a => ({ slot: a.slot, idHash: a.idHash, hasPiAuth: !!a.piAuthPath, usage: a.usage })) }); break;
-    case 'refresh-usage': needJson(); out({ schema_version: 1, ...(await refreshUsage({ stateRoot, all: has('--all'), slot: arg('--slot') })) }); break;
+    case 'refresh-usage': needJson(); out({ schema_version: 1, ...(await refreshUsage({ stateRoot, all: has('--all'), slot: arg('--slot'), force: has('--force') })) }); break;
     case 'prepare-launch': { needJson(); const dir = arg('--isolated-dir'); if (!dir) throw new Error('--isolated-dir required'); out(await prepareLaunch(dir, { stateRoot, slot: arg('--slot'), runId: arg('--run-id'), rootRunId: arg('--root-run-id') })); break; }
     case 'sync-back': { needJson(); const dir = arg('--isolated-dir'); const slot = arg('--slot'); if (!dir || !slot) throw new Error('--isolated-dir and --slot required'); const r = await syncBack(dir, { stateRoot, slot }); if (r.ok) await cleanupLaunch(dir); out({ schema_version: 1, ...r }); break; }
     case 'db-status': needJson(); out({ schema_version: 1, ...(await getDbStatus({ stateRoot })) }); break;

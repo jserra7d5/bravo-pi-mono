@@ -33,6 +33,7 @@ Anything marked **unverified** is a second-hand report I did not confirm myself.
 | 16 | Content filter flags security-review remediation briefs | operational | medium | prompting updated (unreleased) |
 | 17 | 30-minute run wall expires broad briefs | async-subagents | low | open |
 | 18 | Retention sweep on the lease path took the fleet down | codex-auth-balancer | high | fixed (self-inflicted, same day) |
+| 19 | Usage probe measured a quota pool the fleet never spends | codex-auth-balancer | high | fixed (unreleased) |
 
 ---
 
@@ -359,6 +360,61 @@ into this repo's `dist`, so every `npm run build` replaces the code under every
 running session at once, with no staging and no rollback — exactly the hazard #13
 describes from the other direction. Resident processes then hold whichever build
 they started with, which is #4. A rebuild during active fleet work is a deploy.
+
+### 19. The usage probe measured a quota pool the fleet never spends
+
+Surfaced by adding a third Codex account: all three slots began reporting ~98%
+remaining, including two that were nearly exhausted.
+
+The probe ran `codex exec -m gpt-5.3-codex-spark`. The model decides which quota
+pool the rate-limit payload describes, not merely what the probe costs. Measured
+against the same live accounts, minutes apart:
+
+```
+gpt-5.3-codex-spark      slot 1  primary 300min   3% used | secondary 10080  1% used
+                         slot 2  primary 300min   3% used | secondary 10080  1% used
+gpt-5.6-luna             slot 1  primary 10080   95% used | secondary null
+                         slot 2  primary 10080   91% used | secondary null
+                         slot 3  primary 10080    0% used | secondary null
+```
+
+The spark tier has its own 5h + weekly windows that nothing here spends, so it
+read near-100% for every account and near-identically across accounts. The numbers
+were real; they described the wrong pool.
+
+Adding an account is what exposed it, because that runs `refresh-usage --all`,
+which replaced every slot's `live` data at once. Until then the probe path almost
+never ran: live rate-limit headers from real requests kept the slots honest. Slot
+1's history shows the moment precisely — 203 readings of `primary|10080`, and
+exactly one of `primary|300`, written at 14:16:34.
+
+Two fixes:
+
+- **The probe runs a fleet-pool model** (`gpt-5.6-luna`), verified against all
+  three accounts before pinning. The constant is exported and asserted, because
+  the string selects a quota pool rather than naming a preference.
+- **A probe never overwrites a still-fresh live reading.** Live headers come from
+  requests the fleet actually made and are ground truth for the pool being spent;
+  a probe is the fallback for slots that have not served traffic lately.
+  `refreshUsage` reports the slots it deferred, and `--force` overrides.
+
+The deferral covers a *failed* probe too. A slot that served real traffic seconds
+ago is demonstrably working, so a probe that cannot run must not mark it broken.
+That is self-correcting: a genuinely bricked credential stops producing live
+readings, the live snapshot ages out, and the next probe records the breakage.
+
+Enforced on write rather than on read, deliberately: a resident process running
+older code selects on the newest snapshot id and would not honour a read-side
+preference (#4).
+
+Live position after the fix — the two original `pro` accounts are nearly spent and
+the new `prolite` account is carrying the fleet:
+
+```
+slot 1    5% remaining (weekly, pro)
+slot 2    9% remaining (weekly, pro)
+slot 3  100% remaining (weekly, prolite)
+```
 
 ## Closed — no action needed
 

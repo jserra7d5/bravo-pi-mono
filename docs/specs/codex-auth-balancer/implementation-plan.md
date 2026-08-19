@@ -70,4 +70,6 @@ Interactive pilot:
 
 Authswap is not a supported runtime or migration dependency. The package owns account state, launch isolation, sync-back, cleanup, and usage cache refresh directly.
 
-Usage refresh executes `codex exec` in a temporary `CODEX_HOME` containing only the selected slot's `auth.json`, then parses the newest session JSONL `payload.rate_limits` event. The persisted cache is now SQLite usage snapshots/windows with remaining percentages and millisecond reset timestamps.
+Usage refresh executes `codex exec` in a temporary `CODEX_HOME` containing only the selected slot's `auth.json`, then parses the newest session JSONL `payload.rate_limits` event.
+
+The probe model selects which QUOTA POOL is measured, not just what the probe costs, so it must name a model in the pool the fleet runs on (`gpt-5.6-luna`). A probe never overwrites a still-fresh `live` snapshot — live rate-limit headers are ground truth for the pool being spent, and the deferral covers failed probes too, so a transient probe failure cannot mark a demonstrably working slot broken. Enforced on write, because a resident process on older code selects on the newest snapshot id. `refresh-usage --force` overrides. The persisted cache is now SQLite usage snapshots/windows with remaining percentages and millisecond reset timestamps.

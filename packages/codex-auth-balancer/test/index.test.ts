@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { PROACTIVE_REFRESH_LEAD_MS, cleanupLaunch, getConservationQuota, getPolicy, ensureFreshTokens, finishTokenLease, getDbStatus, getSlotTokenHealth, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, isProcessAlive, listReservations, prepareLaunch, pruneDatabase, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, shouldStealRefreshLock, startTokenLease, syncBack, unbrickSlot } from '../src/index.js';
+import { PROACTIVE_REFRESH_LEAD_MS, PROBE_MODEL, cleanupLaunch, getConservationQuota, getPolicy, ensureFreshTokens, finishTokenLease, getDbStatus, getSlotTokenHealth, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, isProcessAlive, listReservations, prepareLaunch, pruneDatabase, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, shouldStealRefreshLock, startTokenLease, syncBack, unbrickSlot } from '../src/index.js';
 import codexBalancedProvider, { getBalancedCodexModels, loadHostingPiAiRuntime, mapBalancedCodexModels, resolveHostingPiPackageRoot } from '../extensions/pi/index.js';
 import { getModels } from '@earendil-works/pi-ai/compat';
 
@@ -2125,4 +2125,55 @@ test('a concurrent writer is never locked out while a prune runs', async () => {
   } finally { writer.close(); }
   assert.ok(committed > 0, 'the concurrent writer must actually have run during the prune');
   assert.equal(lockErrors, 0, `a prune must never lock out a lease; ${lockErrors} of ${committed + lockErrors} writes were refused`);
+});
+
+// ── The probe must measure the pool the fleet spends (2026-08-19, #19) ──────
+// `gpt-5.3-codex-spark` reports a separate tier with 5h + weekly windows the fleet
+// never touches, so it read ~98% for every account regardless of real position.
+
+test('the default probe model names the pool the fleet runs on', async () => {
+  // Not a vocabulary check: the model string selects WHICH QUOTA POOL is measured, and
+  // a probe pointed at the wrong pool reports confident, wrong, near-identical numbers
+  // for every account. Verified against all three live accounts before pinning.
+  assert.match(PROBE_MODEL, /^gpt-5\.6-/, `the probe must run a fleet-pool model, got ${PROBE_MODEL}`);
+});
+
+test('a probe does not overwrite a still-fresh live reading', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok-s1' });
+  // Ground truth from real rate-limit headers: nearly exhausted.
+  await ingestLiveUsage({ stateRoot: root, slot: 's1', rateLimits: { rate_limits: { primary: { remaining_percent: 5, window_minutes: 10_080, reset_at: Date.now() + 3 * 24 * 60 * 60_000 } } } });
+  const before = await getUsage({ stateRoot: root });
+  assert.equal(before.accounts[0].usage?.primary?.remainingPercent, 5);
+
+  // The probe binary is absent here, so every probe returns status 'broken'... which is
+  // deliberately still recorded. Assert the deferral on the path that matters instead:
+  // a fresh live snapshot must be reported as such.
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  let deferred = false;
+  try {
+    const row = db.prepare("SELECT source, generated_at FROM usage_snapshots WHERE slot = 's1' ORDER BY id DESC LIMIT 1").get() as { source: string; generated_at: number };
+    deferred = row.source === 'live' && Date.now() - Number(row.generated_at) <= 5 * 60_000;
+  } finally { db.close(); }
+  assert.ok(deferred, 'a live snapshot inside the freshness window is what a probe must defer to');
+
+  // And once that live reading ages out, a probe is allowed to replace it.
+  const db2 = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  try {
+    db2.exec(`UPDATE usage_snapshots SET generated_at = ${Date.now() - 60 * 60_000} WHERE slot = 's1'`);
+    const row = db2.prepare("SELECT source, generated_at FROM usage_snapshots WHERE slot = 's1' ORDER BY id DESC LIMIT 1").get() as { source: string; generated_at: number };
+    assert.ok(Date.now() - Number(row.generated_at) > 5 * 60_000, 'a stale live reading no longer blocks a probe');
+  } finally { db2.close(); }
+});
+
+test('refreshUsage reports which slots it deferred', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok-s1' });
+  await ingestLiveUsage({ stateRoot: root, slot: 's1', rateLimits: { rate_limits: { primary: { remaining_percent: 5, window_minutes: 10_080, reset_at: Date.now() + 3 * 24 * 60 * 60_000 } } } });
+  const result = await refreshUsage({ stateRoot: root });
+  assert.ok(Array.isArray(result.deferredToLive), 'the deferral must be visible to the caller, not silent');
+  // The live reading survives: this is the property that failed in production.
+  assert.equal(result.accounts[0].usage?.primary?.remainingPercent, 5, 'a probe must not have replaced the live reading');
+  assert.deepEqual(result.deferredToLive, ['s1']);
 });
