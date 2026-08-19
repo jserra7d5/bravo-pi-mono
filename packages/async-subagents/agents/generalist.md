@@ -7,6 +7,10 @@ extensions: [@bravo/web-evidence-cache/extensions/pi]
 mode: oneshot
 maxSubagentDepth: 0
 variants:
+  luna:
+    model: bravo-codex-balanced/gpt-5.6-luna
+  sol:
+    model: bravo-codex-balanced/gpt-5.6-sol
   gemini:
     model: antigravity-code-assist/gemini-3.5-flash
     thinkingLevel: high

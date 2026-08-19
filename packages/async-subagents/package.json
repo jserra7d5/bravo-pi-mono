@@ -3,7 +3,7 @@
   "version": "0.2.5",
   "private": true,
   "type": "module",
-  "description": "Pi-only async subagent primitive with durable run files.",
+  "description": "Durable async subagent runtime for Pi and Claude harnesses.",
   "keywords": ["pi-package"],
   "bin": {
     "async-subagents": "./dist/src/cli.js"

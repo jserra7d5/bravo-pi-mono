@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { defaultRunRoot, loadAsyncSubagentsConfig } from "../src/config.js";
 import { balancedModelId, startSubagent } from "../src/start.js";
 import { codexBalancerSyncBackAndCleanup } from "../src/supervisor.js";
+import { summarizeStartResult } from "../extensions/pi/renderers.js";
+import { ingestLiveUsage } from "@bravo/codex-auth-balancer";
 
 // Resolve the codex-auth-balancer provider extension the same robust way start.ts
 // does, so reachability assertions compare against the real on-disk module path.
@@ -245,4 +247,81 @@ test("legacy copied-credential fail-closed aborts; warn fallback continues", asy
   const open = authWorkspace("prepare-fail", false, { copiedCredentialsLegacy: true });
   const continued = await startSubagent({ agent: "codex", task: "warn", cwd: open.root, runRoot: open.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: open.root }, fake: { mode: "immediate" } });
   assert.equal(continued.state, "completed");
+});
+
+// ── Shared-window visibility at dispatch (incident #14) ──────────────────────
+
+// A lead fanning out lanes had no signal it was spending a scarce shared window
+// until a child died of it. The number must reach the start result, keyed by the
+// window's DURATION rather than by whichever label the upstream happened to use.
+test("startSubagent reports the shared conservation window on the start result", async () => {
+  const w = authWorkspace("success");
+  const resetAt = Date.now() + 19 * 60 * 60_000;
+  // The live 2026-08-19 shape: the 7-day window arrives labelled `primary`.
+  await ingestLiveUsage({ stateRoot: w.stateDir, slot: "slot-a", rateLimits: { rate_limits: { primary: { remaining_percent: 7, window_minutes: 10_080, reset_at: resetAt } } } });
+  const started = await startSubagent({ agent: "codex", task: "ok", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate" } });
+  assert.equal(started.sharedQuota?.bestRemainingPercent, 7);
+  assert.equal(started.sharedQuota?.bestSlot, "slot-a");
+  assert.equal(started.sharedQuota?.windowMinutes, 10_080);
+  assert.match(summarizeStartResult(started), /Shared 7d quota 7%/);
+});
+
+test("a short window is not reported as a shared reserve", async () => {
+  const w = authWorkspace("success");
+  await ingestLiveUsage({ stateRoot: w.stateDir, slot: "slot-a", rateLimits: { rate_limits: { primary: { remaining_percent: 40, window_minutes: 300, reset_at: Date.now() + 60 * 60_000 } } } });
+  const started = await startSubagent({ agent: "codex", task: "ok", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate" } });
+  assert.equal(started.sharedQuota, undefined, "a 5-hour window refills on its own and is not a reserve to conserve");
+  assert.doesNotMatch(summarizeStartResult(started), /Shared/);
+});
+
+test("an unreadable balancer never fails a launch and reports no quota", async () => {
+  const w = authWorkspace("success");
+  // No ingest at all: no ledger exists, so there is nothing to measure.
+  const started = await startSubagent({ agent: "codex", task: "ok", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate" } });
+  assert.equal(started.state, "completed", "quota reporting is advisory and must never fail a launch");
+  assert.equal(started.sharedQuota, undefined);
+  assert.equal(existsSync(join(w.stateDir, "balancer.sqlite3")), false, "asking the quota question must not stamp a ledger");
+});
+
+// ── Launch directory validation (incident #11) ───────────────────────────────
+
+// An absent cwd otherwise surfaced from the spawn as `spawn pi ENOENT`, which reads
+// as a broken Pi install and sends the operator hunting the wrong thing.
+test("a missing --cwd fails with the path, not with spawn ENOENT", async () => {
+  const w = authWorkspace("success");
+  const missing = join(w.root, "worktrees", "typoed-branch");
+  await assert.rejects(
+    startSubagent({ agent: "codex", task: "ok", cwd: missing, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate" } }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "LAUNCH_CWD_NOT_FOUND");
+      assert.match((error as Error).message, new RegExp(missing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the failure must name the path that does not exist");
+      assert.doesNotMatch((error as Error).message, /ENOENT/);
+      return true;
+    },
+  );
+});
+
+test("a missing --store-cwd is reported distinctly from a missing --cwd", async () => {
+  const w = authWorkspace("success");
+  const missing = join(w.root, "not-a-checkout");
+  await assert.rejects(
+    startSubagent({ agent: "codex", task: "ok", cwd: w.root, storageCwd: missing, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate" } }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "LAUNCH_CWD_NOT_FOUND");
+      assert.match((error as Error).message, /--store-cwd/);
+      return true;
+    },
+  );
+});
+
+test("a --cwd pointing at a file is rejected as not a directory", async () => {
+  const w = authWorkspace("success");
+  const file = join(w.root, "config.json");
+  await assert.rejects(
+    startSubagent({ agent: "codex", task: "ok", cwd: file, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate" } }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "LAUNCH_CWD_NOT_A_DIRECTORY");
+      return true;
+    },
+  );
 });

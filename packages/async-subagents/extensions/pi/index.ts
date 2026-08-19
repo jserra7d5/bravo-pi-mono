@@ -18,6 +18,8 @@ import { appendAsyncSubagentsPrompt } from "./promptModule.js";
 import { renderSubagentWakeMessageComponent, type WakeupMessage } from "./renderers.js";
 import { ASYNC_SUBAGENT_TOOL_NAMES, TASK_TOOL_NAMES, registerSubagentTools, type ToolRuntime } from "./tools.js";
 import { isWakeupKeyHandled, markWakeupKeyHandled, pollWakeups, resultDeliveryKey } from "./wakeups.js";
+import { createBudgetAutoSwarmController, renderBudgetAutoSwarmStatus } from "./budgetAutoSwarm.js";
+import { validateBudgetLaunchPolicy } from "../../src/budgetLaunchPolicy.js";
 
 const OWNER_ID = `pi-${process.pid}-${Date.now().toString(36)}`;
 const TASK_RUNTIME_STATE_ENTRY_TYPE = "bravo-async-subagents-task-runtime-state";
@@ -369,20 +371,32 @@ export function __setTasksStatusBadgeForTest(ctx: { ui?: StatusUi }, enabled: bo
   setTasksStatusBadge(ctx as ExtensionContext | ExtensionCommandContext, enabled);
 }
 
-export async function applyActiveTaskTools(pi: ExtensionAPI, enabled: boolean): Promise<void> {
+export async function applyActiveTaskTools(pi: ExtensionAPI, enabled: boolean, options: { requireTaskTools?: boolean } = {}): Promise<void> {
   const api = pi as ExtensionAPI & { getActiveTools?: () => unknown | Promise<unknown>; setActiveTools?: (names: string[]) => unknown | Promise<unknown> };
-  if (typeof api.getActiveTools !== "function" || typeof api.setActiveTools !== "function") return;
+  if (typeof api.getActiveTools !== "function" || typeof api.setActiveTools !== "function") {
+    if (options.requireTaskTools) throw new Error("Pi active-tool APIs are unavailable; required task tools could not be activated");
+    return;
+  }
   const raw = await api.getActiveTools();
-  if (!Array.isArray(raw)) return;
+  if (!Array.isArray(raw)) {
+    if (options.requireTaskTools) throw new Error("Pi returned an invalid active-tool set; required task tools could not be activated");
+    return;
+  }
   const active = raw.filter((name): name is string => typeof name === "string");
   const asyncSet = new Set<string>(ASYNC_SUBAGENT_TOOL_NAMES);
   const hasAsyncTool = active.some((name) => asyncSet.has(name));
-  if (!hasAsyncTool) return;
+  if (!hasAsyncTool && !options.requireTaskTools) return;
   const nonAsync = active.filter((name) => !asyncSet.has(name));
   const taskSet = new Set<string>(TASK_TOOL_NAMES);
   const directNames = ASYNC_SUBAGENT_TOOL_NAMES.filter((name) => !taskSet.has(name));
-  const next = [...nonAsync, ...directNames, ...(enabled ? TASK_TOOL_NAMES : [])];
-  await api.setActiveTools([...new Set(next)]);
+  const next = [...new Set([...nonAsync, ...directNames, ...(enabled ? TASK_TOOL_NAMES : [])])];
+  await api.setActiveTools(next);
+  if (options.requireTaskTools) {
+    const appliedRaw = await api.getActiveTools();
+    const applied = Array.isArray(appliedRaw) ? new Set(appliedRaw.filter((name): name is string => typeof name === "string")) : new Set<string>();
+    const missing = TASK_TOOL_NAMES.filter((name) => !applied.has(name));
+    if (missing.length) throw new Error(`Pi did not activate required task tools: ${missing.join(", ")}`);
+  }
 }
 
 function blockerSummary(blockers: ReturnType<typeof findActiveTaskRuntimeBlockers>): string {
@@ -415,7 +429,7 @@ function registerFastTrackCommand(pi: ExtensionAPI): void {
   });
 }
 
-function registerTasksCommand(pi: ExtensionAPI): void {
+function registerTasksCommand(pi: ExtensionAPI, budgetEnabled: () => boolean): void {
   pi.registerCommand("tasks", {
     description: "Inspect or change async-subagents task orchestration for this root session.",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
@@ -434,6 +448,10 @@ function registerTasksCommand(pi: ExtensionAPI): void {
         return;
       }
       if (arg === "off") {
+        if (budgetEnabled()) {
+          ctx.ui.notify("Task orchestration is required by budget-auto-swarm. Disable /budget-auto-swarm first.", "error");
+          return;
+        }
         const blockers = findActiveTaskRuntimeBlockers(store, identity.rootSessionId);
         if (blockers.length) {
           ctx.ui.notify(blockerSummary(blockers), "error");
@@ -538,6 +556,24 @@ function stopTimers(pi?: ExtensionAPI, ctx?: ExtensionContext): void {
 }
 
 export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
+  let budgetController: ReturnType<typeof createBudgetAutoSwarmController>;
+  const ensureTasksEnabled = async (ctx: ExtensionContext | ExtensionCommandContext) => {
+    const cwd = cwdOf(ctx), identity = ensureRoot(cwd, piSessionIdOf(ctx)), store = new RunStore({ cwd });
+    const wasEnabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
+    if (!wasEnabled) writeTaskRuntimeState(store.runRoot, identity.rootSessionId, true);
+    try {
+      await applyActiveTaskTools(pi, true, { requireTaskTools: true });
+    } catch (error) {
+      if (!wasEnabled) writeTaskRuntimeState(store.runRoot, identity.rootSessionId, false);
+      throw error;
+    }
+    if (!wasEnabled) appendStickyTaskRuntimeState(pi, true);
+    setTasksStatusBadge(ctx, true);
+  };
+  budgetController = createBudgetAutoSwarmController(pi, { reconcileTasks: ensureTasksEnabled, refreshTasks: (ctx) => {
+    const cwd = cwdOf(ctx), identity = ensureRoot(cwd, piSessionIdOf(ctx));
+    setTasksStatusBadge(ctx, readTaskRuntimeState(new RunStore({ cwd }).runRoot, identity.rootSessionId).enabled);
+  }});
   const runtime: ToolRuntime = {
     getRootIdentity(cwd, piSessionId) {
       return roots.get(rootCacheKey(cwd, piSessionId));
@@ -547,6 +583,9 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
     },
     isTaskRuntimeEnabled(cwd, rootSessionId) {
       return tasksEnabled(cwd, rootSessionId);
+    },
+    launchPolicy(launch) {
+      if (budgetController.enabled()) validateBudgetLaunchPolicy(launch);
     },
     afterMutation(ctx) {
       if (ctx) {
@@ -570,12 +609,20 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   });
 
   const restoreTaskRuntimeMode = async (ctx: ExtensionContext) => {
-    const cwd = cwdOf(ctx);
-    const identity = ensureRoot(cwd, piSessionIdOf(ctx));
-    const store = new RunStore({ cwd });
-    const enabled = restoreStickyTaskRuntimeState(ctx, store, identity.rootSessionId);
-    await applyActiveTaskTools(pi, enabled);
-    setTasksStatusBadge(ctx, enabled);
+    budgetController.publish(ctx, false);
+    try {
+      const cwd = cwdOf(ctx);
+      const identity = ensureRoot(cwd, piSessionIdOf(ctx));
+      const store = new RunStore({ cwd });
+      const enabled = restoreStickyTaskRuntimeState(ctx, store, identity.rootSessionId);
+      await applyActiveTaskTools(pi, enabled);
+      setTasksStatusBadge(ctx, enabled);
+      await budgetController.restore(ctx);
+    } catch (error) {
+      budgetController.publish(ctx, false);
+      renderBudgetAutoSwarmStatus(ctx, false);
+      ctx.ui.notify(`Budget auto swarm restore failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
   };
 
   pi.on("session_start", async (_event, ctx) => {
@@ -614,6 +661,7 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
         store: new RunStore({ cwd }),
         parentRunId: identity.parentRunId,
         rootSessionId: identity.rootSessionId,
+        budgetAutoSwarmEnabled: budgetController.enabled(),
       });
       manualCompactionWakeupCooldownUntil = isManualCompactionEvent(event) ? Date.now() + MANUAL_COMPACTION_WAKEUP_COOLDOWN_MS : 0;
       if (!message) return;
@@ -630,11 +678,11 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
     const fastTrackArmed = readFastTrackState(store.runRoot, identity.rootSessionId).enabled;
     const enabled = readTaskRuntimeState(store.runRoot, identity.rootSessionId).enabled;
     const catalog = renderDiscoveredAgentCatalog({ cwd, env: process.env });
-    return { systemPrompt: appendAsyncSubagentsPrompt(event.systemPrompt, catalog, { fastTrackArmed, tasksEnabled: enabled }) };
+    return { systemPrompt: appendAsyncSubagentsPrompt(event.systemPrompt, catalog, { fastTrackArmed, tasksEnabled: enabled, budgetAutoSwarmEnabled: budgetController.enabled() }) };
   });
 
   registerSubagentTools(pi, runtime);
   registerFastTrackCommand(pi);
-  registerTasksCommand(pi);
+  registerTasksCommand(pi, budgetController.enabled);
   registerNamePackCommand(pi);
 }

@@ -17,9 +17,10 @@ import { createRootSession, readRootSession } from "./rootSession.js";
 import { RunStore } from "./runStore.js";
 import { createInitialStatus, updateRunStatus } from "./status.js";
 import { codexBalancerSyncBackAndCleanup, runSupervisor, type SupervisorFakeInput, type SupervisorInput } from "./supervisor.js";
-import type { ContextPolicy, SessionPolicy, SubagentStartResult, ThinkingLevel, TaskRecord } from "./types.js";
-import { prepareLaunch } from "@bravo/codex-auth-balancer";
+import type { ContextPolicy, SessionPolicy, SharedQuotaSnapshot, SubagentStartResult, ThinkingLevel, TaskRecord } from "./types.js";
+import { getConservationQuota, prepareLaunch, type ConservationQuota } from "@bravo/codex-auth-balancer";
 import { archiveRuns } from "./archive.js";
+import type { ResolvedBudgetLaunch } from "./budgetLaunchPolicy.js";
 
 export interface StartFakeChildInput {
   mode: "child";
@@ -40,6 +41,8 @@ export interface StartSubagentInput {
   variant?: string;
   task: string;
   cwd?: string;
+  /** Canonical project cwd used for run/root/task storage; execution and discovery still use cwd. */
+  storageCwd?: string;
   runRoot?: string;
   parentRunId?: string;
   rootRunId?: string;
@@ -69,6 +72,8 @@ export interface StartSubagentInput {
   fastTrack?: boolean;
   /** Internal continuation authorization: preserve priority for a run whose prior launch applied fast-track. */
   inheritedFastTrack?: boolean;
+  /** Call-scoped launch policy, invoked after resolution and before any run allocation. */
+  launchPolicy?: (launch: ResolvedBudgetLaunch) => void;
 }
 
 export function normalizeAllowedFilePaths(files: string[] | undefined): string[] | undefined {
@@ -588,6 +593,24 @@ async function prepareCodexBalancer(config: CodexAuthBalancerConfig, model: stri
   return { enabled: true, isolatedDir, selectedSlot: prepared.selected_slot, env: prepared.env, metadata: { enabled: true, provider: "bravo", mode: "process-env", selectedSlot: prepared.selected_slot, reservationId: prepared.metadata.reservation_id, launchId: prepared.metadata.launch_id, policyVersion: prepared.selection?.policy_version, label: prepared.label, reason: prepared.reason, status: prepared.status, primaryRemainingPercent: prepared.primary_remaining_percent, secondaryRemainingPercent: prepared.secondary_remaining_percent } };
 }
 
+/**
+ * Read-only shared-window position for the lead that is dispatching this lane.
+ * A lead fanning out lanes otherwise gets no signal that it is spending a scarce
+ * shared weekly window until a child dies of it (incident #14). Reserves nothing,
+ * never throws, and reports the best slot because that is where a lane will land.
+ */
+function readSharedQuota(config: CodexAuthBalancerConfig, model: string | undefined): Promise<SharedQuotaSnapshot | undefined> {
+  if (!config.enabled && !(model && isCodexBalancedProviderModel(model))) return Promise.resolve(undefined);
+  return getConservationQuota({ stateRoot: config.stateDir })
+    .then((slots: ConservationQuota[]) => {
+      const best = slots[0];
+      if (!best) return undefined;
+      return { bestRemainingPercent: best.remainingPercent, bestSlot: best.slot, slotsReporting: slots.length, windowMinutes: best.windowMinutes, resetAt: new Date(best.resetAt).toISOString(), stale: slots.every((slot) => slot.stale) };
+    })
+    // Quota reporting is advisory: a balancer that cannot be read must never fail a launch.
+    .catch(() => undefined);
+}
+
 async function spawnDetachedSupervisor(inputPath: string): Promise<string | undefined> {
   const cliPath = join(findPackageRoot(here), "dist", "src", "cli.js");
   if (!existsSync(cliPath)) return `supervisor CLI is not built: ${cliPath}`;
@@ -617,15 +640,42 @@ function scheduleAutoArchive(store: RunStore, logsDir: string, env: NodeJS.Proce
   });
 }
 
+function assertLaunchDirectory(dir: string, label: string): void {
+  let stats;
+  try {
+    stats = statSync(dir);
+  } catch {
+    throw new SubagentError("LAUNCH_CWD_NOT_FOUND", `${label} does not exist: ${dir}`, { dir, label });
+  }
+  if (!stats.isDirectory()) throw new SubagentError("LAUNCH_CWD_NOT_A_DIRECTORY", `${label} is not a directory: ${dir}`, { dir, label });
+}
+
 export async function startSubagent(input: StartSubagentInput): Promise<SubagentStartResult> {
   const allowedFiles = normalizeAllowedFilePaths(input.files);
   const protectedPaths = normalizeAllowedFilePaths(input.protect);
   const cwd = resolve(input.cwd ?? process.cwd());
-  const store = new RunStore({ cwd, runRoot: input.runRoot, env: { ...process.env, ...(input.env ?? {}) } });
-  const root = resolveRootIdentity(input, cwd);
+  const storageCwd = resolve(input.storageCwd ?? cwd);
+  // Validate both roots BEFORE anything downstream touches them. An absent execution cwd
+  // otherwise surfaces from the spawn as `spawn pi ENOENT`, which reads as a broken Pi
+  // install and sends the operator hunting the wrong thing; a typo'd worktree name cost a
+  // lane exactly this way (incident #11). The --cwd/--store-cwd split doubles the exposure.
+  assertLaunchDirectory(cwd, "--cwd (child execution/discovery)");
+  if (storageCwd !== cwd) assertLaunchDirectory(storageCwd, "--store-cwd (canonical run storage)");
   const baseDefinition = resolveAgentDefinition(input.agent, { cwd, env: process.env });
   const definition = applyAgentVariant(baseDefinition, input.variant);
   const selectedThinkingLevel = input.thinkingLevel ?? definition.thinkingLevel;
+  const modelParts = (definition.model ?? "").split("/");
+  input.launchPolicy?.({
+    modeEnabled: true,
+    variant: input.variant,
+    resolvedHarness: definition.harness ?? "pi",
+    resolvedProvider: modelParts.length > 1 ? modelParts.shift()! : "",
+    resolvedModel: modelParts.join("/"),
+    effectiveThinkingLevel: selectedThinkingLevel,
+    fastTrackRequested: input.fastTrack === true,
+  });
+  const store = new RunStore({ cwd: storageCwd, runRoot: input.runRoot, env: { ...process.env, ...(input.env ?? {}) } });
+  const root = resolveRootIdentity(input, storageCwd);
   const requestedContextPolicy = input.context ?? definition.context ?? "fresh";
   const requestedSessionPolicy = input.session ?? definition.session ?? "record";
   const { runId, paths } = store.createRunDirectory({
@@ -1156,6 +1206,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     maxSubagentDepth: definition.maxSubagentDepth,
     fastTrack,
     task: input.taskAssignment ? { taskId: input.taskAssignment.task.id, title: input.taskAssignment.task.title } : undefined,
+    sharedQuota: await readSharedQuota(asyncSubagentsConfig.codexAuthBalancer, effectiveModel),
     next: [],
   };
 }

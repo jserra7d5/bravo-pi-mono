@@ -1,6 +1,6 @@
 ---
 name: pi-async-subagents
-description: Launch and orchestrate named, role-scoped GPT/Pi agents through the durable async-subagents runtime. Use when Claude should delegate repository investigation, planning/spec authoring, bounded implementation, merge-risk review, or broad mixed-mode work to the existing scout, planner, worker, reviewer, or generalist templates; when parallel independent lanes help; or when a prior child should be resumed/continued with its recorded Pi session. Prefer this over raw headless Pi for work matching a named role.
+description: Launch and orchestrate named, role-scoped Pi or Claude agents through the durable async-subagents runtime. Use when Claude should delegate repository investigation, planning/spec authoring, bounded implementation, merge-risk review, or broad mixed-mode work to the existing scout, planner, worker, reviewer, or generalist templates; when parallel independent lanes help; or when a prior child should be resumed/continued with its recorded session. Prefer this over raw headless harness commands for work matching a named role.
 ---
 
 # Pi Async Subagents
@@ -26,7 +26,24 @@ Substantial task → brief file (`--task-file`) with: objective + completion bar
 
 `--file` is the child's authoritative write-scope contract (prompt enforcement, not an OS sandbox): exact paths, directory roots, or globs (`*` in-segment, `**` across). Scope by the ownership boundary the task owns — a package root plus its tests — and `--protect` the must-not-touch files inside it (specs, ledgers). Never pass read-only references as `--file`: the child reads anything in `--cwd`; `--file` only licenses writing.
 
-A child needing an out-of-scope path doesn't die — it emits a `blocked` attention line and keeps its context. Grant additively with `message --run-id X --task "..." --file path` (child resumes in seconds; narrowing mid-run is impossible), then **re-arm `watch` on that run** — the attention line ended the previous watch. A lane started without `--file` takes the grant too — it lands as an additive amendment on top of the scope its brief states, and `allowedFiles` stays unset rather than silently narrowing the lane to the one path you granted.
+A child needing an out-of-scope path doesn't die — it emits a `blocked` attention line and keeps its context. Grant additively with `message --store-cwd <lead-checkout> --run-id X --task "..." --file path` (child resumes in seconds; narrowing mid-run is impossible), then **re-arm `watch` on that run** — the attention line ended the previous watch. A lane started without `--file` takes the grant too — it lands as an additive amendment on top of the scope its brief states, and `allowedFiles` stays unset rather than silently narrowing the lane to the one path you granted.
+
+## Canonical run storage
+
+Pass one immutable `--store-cwd <lead-checkout>` to every run lifecycle command. This selects shared child-run storage. `--cwd <execution-checkout>` separately selects child discovery and execution for `start`/`run` only, so worktree children remain visible to one combined watch. Claude Code's native Tasks remain the sole dependency graph and progress ledger; async-subagents owns only child-run lifecycle.
+
+```bash
+~/.async-subagents/bin/async-subagents start --store-cwd /lead/checkout --cwd /execution/worktree --agent worker --task "..."
+~/.async-subagents/bin/async-subagents run --store-cwd /lead/checkout --cwd /execution/worktree --agent scout --task "..."
+~/.async-subagents/bin/async-subagents continue --store-cwd /lead/checkout --run-id RUN_ID --task "..."
+~/.async-subagents/bin/async-subagents message --store-cwd /lead/checkout --run-id RUN_ID --task "..."
+~/.async-subagents/bin/async-subagents pause --store-cwd /lead/checkout --run-id RUN_ID --reason "..."
+~/.async-subagents/bin/async-subagents cancel --store-cwd /lead/checkout --run-id RUN_ID --reason "..."
+~/.async-subagents/bin/async-subagents status --store-cwd /lead/checkout --run-id RUN_ID
+~/.async-subagents/bin/async-subagents watch --store-cwd /lead/checkout --run-id RUN_ID
+~/.async-subagents/bin/async-subagents result --store-cwd /lead/checkout --run-id RUN_ID
+~/.async-subagents/bin/async-subagents wait --store-cwd /lead/checkout --run-id RUN_ID
+```
 
 ## Start, watch, collect
 
@@ -34,7 +51,7 @@ A child needing an out-of-scope path doesn't die — it emits a `blocked` attent
 
 ```bash
 S=$(mktemp)
-~/.async-subagents/bin/async-subagents start --cwd "$PWD" --agent worker --task-file brief.md --file 'src/**' > "$S" 2>/dev/null
+~/.async-subagents/bin/async-subagents start --store-cwd /lead/checkout --cwd "$PWD" --agent worker --task-file brief.md --file 'src/**' > "$S" 2>/dev/null
 RID=$(grep -oE '"runId": *"[^"]+"' "$S" | head -1 | grep -oE 'run_[A-Za-z0-9_-]+')
 ```
 
@@ -45,15 +62,15 @@ Redirect stderr with `2>/dev/null`, **not `2>&1`**: node prepends an `Experiment
 **Recover a lost runId** — `status` with no `--run-id` lists this project's runs, newest first, each with its live state read from `status.json`:
 
 ```bash
-~/.async-subagents/bin/async-subagents status --cwd "$PWD" --limit 10 2>/dev/null
+~/.async-subagents/bin/async-subagents status --store-cwd /lead/checkout --limit 10 2>/dev/null
 ```
 
-Add `--all` to sweep every project (each cwd hashes to its own project directory, so a lane started in another worktree is invisible without it). Then `status --run-id` every candidate and `cancel` any `running` lane you did not intend — do this BEFORE re-dispatching, not after. Don't go hunting in `~/.async-subagents/runs/`: that tree exists but holds unrelated tooling runs (`cwd: /tmp/async-subagents-tools-*`) and will convince you your lane never started. Real runs live under `~/.async-subagents/projects/<hash>/runs/` — the listing gives the exact path as `runDir`.
+Runs started from different execution worktrees remain visible together when every command shares the same canonical `--store-cwd`. Add `--all` only to sweep storage projects created with other store roots. Then `status --run-id` every candidate and `cancel` any `running` lane you did not intend — do this BEFORE re-dispatching, not after. Don't go hunting in `~/.async-subagents/runs/`: that tree exists but holds unrelated tooling runs (`cwd: /tmp/async-subagents-tools-*`) and will convince you your lane never started. Real runs live under `~/.async-subagents/projects/<hash>/runs/` — the listing gives the exact path as `runDir`.
 
 Pass one `--root-session-id` across sibling lanes. There is no push channel under a CLI parent (start returns `delivery.mode:"none"`) — the completion signal is `watch`, wrapped in ONE Monitor covering every lane:
 
 ```bash
-~/.async-subagents/bin/async-subagents watch --cwd "$PWD" --run-id RUN_A --run-id RUN_B
+~/.async-subagents/bin/async-subagents watch --store-cwd /lead/checkout --run-id RUN_A --run-id RUN_B
 ```
 
 One NDJSON line per lifecycle transition; exits when all runs are terminal-or-attention. Act on `bucket`:
@@ -89,6 +106,10 @@ system card, METR, Artificial Analysis); shape briefs and judge output according
 ## Continue vs fresh
 
 `continue` (same recorded session, same role) for clarification, remediation by the same worker, closure review by the original reviewer, or resuming `expired`. Start fresh on role change, premise contamination, materially changed contract, or an independent release audit. Review lifecycle: fresh initial → continued closure → one fresh release audit; `NEEDS_DECISION` is a lead decision gate, not a failure.
+
+**A lane refused by upstream moderation is never a lane to continue.** A continuation resubmits the whole accumulated transcript, so a flagged lineage re-trips the filter on every attempt. Start a fresh lane with a summarized brief.
+
+This lands on the adversarial-review → remediation loop specifically: a remediation brief is by construction a list of security defects written in the vocabulary that trips the classifier, and the better the review, the likelier its remediation lane is refused. Two habits keep it rare — put rubrics and severity vocabulary in the **initial** brief where the surrounding task context frames them as review guidance, never as a bare mid-run `message --type answer`; and point remediation lanes at findings by location and required outcome ("input filter drops a case at `handler.ts:88`; make it total") rather than at quoted attack narrative ("sanitization leaked"). Never solve it by narrowing what the review reports — under-reporting costs more than a rerun.
 
 ## Housekeeping
 

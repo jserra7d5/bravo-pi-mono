@@ -62,10 +62,11 @@ PKG="$(pi list | awk '/bravo-pi-mono/{getline; print $1; exit}')"
 node "$PKG/packages/async-subagents/dist/src/cli.js" install
 ```
 
-That makes two symlinks, both pointing into the copy pi manages, so `pi update` refreshes them and
+That makes three symlinks, all pointing into the copy pi manages, so `pi update` refreshes them and
 you never re-run this:
 
-- `~/.claude/skills/pi-async-subagents` → the skill Claude loads
+- `~/.claude/skills/pi-async-subagents` → the canonical runtime/CLI skill
+- `~/.claude/skills/budget-auto-swarm` → the explicitly invoked autonomous scheduler skill
 - `~/.async-subagents/bin/async-subagents` → the CLI
 
 The CLI is deliberately **not** put on your PATH. The skill names that launcher path literally, which
@@ -75,6 +76,22 @@ for your own use, that is yours to add:
 ```sh
 ln -sf ~/.async-subagents/bin/async-subagents ~/.local/bin/async-subagents
 ```
+
+## Budget auto swarm
+
+In Pi, `/budget-auto-swarm on` enables a sticky session/branch policy and task orchestration; `/budget-auto-swarm status` reports effective routing, and `/budget-auto-swarm off` removes the launch guard without disabling tasks. While enabled, starts require Luna high/xhigh/max or Sol low/medium variants and normal priority.
+
+In Claude Code, invoke `/budget-auto-swarm <substantial objective>`. The skill uses Opus 5 medium only for that invocation turn. Reinvoke it after a user-authored continuation if the autonomous chain should continue under the same override.
+
+For cross-worktree runs, keep storage canonical:
+
+```sh
+~/.async-subagents/bin/async-subagents start \
+  --root-session-id root_example --store-cwd /canonical/checkout \
+  --cwd /writer/worktree --agent worker --variant luna --thinking high --task-file brief.md
+```
+
+Use that same root ID and `--store-cwd` for `watch` and every other child-run lifecycle command. In Claude Code, use native Tasks as the sole dependency graph and progress ledger.
 
 ## 4. Smoke test
 

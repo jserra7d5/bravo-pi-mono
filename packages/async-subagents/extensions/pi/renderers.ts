@@ -1,6 +1,6 @@
 import type { RunSummaryRow } from "../../src/watcher.js";
 import { bucketForState } from "../../src/schemas.js";
-import type { DerivedTaskState, RunEvent, RunResult, RunStatus, SubagentMessageResult, SubagentStartResult, TaskRecord } from "../../src/types.js";
+import type { DerivedTaskState, RunEvent, RunResult, RunStatus, SharedQuotaSnapshot, SubagentMessageResult, SubagentStartResult, TaskRecord } from "../../src/types.js";
 import { deriveTaskState, unresolvedDependencies } from "../../src/taskState.js";
 
 export interface TextTheme {
@@ -1333,7 +1333,22 @@ export function summarizeStartResult(result: SubagentStartResult, delivery: { mo
     : delivery.pushAvailable
       ? "; async wakeups will report attention or results"
       : `; use async-subagents watch for run ${result.runId}`;
-  return `Subagent ${result.runId} ${action}: ${label} (${result.state})${suffix}`;
+  return `Subagent ${result.runId} ${action}: ${label} (${result.state})${suffix}${formatSharedQuota(result.sharedQuota)}`;
+}
+
+/**
+ * A dispatching lead has no other signal that it is spending a scarce shared window
+ * until a child dies of it (incident #14). Report the position on every start rather
+ * than only when low: a lead deciding how wide to fan out needs the number before the
+ * lanes exist, and "quiet" must not be readable as "plenty".
+ */
+function formatSharedQuota(quota: SharedQuotaSnapshot | undefined): string {
+  if (!quota) return "";
+  const hours = Math.max(0, Math.round((Date.parse(quota.resetAt) - Date.now()) / 3_600_000));
+  const days = Math.round(quota.windowMinutes / 1440);
+  const scope = quota.slotsReporting > 1 ? `best of ${quota.slotsReporting} slots` : quota.bestSlot;
+  const age = quota.stale ? ", stale" : "";
+  return `. Shared ${days}d quota ${Math.round(quota.bestRemainingPercent)}% (${scope}, resets in ${hours}h${age})`;
 }
 
 function formatResultSummary(result: RunResult, options?: { includeSummary?: boolean; useLiteralState?: boolean }): string {

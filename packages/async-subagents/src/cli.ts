@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,7 @@ import { discoverAgentDefinitions } from "./agentDefinitions.js";
 import { waitSubagents } from "./wait.js";
 import { watchSubagents } from "./watch.js";
 import { buildSubagentTools } from "../extensions/pi/tools.js";
+import { applyInstall, installerLinks, planInstall, InstallApplyError } from "./installer.js";
 
 /**
  * Read from the manifest rather than a literal, so `--version` cannot claim a release the
@@ -27,21 +28,20 @@ const VERSION: string = (() => {
   const manifest = join(packageRootFrom(fileURLToPath(import.meta.url)), "package.json");
   return (JSON.parse(readFileSync(manifest, "utf8")) as { version?: string }).version ?? "0.0.0";
 })();
-const SKILL_NAME = "pi-async-subagents";
 
 const USAGE = `async-subagents ${VERSION}
 
 Usage:
   async-subagents agents [--cwd DIR]
-  async-subagents start --agent NAME (--task TEXT|--task-file PATH) [options]
-  async-subagents run   --agent NAME (--task TEXT|--task-file PATH) [options]
-  async-subagents watch  --run-id ID (repeatable) [--cwd DIR] [--interval-seconds N] [--no-result-body]
-  async-subagents status [--run-id ID] [--all] [--limit N] [--cwd DIR]   (no --run-id lists runs newest-first)
-  async-subagents wait   --run-id ID [--cwd DIR] [--timeout-seconds N]
-  async-subagents result --run-id ID [--cwd DIR]
-  async-subagents continue --run-id ID [--task TEXT|--task-file PATH] [options]
-  async-subagents message --run-id ID (--task TEXT|--task-file PATH) [--type answer|instruction|context] [--file PATH]
-  async-subagents pause|cancel --run-id ID [--reason TEXT] [--cwd DIR]
+  async-subagents start --agent NAME (--task TEXT|--task-file PATH) [--store-cwd DIR] [--cwd DIR] [options]
+  async-subagents run   --agent NAME (--task TEXT|--task-file PATH) [--store-cwd DIR] [--cwd DIR] [options]
+  async-subagents watch  --run-id ID (repeatable) [--store-cwd DIR] [--interval-seconds N] [--no-result-body]
+  async-subagents status [--run-id ID] [--all] [--limit N] [--store-cwd DIR]   (no --run-id lists runs newest-first)
+  async-subagents wait   --run-id ID [--store-cwd DIR] [--timeout-seconds N]
+  async-subagents result --run-id ID [--store-cwd DIR]
+  async-subagents continue --run-id ID [--task TEXT|--task-file PATH] [--store-cwd DIR] [options]
+  async-subagents message --run-id ID (--task TEXT|--task-file PATH) [--store-cwd DIR] [--type answer|instruction|context] [--file PATH]
+  async-subagents pause|cancel --run-id ID [--reason TEXT] [--store-cwd DIR]
   async-subagents archive [--older-than-days N (default 7)] [--cap N] [--dry-run]   (global across all projects)
   async-subagents install [--claude-dir DIR] [--home DIR] [--force]
     links the skill into ~/.claude/skills and the CLI to ~/.async-subagents/bin/async-subagents
@@ -53,7 +53,7 @@ watch emits one NDJSON line per lifecycle transition (buckets: terminal|attentio
 reconciles dead runs, inlines each result once, and exits when all runs are terminal-or-attention.
 
 Start/run options:
-  --cwd DIR  --variant NAME  --thinking LEVEL
+  --store-cwd DIR (canonical storage)  --cwd DIR (child execution/discovery)  --variant NAME  --thinking LEVEL
   --file PATH_OR_GLOB (repeatable write scope; prefer ownership-boundary roots)
   --protect PATH (repeatable; never-write paths inside the scope)
   --fast-track (priority service tier; only with operator authorization, critical-path lanes only)
@@ -107,80 +107,6 @@ function numberOption(value: unknown, field: string): number | undefined {
   return parsed;
 }
 
-/**
- * Link the packaged skill into the Claude skills directory, and the CLI to a fixed
- * launcher path.
- *
- * Symlinks rather than copies so the skill and the CLI it documents can never drift:
- * the flags in SKILL.md are the flags this binary parses, in the same commit.
- *
- * The launcher exists because SKILL.md has to name the CLI somehow, and neither
- * available option works: a bare `async-subagents` assumes a PATH entry nobody
- * guarantees, and an absolute install path differs per machine so it cannot be
- * committed. `~/.async-subagents/bin/async-subagents` is the same string everywhere
- * and needs no PATH, so the skill can name it literally.
- */
-function install(args: ParsedArgs, packageRoot: string): unknown {
-  const claudeDir = typeof args.claudeDir === "string" ? resolve(args.claudeDir) : join(homedir(), ".claude");
-  const source = join(packageRoot, "skills", SKILL_NAME);
-  if (!existsSync(source)) throw new Error(`packaged skill is missing: ${source}`);
-  const skillsDir = join(claudeDir, "skills");
-  const target = join(skillsDir, SKILL_NAME);
-  mkdirSync(skillsDir, { recursive: true });
-  let replaced: string | undefined;
-  if (existsSync(target) || isSymlink(target)) {
-    // Only ever reclaim a symlink automatically. A real directory there is someone's
-    // hand-authored skill, and silently deleting it would be unrecoverable.
-    if (!isSymlink(target) && args.force !== true) {
-      throw new Error(`${target} exists and is not a symlink; move it aside or pass --force`);
-    }
-    replaced = isSymlink(target) ? "symlink" : "directory";
-    rmSync(target, { recursive: true, force: true });
-  }
-  symlinkSync(source, target, "dir");
-  return {
-    ok: true,
-    skill: SKILL_NAME,
-    linked: { from: target, to: source },
-    replaced,
-    ...installLauncher(args, packageRoot),
-  };
-}
-
-/**
- * Point the fixed launcher path at this checkout's CLI.
- *
- * Refuses to clobber a real file: that is either a hand-written wrapper or another
- * install's copy, and replacing it silently would redirect every skill invocation
- * on the machine.
- */
-function installLauncher(args: ParsedArgs, packageRoot: string): Record<string, unknown> {
-  const home = typeof args.home === "string" ? resolve(args.home) : homedir();
-  const cli = join(packageRoot, "dist", "src", "cli.js");
-  if (!existsSync(cli)) throw new Error(`the CLI is not built: ${cli} (run \`npm run build\`)`);
-  const binDir = join(home, ".async-subagents", "bin");
-  const launcher = join(binDir, "async-subagents");
-  mkdirSync(binDir, { recursive: true });
-  let replacedLauncher: string | undefined;
-  if (existsSync(launcher) || isSymlink(launcher)) {
-    if (!isSymlink(launcher) && args.force !== true) {
-      throw new Error(`${launcher} exists and is not a symlink; move it aside or pass --force`);
-    }
-    replacedLauncher = isSymlink(launcher) ? "symlink" : "file";
-    rmSync(launcher, { force: true });
-  }
-  symlinkSync(cli, launcher, "file");
-  return { launcher: { from: launcher, to: cli }, replacedLauncher };
-}
-
-function isSymlink(path: string): boolean {
-  try {
-    return lstatSync(path).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
 function packageRootFrom(entry: string): string {
   let current = dirname(entry);
   while (true) {
@@ -217,6 +143,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   const cwd = typeof args.cwd === "string" ? resolve(args.cwd) : process.cwd();
+  const storeCwd = typeof args.storeCwd === "string" ? resolve(args.storeCwd) : process.cwd();
   const packageRoot = packageRootFrom(fileURLToPath(import.meta.url));
 
   const taskBody = (): string | undefined => {
@@ -224,7 +151,23 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return typeof args.task === "string" ? args.task : undefined;
   };
 
-  if (command === "install") return void emit(install(args, packageRoot));
+  if (command === "install") {
+    const claudeDir = typeof args.claudeDir === "string" ? resolve(args.claudeDir) : join(homedir(), ".claude");
+    const home = typeof args.home === "string" ? resolve(args.home) : homedir();
+    let result;
+    try { result = applyInstall(planInstall(installerLinks(packageRoot, home, claudeDir), args.force === true)); }
+    catch (error) {
+      if (error instanceof InstallApplyError) throw Object.assign(error, { details: error.result });
+      throw error;
+    }
+    const byName = Object.fromEntries(result.results.map((item) => [item.name, item]));
+    const runtimeSkill = byName["pi-async-subagents"] as Record<string, unknown>;
+    const launcher = byName.launcher as Record<string, unknown>;
+    const replaced = runtimeSkill.action === "unchanged" ? "symlink" : runtimeSkill.replaced === "conflict" ? "directory" : runtimeSkill.replaced;
+    const replacedLauncher = launcher.action === "unchanged" ? "symlink" : launcher.replaced === "conflict" ? "file" : launcher.replaced;
+    return void emit({ ok: true, skill: "pi-async-subagents", results: result.results, launcher, linked: runtimeSkill, budgetSkill: byName["budget-auto-swarm"], replaced, replacedLauncher });
+  }
+
 
   if (command === "archive") {
     const olderThanDays = args.olderThanDays === undefined ? 7 : Number(args.olderThanDays);
@@ -259,13 +202,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     });
   }
 
-  const store = new RunStore({ cwd });
+  const store = new RunStore({ cwd: storeCwd });
   const runId = args.runId?.at(-1);
 
   if (command === "watch") {
     if (!args.runId?.length) throw new Error("watch requires at least one --run-id");
     await watchSubagents({
-      cwd,
+      cwd: storeCwd,
       runIds: args.runId,
       intervalSeconds: numberOption(args.intervalSeconds, "interval-seconds"),
       includeResultBody: args.noResultBody === undefined,
@@ -275,13 +218,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   let root: RootSessionIdentity | undefined;
   if (typeof args.rootSessionId === "string") {
-    root = readRootSession({ cwd, rootSessionId: args.rootSessionId }) || createRootSession({ cwd, rootSessionId: args.rootSessionId });
+    root = readRootSession({ cwd: storeCwd, rootSessionId: args.rootSessionId }) || createRootSession({ cwd: storeCwd, rootSessionId: args.rootSessionId });
   }
   if (runId) {
     const status = store.readStatus(runId);
-    root = readRootSession({ cwd, rootSessionId: status.rootSessionId }) || createRootSession({ cwd, rootSessionId: status.rootSessionId });
+    root = readRootSession({ cwd: storeCwd, rootSessionId: status.rootSessionId }) || createRootSession({ cwd: storeCwd, rootSessionId: status.rootSessionId });
   }
-  root ??= createRootSession({ cwd });
+  root ??= createRootSession({ cwd: storeCwd });
 
   const tools = buildSubagentTools({
     getRootIdentity: () => root,
@@ -292,7 +235,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const call = async (name: string, params: Record<string, unknown>): Promise<any> => {
     const tool = tools.find((candidate: { name: string }) => candidate.name === name);
     if (!tool) throw new Error(`tool unavailable: ${name}`);
-    const response = await tool.execute("cli", params, undefined, undefined, { cwd });
+    const response = await tool.execute("cli", params, undefined, undefined, { cwd: storeCwd });
     if (response?.isError) throw Object.assign(new Error(response.content?.[0]?.text || `${name} failed`), { details: response.details });
     return response.details;
   };
@@ -316,6 +259,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       variant: args.variant,
       task: body,
       cwd,
+      storageCwd: storeCwd,
       files: args.file,
       protect: args.protect.length ? args.protect : undefined,
       skills: args.skill,

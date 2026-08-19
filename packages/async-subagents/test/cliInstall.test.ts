@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const CLI = join(PACKAGE_ROOT, "dist", "src", "cli.js");
 const SKILL_SOURCE = join(PACKAGE_ROOT, "skills", "pi-async-subagents");
+const BUDGET_SKILL_SOURCE = join(PACKAGE_ROOT, "skills", "budget-auto-swarm");
 
 interface InstallResult {
   ok: boolean;
@@ -63,6 +64,10 @@ test("install links both the skill and the launcher into this checkout", () => {
   assert.equal(result.linked.from, skillLink);
   assert.ok(lstatSync(skillLink).isSymbolicLink(), "the skill must be a symlink, not a copy");
   assert.equal(realpathSync(skillLink), realpathSync(SKILL_SOURCE));
+  const budgetSkillLink = join(paths.claudeDir, "skills", "budget-auto-swarm");
+  assert.ok(lstatSync(budgetSkillLink).isSymbolicLink());
+  assert.equal(realpathSync(budgetSkillLink), realpathSync(BUDGET_SKILL_SOURCE));
+  assert.equal(readFileSync(join(budgetSkillLink, "SKILL.md"), "utf8"), readFileSync(join(BUDGET_SKILL_SOURCE, "SKILL.md"), "utf8"));
 
   // The path SKILL.md names literally. If this string moves, every documented command breaks.
   const launcher = join(paths.home, ".async-subagents", "bin", "async-subagents");
@@ -103,6 +108,17 @@ test("install is idempotent and re-points a stale launcher", () => {
   assert.equal(second.replaced, "symlink");
   assert.equal(second.replacedLauncher, "symlink");
   assert.equal(readlinkSync(launcher), CLI);
+});
+
+test("install refuses and then force-replaces a real budget skill directory", () => {
+  const paths = workspace();
+  const target = join(paths.claudeDir, "skills", "budget-auto-swarm");
+  mkdirSync(target, { recursive: true }); writeFileSync(join(target, "SKILL.md"), "user-owned");
+  assert.match(installError(paths), /exists and is not a symlink/);
+  const forced = install(paths, "--force");
+  assert.ok(lstatSync(target).isSymbolicLink());
+  assert.equal(realpathSync(target), realpathSync(BUDGET_SKILL_SOURCE));
+  assert.ok(forced.ok);
 });
 
 test("install refuses to clobber a real skill directory or a real launcher file", () => {

@@ -45,11 +45,13 @@ Scout system body.
   assert.match(system, /Use safe edits only/);
   assert.match(system, /Runtime Contract/);
   assert.doesNotMatch(system, /global Pi system prompt/i);
+  assert.doesNotMatch(system, /Budget Auto Swarm|budget-auto-swarm:start|Budget auto swarm: enabled/);
 
   const task = readFileSync(assembled.taskPath, "utf8");
   assert.match(task, /Inspect API files/);
   assert.match(task, /parentRunId: root_a/);
   assert.match(task, /src\/api.ts/);
+  assert.doesNotMatch(task, /Budget Auto Swarm|budget-auto-swarm:start|Budget auto swarm: enabled/);
   assert.deepEqual(assembled.skills, ["repo-reader", "tui-design"]);
   assert.deepEqual(assembled.extensions, ["audit-extension"]);
   assert.equal(assembled.model, "openai-codex/gpt-5.5");

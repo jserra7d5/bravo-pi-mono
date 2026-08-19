@@ -12,6 +12,7 @@ export interface CompactionReminderInput {
   parentRunId?: string;
   rootSessionId?: string;
   maxRows?: number;
+  budgetAutoSwarmEnabled?: boolean;
 }
 
 export interface CompactionReminderDetails {
@@ -85,7 +86,6 @@ export function buildCompactionReminder(input: CompactionReminderInput): Compact
     rootSessionId: input.rootSessionId,
   });
   const rows = snapshot.rows.filter((row) => needsReminder(input, row));
-  if (!rows.length) return undefined;
 
   const maxRows = input.maxRows ?? 6;
   const shown = rows.slice(0, maxRows);
@@ -135,11 +135,14 @@ export function buildCompactionReminder(input: CompactionReminderInput): Compact
     resultReady ? `${resultReady} result-ready` : "",
   ].filter(Boolean).join(", ");
 
+  if (!rows.length && !Object.values(taskCounts).some((count) => count > 0)) return undefined;
+
   const content = [
     `Async subagent status preserved after compaction${counts ? ` (${counts})` : ""}:`,
     ...shown.map(rowLine),
     omitted ? `- ${omitted} more subagent run${omitted === 1 ? "" : "s"} not shown.` : "",
     taskCountsLine,
+    input.budgetAutoSwarmEnabled ? "Budget auto swarm remains enabled. Reconcile unread results and attention, update task evidence/state, then dispatch newly ready work before waiting again." : "",
     "After compaction, one subagent_status call is appropriate if you need to re-orient; do not loop on status for active runs. Before finalizing or changing direction, account for these in-flight or unread subagent results.",
   ].filter(Boolean).join("\n");
 

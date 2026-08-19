@@ -82,7 +82,7 @@ export type AgentDefinitionSource = "project" | "user" | "builtin";
 export type CwdPolicy = "inherit" | "explicit" | "sandbox";
 export type ResultFormat = "text" | "json" | "files";
 export type WriterRole = "launcher" | "child-runtime" | "parent-runtime";
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface ArtifactRef {
   artifactId: string;
@@ -462,6 +462,20 @@ export interface TaskEvent {
   createdAt: string;
 }
 
+/**
+ * The long shared window at dispatch time, keyed by window DURATION not by the
+ * label the upstream used. Advisory and best-effort: absent when the balancer is
+ * off, unreadable, or reports no long window at all.
+ */
+export interface SharedQuotaSnapshot {
+  bestRemainingPercent: number;
+  bestSlot: string;
+  slotsReporting: number;
+  windowMinutes: number;
+  resetAt: string;
+  stale: boolean;
+}
+
 export interface SubagentStartResult {
   runId: string;
   runDir: string;
@@ -527,6 +541,8 @@ export interface SubagentStartResult {
   maxSubagentDepth?: number;
   fastTrack?: FastTrackLaunch;
   task?: { taskId: string; title: string };
+  /** Shared-window position at dispatch time. Advisory; absent when unavailable. */
+  sharedQuota?: SharedQuotaSnapshot;
   next: Array<{ tool: string; args: Record<string, unknown> }>;
 }
 

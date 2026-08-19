@@ -83,6 +83,22 @@ test("compaction reminder omits terminal results after they are collected", () =
   assert.equal(buildCompactionReminder({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId }), undefined);
 });
 
+test("task-only nonterminal graph emits a budget-aware reminder without run rows", () => {
+  const w = workspace(); const taskStore = new TaskStore(w.store);
+  taskStore.createTasks(w.parentRunId, { parentRunId: w.parentRunId, tasks: [{ title: "Ready", description: "Dispatch me" }] });
+  const enabled = buildCompactionReminder({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, budgetAutoSwarmEnabled: true });
+  assert.ok(enabled); assert.equal(enabled.details.rows.length, 0);
+  assert.match(enabled.content, /Tasks: 1 ready/);
+  assert.match(enabled.content, /Budget auto swarm remains enabled\. Reconcile unread results and attention, update task evidence\/state, then dispatch newly ready work before waiting again\./);
+  const disabled = buildCompactionReminder({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, budgetAutoSwarmEnabled: false });
+  assert.ok(disabled); assert.doesNotMatch(disabled.content, /Budget auto swarm remains enabled/);
+});
+
+test("budget mode alone does not emit compaction reminder when no work exists", () => {
+  const w = workspace();
+  assert.equal(buildCompactionReminder({ store: w.store, parentRunId: w.parentRunId, rootSessionId: w.parentRunId, budgetAutoSwarmEnabled: true }), undefined);
+});
+
 test("compaction reminder includes task counts in text and details", () => {
   const w = workspace();
   const taskStore = new TaskStore(w.store);

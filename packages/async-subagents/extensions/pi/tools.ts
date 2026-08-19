@@ -9,6 +9,7 @@ import { readSubagentResult } from "../../src/result.js";
 import { createRootSession, readRootSession } from "../../src/rootSession.js";
 import { RunStore } from "../../src/runStore.js";
 import { TaskStore, type TaskUpdateInput } from "../../src/taskStore.js";
+import type { ResolvedBudgetLaunch } from "../../src/budgetLaunchPolicy.js";
 import { readTaskRuntimeState } from "../../src/taskRuntime.js";
 import { deriveTaskReadiness, unresolvedDependencies } from "../../src/taskState.js";
 import { bucketForState, isTerminalRunState, isThinkingLevel } from "../../src/schemas.js";
@@ -49,6 +50,7 @@ export interface ToolRuntime {
   setRootIdentity?: (identity: RootSessionIdentity) => void;
   startSubagent?: (input: StartSubagentInput) => ReturnType<typeof startSubagent>;
   isTaskRuntimeEnabled?: (cwd: string, rootSessionId: string) => boolean;
+  launchPolicy?: (launch: ResolvedBudgetLaunch) => void;
   afterMutation?: (ctx: unknown, cwd: string, identity: RootSessionIdentity) => void | Promise<void>;
   /** Set only by registerSubagentTools inside a live Pi extension runtime. */
   pushAvailable?: boolean;
@@ -846,6 +848,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           variant: typeof params.variant === "string" && params.variant ? params.variant : undefined,
           task: String(params.task),
           cwd,
+          storageCwd: sessionCwd,
           runRoot: storeFor(sessionCwd).runRoot,
           parentRunId: root.parentRunId,
           rootRunId: root.parentRunId,
@@ -864,6 +867,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           },
           thinkingLevel: isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined,
           fastTrack: params.fastTrack === true,
+          launchPolicy: runtime.launchPolicy,
           taskAssignment,
         });
         } catch (error) {

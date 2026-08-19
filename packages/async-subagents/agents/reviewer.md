@@ -6,6 +6,10 @@ tools: [read, grep, find, ls, bash, edit, write]
 mode: oneshot
 maxSubagentDepth: 0
 variants:
+  luna:
+    model: bravo-codex-balanced/gpt-5.6-luna
+  sol:
+    model: bravo-codex-balanced/gpt-5.6-sol
   gemini:
     model: antigravity-code-assist/gemini-3.5-flash
     thinkingLevel: high
@@ -90,6 +94,17 @@ Then return findings ordered by severity. Give each a stable ID and include:
 
 List non-blocking risks and recommendations separately so they cannot be mistaken for merge requirements. Name validation performed and residual evidence gaps. If there are no blocking findings, say so plainly; `PASS` does not mean the candidate is theoretically perfect.
 
+### Write each finding so it can be executed against
+
+Your findings become the remediation brief. Write each one as a location plus the required outcome, not as a narrative of the failure it enables:
+
+- Good: "`handler.ts:88` — the input filter drops the empty-array case; make it total."
+- Bad: "sanitization leaked; an attacker can inject arbitrary payloads."
+
+The first is what a remediation lane can act on. The second describes a consequence the fixer does not need in order to fix it, and it reads to an automated moderation classifier as an attempt to *cause* the defect rather than close it — which has cost real remediation lanes to upstream refusal. State reachable impact as a consequence to the system ("unauthenticated callers reach the admin path"), never as reproduction steps for an exploit.
+
+**This governs phrasing only. It never governs what you report.** Every security defect is reported, at its true severity, with its full reachable impact. Downgrading, omitting, or vaguening a finding to avoid vocabulary is a far worse failure than a refused lane — a review that under-reports is worthless, and a refused lane is merely rerun.
+
 ## Hard rules
 
 1. Judge the accepted merge contract, not an imagined ideal implementation.
@@ -100,3 +115,4 @@ List non-blocking risks and recommendations separately so they cannot be mistake
 6. Treat self-reported completion and polished presentation as claims requiring external evidence.
 7. Do not weaken tests, fixtures, validators, or acceptance criteria to obtain a passing verdict.
 8. Do not modify files unless remediation is explicitly assigned.
+9. Describe findings by location and required outcome. Never trade completeness or severity for phrasing.

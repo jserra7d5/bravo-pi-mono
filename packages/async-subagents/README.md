@@ -1,6 +1,6 @@
 # @bravo/async-subagents
 
-Pi-only async subagent primitive for bounded, session-backed child agents.
+Async subagent runtime for bounded, session-backed child agents, Pi milestone tasks, and optional budget-auto-swarm orchestration.
 
 The runtime is file-backed. By default, each child run gets a durable directory under a harness-owned cache outside the target repo:
 
@@ -80,6 +80,20 @@ delivery (a malformed pre-existing inbox cannot skip polling), and the inbox
 cursor advances only after a successful `sendUserMessage` so a transient send
 failure retries instead of dropping or double-sending a parent message.
 
+## Budget auto swarm
+
+Pi exposes a sticky, branch-scoped mode:
+
+```text
+/budget-auto-swarm on|off|status
+```
+
+Enabling it also enables task orchestration, displays the lavender `SWARM:auto` status, injects the durable ready-set scheduling policy, and guards every new Pi child start before allocation. New starts must use `variant: "luna"` with `thinkingLevel: high|xhigh|max` or `variant: "sol"` with `thinkingLevel: low|medium`; `fastTrack` is forbidden. Existing continuations retain their recorded launch identity. Turning the mode off leaves tasks enabled.
+
+Claude Code users explicitly invoke `/budget-auto-swarm <objective>`. Its Opus 5 medium override lasts only for that invocation turn; reinvoke after user-authored continuation. Claude Code native Tasks are the sole Claude dependency graph and progress ledger; the CLI owns child-run lifecycle only. Installation links both Claude skills.
+
+Pass one canonical `--store-cwd` to every run lifecycle command; `start --cwd` remains the separate child execution/discovery checkout.
+
 ## Defaults
 
 Built-in agents are bounded oneshot agents:
@@ -115,7 +129,7 @@ variants:
 You are a focused reconnaissance agent.
 ```
 
-Use the default by omitting `variant`; use a variant with `subagent_start({ agent: "scout", variant: "gemini", task: "..." })`.
+Every built-in role has pure model variants `luna` (`bravo-codex-balanced/gpt-5.6-luna`) and `sol` (`bravo-codex-balanced/gpt-5.6-sol`) in addition to its existing `gemini` variant. Use the default by omitting `variant`; select a variant with `subagent_start({ agent: "scout", variant: "luna", thinkingLevel: "high", task: "..." })`.
 
 Provider-backed variants must include the provider extension that registers the model because child Pi launches are intentionally isolated with `--no-extensions`. Point `extensions` at a loadable Pi extension module file, such as `extensions/pi/index.ts` or `dist/extensions/pi/index.js`; a package extension directory may not be enough when async-subagents passes it through Pi's `-e` CLI flag.
 

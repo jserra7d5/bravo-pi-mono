@@ -298,7 +298,12 @@ function upstreamModelId(model: Model<typeof API>): string {
 }
 
 function publicModel(model: Model<typeof API>): Model<typeof API> {
-  return { ...model, id: publicModelId(model), provider: PROVIDER, api: API };
+  const balanced = { ...model, id: publicModelId(model), provider: PROVIDER, api: API };
+  if (upstreamModelId(model) !== 'gpt-5.6-luna') return balanced;
+  return {
+    ...balanced,
+    thinkingLevelMap: { ...model.thinkingLevelMap, max: 'max' },
+  };
 }
 
 const EMPTY_REASONING_COMMENT = '<!-- -->';

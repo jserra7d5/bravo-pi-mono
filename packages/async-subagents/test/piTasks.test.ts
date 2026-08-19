@@ -25,6 +25,20 @@ test("applyActiveTaskTools removes and restores task tools while preserving non-
   assert.deepEqual(on.calls, [["read", "grep", ...DIRECT_SUBAGENT_TOOL_NAMES, ...TASK_TOOL_NAMES]]);
 });
 
+test("required task activation works from a non-async active set and verifies the applied set", async () => {
+  let active = ["read", "grep"];
+  const calls: string[][] = [];
+  const pi = { getActiveTools: () => active, setActiveTools: (names: string[]) => { active = names; calls.push(names); } } as any;
+  await applyActiveTaskTools(pi, true, { requireTaskTools: true });
+  assert.deepEqual(calls, [["read", "grep", ...DIRECT_SUBAGENT_TOOL_NAMES, ...TASK_TOOL_NAMES]]);
+  assert.ok(TASK_TOOL_NAMES.every((name) => active.includes(name)));
+});
+
+test("required task activation fails closed when host does not apply the requested set", async () => {
+  const pi = { getActiveTools: () => ["read"], setActiveTools: () => undefined } as any;
+  await assert.rejects(applyActiveTaskTools(pi, true, { requireTaskTools: true }), /did not activate required task tools/);
+});
+
 test("applyActiveTaskTools leaves active tools unchanged when no async-subagents tools are active", async () => {
   const active = ["read", "grep"];
   const off = fakePi(active);
