@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { PROACTIVE_REFRESH_LEAD_MS, cleanupLaunch, ensureFreshTokens, finishTokenLease, getDbStatus, getSlotTokenHealth, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, isProcessAlive, listReservations, prepareLaunch, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, shouldStealRefreshLock, startTokenLease, syncBack, unbrickSlot } from '../src/index.js';
+import { PROACTIVE_REFRESH_LEAD_MS, cleanupLaunch, getConservationQuota, getPolicy, ensureFreshTokens, finishTokenLease, getDbStatus, getSlotTokenHealth, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, isProcessAlive, listReservations, prepareLaunch, pruneDatabase, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, shouldStealRefreshLock, startTokenLease, syncBack, unbrickSlot } from '../src/index.js';
 import codexBalancedProvider, { getBalancedCodexModels, loadHostingPiAiRuntime, mapBalancedCodexModels, resolveHostingPiPackageRoot } from '../extensions/pi/index.js';
 import { getModels } from '@earendil-works/pi-ai/compat';
 
@@ -1601,4 +1601,528 @@ test('a real quota gap outranks a single in-flight reservation', async () => {
   // 5-point quota hold plus a 10-point score penalty) and flipped to 'less'.
   const auto = await startTokenLease(softLeaseArgs(root));
   assert.equal(auto.slot, 'more', 'the slot with more quota must win despite being busy');
+});
+
+// ── conservation window keyed by duration, not by label (incident #5/#10) ───
+// The live accounts report the 7-day window as `primary` and leave `secondary`
+// empty. The old branch keyed off the name `secondary`, so the taper never fired
+// and nothing throttled burn for as long as that shape held.
+test('conservation taper fires on a weekly window reported under the label primary', async () => {
+  const root = await tmp();
+  const now = Date.now();
+  await writeJson(path.join(root, 'accounts', 'drained', 'auth.json'), { access_token: 'tok-drained' });
+  await writeJson(path.join(root, 'accounts', 'onpace', 'auth.json'), { access_token: 'tok-onpace' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    schema_version: 2,
+    generated_at: now,
+    accounts: {
+      // Burned far ahead of pace: 6 of 7 days still to run, only 20% left.
+      drained: { slot: 'drained', status: 'ok', updatedAt: now, primary: { label: 'primary', remainingPercent: 20, windowMinutes: 10_080, resetAt: now + 6 * 24 * 60 * 60_000 } },
+      // On pace: 1 of 7 days left to run, 15% left. Lower remaining, no deficit.
+      onpace: { slot: 'onpace', status: 'ok', updatedAt: now, primary: { label: 'primary', remainingPercent: 15, windowMinutes: 10_080, resetAt: now + 24 * 60 * 60_000 } },
+    },
+  });
+  const prepared = await prepareLaunch(await tmp(), { stateRoot: root });
+  const deficit = prepared.selection?.penalties.find(p => p.startsWith('weekly_conservation_deficit:'));
+  assert.equal(prepared.slot, 'onpace', 'the ahead-of-pace slot must lose to the on-pace one despite more remaining');
+  assert.equal(deficit, undefined, 'the selected on-pace slot carries no deficit');
+});
+
+test('conservation taper ignores a short window even when it is labelled secondary', async () => {
+  const root = await tmp();
+  const now = Date.now();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok-s1' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    schema_version: 2,
+    generated_at: now,
+    accounts: {
+      // A 5-hour window nearly spent. Short windows refill on their own; tapering
+      // against one would throttle burn the weekly reserve never asked us to.
+      s1: { slot: 's1', status: 'ok', updatedAt: now, primary: { label: 'primary', remainingPercent: 90, windowMinutes: 300, resetAt: now + 4 * 60 * 60_000 }, secondary: { label: 'secondary', remainingPercent: 5, windowMinutes: 300, resetAt: now + 4 * 60 * 60_000 } },
+    },
+  });
+  const prepared = await prepareLaunch(await tmp(), { stateRoot: root });
+  assert.ok(!prepared.selection?.penalties.some(p => p.startsWith('weekly_conservation_deficit:')), `no taper on a sub-day window; got ${JSON.stringify(prepared.selection?.penalties)}`);
+});
+
+test('a signal-less window reads as unknown, never as a full reserve', async () => {
+  const root = await tmp();
+  const now = Date.now();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok-s1' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    schema_version: 2,
+    generated_at: now,
+    accounts: {
+      // Exactly the live shape: a real weekly window under `primary`, and a
+      // `secondary` entry carrying no remaining, no duration and no reset.
+      s1: { slot: 's1', status: 'ok', updatedAt: now, primary: { label: 'primary', remainingPercent: 7, windowMinutes: 10_080, resetAt: now + 60_000 }, secondary: { label: 'secondary' } },
+    },
+  });
+  const usage = await getUsage({ stateRoot: root });
+  assert.equal(usage.accounts[0].usage?.secondary, undefined, 'an empty window must not surface as a window at all');
+  const prepared = await prepareLaunch(await tmp(), { stateRoot: root });
+  assert.equal(prepared.secondary_remaining_percent, undefined, 'prepareLaunch must not report a remaining percent it never measured');
+  assert.equal(prepared.primary_remaining_percent, 7);
+});
+
+// ── lease attribution (incident #6) ─────────────────────────────────────────
+test('startTokenLease attributes its reservation to the async-subagents run env', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: fakeCodexJwt('acct-1', Math.floor(Date.now() / 1000) + 3600), refresh_token: 'r0' });
+  const oldRun = process.env.ASYNC_SUBAGENTS_RUN_ID;
+  const oldRoot = process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID;
+  process.env.ASYNC_SUBAGENTS_RUN_ID = 'run_test_attribution';
+  process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID = 'root_test_attribution';
+  try {
+    const lease = await startTokenLease({ provider: 'bravo-codex-balanced', model: 'm', purpose: 'manual', expected_runtime_ms: 60_000, ttl_safety_buffer_ms: 1_000, stateRoot: root });
+    const reservations = await listReservations({ stateRoot: root, includeInactive: true });
+    const mine = reservations.find(r => r.id === lease.reservation_id);
+    assert.equal(mine?.runId, 'run_test_attribution');
+    assert.equal(mine?.rootRunId, 'root_test_attribution');
+  } finally {
+    if (oldRun === undefined) delete process.env.ASYNC_SUBAGENTS_RUN_ID; else process.env.ASYNC_SUBAGENTS_RUN_ID = oldRun;
+    if (oldRoot === undefined) delete process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID; else process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID = oldRoot;
+  }
+});
+
+test('an explicit run_id on the lease input beats the ambient env', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: fakeCodexJwt('acct-1', Math.floor(Date.now() / 1000) + 3600), refresh_token: 'r0' });
+  const oldRun = process.env.ASYNC_SUBAGENTS_RUN_ID;
+  process.env.ASYNC_SUBAGENTS_RUN_ID = 'run_ambient';
+  try {
+    const lease = await startTokenLease({ provider: 'bravo-codex-balanced', model: 'm', purpose: 'manual', expected_runtime_ms: 60_000, ttl_safety_buffer_ms: 1_000, stateRoot: root, run_id: 'run_explicit' });
+    const mine = (await listReservations({ stateRoot: root, includeInactive: true })).find(r => r.id === lease.reservation_id);
+    assert.equal(mine?.runId, 'run_explicit');
+  } finally {
+    if (oldRun === undefined) delete process.env.ASYNC_SUBAGENTS_RUN_ID; else process.env.ASYNC_SUBAGENTS_RUN_ID = oldRun;
+  }
+});
+
+test('prepareLaunch reports the conservation window a dispatching lead is actually spending', async () => {
+  const root = await tmp();
+  const now = Date.now();
+  const resetAt = now + 19 * 60 * 60_000;
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok-s1' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    schema_version: 2,
+    generated_at: now,
+    // The live 2026-08-19 shape: the weekly window arrives labelled `primary`.
+    accounts: { s1: { slot: 's1', status: 'ok', updatedAt: now, primary: { label: 'primary', remainingPercent: 7, windowMinutes: 10_080, resetAt } } },
+  });
+  const prepared = await prepareLaunch(await tmp(), { stateRoot: root });
+  assert.equal(prepared.conservation_remaining_percent, 7);
+  assert.equal(prepared.conservation_window_minutes, 10_080);
+  assert.equal(prepared.conservation_reset_at, resetAt);
+});
+
+test('prepareLaunch reports no conservation window when only a short window exists', async () => {
+  const root = await tmp();
+  const now = Date.now();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok-s1' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    schema_version: 2,
+    generated_at: now,
+    accounts: { s1: { slot: 's1', status: 'ok', updatedAt: now, primary: { label: 'primary', remainingPercent: 40, windowMinutes: 300, resetAt: now + 60 * 60_000 } } },
+  });
+  const prepared = await prepareLaunch(await tmp(), { stateRoot: root });
+  assert.equal(prepared.conservation_remaining_percent, undefined, 'a 5-hour window is not a shared reserve to conserve');
+  assert.equal(prepared.primary_remaining_percent, 40);
+});
+
+test('getConservationQuota reads the long window by duration and omits slots that have none', async () => {
+  const root = await tmp();
+  const resetAt = Date.now() + 19 * 60 * 60_000;
+  for (const slot of ['weekly-primary', 'weekly-secondary', 'short-only']) {
+    await writeJson(path.join(root, 'accounts', slot, 'auth.json'), { access_token: `tok-${slot}` });
+  }
+  // Seeded through the real ingest path so the db is built the way production builds it.
+  // Same 7-day window under two different upstream labels: both must be found.
+  await ingestLiveUsage({ stateRoot: root, slot: 'weekly-primary', rateLimits: { rate_limits: { primary: { remaining_percent: 7, window_minutes: 10_080, reset_at: resetAt } } } });
+  await ingestLiveUsage({ stateRoot: root, slot: 'weekly-secondary', rateLimits: { rate_limits: { secondary: { remaining_percent: 17, window_minutes: 10_080, reset_at: resetAt } } } });
+  await ingestLiveUsage({ stateRoot: root, slot: 'short-only', rateLimits: { rate_limits: { primary: { remaining_percent: 95, window_minutes: 300, reset_at: Date.now() + 60_000 } } } });
+  const quota = await getConservationQuota({ stateRoot: root });
+  assert.deepEqual(quota.map(q => q.slot), ['weekly-secondary', 'weekly-primary'], 'sorted by remaining, duration-keyed, short window excluded');
+  assert.equal(quota[0].remainingPercent, 17);
+  assert.equal(quota[0].windowMinutes, 10_080);
+  assert.equal(quota[1].remainingPercent, 7);
+});
+
+test('getConservationQuota never creates a balancer database', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok-s1' });
+  assert.deepEqual(await getConservationQuota({ stateRoot: root }), []);
+  await assert.rejects(fs.stat(path.join(root, 'balancer.sqlite3')), /ENOENT/, 'a read-only quota question must not stamp a ledger into an untouched state root');
+});
+
+// ── Selection policy lives in the database (incident #4) ────────────────────
+// A resident process never sees a rebuild. Two live Pi sessions kept selecting on
+// the broken policy after it was fixed and could not be restarted without discarding
+// in-flight work. Policy in the database reaches them on their next lease.
+
+// Simulate a newer build having published its policy, then check THIS build selects
+// on the published numbers rather than the ones it was compiled with.
+async function publishPolicy(root: string, version: number, values: Record<string, unknown>) {
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  try {
+    const write = db.prepare('INSERT INTO policy(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+    write.run('version', String(version));
+    write.run('json', JSON.stringify(values));
+  } finally { db.close(); }
+}
+
+test('a published policy reaches a process that was compiled with a different one', async () => {
+  const root = await tmp();
+  const now = Date.now();
+  await writeJson(path.join(root, 'accounts', 'busy', 'auth.json'), { access_token: 'tok-busy' });
+  await writeJson(path.join(root, 'accounts', 'idle', 'auth.json'), { access_token: 'tok-idle' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    schema_version: 2,
+    generated_at: now,
+    accounts: {
+      busy: { slot: 'busy', status: 'ok', updatedAt: now, primary: { label: 'primary', remainingPercent: 80, windowMinutes: 300, resetAt: now + 60_000 } },
+      idle: { slot: 'idle', status: 'ok', updatedAt: now, primary: { label: 'primary', remainingPercent: 60, windowMinutes: 300, resetAt: now + 60_000 } },
+    },
+  });
+  // Materialize the db, then hold a reservation on `busy` so it carries one active lease.
+  const held = await prepareLaunch(await tmp(), { stateRoot: root, slot: 'busy' });
+  assert.ok(held.metadata.reservation_id);
+
+  // Compiled default (activeReservationPenalty 2) leaves busy ahead: 80*0.6-2 = 46 > 60*0.6 = 36.
+  const beforePublish = await prepareLaunch(await tmp(), { stateRoot: root });
+  assert.equal(beforePublish.slot, 'busy');
+
+  // A newer build publishes a far harsher concurrency penalty. No restart, no rebuild.
+  await publishPolicy(root, 99, { version: 99, hardFloorPrimaryPercent: 1, hardFloorSecondaryPercent: 1, stalePenalty: 15, unknownPenalty: 25, activeReservationPenalty: 40, limitedPenalty: 30, weeklyConservationPenalty: 0.5, selectionStaleAfterMs: 15 * 60_000 });
+
+  const afterPublish = await prepareLaunch(await tmp(), { stateRoot: root });
+  assert.equal(afterPublish.slot, 'idle', 'the published penalty must change what this process selects, with no rebuild');
+  assert.equal(afterPublish.selection?.policy_version, 99, 'selections report the policy actually in force');
+});
+
+test('a build older than the published policy is flagged, never refused', async () => {
+  const root = await tmp();
+  const now = Date.now();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok-s1' });
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    schema_version: 2, generated_at: now,
+    accounts: { s1: { slot: 's1', status: 'ok', updatedAt: now, primary: { label: 'primary', remainingPercent: 50, windowMinutes: 300, resetAt: now + 60_000 } } },
+  });
+  await prepareLaunch(await tmp(), { stateRoot: root });
+  await publishPolicy(root, 99, { version: 99 });
+  const prepared = await prepareLaunch(await tmp(), { stateRoot: root });
+  // Loud, not fail-closed: refusing on a version mismatch is the #9 brick rebuilt on purpose.
+  assert.ok(prepared.slot, 'a stale build must still be able to lease');
+  const flag = prepared.selection?.penalties.find(p => p.startsWith('stale_policy_build:'));
+  assert.ok(flag, `stale build must be recorded; got ${JSON.stringify(prepared.selection?.penalties)}`);
+  assert.match(flag!, /published99/);
+  const reservation = (await listReservations({ stateRoot: root, includeInactive: true })).find(r => r.id === prepared.metadata.reservation_id);
+  assert.ok(reservation, 'the flag must be queryable from the reservations table, not just the return value');
+});
+
+test('an older build never steps the published policy backwards', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok-s1' });
+  await prepareLaunch(await tmp(), { stateRoot: root });
+  await publishPolicy(root, 99, { version: 99, activeReservationPenalty: 40 });
+  // Every openDb by this (older) build used to upsert its own policy unconditionally,
+  // so the newer policy was overwritten on the very next lease it was meant to reach.
+  await prepareLaunch(await tmp(), { stateRoot: root });
+  await getUsage({ stateRoot: root });
+  const policy = await getPolicy({ stateRoot: root });
+  assert.equal(policy.selection_policy_version, 99, 'an older build must leave a newer published policy alone');
+  assert.equal(policy.policy.activeReservationPenalty, 40);
+  assert.equal(policy.stale_build, true);
+  assert.equal(policy.compiled_selection_policy_version, policy.compiled.version, 'compiled policy is reported separately from what is in force');
+  assert.equal((policy as Record<string, unknown>).version, undefined, 'the bare name `version` collided with DB_SCHEMA_VERSION and is gone');
+});
+
+test('a corrupt or partial published policy degrades to the compiled defaults', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok-s1' });
+  await prepareLaunch(await tmp(), { stateRoot: root });
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  try {
+    db.prepare('INSERT INTO policy(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('json', '{not json');
+  } finally { db.close(); }
+  const policy = await getPolicy({ stateRoot: root });
+  assert.deepEqual(policy.policy, policy.compiled, 'an unparseable policy row must not fail a lease');
+  const prepared = await prepareLaunch(await tmp(), { stateRoot: root });
+  assert.ok(prepared.slot);
+});
+
+test('a published policy cannot inject a key this build has no code for', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: 'tok-s1' });
+  await prepareLaunch(await tmp(), { stateRoot: root });
+  await publishPolicy(root, 99, { version: 99, someFutureKnob: 123, activeReservationPenalty: 'not-a-number' });
+  const policy = await getPolicy({ stateRoot: root });
+  assert.equal((policy.policy as Record<string, unknown>).someFutureKnob, undefined, 'unknown keys are ignored, not adopted');
+  assert.equal(policy.policy.activeReservationPenalty, policy.compiled.activeReservationPenalty, 'a non-numeric value falls back to the compiled default');
+});
+
+// ── Retention (incident #7) ─────────────────────────────────────────────────
+// 431 MB, 781,882 launch_events, ~13k reservations/day, nothing ever deleted.
+
+async function seedDb(root: string, slots: string[]) {
+  for (const slot of slots) await writeJson(path.join(root, 'accounts', slot, 'auth.json'), { access_token: `tok-${slot}` });
+  await prepareLaunch(await tmp(), { stateRoot: root, slot: slots[0] });
+  const { DatabaseSync } = await import('node:sqlite');
+  return new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+}
+const RETENTION_DAY = 24 * 60 * 60_000;
+
+test('prune deletes aged forensic rows and leaves recent ones', async () => {
+  const root = await tmp();
+  const db = await seedDb(root, ['s1']);
+  const old = Date.now() - 30 * RETENTION_DAY;
+  const recent = Date.now() - 1 * RETENTION_DAY;
+  try {
+    const ev = db.prepare('INSERT INTO launch_events(launch_id, slot, event_type, created_at) VALUES (?, ?, ?, ?)');
+    for (let i = 0; i < 50; i++) ev.run(`l${i}`, 's1', 'reserved', old);
+    for (let i = 0; i < 5; i++) ev.run(`r${i}`, 's1', 'reserved', recent);
+    const res = db.prepare("INSERT INTO reservations(id, slot, launch_id, state, created_at, updated_at, expires_at) VALUES (?, 's1', ?, 'completed', ?, ?, ?)");
+    for (let i = 0; i < 40; i++) res.run(`old_${i}`, `l${i}`, old, old, old);
+    for (let i = 0; i < 4; i++) res.run(`new_${i}`, `r${i}`, recent, recent, recent);
+  } finally { db.close(); }
+
+  const result = await pruneDatabase({ stateRoot: root, olderThanDays: 14 });
+  assert.equal(result.deleted.launch_events, 50);
+  assert.equal(result.deleted.reservations, 40);
+
+  const after = await listReservations({ stateRoot: root, includeInactive: true });
+  assert.equal(after.filter(r => r.id?.startsWith('old_')).length, 0);
+  assert.equal(after.filter(r => r.id?.startsWith('new_')).length, 4);
+});
+
+// An active reservation is holding a slot. Deleting one by age would drop it from
+// activeReservationCounts and let the slot be over-subscribed.
+test('prune never deletes an active reservation, however old', async () => {
+  const root = await tmp();
+  const db = await seedDb(root, ['s1']);
+  const old = Date.now() - 90 * RETENTION_DAY;
+  try {
+    db.prepare("INSERT INTO reservations(id, slot, launch_id, state, created_at, updated_at, expires_at) VALUES ('ancient_active', 's1', 'l', 'pending', ?, ?, ?)")
+      .run(old, old, Date.now() + 60 * 60_000);
+    db.prepare("INSERT INTO reservations(id, slot, launch_id, state, created_at, updated_at, expires_at) VALUES ('ancient_expired', 's1', 'l', 'pending', ?, ?, ?)")
+      .run(old, old, old);
+  } finally { db.close(); }
+
+  await pruneDatabase({ stateRoot: root, olderThanDays: 14 });
+  const ids = (await listReservations({ stateRoot: root, includeInactive: true })).map(r => r.id);
+  assert.ok(ids.includes('ancient_active'), 'a pending reservation that has not expired is still holding a slot');
+  assert.ok(!ids.includes('ancient_expired'), 'an aged, long-expired reservation is eligible');
+});
+
+// latestUsageEntries reads the newest snapshot per slot. If retention deleted every
+// snapshot for an idle slot, that slot would score as unknown and be penalised for
+// having been idle — retention must never change what selection sees.
+test('prune keeps a usage tail per slot so an idle slot never becomes unknown', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 'idle', 'auth.json'), { access_token: 'tok-idle' });
+  await ingestLiveUsage({ stateRoot: root, slot: 'idle', rateLimits: { rate_limits: { primary: { remaining_percent: 42, window_minutes: 300 } } } });
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  try {
+    // Age every existing snapshot far past any retention window.
+    db.exec(`UPDATE usage_snapshots SET generated_at = ${Date.now() - 90 * RETENTION_DAY}, created_at = ${Date.now() - 90 * RETENTION_DAY}`);
+  } finally { db.close(); }
+
+  const before = await getUsage({ stateRoot: root });
+  assert.equal(before.accounts[0].usage?.primary?.remainingPercent, 42);
+
+  await pruneDatabase({ stateRoot: root, olderThanDays: 14 });
+
+  const after = await getUsage({ stateRoot: root });
+  assert.equal(after.accounts[0].usage?.primary?.remainingPercent, 42, 'the newest snapshot survives regardless of age');
+  const prepared = await prepareLaunch(await tmp(), { stateRoot: root });
+  assert.ok(!prepared.selection?.penalties.includes('unknown_usage'), 'retention must not make a live slot look unknown');
+});
+
+// migrationCompleted falls back to a launch_event when the schema_metadata key is
+// absent. Pruning that event would silently re-arm a one-time usage-cache migration.
+test('prune cannot re-arm the one-time usage cache migration', async () => {
+  const root = await tmp();
+  const db = await seedDb(root, ['s1']);
+  const old = Date.now() - 90 * RETENTION_DAY;
+  try {
+    // Exactly the pre-promotion shape: the marker exists ONLY as an aged launch_event.
+    db.prepare('INSERT INTO launch_events(launch_id, slot, event_type, created_at) VALUES (?, ?, ?, ?)').run('m', 's1', 'migrated_usage_cache_v2', old);
+    db.prepare("DELETE FROM schema_metadata WHERE key = 'usage_cache_v2_migrated'").run();
+  } finally { db.close(); }
+
+  await pruneDatabase({ stateRoot: root, olderThanDays: 14 });
+
+  const check = new (await import('node:sqlite')).DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  try {
+    const key = check.prepare("SELECT value FROM schema_metadata WHERE key = 'usage_cache_v2_migrated'").get();
+    assert.ok(key, 'the marker must be promoted to schema_metadata before its event can be deleted');
+  } finally { check.close(); }
+
+  // A stale on-disk cache must NOT be re-migrated now that its event is gone.
+  await writeJson(path.join(root, 'cache', 'usage.json'), {
+    schema_version: 2, generated_at: Date.now(),
+    accounts: { s1: { slot: 's1', status: 'ok', updatedAt: Date.now(), primary: { label: 'primary', remainingPercent: 99 } } },
+  });
+  const usage = await getUsage({ stateRoot: root });
+  assert.notEqual(usage.accounts[0].usage?.primary?.remainingPercent, 99, 'a completed migration must stay completed after pruning');
+});
+
+test('prune --dry-run reports counts and deletes nothing', async () => {
+  const root = await tmp();
+  const db = await seedDb(root, ['s1']);
+  const old = Date.now() - 30 * RETENTION_DAY;
+  try {
+    const ev = db.prepare('INSERT INTO launch_events(launch_id, slot, event_type, created_at) VALUES (?, ?, ?, ?)');
+    for (let i = 0; i < 25; i++) ev.run(`l${i}`, 's1', 'reserved', old);
+  } finally { db.close(); }
+
+  const dry = await pruneDatabase({ stateRoot: root, olderThanDays: 14, dryRun: true });
+  assert.equal(dry.dryRun, true);
+  assert.equal(dry.deleted.launch_events, 25);
+  const real = await pruneDatabase({ stateRoot: root, olderThanDays: 14 });
+  assert.equal(real.deleted.launch_events, 25, 'dry-run must not have deleted the rows it counted');
+});
+
+test('prune is bounded by maxDeletesPerTable', async () => {
+  const root = await tmp();
+  const db = await seedDb(root, ['s1']);
+  const old = Date.now() - 30 * RETENTION_DAY;
+  try {
+    const ev = db.prepare('INSERT INTO launch_events(launch_id, slot, event_type, created_at) VALUES (?, ?, ?, ?)');
+    for (let i = 0; i < 100; i++) ev.run(`l${i}`, 's1', 'reserved', old);
+  } finally { db.close(); }
+  const first = await pruneDatabase({ stateRoot: root, olderThanDays: 14, maxDeletesPerTable: 30 });
+  assert.equal(first.deleted.launch_events, 30, 'a bounded sweep must never stall a lease by deleting everything at once');
+  const second = await pruneDatabase({ stateRoot: root, olderThanDays: 14, maxDeletesPerTable: 30 });
+  assert.equal(second.deleted.launch_events, 30, 'the remainder is picked up by the next sweep');
+});
+
+test('vacuum reclaims the file and is reported, opt-in only', async () => {
+  const root = await tmp();
+  const db = await seedDb(root, ['s1']);
+  const old = Date.now() - 30 * RETENTION_DAY;
+  try {
+    const ev = db.prepare('INSERT INTO launch_events(launch_id, slot, event_type, created_at, details_json) VALUES (?, ?, ?, ?, ?)');
+    const padding = JSON.stringify({ pad: 'x'.repeat(4000) });
+    for (let i = 0; i < 2000; i++) ev.run(`l${i}`, 's1', 'reserved', old, padding);
+  } finally { db.close(); }
+
+  const noVacuum = await pruneDatabase({ stateRoot: root, olderThanDays: 14 });
+  assert.equal(noVacuum.vacuum, undefined, 'VACUUM rewrites the whole database and must stay opt-in');
+  const sizeAfterDelete = (await fs.stat(path.join(root, 'balancer.sqlite3'))).size;
+
+  const vacuumed = await pruneDatabase({ stateRoot: root, olderThanDays: 14, vacuum: true });
+  assert.equal(vacuumed.vacuum?.ran, true);
+  assert.ok(vacuumed.vacuum!.bytes_after < sizeAfterDelete, `vacuum must reclaim the file: ${sizeAfterDelete} -> ${vacuumed.vacuum!.bytes_after}`);
+});
+
+function rowCount(db: { prepare(sql: string): { get(...p: unknown[]): unknown } }, sql: string, ...params: unknown[]): number {
+  return Number((db.prepare(sql).get(...params) as { c: number | bigint }).c);
+}
+
+// ── The lease path must never do housekeeping (2026-08-19, self-inflicted) ───
+// Retention was briefly wired into finishTokenLease. On a database with no retention
+// indexes the sweep held the write lock long enough that every concurrent lease failed
+// with "database is locked", and because the sweep never reached the line recording that
+// it had run, every finish started another one. It took the whole agent fleet down.
+
+test('finishing a lease does no retention work', async () => {
+  const root = await tmp();
+  await writeJson(path.join(root, 'accounts', 's1', 'auth.json'), { access_token: fakeCodexJwt('acct-1', Math.floor(Date.now() / 1000) + 3600), refresh_token: 'r0' });
+  const lease = await startTokenLease({ provider: 'bravo-codex-balanced', model: 'm', purpose: 'manual', expected_runtime_ms: 60_000, ttl_safety_buffer_ms: 1_000, stateRoot: root });
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  try {
+    const ev = db.prepare('INSERT INTO launch_events(launch_id, slot, event_type, created_at) VALUES (?, ?, ?, ?)');
+    for (let i = 0; i < 20; i++) ev.run(`l${i}`, 's1', 'reserved', Date.now() - 90 * RETENTION_DAY);
+  } finally { db.close(); }
+
+  await finishTokenLease({ stateRoot: root, lease_id: lease.lease_id, reservation_id: lease.reservation_id, launch_id: lease.launch_id, status: 'completed' });
+
+  const check = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  try {
+    assert.equal(rowCount(check, 'SELECT COUNT(*) AS c FROM launch_events WHERE created_at < ?', Date.now() - 14 * RETENTION_DAY), 20,
+      'a request path must not sweep: housekeeping that can livelock the thing it houses does not belong here');
+    assert.equal(check.prepare("SELECT value FROM policy WHERE key = 'last_pruned_at'").get(), undefined);
+  } finally { check.close(); }
+});
+
+// launch_events references reservations ON DELETE SET NULL. Without an index on
+// launch_events(reservation_id) every reservation delete full-scans the whole events
+// table — the O(n^2) that produced a multi-minute write lock on 791,654 events and took
+// the agent fleet down. A timing assertion at test-database scale does NOT discriminate
+// (measured: removing the index still passed a 10s bound), so this asserts the schema
+// invariant directly.
+test('the retention indexes exist, including the one whose absence caused the outage', async () => {
+  const root = await tmp();
+  const db = await seedDb(root, ['s1']);
+  try {
+    const names = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Array<{ name: string }>).map(r => String(r.name));
+    assert.ok(names.includes('idx_launch_events_reservation'), `the FK back-reference index is load-bearing, not an optimisation; got ${names.join(', ')}`);
+    assert.ok(names.includes('idx_launch_events_created'));
+    assert.ok(names.includes('idx_reservations_updated'));
+    assert.ok(names.includes('idx_usage_snapshots_generated'));
+  } finally { db.close(); }
+});
+
+// The sweep must release the write lock between chunks. Elapsed time does not
+// discriminate at test scale either, so the sweep reports the transactions it used.
+test('a large sweep commits in many transactions, never under one long lock', async () => {
+  const root = await tmp();
+  const db = await seedDb(root, ['s1']);
+  const old = Date.now() - 30 * RETENTION_DAY;
+  try {
+    db.exec('BEGIN');
+    const ev = db.prepare('INSERT INTO launch_events(launch_id, slot, event_type, created_at) VALUES (?, ?, ?, ?)');
+    for (let i = 0; i < 5_000; i++) ev.run(`l${i}`, 's1', 'reserved', old);
+    db.exec('COMMIT');
+  } finally { db.close(); }
+
+  const result = await pruneDatabase({ stateRoot: root, olderThanDays: 14 });
+  assert.equal(result.deleted.launch_events, 5_000);
+  assert.ok(result.chunks >= 10, `5,000 rows must not be deleted under one lock; used ${result.chunks} transactions`);
+});
+
+// A writer contending for the same database must never be refused during a sweep.
+test('a concurrent writer is never locked out while a prune runs', async () => {
+  const root = await tmp();
+  const db = await seedDb(root, ['s1']);
+  const old = Date.now() - 30 * RETENTION_DAY;
+  try {
+    db.exec('BEGIN');
+    const ev = db.prepare('INSERT INTO launch_events(launch_id, slot, event_type, created_at) VALUES (?, ?, ?, ?)');
+    for (let i = 0; i < 60_000; i++) ev.run(`l${i}`, 's1', 'reserved', old);
+    db.exec('COMMIT');
+  } finally { db.close(); }
+
+  const { DatabaseSync } = await import('node:sqlite');
+  const writer = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  // Deliberately impatient: with a generous busy_timeout a long lock is merely slow and
+  // stays invisible. 50ms means any sweep holding the lock across chunks fails this.
+  writer.exec('PRAGMA busy_timeout = 50');
+  let committed = 0;
+  let lockErrors = 0;
+  let done = false;
+  const prune = pruneDatabase({ stateRoot: root, olderThanDays: 14 }).finally(() => { done = true; });
+  try {
+    while (!done) {
+      try {
+        writer.exec('BEGIN IMMEDIATE');
+        writer.prepare("INSERT INTO launch_events(launch_id, slot, event_type, created_at) VALUES ('probe','s1','probe',?)").run(Date.now());
+        writer.exec('COMMIT');
+        committed++;
+      } catch (error) {
+        try { writer.exec('ROLLBACK'); } catch { /* not in a transaction */ }
+        if (/locked|busy/i.test(String((error as Error).message))) lockErrors++;
+        else throw error;
+      }
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    await prune;
+  } finally { writer.close(); }
+  assert.ok(committed > 0, 'the concurrent writer must actually have run during the prune');
+  assert.equal(lockErrors, 0, `a prune must never lock out a lease; ${lockErrors} of ${committed + lockErrors} writes were refused`);
 });

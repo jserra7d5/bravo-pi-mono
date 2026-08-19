@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { refreshCodexToken, type CodexTokenSet } from './codex-oauth.js';
 import { classifyOAuthRefreshError, redactSecretsInText, type OAuthErrorKind } from './oauth-error.js';
+import pkg from '../package.json' with { type: 'json' };
 
 export type UsageWindow = {
   label: 'primary' | 'secondary' | string;
@@ -92,6 +93,15 @@ export type PrepareLaunchResult = {
   selection?: SelectionMetadata;
   primary_remaining_percent?: number;
   secondary_remaining_percent?: number;
+  /**
+   * The long shared window, identified by duration rather than by the label the
+   * upstream happened to use. This is the number a dispatching lead should read
+   * before fanning out lanes: `primary_remaining_percent` is whichever window the
+   * upstream called "primary" and on these accounts that is already the weekly one.
+   */
+  conservation_remaining_percent?: number;
+  conservation_window_minutes?: number;
+  conservation_reset_at?: number;
 };
 
 export type TokenLeasePurpose = 'pi-provider-request' | 'async-child-preflight' | 'manual' | 'command-backed-token';
@@ -106,6 +116,9 @@ export type StartTokenLeaseInput = {
   lease_key?: string;
   preferred_slot?: string;
   session_affinity_key?: string;
+  /** Attribution for the shared window. Defaults to the async-subagents run env of the calling process. */
+  run_id?: string;
+  root_run_id?: string;
   abort_signal?: AbortSignal;
 };
 export type TokenLease = {
@@ -167,10 +180,12 @@ const PROBE_MODEL = process.env.CODEX_AUTH_BALANCER_PROBE_MODEL || 'gpt-5.3-code
 const PROBE_TIMEOUT_MS = Number(process.env.CODEX_AUTH_BALANCER_PROBE_TIMEOUT_MS || 60_000);
 const PROBE_PROMPT = 'Reply exactly: OK';
 const DB_SCHEMA_VERSION = 1;
+const PACKAGE_VERSION: string = pkg.version;
 const DEFAULT_RESERVATION_TTL_MS = 2 * 60 * 60_000;
-const WEEK_MS = 7 * 24 * 60 * 60_000;
 const POLICY = {
-  version: 2,
+  // Bump whenever these values change. Publication is upgrade-only and keyed off this
+  // number, so a build that retunes without bumping cannot reach a resident process.
+  version: 3,
   hardFloorPrimaryPercent: 1,
   hardFloorSecondaryPercent: 1,
   // In-flight reservations are a *preference* signal, never a quota deduction: a
@@ -186,6 +201,47 @@ const POLICY = {
   weeklyConservationPenalty: 0.5,
   selectionStaleAfterMs: DEFAULT_STALE_AFTER_MS,
 };
+
+type SelectionPolicy = typeof POLICY;
+
+/**
+ * The selection policy actually in force, plus who published it.
+ *
+ * Policy lives in the database rather than only in each process's memory because a
+ * resident process never sees a rebuild: on 2026-08-19 a policy fix could not reach
+ * two live Pi sessions that could not be restarted without discarding in-flight work
+ * (incident #4). Publishing it means a tunable change reaches every process on its
+ * next lease.
+ *
+ * This carries NUMBERS, not code paths. A build with different selection *logic* is
+ * still a different build; part of what this record is for is making that visible
+ * (`stale_policy_build` below) rather than pretending it away.
+ */
+type EffectivePolicy = { values: SelectionPolicy; publishedVersion: number; stale: boolean };
+
+/**
+ * Merge the published policy over this build's defaults, key by key.
+ *
+ * Only keys this build already knows are taken, and only as finite numbers, so a
+ * newer publisher can retune this build but can never inject a key it has no code
+ * for, and a corrupt row degrades to the compiled defaults instead of failing a
+ * lease.
+ */
+function readEffectivePolicy(db: DatabaseSync): EffectivePolicy {
+  const storedVersion = Number(readKv(db, 'version'));
+  const publishedVersion = Number.isFinite(storedVersion) && storedVersion > 0 ? storedVersion : POLICY.version;
+  const values: SelectionPolicy = { ...POLICY };
+  let published: unknown;
+  try { published = JSON.parse(readKv(db, 'json') ?? 'null'); } catch { published = undefined; }
+  if (isRecord(published)) {
+    for (const key of Object.keys(POLICY) as Array<keyof SelectionPolicy>) {
+      const candidate = asNumber(published[key]);
+      if (candidate != null) values[key] = candidate;
+    }
+  }
+  values.version = publishedVersion;
+  return { values, publishedVersion, stale: POLICY.version < publishedVersion };
+}
 
 const sha = (s: string | Buffer) => createHash('sha256').update(s).digest('hex');
 async function exists(p: string) { try { await fs.access(p); return true; } catch { return false; } }
@@ -239,7 +295,7 @@ function normalizeWindow(label: string, value: unknown): UsageWindow | undefined
   const windowMinutes = normalizeWindowMinutes(value.windowMinutes) ?? normalizeWindowMinutes(value.window_minutes);
   const resetAt = asNumber(value.resetAt) ?? asNumber(value.reset_at);
   const resetInSeconds = asNumber(value.resetInSeconds) ?? asNumber(value.reset_in_seconds);
-  return {
+  const window: UsageWindow = {
     label: typeof value.label === 'string' ? value.label : label,
     remainingPercent: remaining == null ? undefined : clampPct(remaining),
     windowMinutes,
@@ -247,6 +303,23 @@ function normalizeWindow(label: string, value: unknown): UsageWindow | undefined
     resetInSeconds,
     stale: value.stale === true,
   };
+  // A window carrying no remaining/duration/reset signal is UNKNOWN, not full. Returning a
+  // hollow {label} object here is what let an empty `secondary` read as "100% weekly reserve
+  // untouched" across every operator surface on 2026-08-19 (incident #10).
+  return hasWindowSignal(window) ? window : undefined;
+}
+/**
+ * The long "conservation" window is identified by its DURATION, never by its name.
+ * These accounts report the 7-day window under the label `primary` and leave
+ * `secondary` empty, so the old `secondary`-keyed branch was silently dead and
+ * nothing throttled burn (incident #5/#10, 2026-08-19). Requires a real
+ * remaining-percent and reset so the taper is computed from measured position.
+ */
+const CONSERVATION_WINDOW_MIN_MINUTES = 24 * 60;
+function conservationWindow(...windows: Array<UsageWindow | undefined>): UsageWindow | undefined {
+  return windows
+    .filter((w): w is UsageWindow => w?.windowMinutes != null && w.windowMinutes >= CONSERVATION_WINDOW_MIN_MINUTES && w.remainingPercent != null && w.resetAt != null)
+    .sort((a, b) => b.windowMinutes! - a.windowMinutes!)[0];
 }
 function asNumberish(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -527,6 +600,15 @@ function openDb(stateRoot: string): DatabaseSync {
       created_at INTEGER NOT NULL,
       details_json TEXT
     );
+    -- Retention indexes. idx_launch_events_reservation is not optional: launch_events
+    -- references reservations ON DELETE SET NULL, so without it every reservation delete
+    -- full-scans the whole launch_events table. On the live database (791k events, 286k
+    -- eligible reservations) that turned one sweep into a multi-minute write lock and
+    -- surfaced across the fleet as "database is locked".
+    CREATE INDEX IF NOT EXISTS idx_launch_events_reservation ON launch_events(reservation_id);
+    CREATE INDEX IF NOT EXISTS idx_launch_events_created ON launch_events(created_at);
+    CREATE INDEX IF NOT EXISTS idx_reservations_updated ON reservations(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_usage_snapshots_generated ON usage_snapshots(generated_at);
   `);
   const row = db.prepare('SELECT value FROM schema_metadata WHERE key = ?').get('schema_version') as SqlRow | undefined;
   const metadataVersion = row ? Number(row.value) : 0;
@@ -561,10 +643,17 @@ function ensureAdditiveColumns(db: DatabaseSync) {
   }
 }
 function initializePolicy(db: DatabaseSync) {
-  // Upsert, not INSERT OR IGNORE: these rows are the forensic record of which
-  // selection policy is resident, so a stale row would misreport getDbStatus.
-  db.prepare('INSERT INTO policy(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('version', String(POLICY.version));
-  db.prepare('INSERT INTO policy(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('json', JSON.stringify(POLICY));
+  // UPGRADE-ONLY. This row is the policy every process selects on, so an unconditional
+  // upsert let any resident old build stomp a newer build's policy on its next openDb —
+  // which is every lease. Never step the published policy backwards; a build older than
+  // what is published leaves it alone and is flagged at selection instead.
+  const storedVersion = Number(readKv(db, 'version'));
+  if (Number.isFinite(storedVersion) && storedVersion >= POLICY.version) return;
+  const write = db.prepare('INSERT INTO policy(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+  write.run('version', String(POLICY.version));
+  write.run('json', JSON.stringify(POLICY));
+  write.run('published_by', PACKAGE_VERSION);
+  write.run('published_at', String(Date.now()));
 }
 function closeDb(db: DatabaseSync) { try { db.close(); } catch { /* ignore close errors */ } }
 function migrationCompleted(db: DatabaseSync): boolean {
@@ -680,6 +769,39 @@ function latestUsageEntries(db: DatabaseSync): Record<string, UsageEntry> {
 function latestGeneratedAt(db: DatabaseSync): number | undefined {
   const row = db.prepare('SELECT MAX(generated_at) AS generated_at FROM usage_snapshots').get() as SqlRow | undefined;
   return rowNumber(row?.generated_at);
+}
+
+export type ConservationQuota = {
+  slot: string;
+  remainingPercent: number;
+  windowMinutes: number;
+  resetAt: number;
+  stale: boolean;
+};
+
+/**
+ * Read-only view of the long shared window per slot, selected BY DURATION.
+ * Reserves nothing, so a dispatching lead can ask "how much shared runway is
+ * left" before fanning out lanes without charging the window to do it
+ * (incident #14). Slots whose long window is unknown are omitted rather than
+ * reported as full — the mistake that made an empty window read as 100%
+ * across every operator surface (incident #10).
+ */
+export async function getConservationQuota(options: { stateRoot?: string; staleAfterMs?: number } = {}): Promise<ConservationQuota[]> {
+  // Strictly read-only: opening the database CREATES it, and a dispatch-time quota
+  // question must never bring a balancer ledger into existence in a state root that
+  // does not have one. No database means no measurement, which is reported as "no
+  // long window known" rather than as a full reserve.
+  const stateRoot = options.stateRoot || resolveStateRoot();
+  if (!(await exists(path.join(stateRoot, 'balancer.sqlite3')))) return [];
+  const usage = await getUsage({ ...options, stateRoot });
+  const out: ConservationQuota[] = [];
+  for (const account of usage.accounts) {
+    const window = conservationWindow(normalizeWindow('primary', account.usage?.primary), normalizeWindow('secondary', account.usage?.secondary));
+    if (!window) continue;
+    out.push({ slot: account.slot, remainingPercent: window.remainingPercent!, windowMinutes: window.windowMinutes!, resetAt: window.resetAt!, stale: window.stale === true });
+  }
+  return out.sort((a, b) => b.remainingPercent - a.remainingPercent);
 }
 
 export async function getUsage(options: { stateRoot?: string; staleAfterMs?: number } | string = {}): Promise<CodexUsage> {
@@ -960,7 +1082,8 @@ function statusOf(entry: UsageEntry | undefined): CodexAccountStatus {
  *    otherwise selection falls back to the full account set. A preference must never
  *    turn a usable install into `slot unavailable by policy`.
  */
-function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageEntry>, activeCounts: Record<string, number>, stateRoot: string, requestedSlot: string | undefined, requestedSlotMode: 'hard' | 'soft', now: number): { account: InternalAccount; selection: SelectionMetadata } {
+function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageEntry>, activeCounts: Record<string, number>, stateRoot: string, requestedSlot: string | undefined, requestedSlotMode: 'hard' | 'soft', now: number, effective: EffectivePolicy): { account: InternalAccount; selection: SelectionMetadata } {
+  const POLICY = effective.values;
   const candidates: Array<{ account: InternalAccount; selection: SelectionMetadata }> = [];
   const hardSlot = requestedSlotMode === 'hard' ? requestedSlot : undefined;
   const considered = hardSlot ? accounts.filter(a => a.slot === hardSlot) : accounts;
@@ -999,9 +1122,12 @@ function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageE
       score -= active * POLICY.activeReservationPenalty;
       penalties.push(`active_reservations:${active}`);
     }
-    if (secondary?.resetAt && remSecondary != null && secondary.resetAt > now) {
-      const curve = clampPct(((secondary.resetAt - now) / WEEK_MS) * 100);
-      const deficit = Math.max(0, curve - remSecondary);
+    const conservation = conservationWindow(primary, secondary);
+    if (conservation && conservation.resetAt! > now) {
+      // Taper against THIS window's own length, not a hardcoded week: a window is
+      // "on pace" when remaining% >= the fraction of the window still to run.
+      const curve = clampPct(((conservation.resetAt! - now) / (conservation.windowMinutes! * 60_000)) * 100);
+      const deficit = Math.max(0, curve - conservation.remainingPercent!);
       if (deficit > 0) {
         score -= deficit * POLICY.weeklyConservationPenalty;
         penalties.push(`weekly_conservation_deficit:${deficit.toFixed(2)}`);
@@ -1009,13 +1135,19 @@ function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageE
     }
     const reservationId = `res_${randomBytes(12).toString('hex')}`;
     const launchId = `launch_${randomBytes(12).toString('hex')}`;
-    const tieBreak = sha(`${POLICY.version}:${stateRoot}:${account.slot}`).slice(0, 16);
+    // Keyed off the PUBLISHED version, not the compiled one, so every process — old
+    // build or new — breaks ties identically instead of splitting the fleet's ordering.
+    const tieBreak = sha(`${effective.publishedVersion}:${stateRoot}:${account.slot}`).slice(0, 16);
+    // Visible, never fail-closed: refusing to select on a version mismatch is the #9
+    // brick rebuilt on purpose. Recorded in reservations.metadata_json so
+    // `codex-auth-balancer reservations --json` answers "which processes are on old code".
+    if (effective.stale) penalties.push(`stale_policy_build:${PACKAGE_VERSION}@policy${POLICY.version}<published${effective.publishedVersion}`);
     candidates.push({
       account,
       selection: {
         reservation_id: reservationId,
         launch_id: launchId,
-        policy_version: POLICY.version,
+        policy_version: effective.publishedVersion,
         score: Number(score.toFixed(4)),
         active_reservations: active,
         reservation_expires_at: now + DEFAULT_RESERVATION_TTL_MS,
@@ -1051,7 +1183,7 @@ export async function chooseSlot(stateRoot = resolveStateRoot(), slot?: string, 
       releaseExpiredReservations(db, now);
       const usage = latestUsageEntries(db);
       const activeCounts = activeReservationCounts(db, now);
-      const selected = selectAccount(accounts, usage, activeCounts, stateRoot, slot, opts.softSlot ? 'soft' : 'hard', now);
+      const selected = selectAccount(accounts, usage, activeCounts, stateRoot, slot, opts.softSlot ? 'soft' : 'hard', now, readEffectivePolicy(db));
       const expiresAt = now + (opts.reservationTtlMs && opts.reservationTtlMs > 0 ? opts.reservationTtlMs : DEFAULT_RESERVATION_TTL_MS);
       selected.selection.reservation_expires_at = expiresAt;
       db.prepare(`
@@ -1154,7 +1286,8 @@ export async function prepareLaunch(isolatedDir: string, opts: { stateRoot?: str
     markReservation(stateRoot, acct.reservationId, acct.launchId, 'prepared', { isolated_dir: isolatedDir, metadata_path: metaPath });
     const primary = normalizeWindow('primary', acct.usage?.primary);
     const secondary = normalizeWindow('secondary', acct.usage?.secondary);
-    return { schema_version: 1, selected_slot: acct.slot, slot: acct.slot, label: acct.slot, reason: 'selected', status: acct.usage?.status === 'limited' ? 'limited' : acct.usage?.status === 'ok' ? 'ok' : 'unknown', isolated_dir: isolatedDir, pi_agent_dir: piDir, codex_home: codexDir, env: { PI_CODING_AGENT_DIR: piDir, CODEX_HOME: codexDir }, metadata: { metadata_path: metaPath, launch_id: acct.launchId, reservation_id: acct.reservationId }, selection: acct.selection, primary_remaining_percent: primary?.remainingPercent, secondary_remaining_percent: secondary?.remainingPercent };
+    const conservation = conservationWindow(primary, secondary);
+    return { schema_version: 1, conservation_remaining_percent: conservation?.remainingPercent, conservation_window_minutes: conservation?.windowMinutes, conservation_reset_at: conservation?.resetAt, selected_slot: acct.slot, slot: acct.slot, label: acct.slot, reason: 'selected', status: acct.usage?.status === 'limited' ? 'limited' : acct.usage?.status === 'ok' ? 'ok' : 'unknown', isolated_dir: isolatedDir, pi_agent_dir: piDir, codex_home: codexDir, env: { PI_CODING_AGENT_DIR: piDir, CODEX_HOME: codexDir }, metadata: { metadata_path: metaPath, launch_id: acct.launchId, reservation_id: acct.reservationId }, selection: acct.selection, primary_remaining_percent: primary?.remainingPercent, secondary_remaining_percent: secondary?.remainingPercent };
   } catch (error) {
     try { markReservation(stateRoot, acct.reservationId, acct.launchId, 'failed', { stage: 'prepare', message: error instanceof Error ? error.message : String(error) }); } catch { /* preserve original prepare error */ }
     try { await fs.rm(isolatedDir, { recursive: true, force: true }); } catch { /* preserve original prepare error */ }
@@ -1541,7 +1674,11 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
   const stateRoot = input.stateRoot || resolveStateRoot();
   const ttlMs = input.expected_runtime_ms + input.ttl_safety_buffer_ms;
   const preferred = input.preferred_slot || await readAffinitySlot(stateRoot, input.session_affinity_key);
-  const account = await chooseSlot(stateRoot, preferred, { reservationTtlMs: ttlMs, softSlot: true });
+  // Without this the reservations table records run_id NULL for every provider lease, and
+  // "who is burning the shared window" has no answer but a fleet-wide average (incident #6).
+  const runId = input.run_id ?? process.env.ASYNC_SUBAGENTS_RUN_ID ?? process.env.ASYNC_SUBAGENT_RUN_ID;
+  const rootRunId = input.root_run_id ?? process.env.ASYNC_SUBAGENTS_PARENT_RUN_ID ?? process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID;
+  const account = await chooseSlot(stateRoot, preferred, { reservationTtlMs: ttlMs, softSlot: true, runId, rootRunId });
   if (input.abort_signal?.aborted) {
     markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'aborted_after_reservation' });
     throw new Error('token lease aborted');
@@ -1706,6 +1843,7 @@ export async function finishTokenLease(input: FinishTokenLeaseInput): Promise<Fi
   const stateRoot = input.stateRoot || resolveStateRoot();
   if (!input.lease_id || !input.reservation_id || !input.launch_id) throw new Error('lease_id, reservation_id, and launch_id are required');
   const db = openDb(stateRoot);
+  let result: FinishTokenLeaseResult;
   try {
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -1716,7 +1854,7 @@ export async function finishTokenLease(input: FinishTokenLeaseInput): Promise<Fi
       if (!alreadyFinal) db.prepare('UPDATE reservations SET state = ?, updated_at = ? WHERE id = ?').run(reservationStateForFinish(input.status), now, input.reservation_id);
       insertReservationEvent(db, input.reservation_id, input.launch_id, alreadyFinal ? 'token_lease_finish_ignored' : 'token_lease_finished', now, { status: input.status, error_kind: input.error_kind, previous_state: previous, state_updated: !alreadyFinal });
       db.exec('COMMIT');
-      return { schema_version: 1, ok: true, lease_id: input.lease_id, reservation_id: input.reservation_id, status: input.status, already_final: alreadyFinal, previous_status: previous };
+      result = { schema_version: 1, ok: true, lease_id: input.lease_id, reservation_id: input.reservation_id, status: input.status, already_final: alreadyFinal, previous_status: previous };
     } catch (error) {
       db.exec('ROLLBACK');
       throw error;
@@ -1724,6 +1862,181 @@ export async function finishTokenLease(input: FinishTokenLeaseInput): Promise<Fi
   } finally {
     closeDb(db);
   }
+  // Retention is OFF the lease path by default. It was briefly wired here and took the
+  // whole fleet down: on a database with no retention indexes the sweep held the write
+  // lock long enough that every concurrent lease failed with "database is locked", and
+  // because the sweep never reached the line that records it had run, every finish
+  // started another one. Housekeeping that can livelock the thing it is housekeeping does
+  // not belong on a request path. Run `codex-auth-balancer prune --json` from cron or by
+  // hand; set CODEX_BALANCER_AUTO_PRUNE=1 to opt a process back in.
+  if (process.env.CODEX_BALANCER_AUTO_PRUNE === '1') await pruneOpportunistically(stateRoot);
+  return result;
+}
+
+// ── Retention ───────────────────────────────────────────────────────────────
+// Every lease writes a `reserved` and a `token_lease_finished` event, at roughly
+// 13,000 reservations a day, and nothing ever removed any of it: the live database
+// reached 431 MB with 781,882 launch_events (incident #7).
+
+const RETENTION_DEFAULT_DAYS = 14;
+/**
+ * Selection reads the newest snapshot per slot (`latestUsageEntries`), so a slot
+ * idle for longer than the retention window would lose its usage entirely and be
+ * scored with `unknownPenalty` — retention must never make a slot look unknown.
+ * Keep a small tail per slot regardless of age.
+ */
+const RETENTION_KEEP_SNAPSHOTS_PER_SLOT = 3;
+/** Rows per transaction. Small on purpose: the write lock is released between chunks. */
+const RETENTION_CHUNK = 500;
+/** Bound for the opportunistic sweep so a background prune can never stall a lease. */
+const RETENTION_OPPORTUNISTIC_BATCH = 20_000;
+/**
+ * Wall-clock budget for the opportunistic sweep. A backlog is picked up over successive
+ * days rather than in one long sweep; an operator who wants it gone now runs
+ * `codex-auth-balancer prune --json` explicitly.
+ */
+const RETENTION_OPPORTUNISTIC_BUDGET_MS = 2_000;
+const RETENTION_MIN_INTERVAL_MS = 24 * 60 * 60_000;
+
+export type PruneResult = {
+  schema_version: 1;
+  stateRoot: string;
+  dryRun: boolean;
+  olderThanDays: number;
+  cutoff: number;
+  deleted: { launch_events: number; reservations: number; usage_snapshots: number; usage_windows: number };
+  /** Transactions used. More than one means the write lock was released mid-sweep. */
+  chunks: number;
+  vacuum?: { ran: boolean; bytes_before: number; bytes_after: number };
+};
+
+type PruneOptions = {
+  stateRoot?: string;
+  olderThanDays?: number;
+  keepSnapshotsPerSlot?: number;
+  maxDeletesPerTable?: number;
+  vacuum?: boolean;
+  dryRun?: boolean;
+  /** Wall-clock stop time. The sweep finishes its current chunk and returns what it did. */
+  deadline?: number;
+};
+
+/**
+ * Delete in small chunks, each in its own short transaction.
+ *
+ * A single `BEGIN IMMEDIATE` around the whole sweep holds the write lock for as long as
+ * the sweep takes, and on the live database that was long enough to surface as
+ * `database is locked` in every concurrent lease. Retention is housekeeping: it must
+ * yield the lock constantly and give up rather than make anything wait.
+ */
+function deleteChunked(db: DatabaseSync, sql: string, params: unknown[], limitTotal: number, deadline: number, counter: { chunks: number }): number {
+  let total = 0;
+  while (total < limitTotal && Date.now() < deadline) {
+    const take = Math.min(RETENTION_CHUNK, limitTotal - total);
+    db.exec('BEGIN IMMEDIATE');
+    let changes: number;
+    try {
+      changes = Number(db.prepare(sql).run(...[...params, take] as never[]).changes);
+      db.exec('COMMIT');
+      counter.chunks += 1;
+    } catch (error) {
+      try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+      throw error;
+    }
+    total += changes;
+    if (changes < take) break;
+  }
+  return total;
+}
+
+function countEligible(db: DatabaseSync, sql: string, params: unknown[], limit: number): number {
+  return rowNumber((db.prepare(sql).get(...[...params, limit] as never[]) as SqlRow | undefined)?.count) ?? 0;
+}
+
+/**
+ * Delete forensic rows older than the retention window. `vacuum` reclaims the file
+ * on disk and is opt-in: VACUUM rewrites the whole database, needs free space equal
+ * to its current size, and cannot run inside a transaction.
+ */
+export async function pruneDatabase(options: PruneOptions = {}): Promise<PruneResult> {
+  const stateRoot = options.stateRoot || resolveStateRoot();
+  const olderThanDays = options.olderThanDays != null && options.olderThanDays >= 0 ? options.olderThanDays : RETENTION_DEFAULT_DAYS;
+  const keepPerSlot = options.keepSnapshotsPerSlot ?? RETENTION_KEEP_SNAPSHOTS_PER_SLOT;
+  const limit = options.maxDeletesPerTable ?? Number.MAX_SAFE_INTEGER;
+  const cutoff = Date.now() - olderThanDays * 24 * 60 * 60_000;
+  const dbPath = path.join(stateRoot, 'balancer.sqlite3');
+  const bytesBefore = await fileSize(dbPath);
+  const deadline = options.deadline ?? Number.MAX_SAFE_INTEGER;
+  const now = Date.now();
+  const dryRun = options.dryRun === true;
+  const db = openDb(stateRoot);
+  const deleted: PruneResult['deleted'] = { launch_events: 0, reservations: 0, usage_snapshots: 0, usage_windows: 0 };
+  const counter = { chunks: 0 };
+  try {
+    // `migrationCompleted` falls back to a `migrated_usage_cache_v2` launch_event when the
+    // schema_metadata key is absent. Promote it BEFORE deleting any event, or pruning an old
+    // database silently re-arms a one-time usage-cache migration. Idempotent.
+    migrationCompleted(db);
+
+    // An active reservation is never eligible, whatever its age: it is still holding a slot.
+    const reservationFilter = `updated_at < ? AND NOT (state IN ('pending', 'prepared') AND expires_at > ?)`;
+    // Selection reads the newest snapshot per slot, so a tail always survives (see the constant).
+    const snapshotFilter = `generated_at < ? AND id NOT IN (
+        SELECT id FROM usage_snapshots u2 WHERE u2.slot = usage_snapshots.slot ORDER BY id DESC LIMIT ?
+      )`;
+
+    if (dryRun) {
+      deleted.launch_events = countEligible(db, 'SELECT COUNT(*) AS count FROM (SELECT id FROM launch_events WHERE created_at < ? LIMIT ?)', [cutoff], limit);
+      deleted.reservations = countEligible(db, `SELECT COUNT(*) AS count FROM (SELECT id FROM reservations WHERE ${reservationFilter} LIMIT ?)`, [cutoff, now], limit);
+      deleted.usage_snapshots = countEligible(db, `SELECT COUNT(*) AS count FROM (SELECT id FROM usage_snapshots WHERE ${snapshotFilter} LIMIT ?)`, [cutoff, keepPerSlot], limit);
+      deleted.usage_windows = deleted.usage_snapshots === 0 ? 0 : countEligible(db,
+        `SELECT COUNT(*) AS count FROM usage_windows WHERE snapshot_id IN (SELECT id FROM usage_snapshots WHERE ${snapshotFilter} LIMIT ?)`, [cutoff, keepPerSlot], limit);
+    } else {
+      // Events first: deleting a reservation nulls the FK on every event that points at it,
+      // so clearing the aged events first keeps that work off the reservation pass.
+      deleted.launch_events = deleteChunked(db, 'DELETE FROM launch_events WHERE id IN (SELECT id FROM launch_events WHERE created_at < ? LIMIT ?)', [cutoff], limit, deadline, counter);
+      const windowsBefore = rowNumber((db.prepare('SELECT COUNT(*) AS count FROM usage_windows').get() as SqlRow | undefined)?.count) ?? 0;
+      deleted.reservations = deleteChunked(db, `DELETE FROM reservations WHERE id IN (SELECT id FROM reservations WHERE ${reservationFilter} LIMIT ?)`, [cutoff, now], limit, deadline, counter);
+      deleted.usage_snapshots = deleteChunked(db, `DELETE FROM usage_snapshots WHERE id IN (SELECT id FROM usage_snapshots WHERE ${snapshotFilter} LIMIT ?)`, [cutoff, keepPerSlot], limit, deadline, counter);
+      const windowsAfter = rowNumber((db.prepare('SELECT COUNT(*) AS count FROM usage_windows').get() as SqlRow | undefined)?.count) ?? 0;
+      deleted.usage_windows = Math.max(0, windowsBefore - windowsAfter);
+      writeKvOn(db, 'last_pruned_at', String(Date.now()));
+      // VACUUM rewrites the whole database and cannot run inside a transaction. It takes an
+      // exclusive lock for its full duration, so it is opt-in and never opportunistic.
+      if (options.vacuum) db.exec('VACUUM');
+    }
+  } finally {
+    closeDb(db);
+  }
+  const result: PruneResult = { schema_version: 1, stateRoot, dryRun: options.dryRun === true, olderThanDays, cutoff, deleted, chunks: counter.chunks };
+  if (options.vacuum) result.vacuum = { ran: !options.dryRun, bytes_before: bytesBefore, bytes_after: await fileSize(dbPath) };
+  return result;
+}
+
+async function fileSize(p: string): Promise<number> {
+  try { return (await fs.stat(p)).size; } catch { return 0; }
+}
+function writeKvOn(db: DatabaseSync, key: string, value: string) {
+  db.prepare('INSERT INTO policy(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+}
+
+/**
+ * At most one real sweep a day, bounded, never vacuuming, and never able to fail its
+ * caller: retention is housekeeping and a lease must not depend on it.
+ */
+async function pruneOpportunistically(stateRoot: string): Promise<void> {
+  try {
+    const db = openDb(stateRoot);
+    let due: boolean;
+    try {
+      const last = Number(readKv(db, 'last_pruned_at'));
+      due = !Number.isFinite(last) || Date.now() - last > RETENTION_MIN_INTERVAL_MS;
+    } finally {
+      closeDb(db);
+    }
+    if (!due) return;
+    await pruneDatabase({ stateRoot, maxDeletesPerTable: RETENTION_OPPORTUNISTIC_BATCH, deadline: Date.now() + RETENTION_OPPORTUNISTIC_BUDGET_MS });
+  } catch { /* housekeeping must never fail a lease */ }
 }
 
 export async function getDbStatus(options: { stateRoot?: string } | string = {}) {
@@ -1758,7 +2071,22 @@ export async function getPolicy(options: { stateRoot?: string } | string = {}) {
   try {
     const rows = db.prepare('SELECT key, value FROM policy ORDER BY key').all() as SqlRow[];
     const values = Object.fromEntries(rows.map(row => [String(row.key), String(row.value)]));
-    return { version: POLICY.version, policy: POLICY, stored: values };
+    const effective = readEffectivePolicy(db);
+    // `policy` is what selection actually uses; `compiled` is what this build ships.
+    // They differ whenever this process is older than the published policy, which is
+    // the condition that made a policy fix unable to reach a resident process.
+    // Named `selection_policy_version`, never `version`: an operator reading
+    // `version: 2` here one day after a real `unsupported balancer sqlite schema
+    // version: 2` brick has no way to know the two numbers are unrelated (incident #8).
+    return {
+      selection_policy_version: effective.publishedVersion,
+      policy: effective.values,
+      compiled: POLICY,
+      compiled_selection_policy_version: POLICY.version,
+      build: PACKAGE_VERSION,
+      stale_build: effective.stale,
+      stored: values,
+    };
   } finally {
     closeDb(db);
   }

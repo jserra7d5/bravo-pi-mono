@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { finishTokenLease, cleanupLaunch, getDbStatus, getPolicy, getUsage, listReservations, loadAccounts, prepareLaunch, redactForJson, refreshUsage, resolveStateRoot, startTokenLease, syncBack } from './index.js';
+import { finishTokenLease, cleanupLaunch, getDbStatus, getPolicy, getUsage, listReservations, loadAccounts, prepareLaunch, pruneDatabase, redactForJson, refreshUsage, resolveStateRoot, startTokenLease, syncBack } from './index.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -18,7 +18,7 @@ async function writeUniqueJson(p: string, v: unknown) {
   try { await handle.writeFile(JSON.stringify(redactForJson(v), null, 2) + '\n'); } finally { await handle.close(); }
 }
 async function main() {
-  if (has('--version')) { needJson(); out({ schema_version: 1, name: '@bravo/codex-auth-balancer', version: pkg.version, capabilities: { codex_usage_json: 1, codex_refresh_usage_json: 1, codex_prepare_launch_json: 1, codex_sync_back_json: 1, codex_db_status_json: 1, codex_reservations_json: 1, codex_policy_json: 1, codex_token_lease: 1 } }); return; }
+  if (has('--version')) { needJson(); out({ schema_version: 1, name: '@bravo/codex-auth-balancer', version: pkg.version, capabilities: { codex_usage_json: 1, codex_refresh_usage_json: 1, codex_prepare_launch_json: 1, codex_sync_back_json: 1, codex_db_status_json: 1, codex_reservations_json: 1, codex_policy_json: 1, codex_token_lease: 1, codex_prune_json: 1 } }); return; }
   const cmd = process.argv[2]; const stateRoot = resolveStateRoot();
   switch (cmd) {
     case 'usage': needJson(); out({ schema_version: 1, ...(await getUsage({ stateRoot })) }); break;
@@ -28,6 +28,18 @@ async function main() {
     case 'sync-back': { needJson(); const dir = arg('--isolated-dir'); const slot = arg('--slot'); if (!dir || !slot) throw new Error('--isolated-dir and --slot required'); const r = await syncBack(dir, { stateRoot, slot }); if (r.ok) await cleanupLaunch(dir); out({ schema_version: 1, ...r }); break; }
     case 'db-status': needJson(); out({ schema_version: 1, ...(await getDbStatus({ stateRoot })) }); break;
     case 'reservations': needJson(); out({ schema_version: 1, stateRoot, reservations: await listReservations({ stateRoot, includeInactive: has('--all') }) }); break;
+    case 'prune': {
+      needJson();
+      const days = arg('--older-than-days');
+      out(await pruneDatabase({
+        stateRoot,
+        olderThanDays: days == null ? undefined : Number(days),
+        keepSnapshotsPerSlot: arg('--keep-per-slot') == null ? undefined : Number(arg('--keep-per-slot')),
+        vacuum: has('--vacuum'),
+        dryRun: has('--dry-run'),
+      }));
+      break;
+    }
     case 'policy': needJson(); out({ schema_version: 1, stateRoot, ...(await getPolicy({ stateRoot })) }); break;
     case 'token': {
       const provider = arg('--provider');
@@ -38,7 +50,7 @@ async function main() {
       const existing = await readJson<{ expires_at?: number; finished?: boolean }>(p);
       if (existing && !existing.finished && (existing.expires_at ?? 0) > Date.now()) throw new Error('active lease-key already exists');
       if (existing) await fs.rm(p, { force: true });
-      const lease = await startTokenLease({ provider: 'bravo-codex-balanced', model: arg('--model') || 'command-backed-token', purpose: 'command-backed-token', expected_runtime_ms: Number(arg('--expected-runtime-ms') || 240_000), ttl_safety_buffer_ms: Number(arg('--ttl-safety-buffer-ms') || 60_000), stateRoot, lease_key: leaseKey, preferred_slot: arg('--slot'), session_affinity_key: arg('--session-affinity-key') });
+      const lease = await startTokenLease({ provider: 'bravo-codex-balanced', model: arg('--model') || 'command-backed-token', purpose: 'command-backed-token', expected_runtime_ms: Number(arg('--expected-runtime-ms') || 240_000), ttl_safety_buffer_ms: Number(arg('--ttl-safety-buffer-ms') || 60_000), stateRoot, lease_key: leaseKey, preferred_slot: arg('--slot'), session_affinity_key: arg('--session-affinity-key'), run_id: arg('--run-id'), root_run_id: arg('--root-run-id') });
       try {
         await writeUniqueJson(p, { schema_version: 1, lease_key_hash: sha(leaseKey), lease_id: lease.lease_id, reservation_id: lease.reservation_id, launch_id: lease.launch_id, slot: lease.slot, model: lease.model, provider: lease.provider, expires_at: lease.expires_at, created_at: Date.now(), finished: false });
       } catch (error) {
