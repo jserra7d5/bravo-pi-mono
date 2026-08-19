@@ -44,6 +44,51 @@ export const DEFAULT_UPSTREAM_HEADER_TIMEOUT_MS = 90 * 1000;
  */
 export const RETRY_AFTER_WAIT_CEILING_MS = 15_000;
 
+/**
+ * Transport failures that killed the connection before any response byte
+ * arrived, and are therefore safe to re-send on the same account.
+ *
+ * `pre-header` is the hard precondition — no status line reached the client, so
+ * a retry cannot duplicate streamed content. Within that, only errors meaning
+ * "the connection broke" qualify. A header TIMEOUT is deliberately excluded:
+ * the server is plausibly still working on that inference, and re-sending would
+ * bill a second one.
+ *
+ * Measured provenance: 34 transport failures over two days on this deployment,
+ * 33 of them `ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC` and one `ECONNRESET`, every
+ * one at `pre-header`. Each surfaced to Claude Code as a hard 502.
+ */
+export const RETRYABLE_TRANSPORT_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EPIPE',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC',
+  'ERR_SSL_WRONG_VERSION_NUMBER',
+  'ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC',
+]);
+
+/** Attempts added after the first, on a retryable pre-header transport failure. */
+export const TRANSPORT_RETRY_LIMIT = 2;
+
+/** Backoff before each transport retry. Short: the connection died instantly. */
+export const TRANSPORT_RETRY_BACKOFF_MS = [150, 600];
+
+/**
+ * A pre-header transport failure re-sends only when the connection itself
+ * broke. Anything else — a header timeout above all — is terminal, because the
+ * request may already be running upstream.
+ */
+export function isRetryableTransportError(error: {
+  phase?: string;
+  code?: string;
+}): boolean {
+  if (error.phase !== 'pre-header') return false;
+  if (error.code === 'UPSTREAM_HEADERS_TIMEOUT') return false;
+  return error.code !== undefined && RETRYABLE_TRANSPORT_CODES.has(error.code);
+}
+
 /** Raw metric rows are pruned on this cadence, not only at startup. */
 const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -646,48 +691,65 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
       // the one case where both pay a full cache write.
       if (sessionId) affinity.touch(sessionId, selection.slot, model);
 
-      let result: UpstreamResult;
-      try {
-        result = await forward(
-          opts.upstream,
-          req,
-          body,
-          oauth.accessToken,
-          opts.upstreamHeaderTimeoutMs,
-          upstreamHttpsAgent,
-        );
-      } catch (error) {
-        const detail = error as NodeJS.ErrnoException & { phase?: string; durationMs?: number; reusedSocket?: boolean };
-        opts.log({
-          kind: 'error',
-          method,
-          path: reqPath,
-          slot: selection.slot,
-          message: [
-            detail.message,
-            detail.phase ? `phase=${detail.phase}` : '',
-            detail.code ? `code=${detail.code}` : '',
-            detail.syscall ? `syscall=${detail.syscall}` : '',
-            detail.durationMs !== undefined ? `duration=${detail.durationMs}ms` : '',
-            detail.reusedSocket !== undefined ? `reused=${detail.reusedSocket}` : '',
-          ].filter(Boolean).join(' '),
-        });
+      // Retry a broken connection on the SAME account. Rotating would be wrong
+      // twice over: the account is not at fault, and moving the session pays a
+      // full cache re-create for a socket-level fault.
+      let result: UpstreamResult | undefined;
+      for (let transportAttempt = 0; ; transportAttempt += 1) {
         try {
-          metrics?.record({
-            ts: startedAt,
+          result = await forward(
+            opts.upstream,
+            req,
+            body,
+            oauth.accessToken,
+            opts.upstreamHeaderTimeoutMs,
+            upstreamHttpsAgent,
+          );
+          break;
+        } catch (error) {
+          const detail = error as NodeJS.ErrnoException & { phase?: string; durationMs?: number; reusedSocket?: boolean };
+          const willRetry =
+            transportAttempt < TRANSPORT_RETRY_LIMIT && isRetryableTransportError(detail);
+          opts.log({
+            kind: willRetry ? 'retry' : 'error',
+            method,
+            path: reqPath,
             slot: selection.slot,
-            email: account.email,
-            sessionHash: sessionId ? AffinityStore.hashSession(sessionId, model) : undefined,
-            model,
-            endpoint: reqPath,
-            status: 502,
-            decision: selection.decision,
-            durationMs: opts.now() - startedAt,
-            usage: {},
+            message: [
+              detail.message,
+              detail.phase ? `phase=${detail.phase}` : '',
+              detail.code ? `code=${detail.code}` : '',
+              detail.syscall ? `syscall=${detail.syscall}` : '',
+              detail.durationMs !== undefined ? `duration=${detail.durationMs}ms` : '',
+              detail.reusedSocket !== undefined ? `reused=${detail.reusedSocket}` : '',
+              `attempt=${transportAttempt + 1}`,
+              willRetry ? 'retrying on the same account' : 'terminal',
+            ].filter(Boolean).join(' '),
           });
-        } catch { /* transport failure reporting must not mask the response */ }
-        if (!res.headersSent) res.writeHead(502).end();
-        return true;
+          if (willRetry) {
+            const backoff =
+              TRANSPORT_RETRY_BACKOFF_MS[transportAttempt] ??
+              TRANSPORT_RETRY_BACKOFF_MS[TRANSPORT_RETRY_BACKOFF_MS.length - 1]!;
+            await sleep(backoff);
+            continue;
+          }
+          try {
+            metrics?.record({
+              ts: startedAt,
+              slot: selection.slot,
+              email: account.email,
+              sessionHash: sessionId ? AffinityStore.hashSession(sessionId, model) : undefined,
+              model,
+              endpoint: reqPath,
+              status: 502,
+              decision: selection.decision,
+              durationMs: opts.now() - startedAt,
+              usage: {},
+            });
+          } catch { /* transport failure reporting must not mask the response */ }
+          if (!res.headersSent) res.writeHead(502).end();
+          return true;
+        }
       }
 
       const claims = parseClaims(result.headers as Record<string, string | string[] | undefined>);

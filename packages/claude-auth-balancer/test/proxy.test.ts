@@ -170,15 +170,6 @@ test('a body stream stays alive beyond the short header timeout once headers arr
   assert.match(out.text, /data: two/, 'body remained connected after header deadline elapsed');
 });
 
-test('a pre-header socket abort fails the request without retrying messages', async () => {
-  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
-  const up = await upstream((_call, res) => res.socket?.destroy());
-  const { url } = await boot({ authswapRoot, upstreamUrl: up.url });
-  const out = await post(url, { model: 'claude-opus-5' });
-  assert.equal(out.status, 502);
-  assert.equal(up.calls.length, 1, 'messages must not be blindly replayed');
-});
-
 test('the client-supplied Authorization is replaced with the selected account token', async () => {
   const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-slot-1' }]);
   const up = await upstream((_call, res) => {
@@ -507,4 +498,89 @@ test('metrics attribute usage to the account that actually served the request', 
   } finally {
     store.close();
   }
+});
+
+// --- pre-header transport retry -------------------------------------------
+//
+// Faithful seam: the upstream is a real socket that really dies mid-request,
+// so the proxy's own error path, retry, and relay all run for real. Provenance
+// for this behaviour is 34 transport failures over two days on the live
+// deployment — 33 `bad record mac`, one ECONNRESET, every one at `pre-header`
+// — each of which reached Claude Code as a hard 502.
+
+/** An upstream that kills the connection for the first `n` calls. */
+async function flakyUpstream(n: number, onServe?: (res: http.ServerResponse) => void) {
+  let killed = 0;
+  return upstream((_call, res) => {
+    if (killed < n) {
+      killed += 1;
+      res.socket?.destroy();
+      return;
+    }
+    if (onServe) {
+      onServe(res);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream', ...OK_HEADERS });
+    res.end(sseBody('claude-opus-5', 1000, 10));
+  });
+}
+
+test('a connection that dies before any response byte is re-sent on the same account', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  const up = await flakyUpstream(1);
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url });
+
+  const res = await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'transport-retry' });
+
+  assert.equal(res.status, 200, 'the client never sees the broken socket');
+  assert.equal(up.calls.length, 2, 'exactly one re-send');
+  assert.equal(
+    up.calls[0]!.authorization,
+    up.calls[1]!.authorization,
+    'the retry stays on the same account: the socket broke, the account did not',
+  );
+});
+
+test('two consecutive broken connections still recover inside the retry budget', async () => {
+  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
+  const up = await flakyUpstream(2);
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url });
+
+  const res = await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'transport-retry-2' });
+
+  assert.equal(res.status, 200);
+  assert.equal(up.calls.length, 3, 'first attempt plus the two allowed retries');
+});
+
+test('a transport failure that never recovers ends as one 502, not an account rotation', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  const up = await flakyUpstream(99);
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url });
+
+  const res = await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'transport-dead' });
+
+  assert.equal(res.status, 502);
+  assert.equal(up.calls.length, 3, 'the budget is bounded; it does not spin');
+  const accounts = new Set(up.calls.map(c => c.authorization));
+  assert.equal(accounts.size, 1, 'a dead socket is not a reason to abandon the warm account');
+});
+
+test('a header timeout is NOT re-sent — the inference may already be running', async () => {
+  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
+  // Accepts the request and never answers: the request is plausibly in flight
+  // upstream, so re-sending would bill a second inference.
+  const up = await upstream(() => {});
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, upstreamHeaderTimeoutMs: 200 });
+
+  const res = await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'header-timeout' });
+
+  assert.equal(res.status, 502);
+  assert.equal(up.calls.length, 1, 'a timed-out inference is never duplicated');
 });

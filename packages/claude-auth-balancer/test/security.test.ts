@@ -13,7 +13,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { after, test } from 'node:test';
 
-import { isOriginFormTarget, retryAfterMs, startProxy } from '../src/proxy.js';
+import { isOriginFormTarget, isRetryableTransportError, retryAfterMs, startProxy } from '../src/proxy.js';
 import { mergeClaims } from '../src/accounts.js';
 import { parseClaims } from '../src/claims.js';
 import { computeHeadroom, selectAccount } from '../src/policy.js';
@@ -582,4 +582,30 @@ test('retry-after parses both delta-seconds and an HTTP date', () => {
   assert.equal(retryAfterMs({}, now), undefined);
   assert.equal(retryAfterMs({ 'retry-after': 'nonsense' }, now), undefined);
   assert.equal(retryAfterMs({ 'retry-after': new Date(now + 5000).toUTCString() }, now), 5000);
+});
+
+// --- transport retry eligibility ------------------------------------------
+
+test('only a broken pre-header connection is re-sent', () => {
+  assert.equal(isRetryableTransportError({ phase: 'pre-header', code: 'ECONNRESET' }), true);
+  assert.equal(
+    isRetryableTransportError({ phase: 'pre-header', code: 'ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC' }),
+    true,
+    'the failure this retry exists for',
+  );
+  assert.equal(
+    isRetryableTransportError({ phase: 'pre-header', code: 'UPSTREAM_HEADERS_TIMEOUT' }),
+    false,
+    'the server may still be running that inference; re-sending would bill a second one',
+  );
+  assert.equal(
+    isRetryableTransportError({ phase: 'pre-header', code: undefined }),
+    false,
+    'an unclassified failure is terminal, not retried on a guess',
+  );
+  assert.equal(
+    isRetryableTransportError({ phase: 'streaming', code: 'ECONNRESET' }),
+    false,
+    'bytes already reached the client; a re-send would duplicate them',
+  );
 });
