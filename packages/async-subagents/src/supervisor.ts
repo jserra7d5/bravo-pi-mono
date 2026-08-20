@@ -58,8 +58,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 function tmuxMcpDrainMs(): number {
-  const parsed = Number(process.env.ASYNC_SUBAGENTS_TMUX_MCP_DRAIN_MS ?? "1000");
-  if (!Number.isFinite(parsed) || parsed < 0) return 1000;
+  const parsed = Number(process.env.ASYNC_SUBAGENTS_TMUX_MCP_DRAIN_MS ?? "5000");
+  if (!Number.isFinite(parsed) || parsed < 0) return 5000;
   return Math.min(5000, parsed);
 }
 
