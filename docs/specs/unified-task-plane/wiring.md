@@ -11,7 +11,11 @@ of it: `packages/task-plane`.
   (`session_start`/`before_agent_start`/shutdown).
 - **State root:** exactly one (`$PI_TASK_PLANE_HOME` or `~/.pi/task-plane`),
   layout `tasks/<task_id>/{metadata.json, output.log, model-wake.claim}` plus one
-  active-index file. `~/.pi/monitor` and `~/.pi/background-bash` are retired.
+  active-index file. After terminal dispatch is resolved (or shutdown suppresses
+  notification), the directory moves to `archive/tasks/<task_id>` and the original
+  task path becomes a stable symlink. Default registry scans ignore archived links;
+  explicit completed-history reads follow them. `~/.pi/monitor` and
+  `~/.pi/background-bash` are retired.
 - **Forbidden owners:** no other package, extension, or module holds a registry,
   dispatcher, state root, tool registration, or lifecycle hook for these tools.
   `packages/monitor` and `packages/pi-extension-background-bash` are deleted, not

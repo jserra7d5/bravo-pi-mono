@@ -57,7 +57,7 @@ test("real faux-provider prompt executes owned background bash and receives its 
  ]);
  session.subscribe(event=>{if(event.type==="queue_update")queueEvents.push({steering:event.steering,followUp:event.followUp});});
  await bounded(session.prompt("Run the requested command in managed background mode."));
- const records=JSON.parse(readFileSync(join(state,"active-index.json"),"utf8")) as string[];assert.deepEqual(records,[]);const taskDirs=(await import("node:fs")).readdirSync(join(state,"tasks"));assert.equal(taskDirs.length,1);const record=JSON.parse(readFileSync(join(state,"tasks",taskDirs[0],"metadata.json"),"utf8"));
+ const records=JSON.parse(readFileSync(join(state,"active-index.json"),"utf8")) as {active:string[]};assert.deepEqual(records.active,[]);const taskDirs=(await import("node:fs")).readdirSync(join(state,"tasks"));assert.equal(taskDirs.length,1);const record=JSON.parse(readFileSync(join(state,"tasks",taskDirs[0],"metadata.json"),"utf8"));
  assert.equal(record.owner_session_id,session.sessionId);assert.equal(record.owner_session_file,session.sessionFile);assert.equal(record.status,"completed");assert.equal(readFileSync(record.output_path,"utf8"),"bash-ok\n");assert.match(firstContext?.systemPrompt??"",/Silence is not success/);assert.match(contextText(followUpContext!),/<task_notification not_user_input=\\"true\\">/);const notificationCount=contextText(followUpContext!).split("<task_notification not_user_input=\\\"true\\\">").length-1;assert.equal(notificationCount,1);
  // Pi 0.74 queues extension custom follow-ups directly on Agent, so they are
  // observable in the next provider context but not in the string-only
