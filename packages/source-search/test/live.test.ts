@@ -333,6 +333,21 @@ test("top-k retention preserves score and path tie ordering", async () => {
   assert.equal(result.hits[0]?.path, "a.txt");
 });
 
+test("package API defaults to 3 results and clamps callers to 10", async () => {
+  const root = await mkdtemp(join(tmpdir(), "source-search-limits-"));
+  for (let index = 0; index < 15; index += 1) {
+    await writeFile(join(root, `hit-${String(index).padStart(2, "0")}.txt`), "shared result limit needle\n");
+  }
+
+  const defaults = await rankedSearch({ cwd: root, query: "shared result limit needle" });
+  assert.equal(defaults.ok, true);
+  assert.equal(defaults.hits.length, 3);
+
+  const clamped = await rankedSearch({ cwd: root, query: "shared result limit needle", limit: 50 });
+  assert.equal(clamped.ok, true);
+  assert.equal(clamped.hits.length, 10);
+});
+
 test("aborted search returns warning-coded cancellation", async () => {
   const root = await mkdtemp(join(tmpdir(), "source-search-abort-"));
   await writeFile(join(root, "needle.txt"), "abort needle\n");
@@ -344,13 +359,16 @@ test("aborted search returns warning-coded cancellation", async () => {
   assert.equal(result.warnings?.some((warning) => warning.startsWith("search_aborted")), true);
 });
 
-test("extension registers ranked_search only and does not mutate environment", async () => {
+test("extension registers ranked_search only with bounded limit guidance and does not mutate environment", async () => {
   const beforePath = process.env.PATH;
   const beforeCli = process.env.SOURCE_SEARCH_CLI;
   const beforeSidecar = process.env.SOURCE_SEARCH_SIDECAR;
-  const tools: Array<{ name: string; execute: Function }> = [];
+  const tools: Array<{ name: string; execute: Function; parameters?: { properties?: { limit?: { maximum?: number; description?: string } } }; promptSnippet?: string }> = [];
   await sourceSearchExtension({ registerTool: (tool: never) => { tools.push(tool as never); }, on: () => undefined } as never);
   assert.deepEqual(tools.map((tool) => tool.name), ["ranked_search"]);
+  assert.equal(tools[0]?.parameters?.properties?.limit?.maximum, 10);
+  assert.match(tools[0]?.parameters?.properties?.limit?.description ?? "", /default 3/);
+  assert.match(tools[0]?.promptSnippet ?? "", /narrow path\/query before increasing/);
   assert.equal(process.env.PATH, beforePath);
   assert.equal(process.env.SOURCE_SEARCH_CLI, beforeCli);
   assert.equal(process.env.SOURCE_SEARCH_SIDECAR, beforeSidecar);

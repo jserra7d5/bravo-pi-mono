@@ -15,9 +15,9 @@ export async function discoverSourceSearch(cwd: string): Promise<Discovery> {
 
 export function renderDiscoveryPrompt(discovery: Discovery): string {
   if (discovery.kind === "repo") {
-    return "## Source Search\n\nranked_search is available for this git checkout. Use it as the default first-pass discovery tool for live broad lexical source search, then use read or grep to inspect exact evidence. Use typed boosts/excludeTerms for ranking noise control; do not put boost, boolean, or field syntax in the query string.";
+    return "## Source Search\n\nranked_search is available for this git checkout. Use it as the default first-pass discovery tool for live broad lexical source search, then use read or grep to inspect exact evidence. Start with the default 3 results; narrow path/query before increasing the limit (maximum 10). Use typed boosts/excludeTerms for ranking noise control; do not put boost, boolean, or field syntax in the query string.";
   }
-  return "## Source Search\n\nranked_search is available for this directory. It searches git-visible files when inside a checkout, otherwise it searches live filesystem files under the current/requested directory with conservative noise/secret excludes.";
+  return "## Source Search\n\nranked_search is available for this directory. It searches git-visible files when inside a checkout, otherwise it searches live filesystem files under the current/requested directory with conservative noise/secret excludes. Start with the default 3 results; narrow path/query before increasing the limit (maximum 10).";
 }
 
 export function appendSourceSearchPrompt(systemPrompt: string, discovery: Discovery): string {

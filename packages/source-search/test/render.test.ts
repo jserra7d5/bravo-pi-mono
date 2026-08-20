@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { renderQueryResult } from "../src/render.js";
+import { MAX_RENDER_CODE_POINTS, renderQueryResult } from "../src/render.js";
 import { renderDiscoveryPrompt } from "../src/discovery.js";
 
 test("renders ranked search hits", () => {
@@ -30,7 +30,8 @@ test("renders structured snippet windows without flattening whitespace", () => {
   });
   assert.match(text, /src\/a\.ts:2-4/);
   assert.match(text, /fields: content/);
-  assert.match(text, /lines 2-4 \(truncated\):/);
+  assert.match(text, /lines 2-4:/);
+  assert.doesNotMatch(text, /\(truncated/);
   assert.match(text, /    before\n      alpha\(\);\n    after/);
 });
 
@@ -51,8 +52,8 @@ test("renders snippet enclosing context metadata", () => {
   assert.match(text, /lines 1-3 in function run:/);
 });
 
-test("renders directional snippet truncation metadata", () => {
-  const text = renderQueryResult({
+test("hides directional truncation labels without changing response details", () => {
+  const result = {
     protocolVersion: 1,
     ok: true,
     query: "alpha",
@@ -64,8 +65,12 @@ test("renders directional snippet truncation metadata", () => {
       snippets: [{ lineStart: 8, lineEnd: 12, text: "alpha", truncated: true, truncatedBefore: true, truncatedAfter: true }],
     }],
     count: 1,
-  });
-  assert.match(text, /lines 8-12 \(truncated before\/after\):/);
+  };
+  const before = structuredClone(result);
+  const text = renderQueryResult(result);
+  assert.match(text, /lines 8-12:/);
+  assert.doesNotMatch(text, /\(truncated/);
+  assert.deepEqual(result, before);
 });
 
 test("renders disjoint snippet ranges in the hit location", () => {
@@ -106,7 +111,59 @@ test("renders warning codes with successful hits", () => {
   assert.match(text, /Warnings: candidate_budget_exceeded/);
 });
 
-test("renders git checkout discovery prompt", () => {
+test("keeps a no-hit warning tail just below the Unicode cap intact", () => {
+  const prefix = "candidate_budget_exceeded: ";
+  const base = { protocolVersion: 1, ok: true, query: "missing", hits: [], count: 0, warnings: [prefix] };
+  const baseLength = Array.from(renderQueryResult(base)).length;
+  const detail = "😀".repeat(MAX_RENDER_CODE_POINTS - 1 - baseLength);
+  const result = { ...base, warnings: [`${prefix}${detail}`] };
+  const before = structuredClone(result);
+  const text = renderQueryResult(result);
+  assert.equal(Array.from(text).length, MAX_RENDER_CODE_POINTS - 1);
+  assert.ok(text.endsWith(detail));
+  assert.doesNotMatch(text, /details compacted/);
+  assert.deepEqual(result, before);
+});
+
+test("compacts oversized warning tails for failure and hit branches", () => {
+  const warning = `git_timeout: ${"😀".repeat(MAX_RENDER_CODE_POINTS + 100)}`;
+  const responses = [
+    { protocolVersion: 1, ok: false, error: "git failed", hits: [], count: 0, warnings: [warning] },
+    { protocolVersion: 1, ok: true, query: "alpha", hits: [{ path: "src/a.ts", score: 1, line: 1, snippet: "alpha" }], count: 1, warnings: [warning] },
+  ];
+  for (const result of responses) {
+    const before = structuredClone(result);
+    const text = renderQueryResult(result);
+    assert.ok(Array.from(text).length <= MAX_RENDER_CODE_POINTS);
+    assert.match(text, /Warnings: git_timeout \[details compacted\]/);
+    assert.match(text, /Output compacted/);
+    assert.deepEqual(result, before);
+  }
+});
+
+test("caps aggregate output by Unicode code points and omits lower-ranked blocks", () => {
+  const hits = Array.from({ length: 10 }, (_, index) => ({
+    path: `src/rank-${index}.ts`,
+    score: 10 - index,
+    line: 1,
+    snippet: "legacy",
+    snippets: [{ lineStart: 1, lineEnd: 1, text: `${"😀".repeat(1_000)} rank-${index}` }],
+  }));
+  const result = { protocolVersion: 1, ok: true, query: "rank", hits, count: hits.length, warnings: ["candidate_budget_exceeded"] };
+  const before = structuredClone(result);
+  const text = renderQueryResult(result);
+  assert.ok(Array.from(text).length <= MAX_RENDER_CODE_POINTS);
+  assert.match(text, /src\/rank-0\.ts/);
+  assert.match(text, /lower-ranked results omitted to fit output limit/);
+  assert.doesNotMatch(text, /src\/rank-9\.ts/);
+  assert.match(text, /Warnings: candidate_budget_exceeded/);
+  assert.deepEqual(result, before);
+});
+
+test("renders git checkout discovery prompt with result-limit guidance", () => {
   const text = renderDiscoveryPrompt({ kind: "repo", cwd: "/tmp/repo", repoRoot: "/tmp/repo" });
   assert.match(text, /ranked_search is available/);
+  assert.match(text, /default 3 results/);
+  assert.match(text, /narrow path\/query before increasing/);
+  assert.match(text, /maximum 10/);
 });

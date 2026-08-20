@@ -14,7 +14,7 @@ Input shape:
 {
   query: string;
   path?: string;
-  limit?: number; // 1..50, default 10
+  limit?: number; // 1..10, default 3
   boosts?: Array<{ term: string; weight: number }>;
   excludeTerms?: string[];
 }
@@ -24,8 +24,9 @@ Input shape:
 - `path` searches/restricts to that file or directory directly. It does not need to be declared in any config.
 - `boosts` change ranking only; they never filter.
 - `excludeTerms` filter noisy terms and are not proof of absence.
+- Start with the default 3 results. Narrow `path` or `query` before increasing `limit`; all callers are capped at 10.
 
-Results are compact evidence packets: ranked paths/scores, `matchedFields` (`filename`, `path`, `content`), and structured snippet windows with line ranges, text, optional context, and truncation flags. Use `grep` and `read` to confirm exact evidence.
+Results are compact evidence packets: ranked paths/scores, `matchedFields` (`filename`, `path`, `content`), and structured snippet windows with line ranges, text, optional context, and truncation flags. Use `grep` and `read` to confirm exact evidence. Agent-visible text omits truncation labels and is capped at 8,000 Unicode code points by retaining the highest-ranked complete hit blocks where possible and reporting omitted lower-ranked results. Structured response details retain all snippet truncation metadata.
 
 ## Search behavior
 

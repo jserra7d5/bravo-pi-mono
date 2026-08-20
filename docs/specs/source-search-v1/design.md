@@ -50,7 +50,7 @@ Input parameters:
 {
   query: string;
   path?: string;
-  limit?: number; // 1..50, default 10
+  limit?: number; // 1..10, default 3
   boosts?: Array<{ term: string; weight: number }>;
   excludeTerms?: string[];
 }
@@ -60,6 +60,7 @@ Input parameters:
 - `path` searches/restricts to that file or directory directly; no workspace/repo registry is required.
 - `boosts` modify ranking only; they never filter.
 - `excludeTerms` filter clearly unwanted noise and are not proof of absence.
+- Start with the default 3 results and narrow `path` or `query` before increasing `limit`. Agent-facing validation and direct package calls cannot exceed 10 results.
 
 ## Response contract
 
@@ -79,6 +80,8 @@ Preserve the `QueryResponse` / `SearchHit` shape:
 
 Each hit includes path, score, optional line/range fields, legacy `snippet`, structured `snippets`, and optional `matchedFields` using `filename`, `path`, and `content`.
 
+The agent-visible renderer omits snippet truncation labels while preserving truncation flags in the structured `QueryResponse`. Rendered text never exceeds 8,000 Unicode code points. It preserves highest-ranked complete hit blocks where possible, omits lower-ranked blocks, emits a compact omission/compaction notice, and preserves warning codes where feasible. Rendering must not mutate `QueryResponse`.
+
 `warnings` remains a string array for v1 compatibility. Warning strings should begin with stable compact codes such as `git_timeout`, `git_error`, `candidate_budget_exceeded`, `file_read_budget_exceeded`, `byte_read_budget_exceeded`, `depth_budget_exceeded`, `large_or_binary_files_skipped`, `read_errors_omitted`, or `search_aborted`. Degraded partial searches with useful results may return `ok: true`; validation failures, missing paths, pre-result cancellation, and unrecoverable failures return `ok: false`. A no-hit response with warnings is not authoritative proof of absence.
 
 ## Prompting guidance
@@ -89,5 +92,6 @@ System/tool prompts should say:
 - Use it as the default broad first pass when available.
 - Confirm exact evidence with `read` or `grep`.
 - Use typed `boosts` and `excludeTerms`; do not put query syntax in `query`.
+- Start with the default 3 results; narrow path/query before increasing the limit (maximum 10).
 
 Prompts must not direct agents to use index/cache/CLI/setup/debug workflows or repo/workspace setup. The always-loaded tool prompt and startup discovery prompt are the supported guidance surfaces; there is no separate source-search skill.

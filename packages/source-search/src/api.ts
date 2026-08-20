@@ -22,6 +22,9 @@ export interface SourceSearchPolicyDecision {
   reason?: string;
 }
 
+export const DEFAULT_RESULT_LIMIT = 3;
+export const MAX_RESULT_LIMIT = 10;
+
 const SECRET_PATH_RE = /(^|\/)(\.git(?:\/|$)|\.env(?:\.|$)|.*\.(?:pem|key|p12|pfx)$|id_rsa$|id_dsa$|.*secret.*|.*credential.*|.*token.*)(?:\/|$)?/i;
 const DENIED_DIR_RE = /(^|\/)(dist|build|target|node_modules)(\/|$)/i;
 
@@ -82,7 +85,10 @@ function simpleMatch(pattern: string, path: string): boolean {
  * importing Pi-extension internals.
  */
 export async function rankedSearch(options: SourceSearchQueryOptions): Promise<QueryResponse> {
-  const limit = Math.min(50, Math.max(1, Math.floor(options.limit ?? 10)));
+  const requestedLimit = options.limit ?? DEFAULT_RESULT_LIMIT;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.min(MAX_RESULT_LIMIT, Math.max(1, Math.floor(requestedLimit)))
+    : DEFAULT_RESULT_LIMIT;
   const errorResponse = (error: string, warnings?: string[]): QueryResponse => ({
     protocolVersion: PROTOCOL_VERSION,
     ok: false,
