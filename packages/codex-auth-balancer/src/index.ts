@@ -322,17 +322,20 @@ function normalizeWindow(label: string, value: unknown): UsageWindow | undefined
   return hasWindowSignal(window) ? window : undefined;
 }
 /**
- * The long "conservation" window is identified by its DURATION, never by its name.
- * These accounts report the 7-day window under the label `primary` and leave
- * `secondary` empty, so the old `secondary`-keyed branch was silently dead and
- * nothing throttled burn (incident #5/#10, 2026-08-19). Requires a real
- * remaining-percent and reset so the taper is computed from measured position.
+ * The long "conservation" window is the canonical 7-day duration, never a label
+ * or merely the longest reported window. These accounts can reverse the upstream
+ * `primary`/`secondary` labels. Unknown durations are neutral because treating an
+ * arbitrary window as weekly would conserve quota we cannot classify. A real
+ * remaining-percent and reset are required to compute the taper.
  */
-const CONSERVATION_WINDOW_MIN_MINUTES = 24 * 60;
+const SHORT_WINDOW_MINUTES = 300;
+const WEEKLY_WINDOW_MINUTES = 10_080;
+function canonicalWindow(windowMinutes: number, ...windows: Array<UsageWindow | undefined>): UsageWindow | undefined {
+  return windows.find((window): window is UsageWindow => window?.windowMinutes === windowMinutes);
+}
 function conservationWindow(...windows: Array<UsageWindow | undefined>): UsageWindow | undefined {
-  return windows
-    .filter((w): w is UsageWindow => w?.windowMinutes != null && w.windowMinutes >= CONSERVATION_WINDOW_MIN_MINUTES && w.remainingPercent != null && w.resetAt != null)
-    .sort((a, b) => b.windowMinutes! - a.windowMinutes!)[0];
+  const weekly = canonicalWindow(WEEKLY_WINDOW_MINUTES, ...windows);
+  return weekly?.remainingPercent != null && weekly.resetAt != null ? weekly : undefined;
 }
 function asNumberish(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -1145,15 +1148,20 @@ function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageE
     const generatedAt = entry?.updatedAt;
     const stale = generatedAt != null ? now - generatedAt > POLICY.selectionStaleAfterMs : true;
     const usageStale = stale || primary?.stale === true || secondary?.stale === true;
-    const remPrimary = primary?.remainingPercent;
-    const remSecondary = secondary?.remainingPercent;
+    // Quota semantics belong to the canonical durations, not the positional labels:
+    // upstream may report either duration as primary. Missing canonical windows are
+    // neutral, and unknown durations contribute neither score nor hard-floor rejection.
+    const shortWindow = canonicalWindow(SHORT_WINDOW_MINUTES, primary, secondary);
+    const weeklyWindow = canonicalWindow(WEEKLY_WINDOW_MINUTES, primary, secondary);
+    const shortRemaining = shortWindow?.remainingPercent;
+    const weeklyRemaining = weeklyWindow?.remainingPercent;
     const penalties: string[] = [];
     if (status === 'broken') { penalties.push('rejected:broken'); continue; }
-    if (!usageStale && remPrimary != null && remPrimary < POLICY.hardFloorPrimaryPercent) { penalties.push('rejected:primary_hard_floor'); continue; }
-    if (!usageStale && remSecondary != null && remSecondary < POLICY.hardFloorSecondaryPercent) { penalties.push('rejected:secondary_hard_floor'); continue; }
+    if (!usageStale && shortRemaining != null && shortRemaining < POLICY.hardFloorPrimaryPercent) { penalties.push('rejected:primary_hard_floor'); continue; }
+    if (!usageStale && weeklyRemaining != null && weeklyRemaining < POLICY.hardFloorSecondaryPercent) { penalties.push('rejected:secondary_hard_floor'); continue; }
     let score = 50;
-    if (remPrimary != null) score += remPrimary * 0.6;
-    if (remSecondary != null) score += remSecondary * 0.4;
+    if (shortRemaining != null) score += shortRemaining * 0.6;
+    if (weeklyRemaining != null) score += weeklyRemaining * 0.4;
     if (entry?.updatedAt == null && !primary && !secondary) {
       score -= POLICY.unknownPenalty;
       penalties.push('unknown_usage');

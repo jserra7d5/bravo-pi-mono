@@ -483,13 +483,7 @@ export interface FooterRenderState {
 	cost: number | null;
 	sub: boolean;
 	codex: {
-		primary?: number | null;
-		primaryLabel?: string;
-		primaryReset?: string | null;
-		secondary?: number | null;
-		secondaryLabel?: string;
-		secondaryReset?: string | null;
-		accounts?: Array<{ slot: string; label: string; active: boolean; status: CodexAccountStatus; primary: number | null; primaryWindowLabel: string; primaryReset: string | null; secondary: number | null; secondaryWindowLabel: string; secondaryReset: string | null; stale: boolean; expiry: CodexExpiryWarning | null }>;
+		accounts: Array<{ slot: string; label: string; active: boolean; status: CodexAccountStatus; fiveHour: number | null; fiveHourReset: string | null; weekly: number | null; weeklyReset: string | null; stale: boolean; expiry: CodexExpiryWarning | null }>;
 		unavailable?: boolean;
 		stale?: boolean;
 	} | null;
@@ -560,17 +554,6 @@ export function costSegment(cost: number | null, sub: boolean): string | null {
 	return sub ? `${dollar} ${c.sub}sub${R}` : dollar;
 }
 
-export function formatUsageWindowLabel(windowMinutes: number | undefined, position: "primary" | "secondary"): string {
-	if (windowMinutes == null || !Number.isInteger(windowMinutes) || windowMinutes <= 0) return position === "primary" ? "pri" : "sec";
-	if (windowMinutes % 10_080 === 0) {
-		const weeks = windowMinutes / 10_080;
-		return weeks === 1 ? "wk" : `${weeks}wk`;
-	}
-	if (windowMinutes % 1_440 === 0) return `${windowMinutes / 1_440}d`;
-	if (windowMinutes % 60 === 0) return `${windowMinutes / 60}h`;
-	return `${windowMinutes}m`;
-}
-
 export function codexWindowSegment(
 	label: string,
 	remainingPct: number | null,
@@ -604,14 +587,9 @@ export function renderStatsLine(width: number, s: FooterRenderState, extensionSt
 	parts.push(...extensionStatuses);
 
 	if (s.codex) {
-		if (!s.codex.accounts && (s.codex.primary != null || s.codex.secondary != null)) {
-			const p = codexWindowSegment(s.codex.primaryLabel ?? "pri", s.codex.primary ?? null, s.codex.primaryReset ?? null, codexBar);
-			const sec = codexWindowSegment(s.codex.secondaryLabel ?? "sec", s.codex.secondary ?? null, s.codex.secondaryReset ?? null, codexBar);
-			if (p) parts.push(p);
-			if (sec) parts.push(sec);
-		} else if (s.codex.unavailable) {
+		if (s.codex.unavailable) {
 			parts.push(`${c.warn}codex usage ?${R}`);
-		} else if (s.codex.accounts && s.codex.accounts.length > 0) {
+		} else if (s.codex.accounts.length > 0) {
 			const sortedAccounts = [...s.codex.accounts].sort((a, b) => Number(b.active) - Number(a.active));
 			const limit = width >= 100 ? 3 : 2;
 			const renderAccounts = (mode: "full" | "noSecondary" | "identity", activeOnly: boolean): string[] => {
@@ -630,15 +608,13 @@ export function renderStatsLine(width: number, s: FooterRenderState, extensionSt
 							: "";
 						const head = `${c.dim}cx${mark}${R}${status}${c.text}${account.label}${R}${expiry}`;
 						if (mode === "identity") return `${head}${stale}`;
-						const p = account.primary == null ? "?" : `${Math.round(account.primary)}%`;
-						const primaryWindowLabel = account.primaryWindowLabel ?? "pri";
-						const secondaryWindowLabel = account.secondaryWindowLabel ?? "sec";
-						const primary = mode === "full" && account.active
-							? codexAccountPrimarySegment(primaryWindowLabel, account.primary, account.primaryReset, codexBar)
-							: ` ${c.dim}${primaryWindowLabel}${R} ${p}${account.primaryReset ? `${c.dim}/${account.primaryReset}${R}` : ""}`;
-						if (mode === "noSecondary") return `${head}${primary}${stale}`;
-						const sec = account.secondary == null ? "?" : `${Math.round(account.secondary)}%`;
-						return `${head}${primary} ${c.dim}${secondaryWindowLabel}${R} ${sec}${account.secondaryReset ? `${c.dim}/${account.secondaryReset}${R}` : ""}${stale}`;
+						const fiveHourPct = account.fiveHour == null ? "?" : `${Math.round(account.fiveHour)}%`;
+						const fiveHour = mode === "full" && account.active
+							? codexAccountPrimarySegment("5h", account.fiveHour, account.fiveHourReset, codexBar)
+							: ` ${c.dim}5h${R} ${fiveHourPct}${account.fiveHourReset ? `${c.dim}/${account.fiveHourReset}${R}` : ""}`;
+						if (mode === "noSecondary") return `${head}${fiveHour}${stale}`;
+						const weeklyPct = account.weekly == null ? "?" : `${Math.round(account.weekly)}%`;
+						return `${head}${fiveHour} ${c.dim}wk${R} ${weeklyPct}${account.weeklyReset ? `${c.dim}/${account.weeklyReset}${R}` : ""}${stale}`;
 					});
 			};
 			parts.push(...renderAccounts("full", false));
@@ -723,6 +699,14 @@ function collectFooterCostState(ctx: ExtensionContext): FooterCostState {
 	return { totalCost, entryCount };
 }
 
+export function canonicalCodexWindows(usage: CodexAccountSlot["usage"]): { fiveHour?: UsageWindow; weekly?: UsageWindow } {
+	const windows = [usage?.primary, usage?.secondary];
+	return {
+		fiveHour: windows.find((window) => window?.windowMinutes === 300),
+		weekly: windows.find((window) => window?.windowMinutes === 10_080),
+	};
+}
+
 function buildCodexState(
 	usage: CodexUsage | undefined,
 	now = Date.now(),
@@ -730,20 +714,21 @@ function buildCodexState(
 ): FooterRenderState["codex"] {
 	if (!usage) return null;
 	if (usage.unavailable) return { accounts: [], unavailable: true };
-	const accounts = usage.accounts.map((a) => ({
-		slot: a.slot,
-		label: redactCodexAccountLabel(a),
-		active: a.slot === balancedAffinitySlot || a.activeCodex || a.activePi,
-		status: a.status,
-		primary: a.usage?.primary?.remainingPercent ?? null,
-		primaryWindowLabel: formatUsageWindowLabel(a.usage?.primary?.windowMinutes, "primary"),
-		primaryReset: resetFor(a.usage?.primary, now),
-		secondary: a.usage?.secondary?.remainingPercent ?? null,
-		secondaryWindowLabel: formatUsageWindowLabel(a.usage?.secondary?.windowMinutes, "secondary"),
-		secondaryReset: resetFor(a.usage?.secondary, now),
-		stale: usage.error === "stale" || a.usage?.primary?.stale === true || a.usage?.secondary?.stale === true,
-		expiry: codexExpiryWarning(a.tokenExpiresAt, now),
-	}));
+	const accounts = usage.accounts.map((a) => {
+		const windows = canonicalCodexWindows(a.usage);
+		return {
+			slot: a.slot,
+			label: redactCodexAccountLabel(a),
+			active: a.slot === balancedAffinitySlot || a.activeCodex || a.activePi,
+			status: a.status,
+			fiveHour: windows.fiveHour?.remainingPercent ?? null,
+			fiveHourReset: resetFor(windows.fiveHour, now),
+			weekly: windows.weekly?.remainingPercent ?? null,
+			weeklyReset: resetFor(windows.weekly, now),
+			stale: usage.error === "stale" || a.usage?.primary?.stale === true || a.usage?.secondary?.stale === true,
+			expiry: codexExpiryWarning(a.tokenExpiresAt, now),
+		};
+	});
 	return { accounts, stale: usage.error === "stale" };
 }
 

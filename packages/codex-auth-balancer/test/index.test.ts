@@ -459,8 +459,8 @@ test('prepareLaunch does not hard-reject stale zero windows', async () => {
     schema_version: 2,
     generated_at: Date.now() - 60 * 60_000,
     accounts: {
-      low: { slot: 'low', status: 'ok', updatedAt: Date.now() - 60 * 60_000, primary: { label: 'primary', remainingPercent: 75 }, secondary: { label: 'secondary', remainingPercent: 16 } },
-      'stale-zero': { slot: 'stale-zero', status: 'ok', updatedAt: Date.now() - 60 * 60_000, primary: { label: 'primary', remainingPercent: 100 }, secondary: { label: 'secondary', remainingPercent: 0 } },
+      low: { slot: 'low', status: 'ok', updatedAt: Date.now() - 60 * 60_000, primary: { label: 'primary', remainingPercent: 75, windowMinutes: 300 }, secondary: { label: 'secondary', remainingPercent: 16, windowMinutes: 10_080 } },
+      'stale-zero': { slot: 'stale-zero', status: 'ok', updatedAt: Date.now() - 60 * 60_000, primary: { label: 'primary', remainingPercent: 100, windowMinutes: 300 }, secondary: { label: 'secondary', remainingPercent: 0, windowMinutes: 10_080 } },
     },
   });
   const prepared = await prepareLaunch(await tmp(), { stateRoot: root });
@@ -1553,7 +1553,11 @@ test('ensureFreshTokens never throws, even when the state root is unreadable', a
 // affinity pin must degrade to a preference rather than fail the lease.
 async function seedUsableSlot(root: string, slot: string, primaryRemaining: number, secondaryRemaining = 100) {
   await writeJson(path.join(root, 'accounts', slot, 'auth.json'), { access_token: fakeCodexJwt(`acct-${slot}`), expiry_date: Date.now() + 600_000 });
-  await ingestLiveUsage({ stateRoot: root, slot, rateLimits: { rate_limits: { primary: { remaining_percent: primaryRemaining }, secondary: { remaining_percent: secondaryRemaining } } } });
+  await ingestLiveUsage({ stateRoot: root, slot, rateLimits: { rate_limits: { primary: { remaining_percent: primaryRemaining, window_minutes: 300 }, secondary: { remaining_percent: secondaryRemaining, window_minutes: 10_080 } } } });
+}
+async function seedDurationSlot(root: string, slot: string, primary: { remaining_percent: number; window_minutes: number }, secondary?: { remaining_percent: number; window_minutes: number }) {
+  await writeJson(path.join(root, 'accounts', slot, 'auth.json'), { access_token: fakeCodexJwt(`acct-${slot}`), expiry_date: Date.now() + 600_000 });
+  await ingestLiveUsage({ stateRoot: root, slot, rateLimits: { rate_limits: { primary, secondary } } });
 }
 const softLeaseArgs = (root: string) => ({ stateRoot: root, provider: 'bravo-codex-balanced' as const, model: 'bravo-codex-balanced/fake', purpose: 'pi-provider-request' as const, expected_runtime_ms: 1000, ttl_safety_buffer_ms: 1000 });
 
@@ -1601,6 +1605,30 @@ test('a real quota gap outranks a single in-flight reservation', async () => {
   // 5-point quota hold plus a 10-point score penalty) and flipped to 'less'.
   const auto = await startTokenLease(softLeaseArgs(root));
   assert.equal(auto.slot, 'more', 'the slot with more quota must win despite being busy');
+});
+
+test('quota scoring classifies canonical windows when primary and secondary are reversed', async () => {
+  const root = await tmp();
+  await seedDurationSlot(root, 'reversed', { remaining_percent: 20, window_minutes: 10_080 }, { remaining_percent: 80, window_minutes: 300 });
+  await seedDurationSlot(root, 'positional-favorite', { remaining_percent: 70, window_minutes: 300 }, { remaining_percent: 30, window_minutes: 10_080 });
+  const selected = await startTokenLease(softLeaseArgs(root));
+  assert.equal(selected.slot, 'reversed', '80% of the 5h window must receive the short-window weight even under secondary');
+});
+
+test('an unknown-duration secondary at 100 percent contributes no quota score', async () => {
+  const root = await tmp();
+  await seedDurationSlot(root, 'known', { remaining_percent: 10, window_minutes: 300 });
+  await seedDurationSlot(root, 'unknown', { remaining_percent: 0, window_minutes: 60 }, { remaining_percent: 100, window_minutes: 1_440 });
+  const selected = await startTokenLease(softLeaseArgs(root));
+  assert.equal(selected.slot, 'known', 'unknown-duration quota must be neutral rather than read as full');
+});
+
+test('known weekly quota beats a bogus unknown-duration secondary', async () => {
+  const root = await tmp();
+  await seedDurationSlot(root, 'weekly', { remaining_percent: 20, window_minutes: 10_080 });
+  await seedDurationSlot(root, 'bogus', { remaining_percent: 1, window_minutes: 60 }, { remaining_percent: 100, window_minutes: 20_160 });
+  const selected = await startTokenLease(softLeaseArgs(root));
+  assert.equal(selected.slot, 'weekly', 'measured weekly runway must outrank an unclassified 100% metric');
 });
 
 // ── conservation window keyed by duration, not by label (incident #5/#10) ───
@@ -1733,7 +1761,7 @@ test('prepareLaunch reports no conservation window when only a short window exis
 test('getConservationQuota reads the long window by duration and omits slots that have none', async () => {
   const root = await tmp();
   const resetAt = Date.now() + 19 * 60 * 60_000;
-  for (const slot of ['weekly-primary', 'weekly-secondary', 'short-only']) {
+  for (const slot of ['weekly-primary', 'weekly-secondary', 'short-only', 'unknown-long']) {
     await writeJson(path.join(root, 'accounts', slot, 'auth.json'), { access_token: `tok-${slot}` });
   }
   // Seeded through the real ingest path so the db is built the way production builds it.
@@ -1741,8 +1769,9 @@ test('getConservationQuota reads the long window by duration and omits slots tha
   await ingestLiveUsage({ stateRoot: root, slot: 'weekly-primary', rateLimits: { rate_limits: { primary: { remaining_percent: 7, window_minutes: 10_080, reset_at: resetAt } } } });
   await ingestLiveUsage({ stateRoot: root, slot: 'weekly-secondary', rateLimits: { rate_limits: { secondary: { remaining_percent: 17, window_minutes: 10_080, reset_at: resetAt } } } });
   await ingestLiveUsage({ stateRoot: root, slot: 'short-only', rateLimits: { rate_limits: { primary: { remaining_percent: 95, window_minutes: 300, reset_at: Date.now() + 60_000 } } } });
+  await ingestLiveUsage({ stateRoot: root, slot: 'unknown-long', rateLimits: { rate_limits: { secondary: { remaining_percent: 100, window_minutes: 20_160, reset_at: resetAt } } } });
   const quota = await getConservationQuota({ stateRoot: root });
-  assert.deepEqual(quota.map(q => q.slot), ['weekly-secondary', 'weekly-primary'], 'sorted by remaining, duration-keyed, short window excluded');
+  assert.deepEqual(quota.map(q => q.slot), ['weekly-secondary', 'weekly-primary'], 'sorted by remaining; non-weekly durations excluded even when long and full');
   assert.equal(quota[0].remainingPercent, 17);
   assert.equal(quota[0].windowMinutes, 10_080);
   assert.equal(quota[1].remainingPercent, 7);

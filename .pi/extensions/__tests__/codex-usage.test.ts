@@ -7,6 +7,7 @@ import codexUsageExtension, {
 	bar,
 	applyModelSpeedToPayload,
 	codexThreshold,
+	canonicalCodexWindows,
 	codexExpiryWarning,
 	codexHealthWarnings,
 	codexWindowSegment,
@@ -15,7 +16,6 @@ import codexUsageExtension, {
 	costSegment,
 	ctxSegment,
 	formatTokens,
-	formatUsageWindowLabel,
 	identityColor,
 	identitySlot,
 	parseFastCommand,
@@ -52,12 +52,11 @@ function makeState(overrides: Partial<FooterRenderState> = {}): FooterRenderStat
 		cost: 0.42,
 		sub: true,
 		codex: {
-			primary: 80,
-			primaryLabel: "5h",
-			primaryReset: "4h",
-			secondary: 55,
-			secondaryLabel: "wk",
-			secondaryReset: "4d",
+			accounts: [{
+				slot: "work", label: "work", active: true, status: "ok",
+				fiveHour: 80, fiveHourReset: "4h", weekly: 55, weeklyReset: "4d",
+				stale: false, expiry: null,
+			}],
 		},
 		...overrides,
 	};
@@ -285,17 +284,6 @@ test("costSegment with $0 still renders", () => {
 	assert.equal(stripAnsi(out!), "$0.000 sub");
 });
 
-test("formatUsageWindowLabel uses truthful exact durations and neutral fallbacks", () => {
-	assert.equal(formatUsageWindowLabel(300, "primary"), "5h");
-	assert.equal(formatUsageWindowLabel(10_080, "secondary"), "wk");
-	assert.equal(formatUsageWindowLabel(60, "primary"), "1h");
-	assert.equal(formatUsageWindowLabel(1_440, "secondary"), "1d");
-	assert.equal(formatUsageWindowLabel(20_160, "primary"), "2wk");
-	assert.equal(formatUsageWindowLabel(90, "secondary"), "90m");
-	assert.equal(formatUsageWindowLabel(undefined, "primary"), "pri");
-	assert.equal(formatUsageWindowLabel(Number.NaN, "secondary"), "sec");
-});
-
 test("codexWindowSegment renders nothing when remainingPct is null", () => {
 	assert.equal(codexWindowSegment("5h", null, "1h", 10), null);
 });
@@ -333,7 +321,7 @@ test("renderStatsLine drops codex windows right-to-left when line would overflow
 
 test("renderStatsLine drops only wk when 5h still fits", () => {
 	// craft a width that fits ctx + cost + 5h but not wk
-	const state = makeState({ codex: { primary: 80, primaryLabel: "5h", primaryReset: "4h", secondary: 55, secondaryLabel: "wk", secondaryReset: "4d" } });
+	const state = makeState();
 	for (let width = 50; width <= 120; width++) {
 		const line = renderStatsLine(width, state);
 		const plain = stripAnsi(line);
@@ -697,33 +685,53 @@ test("parseCodexUsage strictly rejects malformed documented schema", () => {
 	for (const payload of invalids) assert.equal(parseCodexUsage(payload), undefined);
 });
 
-test("renderStatsLine uses actual reversed durations and remains responsive", () => {
+test("canonicalCodexWindows classifies windows by duration, not source position", () => {
+	const weekly = { label: "primary", remainingPercent: 64, windowMinutes: 10_080 };
+	const fiveHour = { label: "secondary", remainingPercent: 25, windowMinutes: 300 };
+	assert.deepEqual(canonicalCodexWindows({ primary: weekly, secondary: fiveHour }), { fiveHour, weekly });
+	assert.deepEqual(canonicalCodexWindows({ primary: fiveHour, secondary: weekly }), { fiveHour, weekly });
+});
+
+test("canonicalCodexWindows does not relabel missing or inexact-duration metrics", () => {
+	const missing = canonicalCodexWindows({
+		primary: { label: "primary", remainingPercent: 72 },
+		secondary: { label: "secondary", remainingPercent: 100 },
+	});
+	assert.equal(missing.fiveHour, undefined);
+	assert.equal(missing.weekly, undefined);
+
+	const inexact = canonicalCodexWindows({
+		primary: { label: "primary", remainingPercent: 72, windowMinutes: 299 },
+		secondary: { label: "secondary", remainingPercent: 100, windowMinutes: 10_081 },
+	});
+	assert.equal(inexact.fiveHour, undefined);
+	assert.equal(inexact.weekly, undefined);
+});
+
+test("renderStatsLine always presents canonical 5h then weekly usage", () => {
 	const state = makeState({ codex: { accounts: [{
-		slot: "work", label: "work", active: true, status: "ok", primary: 64,
-		primaryWindowLabel: "wk", primaryReset: "1h", secondary: 25,
-		secondaryWindowLabel: "5h", secondaryReset: "2h", stale: false, expiry: null,
+		slot: "work", label: "work", active: true, status: "ok", fiveHour: 25,
+		fiveHourReset: "2h", weekly: 64, weeklyReset: "1h", stale: false, expiry: null,
 	}] } });
 	const wide = stripAnsi(renderStatsLine(160, state));
-	assert.match(wide, /wk .*64%/);
-	assert.match(wide, /5h 25%/);
+	assert.match(wide, /5h .*25%.*wk 64%/);
 	for (const width of [40, 60, 80, 120, 160]) assert.ok(visWidth(renderStatsLine(width, state)) <= width);
 });
 
-test("renderStatsLine never claims canonical durations when duration metadata is missing", () => {
+test("renderStatsLine shows unknown canonical windows instead of pri/sec metrics", () => {
 	const line = stripAnsi(renderStatsLine(160, makeState({ codex: { accounts: [{
-		slot: "work", label: "work", active: true, status: "ok", primary: 72,
-		primaryWindowLabel: "pri", primaryReset: null, secondary: 41,
-		secondaryWindowLabel: "sec", secondaryReset: null, stale: false, expiry: null,
+		slot: "work", label: "work", active: true, status: "ok", fiveHour: null,
+		fiveHourReset: null, weekly: null, weeklyReset: null, stale: false, expiry: null,
 	}] } })));
-	assert.match(line, /pri .*72%/);
-	assert.match(line, /sec 41%/);
-	assert.doesNotMatch(line, /5h|wk/);
+	assert.match(line, /5h \?/);
+	assert.match(line, /wk \?/);
+	assert.doesNotMatch(line, /pri|sec/);
 });
 
 test("renderStatsLine renders compact multi-account Codex usage with active marker", () => {
 	const line = stripAnsi(renderStatsLine(160, makeState({ codex: { accounts: [
-		{ label: "work", active: true, status: "ok", primary: 72, primaryWindowLabel: "5h", primaryReset: "1h", secondary: 41, secondaryWindowLabel: "wk", secondaryReset: "2d", stale: false },
-		{ label: "alt", active: false, status: "limited", primary: 8, primaryWindowLabel: "5h", primaryReset: "10m", secondary: null, secondaryWindowLabel: "wk", secondaryReset: null, stale: true },
+		{ label: "work", active: true, status: "ok", fiveHour: 72, fiveHourReset: "1h", weekly: 41, weeklyReset: "2d", stale: false },
+		{ label: "alt", active: false, status: "limited", fiveHour: 8, fiveHourReset: "10m", weekly: null, weeklyReset: null, stale: true },
 	] } } as any)));
 	assert.ok(line.includes("cx*"));
 	assert.ok(line.includes("work"));
@@ -734,8 +742,8 @@ test("renderStatsLine renders compact multi-account Codex usage with active mark
 
 test("renderStatsLine degrades account usage before dropping active account identity", () => {
 	const state = makeState({ codex: { accounts: [
-		{ label: "active", active: true, status: "ok", primary: 72, primaryReset: "1h", secondary: 41, secondaryReset: "2d", stale: false },
-		{ label: "inactive", active: false, status: "limited", primary: 8, primaryReset: "10m", secondary: 90, secondaryReset: "5d", stale: true },
+		{ label: "active", active: true, status: "ok", fiveHour: 72, fiveHourReset: "1h", weekly: 41, weeklyReset: "2d", stale: false },
+		{ label: "inactive", active: false, status: "limited", fiveHour: 8, fiveHourReset: "10m", weekly: 90, weeklyReset: "5d", stale: true },
 	] } } as any);
 	const line = stripAnsi(renderStatsLine(64, state));
 	assert.ok(line.includes("cx*active"), "active account identity should survive");
@@ -788,7 +796,7 @@ function accountWithExpiry(expiry: ReturnType<typeof codexExpiryWarning>) {
 		codex: {
 			accounts: [{
 				slot: "1", label: "1", active: true, status: "ok" as const,
-				primary: 80, primaryReset: "4h", secondary: 60, secondaryReset: "4d",
+				fiveHour: 80, fiveHourReset: "4h", weekly: 60, weeklyReset: "4d",
 				stale: false, expiry,
 			}],
 		},
