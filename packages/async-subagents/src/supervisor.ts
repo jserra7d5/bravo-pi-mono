@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createRunEvent, createStartedEvent } from "./events.js";
+import { createProgressEvent, createRunEvent, createStartedEvent } from "./events.js";
 import { finalizeTerminalRun, reconcileUnderLock } from "./lifecycle.js";
 import { appendJsonl } from "./jsonl.js";
 import { isTerminalRunState } from "./schemas.js";
@@ -43,6 +43,19 @@ export interface SupervisorInput {
   transport?: "stdio" | "mcp";
   supervisorAdapter?: SupervisorAdapter;
   effectiveMaxRunMs?: number;
+  /**
+   * Relaunch policy for a child killed by a transient upstream refusal. `command`
+   * is what to relaunch with — the launcher supplies a continuation prompt when
+   * the run records a Pi session, so the retry resumes the child's own history
+   * (including any files it already wrote) instead of restarting the brief blind.
+   * Omitted entirely when a retry would not be safe, and a retry never extends the
+   * run's time budget.
+   */
+  transientRetry?: {
+    maxAttempts: number;
+    backoffMs?: number;
+    command?: PiCommand;
+  };
   fake?: SupervisorFakeInput;
   codexAuthBalancer?: {
     isolatedDir: string;
@@ -208,6 +221,37 @@ export function augmentChildFailureDiagnostics(command: PiCommand, stderr: strin
     stderr: augmentedStderr,
     error: error ? { ...error, message: `${error.message}. ${hint}` } : error,
   };
+}
+
+/**
+ * An upstream moderation classifier on the Codex Responses stream refuses a turn
+ * mid-reply — after the response is created and reasoning has begun streaming —
+ * and Pi surfaces that as a fatal error, so the child exits non-zero and the whole
+ * lane dies holding whatever work it had already done.
+ *
+ * The refusal is probabilistic, not a property of the brief: in the transcripts
+ * that motivated this, 42 of 47 parent-session occurrences succeeded on the very
+ * next turn against the same context, several within seconds. A lane that dies on
+ * it has not hit a wall; it has hit a coin flip.
+ *
+ * The wording says "prompt" but the request was accepted and billed nothing, and
+ * there is no error code to match on — Pi passes the upstream string through as a
+ * diagnostic line of its own. So anchor on that framing: a line that STARTS with
+ * Pi's `Codex error:` prefix and carries the flag text. A bare substring search
+ * would also fire on a child that merely printed the message — quoting it from a
+ * brief, a log, or tool output — and then exited non-zero for an unrelated reason,
+ * which would relaunch a genuinely broken run against a tree it may have half
+ * edited. Every observed occurrence (32 of 32 in the run store) matches this shape,
+ * and all of them arrive on stderr.
+ *
+ * Deliberately biased toward under-matching. A missed refusal costs one lane, which
+ * is the behaviour that already exists; a false match spends budget and resumes a
+ * dirty working tree.
+ */
+const UPSTREAM_REFUSAL_PATTERN = /^Codex error: Invalid prompt:[^\n]*flagged as potentially violating our usage policy/im;
+
+export function isTransientUpstreamRefusal(stderr: string): boolean {
+  return UPSTREAM_REFUSAL_PATTERN.test(stderr);
 }
 
 function classifyBalancerError(error: unknown): { classification: string; retryable: boolean; safeCleanup: boolean; message: string } {
@@ -475,34 +519,64 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
     const supervisorErrorPath = join(paths.logsDir, "supervisor-error.log");
 
     const controlPath = join(paths.runDir, "control.jsonl");
-    const child = spawn(input.command.command, input.command.args, {
-      cwd: input.command.cwd,
-      env: {
-        ...process.env,
-        ...input.command.env,
-        ASYNC_SUBAGENTS_RUN_ID: input.runId,
-        ASYNC_SUBAGENTS_RUN_DIR: paths.runDir,
-        ASYNC_SUBAGENTS_PARENT_RUN_ID: input.parentRunId,
-        ASYNC_SUBAGENT_RUN_ID: input.runId,
-        ASYNC_SUBAGENT_RUN_DIR: paths.runDir,
-        ASYNC_SUBAGENT_PARENT_RUN_ID: input.parentRunId,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
-    });
 
-    void mutateLiveStatus((started) => {
-      store.writeStatus(updateRunStatus(started, { pid: child.pid, processHealth: child.pid ? "alive" : "unknown", summary: child.pid ? `Running child process ${child.pid}` : "Running child process" }));
-    });
+    const spawnChild = (command: PiCommand): ReturnType<typeof spawn> => {
+      const spawned = spawn(command.command, command.args, {
+        cwd: command.cwd,
+        env: {
+          ...process.env,
+          ...command.env,
+          ASYNC_SUBAGENTS_RUN_ID: input.runId,
+          ASYNC_SUBAGENTS_RUN_DIR: paths.runDir,
+          ASYNC_SUBAGENTS_PARENT_RUN_ID: input.parentRunId,
+          ASYNC_SUBAGENT_RUN_ID: input.runId,
+          ASYNC_SUBAGENT_RUN_DIR: paths.runDir,
+          ASYNC_SUBAGENT_PARENT_RUN_ID: input.parentRunId,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      });
+      spawned.stdout?.on("data", (chunk: Buffer) => {
+        stdoutChunks.push(chunk);
+        appendLog(stdoutPath, chunk.toString("utf8"));
+      });
+      spawned.stderr?.on("data", (chunk: Buffer) => {
+        stderrChunks.push(chunk);
+        appendLog(stderrPath, chunk.toString("utf8"));
+      });
+      spawned.once("error", onChildError);
+      spawned.once("close", onChildClose);
+      return spawned;
+    };
 
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdoutChunks.push(chunk);
-      appendLog(stdoutPath, chunk.toString("utf8"));
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderrChunks.push(chunk);
-      appendLog(stderrPath, chunk.toString("utf8"));
-    });
+    let child: ReturnType<typeof spawn>;
+    let transientRetries = 0;
+    /**
+     * A relaunch that has been decided but not yet spawned: either counting down its
+     * backoff (`timer` set) or held because the parent paused the run mid-backoff.
+     * While this is set there is no live child, so no `close` event is coming and
+     * signals sent to the process group land on nothing.
+     */
+    let pendingRetry: { command: PiCommand; timer?: NodeJS.Timeout } | undefined;
+
+    /**
+     * Claim the pending relaunch so the caller owns what happens next. Cancel, expiry,
+     * and supervisor cleanup must settle the run themselves after claiming it —
+     * without this a run with no live child hangs until the supervisor is killed.
+     */
+    const takePendingRetry = (): { command: PiCommand } | undefined => {
+      if (!pendingRetry) return undefined;
+      if (pendingRetry.timer) clearTimeout(pendingRetry.timer);
+      const claimed = pendingRetry;
+      pendingRetry = undefined;
+      return claimed;
+    };
+
+    const publishChildPid = (summaryPrefix: string): void => {
+      void mutateLiveStatus((current) => {
+        store.writeStatus(updateRunStatus(current, { pid: child.pid, processHealth: child.pid ? "alive" : "unknown", summary: child.pid ? `${summaryPrefix} ${child.pid}` : summaryPrefix }));
+      });
+    };
 
     const killGroup = (signal: NodeJS.Signals): boolean => {
       if (!child.pid) return false;
@@ -528,6 +602,8 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
 
     const clearRuntimeResources = (): void => {
       clearBudgetTimers();
+      if (pendingRetry?.timer) clearTimeout(pendingRetry.timer);
+      pendingRetry = undefined;
       if (controlPoll) clearInterval(controlPoll);
       controlPoll = undefined;
       if (cancelState?.forceTimer) clearTimeout(cancelState.forceTimer);
@@ -545,6 +621,13 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
     const startSupervisorChildCleanup = (reason: string, signal?: NodeJS.Signals): void => {
       if (settled || supervisorCleanupState) return;
       supervisorCleanupState = { reason, signal };
+      if (takePendingRetry()) {
+        logSupervisorCleanup(`[async-subagents] supervisor cleanup: ${reason}; no live child (retry pending)`);
+        settle(signal ? "cancelled" : "failed", signal
+          ? { code: "SUPERVISOR_SIGNAL", message: reason, details: { signal, transientRetries } }
+          : { code: "SUPERVISOR_CRASH", message: reason, details: { transientRetries } });
+        return;
+      }
       logSupervisorCleanup(`[async-subagents] supervisor cleanup: ${reason}; sending SIGTERM/SIGCONT to child process group ${child.pid ?? "unknown"}`);
       void mutateLiveStatus((current) => {
         store.writeStatus(updateRunStatus(current, { processHealth: "alive", summary: `Supervisor cleanup: ${reason}` }));
@@ -682,13 +765,60 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       void finalizeRun(input, { state, stdout, stderr: diagnostics.stderr, error: diagnostics.error }).then(resolve);
     };
 
-    child.once("error", (error) => {
+    function onChildError(error: Error): void {
       if (supervisorCleanupState) return;
       appendLog(stderrPath, `${error.message}\n`);
       settle("failed", { code: "SPAWN_FAILED", message: error.message });
-    });
+    }
 
-    child.once("close", (code, signal) => {
+    /**
+     * Relaunch after a transient upstream refusal. The run keeps its identity, its
+     * budget, and its logs; only the child process is replaced. The in-memory
+     * stdout/stderr buffers are reset so a successful retry reports its own output
+     * as the result body instead of the refusal text from the attempt that died —
+     * the full history stays on disk in stdout.log/stderr.log.
+     */
+    function retryAfterUpstreamRefusal(previousStderr: string): void {
+      const policy = input.transientRetry!;
+      transientRetries += 1;
+      const attempt = transientRetries;
+      const delayMs = policy.backoffMs ?? 2_000;
+      const summary = `Upstream refused the turn; relaunching (retry ${attempt}/${policy.maxAttempts})`;
+      appendLog(stderrPath, `[async-subagents] ${summary} after ${delayMs}ms\n`);
+      void mutateRun(() => {
+        store.appendEvent(input.runId, createProgressEvent({
+          sequence: store.readEvents(input.runId).records.length + 1,
+          runId: input.runId,
+          parentRunId: input.parentRunId,
+          summary,
+          body: previousStderr.trim() || undefined,
+          wake: false,
+          data: { reason: "upstream_prompt_flag", attempt, maxAttempts: policy.maxAttempts },
+        }));
+      }).catch(() => undefined);
+      void mutateLiveStatus((current) => {
+        store.writeStatus(updateRunStatus(current, { summary, transientRetries: attempt }));
+      }).catch(() => undefined);
+      stdoutChunks.length = 0;
+      stderrChunks.length = 0;
+      const retryCommand = policy.command ?? input.command;
+      pendingRetry = {
+        command: retryCommand,
+        timer: setTimeout(() => {
+          if (!pendingRetry) return;
+          pendingRetry = undefined;
+          if (settled || cancelState || expiryState || supervisorCleanupState) return;
+          launchRetry(retryCommand);
+        }, delayMs),
+      };
+    }
+
+    function launchRetry(command: PiCommand): void {
+      child = spawnChild(command);
+      publishChildPid("Running child process");
+    }
+
+    function onChildClose(code: number | null, signal: NodeJS.Signals | null): void {
       if (supervisorCleanupState) {
         const cleanupState = supervisorCleanupState;
         logSupervisorCleanup(`[async-subagents] supervisor cleanup: child process group ${child.pid ?? "unknown"} closed after ${cleanupState.reason}; code ${code ?? "null"}${signal ? ` signal ${signal}` : ""}`);
@@ -716,9 +846,17 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       } else if (code === 0) {
         settle("completed");
       } else {
-        settle("failed", { code: "CHILD_EXITED", message: `child exited with code ${code ?? "null"}${signal ? ` signal ${signal}` : ""}`, details: { code, signal } });
+        const stderrSoFar = Buffer.concat(stderrChunks).toString("utf8");
+        if (input.transientRetry && transientRetries < input.transientRetry.maxAttempts && isTransientUpstreamRefusal(stderrSoFar)) {
+          retryAfterUpstreamRefusal(stderrSoFar);
+          return;
+        }
+        settle("failed", { code: "CHILD_EXITED", message: `child exited with code ${code ?? "null"}${signal ? ` signal ${signal}` : ""}`, details: { code, signal, transientRetries } });
       }
-    });
+    }
+
+    child = spawnChild(input.command);
+    publishChildPid("Running child process");
 
     const applyControl = (command: any): void => {
       if (!command || typeof command !== "object") return;
@@ -726,6 +864,10 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
         if (cancelState) return;
         const reason = String(command.reason ?? "Cancelled by parent");
         cancelState = { reason, command };
+        if (takePendingRetry()) {
+          settle("cancelled", { code: "PARENT_CANCELLED", message: reason, details: { transientRetries } });
+          return;
+        }
         if (command.signal === "SIGKILL") {
           killGroup("SIGKILL");
         } else {
@@ -736,7 +878,19 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
           }, 5_000);
         }
       } else if (command.action === "pause") {
-        if (killGroup("SIGSTOP")) {
+        // Mid-backoff there is no process to SIGSTOP, so without this the pause is
+        // silently dropped and the relaunch spawns anyway — the run keeps working
+        // after the parent told it to stop. Hold the relaunch instead; `resume`
+        // spawns it.
+        const heldRetry = takePendingRetry();
+        if (heldRetry) {
+          pendingRetry = { command: heldRetry.command };
+          accountActiveTime();
+          clearBudgetTimers();
+          void mutateLiveStatus((current) => {
+            store.writeStatus(updateRunStatus(current, { state: "paused", processHealth: "dead", summary: String(command.reason ?? "Paused by parent"), timeout: { ...(current.timeout ?? {}), reason: String(command.reason ?? "Paused by parent") } }));
+          }).catch(() => undefined);
+        } else if (killGroup("SIGSTOP")) {
           accountActiveTime();
           clearBudgetTimers();
           void mutateLiveStatus((current) => {
@@ -744,7 +898,10 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
           }).catch(() => undefined);
         }
       } else if (command.action === "resume" || command.action === "extend") {
-        killGroup("SIGCONT");
+        // A relaunch held by `pause` has no timer; claim it and spawn now.
+        const resumedRetry = pendingRetry && !pendingRetry.timer ? takePendingRetry() : undefined;
+        if (resumedRetry) launchRetry(resumedRetry.command);
+        else killGroup("SIGCONT");
         const additional = typeof command.additionalRunSeconds === "number" ? command.additionalRunSeconds : undefined;
         void mutateLiveStatus((current) => {
           store.writeStatus(updateRunStatus(current, { state: "running", processHealth: "alive", summary: "Continued by parent", needs: null, timeout: { ...(current.timeout ?? {}), additionalRunSeconds: additional } }));
@@ -769,6 +926,10 @@ export async function runSupervisor(input: SupervisorInput): Promise<RunResult> 
       accountActiveTime();
       clearBudgetTimers();
       expiryState = {};
+      if (takePendingRetry()) {
+        settle("expired", { code: "MAX_RUN_SECONDS_EXPIRED", message: "Time budget expired", details: { effectiveMaxRunMs: input.effectiveMaxRunMs, transientRetries } });
+        return;
+      }
       killGroup("SIGTERM");
       killGroup("SIGCONT");
       expiryState.forceTimer = setTimeout(() => killGroup("SIGKILL"), 500);

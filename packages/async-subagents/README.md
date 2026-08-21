@@ -337,6 +337,29 @@ When a child approaches its budget, the supervisor appends an inbox warning aski
 
 A child killed mid-report has written nothing to stdout while everything it actually said sits in `events.jsonl`. Rather than finalize with an empty body, the supervisor reconstructs one from those event summaries and bodies, marked `# Reconstructed report` so it is not mistaken for the agent's intended deliverable.
 
+### Transient upstream refusals
+
+An upstream moderation classifier on the Codex Responses API refuses turns mid-reply: the request is
+accepted, reasoning begins streaming, then the stream dies with `Invalid prompt: your prompt was
+flagged as potentially violating our usage policy`. Nothing is billed and the refusal is
+probabilistic — the same context usually succeeds on an immediate retry — but Pi treats it as fatal
+and exits non-zero, which used to kill the whole lane.
+
+The supervisor now relaunches instead. It matches only a stderr line starting with Pi's
+`Codex error: Invalid prompt:` prefix, so a child that merely prints or quotes that text and then
+fails for its own reasons is never relaunched. Two attempts, 2s apart, and only when the run records
+a Pi session: the relaunch points Pi at the same `--session` file with `artifacts/resume.md` as the
+prompt, so the child resumes its own history rather than restarting the brief. Because the turn died
+mid-reply, `resume.md` tells the child to reconcile half-applied edits before continuing.
+
+Relaunches spend the run's existing budget — they never extend it — and are visible as
+`status.transientRetries` plus a `progress` event carrying `reason: "upstream_prompt_flag"`. The
+attempt that died keeps its output in `logs/stderr.log`; the reported result body comes from the
+attempt that succeeded. Once the attempts are exhausted the run fails as `CHILD_EXITED` as before.
+
+A lineage whose accumulated transcript reliably trips the classifier will exhaust the retries rather
+than recover. That case is not a lane to continue — start a fresh lane with a summarized brief.
+
 Continue useful unfinished work from the recorded session by calling `subagent_continue` on the terminal run. This creates a new continuation run that replays the session state; use `additionalRunSeconds` to choose the smallest reasonable budget for the remaining work.
 
 ## Parent Tools

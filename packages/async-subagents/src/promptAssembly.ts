@@ -21,6 +21,8 @@ export interface PromptAssemblyInput {
 export interface PromptAssemblyResult {
   systemPath: string;
   taskPath: string;
+  /** Prompt used when the supervisor relaunches this run into its recorded session. */
+  resumePath: string;
   includePaths: string[];
   skills: string[];
   extensions: string[];
@@ -126,9 +128,37 @@ ${input.definition.harness === "claude" ? "Interactive Claude agents should reac
     "utf8",
   );
 
+  // Relaunch prompt for a child killed mid-reply by a transient upstream refusal.
+  // The supervisor points Pi at the same recorded session, so the child reads this
+  // with its full history already in context — repeating the brief would only
+  // invite it to start over. What it cannot infer is that its last turn died
+  // between deciding to write and finishing the write, so say that plainly and
+  // make reconciling the working tree the first step.
+  const resumePath = join(input.runPaths.artifactsDir, "resume.md");
+  writeFileSync(
+    resumePath,
+    `# Resume After an Interrupted Turn
+
+Your previous turn was terminated by an upstream content filter before it could
+finish. This was not a judgement about your task, and nothing you did caused it.
+Your assigned task is unchanged and is mirrored at ${taskPath}.
+
+The turn was cut off mid-reply, so a file edit or command may have been half
+applied. Before continuing:
+
+1. Inspect the working tree for partial or inconsistent edits from that turn.
+2. Repair or revert anything left half-written.
+3. Then resume the task from where it actually stands.
+
+Do not restart work you have already completed.
+`,
+    "utf8",
+  );
+
   return {
     systemPath,
     taskPath,
+    resumePath,
     includePaths,
     skills: uniqueStrings([...input.definition.skills, ...(input.skills ?? [])]),
     extensions: input.definition.harness === "claude" ? [] : input.definition.extensions,

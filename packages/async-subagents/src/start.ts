@@ -1087,7 +1087,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     ? (() => { const p = resolveBalancedProviderExtensionPath(); return p ? [p] : []; })()
     : [];
 
-  const piCommand = buildPiCommand({
+  const piCommandInput = {
     piBin: input.piBin,
     systemPath: prompt.systemPath,
     taskPath: prompt.taskPath,
@@ -1114,7 +1114,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     parentRunId: root.parentRunId,
     continuation: input.continuation,
     extraEnv: effectiveExtraEnv,
-  });
+  } satisfies Parameters<typeof buildPiCommand>[0];
+  const piCommand = buildPiCommand(piCommandInput);
   const command = input.fake?.mode === "child" ? fakeChildCommand(input.fake, cwd) : piCommand;
   writeLaunchLogWithMetadata(paths.runDir, command, {
     variant: input.variant,
@@ -1153,6 +1154,25 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     }
   }
 
+  // An upstream moderation classifier refuses Codex turns mid-reply. The refusal is
+  // probabilistic — the same context succeeds on an immediate retry — but Pi treats
+  // it as fatal, so today one coin flip destroys a lane that may have been working
+  // for minutes. Relaunch instead, into the run's own recorded session so the child
+  // resumes with its history and its half-finished edits in view.
+  //
+  // Only when the run records a session. Without one there is nothing to resume
+  // into, and relaunching the original brief against a working tree the dead child
+  // may have already edited is a worse failure than reporting the refusal.
+  const transientRetry: SupervisorInput["transientRetry"] = sessionPolicy === "record"
+    ? {
+        maxAttempts: 2,
+        backoffMs: 2_000,
+        // A fake-child launch relaunches the same fake: swapping in a real Pi
+        // command mid-run would make the fake stop being a faithful stand-in.
+        command: input.fake?.mode === "child" ? command : buildPiCommand({ ...piCommandInput, taskPath: prompt.resumePath }),
+      }
+    : undefined;
+
   const supervisorInput: SupervisorInput = {
     runId,
     runRoot: store.runRoot,
@@ -1160,6 +1180,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     parentRunId: root.parentRunId,
     agentName: definition.name,
     command,
+    transientRetry,
     effectiveMaxRunMs: input.fake?.mode === "child" ? input.fake.effectiveMaxRunMs ?? effectiveMaxRunMs : effectiveMaxRunMs,
     fake: input.fake?.mode === "immediate" ? input.fake : undefined,
     codexAuthBalancer: codexAuthBalancer ? { isolatedDir: codexAuthBalancer.isolatedDir, selectedSlot: codexAuthBalancer.selectedSlot, stateDir: asyncSubagentsConfig.codexAuthBalancer.stateDir, timeoutMs: asyncSubagentsConfig.codexAuthBalancer.timeoutMs, metadata: codexAuthBalancer.metadata } : undefined,

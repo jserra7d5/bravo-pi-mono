@@ -1385,3 +1385,62 @@ test("status and result helpers read durable snapshots", () => {
   assert.equal(readSubagentResult(store, { runId })?.body, "Done");
   assert.equal(JSON.parse(readFileSync(join(store.pathsFor({ runId }).resultPath), "utf8")).state, "completed");
 });
+
+test("a recorded-session launch carries a relaunch command that resumes the same session", async () => {
+  const w = workspace();
+  const started = await startSubagent({
+    agent: "scout",
+    task: "Return a fake result",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    fake: { mode: "child" },
+  });
+
+  const resumePath = join(started.runDir, "artifacts", "resume.md");
+  const resume = readFileSync(resumePath, "utf8");
+  // The relaunch must tell the child to reconcile a half-applied edit: the turn
+  // died mid-reply, so the working tree can be inconsistent in a way the child
+  // cannot see from its own transcript.
+  assert.match(resume, /partial or inconsistent edits/);
+  assert.match(resume, /Do not restart work you have already completed/);
+
+  const supervisorInput = JSON.parse(readFileSync(join(started.runDir, "logs", "supervisor-input.json"), "utf8"));
+  assert.equal(supervisorInput.transientRetry.maxAttempts, 2);
+});
+
+test("the relaunch command carries the resume prompt against the run's own session", async () => {
+  const w = workspace();
+  const started = await startSubagent({
+    agent: "scout",
+    task: "Return a fake result",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    piBin: "/bin/true",
+  });
+
+  const supervisorInput = JSON.parse(readFileSync(join(started.runDir, "logs", "supervisor-input.json"), "utf8"));
+  const retryArgs: string[] = supervisorInput.transientRetry.command.args;
+  assert.ok(retryArgs.includes(`@${join(started.runDir, "artifacts", "resume.md")}`), "relaunch prompt should be the resume artifact");
+  // Same recorded session as the first attempt, so the child resumes its own history.
+  const sessionPath = join(started.runDir, "pi-session", "session.jsonl");
+  assert.equal(retryArgs[retryArgs.indexOf("--session") + 1], sessionPath);
+  assert.equal(supervisorInput.command.args[supervisorInput.command.args.indexOf("--session") + 1], sessionPath);
+});
+
+test("a session-less launch carries no relaunch command", async () => {
+  const w = workspace();
+  const started = await startSubagent({
+    agent: "scout",
+    task: "Return a fake result",
+    cwd: w.root,
+    runRoot: w.runRoot,
+    parentRunId: "root_test",
+    session: "none",
+    fake: { mode: "child" },
+  });
+
+  const supervisorInput = JSON.parse(readFileSync(join(started.runDir, "logs", "supervisor-input.json"), "utf8"));
+  assert.equal(supervisorInput.transientRetry, undefined);
+});

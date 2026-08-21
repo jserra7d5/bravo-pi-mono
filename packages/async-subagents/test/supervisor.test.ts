@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSupervisor } from "../src/supervisor.js";
@@ -238,4 +238,244 @@ test("supervisor removes lifecycle listeners after child settles", async () => {
   for (const signal of signals) {
     assert.equal(process.listenerCount(signal), before.get(signal));
   }
+});
+
+const UPSTREAM_REFUSAL =
+  "Codex error: Invalid prompt: your prompt was flagged as potentially violating our usage policy. Please try again with a different prompt: https://platform.openai.com/docs/guides/reasoning#advice-on-prompting";
+
+/**
+ * A real child process that refuses on its first N invocations exactly the way Pi
+ * does — the upstream string on stderr, exit code 1 — and succeeds after that. The
+ * attempt counter lives on disk so it survives the relaunch, which is the whole
+ * point: the supervisor must spawn a genuinely new process for the count to move.
+ */
+function refusingChild(cwd: string, refusals: number, successOutput = "recovered result") {
+  const counterPath = join(cwd, "refusal-count");
+  const script = `
+    const { existsSync, readFileSync, writeFileSync } = require("node:fs");
+    const counter = ${JSON.stringify(counterPath)};
+    const seen = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;
+    writeFileSync(counter, String(seen + 1), "utf8");
+    if (seen < ${refusals}) {
+      process.stderr.write(${JSON.stringify(UPSTREAM_REFUSAL)} + "\\n");
+      process.exit(1);
+    }
+    process.stdout.write(${JSON.stringify(successOutput)});
+  `;
+  return { command: process.execPath, args: ["-e", script], cwd, env: {}, counterPath };
+}
+
+test("a child refused by the upstream content filter is relaunched, not failed", async () => {
+  const { cwd, runRoot, parentRunId, store, runId } = createQueuedRun();
+  const child = refusingChild(cwd, 1);
+
+  const result = await runSupervisor({
+    runId,
+    runRoot,
+    cwd,
+    parentRunId,
+    agentName: "scout",
+    command: child,
+    transientRetry: { maxAttempts: 2, backoffMs: 10 },
+  });
+
+  assert.equal(result.state, "completed");
+  assert.equal(result.success, true);
+  // The refusal text must not survive into the reported body.
+  assert.match(result.body ?? "", /recovered result/);
+  assert.doesNotMatch(result.body ?? "", /usage policy/);
+  assert.equal(readFileSync(child.counterPath, "utf8"), "2");
+
+  const status = store.readStatus(runId);
+  assert.equal(status.transientRetries, 1);
+  const events = store.readEvents(runId).records;
+  const retryEvent = events.find((event) => event.data?.reason === "upstream_prompt_flag");
+  assert.ok(retryEvent, "expected a progress event recording the relaunch");
+  assert.equal(retryEvent?.data?.attempt, 1);
+  assert.equal(retryEvent?.wake, false);
+});
+
+test("relaunching stops at maxAttempts and reports the refusal", async () => {
+  const { cwd, runRoot, parentRunId, store, runId } = createQueuedRun();
+  const child = refusingChild(cwd, 99);
+
+  const result = await runSupervisor({
+    runId,
+    runRoot,
+    cwd,
+    parentRunId,
+    agentName: "scout",
+    command: child,
+    transientRetry: { maxAttempts: 2, backoffMs: 10 },
+  });
+
+  assert.equal(result.state, "failed");
+  assert.equal(result.error?.code, "CHILD_EXITED");
+  assert.equal((result.error?.details as { transientRetries?: number })?.transientRetries, 2);
+  // Initial attempt plus two relaunches.
+  assert.equal(readFileSync(child.counterPath, "utf8"), "3");
+  assert.equal(store.readStatus(runId).transientRetries, 2);
+});
+
+test("a failure that is not an upstream refusal is never relaunched", async () => {
+  const { cwd, runRoot, parentRunId, runId } = createQueuedRun();
+  const counterPath = join(cwd, "plain-count");
+  const script = `
+    const { existsSync, readFileSync, writeFileSync } = require("node:fs");
+    const counter = ${JSON.stringify(counterPath)};
+    const seen = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;
+    writeFileSync(counter, String(seen + 1), "utf8");
+    process.stderr.write("TypeError: cannot read properties of undefined\\n");
+    process.exit(1);
+  `;
+
+  const result = await runSupervisor({
+    runId,
+    runRoot,
+    cwd,
+    parentRunId,
+    agentName: "scout",
+    command: { command: process.execPath, args: ["-e", script], cwd, env: {} },
+    transientRetry: { maxAttempts: 2, backoffMs: 10 },
+  });
+
+  assert.equal(result.state, "failed");
+  assert.equal(readFileSync(counterPath, "utf8"), "1");
+});
+
+test("cancelling during the relaunch backoff settles the run instead of hanging", async () => {
+  const { cwd, runRoot, parentRunId, store, runId, paths } = createQueuedRun();
+  const child = refusingChild(cwd, 99);
+
+  const supervisor = runSupervisor({
+    runId,
+    runRoot,
+    cwd,
+    parentRunId,
+    agentName: "scout",
+    command: child,
+    // Long enough that the cancel lands while no child process exists.
+    transientRetry: { maxAttempts: 3, backoffMs: 3_000 },
+  });
+
+  await delay(300);
+  appendFileSync(join(paths.runDir, "control.jsonl"), `${JSON.stringify({ action: "cancel", reason: "parent stopped the lane" })}\n`, "utf8");
+
+  const result = await Promise.race([
+    supervisor,
+    delay(2_000).then(() => "hung" as const),
+  ]);
+  assert.notEqual(result, "hung", "cancel during backoff must settle the run");
+  assert.equal(typeof result === "string" ? result : result.state, "cancelled");
+  assert.equal(store.readStatus(runId).state, "cancelled");
+  // The pending relaunch must not have spawned after the cancel.
+  await delay(3_200);
+  assert.equal(readFileSync(child.counterPath, "utf8"), "1");
+});
+
+test("pausing during the relaunch backoff holds the relaunch until resume", async () => {
+  const { cwd, runRoot, parentRunId, store, runId, paths } = createQueuedRun();
+  const child = refusingChild(cwd, 1);
+
+  const supervisor = runSupervisor({
+    runId,
+    runRoot,
+    cwd,
+    parentRunId,
+    agentName: "scout",
+    command: child,
+    transientRetry: { maxAttempts: 2, backoffMs: 400 },
+  });
+
+  // Land the pause inside the backoff window, while no child process exists.
+  await delay(180);
+  appendFileSync(join(paths.runDir, "control.jsonl"), `${JSON.stringify({ action: "pause", reason: "parent checkpoint" })}\n`, "utf8");
+  await delay(700);
+
+  // The relaunch must not have fired on its own timer.
+  assert.equal(store.readStatus(runId).state, "paused");
+  assert.equal(readFileSync(child.counterPath, "utf8"), "1");
+
+  appendFileSync(join(paths.runDir, "control.jsonl"), `${JSON.stringify({ action: "resume" })}\n`, "utf8");
+  const result = await supervisor;
+  assert.equal(result.state, "completed");
+  assert.equal(readFileSync(child.counterPath, "utf8"), "2");
+});
+
+test("a child that merely prints the refusal text is not relaunched", async () => {
+  const { cwd, runRoot, parentRunId, runId } = createQueuedRun();
+  const counterPath = join(cwd, "quoting-count");
+  // The refusal text reaches stdout the way a child quoting a brief or echoing a
+  // log would produce it, while the real failure is something else entirely.
+  const script = `
+    const { existsSync, readFileSync, writeFileSync } = require("node:fs");
+    const counter = ${JSON.stringify(counterPath)};
+    const seen = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;
+    writeFileSync(counter, String(seen + 1), "utf8");
+    process.stdout.write(${JSON.stringify(UPSTREAM_REFUSAL)} + "\\n");
+    process.stderr.write("quoted the incident report above; " + ${JSON.stringify(UPSTREAM_REFUSAL)} + "\\n");
+    process.stderr.write("TypeError: cannot read properties of undefined\\n");
+    process.exit(1);
+  `;
+
+  const result = await runSupervisor({
+    runId,
+    runRoot,
+    cwd,
+    parentRunId,
+    agentName: "scout",
+    command: { command: process.execPath, args: ["-e", script], cwd, env: {} },
+    transientRetry: { maxAttempts: 2, backoffMs: 10 },
+  });
+
+  assert.equal(result.state, "failed");
+  assert.equal(readFileSync(counterPath, "utf8"), "1");
+});
+
+test("the time budget expiring during the relaunch backoff settles the run and spawns nothing", async () => {
+  const { cwd, runRoot, parentRunId, store, runId } = createQueuedRun();
+  const child = refusingChild(cwd, 99);
+
+  const result = await runSupervisor({
+    runId,
+    runRoot,
+    cwd,
+    parentRunId,
+    agentName: "scout",
+    command: child,
+    // The budget runs out while the relaunch is still counting down.
+    effectiveMaxRunMs: 250,
+    transientRetry: { maxAttempts: 3, backoffMs: 2_000 },
+  });
+
+  assert.equal(result.state, "expired");
+  assert.equal(result.error?.code, "MAX_RUN_SECONDS_EXPIRED");
+  assert.equal(readFileSync(child.counterPath, "utf8"), "1");
+  await delay(2_200);
+  // The backoff was charged to the run, so nothing spawns after expiry.
+  assert.equal(readFileSync(child.counterPath, "utf8"), "1");
+  assert.equal(store.readStatus(runId).state, "expired");
+});
+
+test("a relaunch that cannot spawn settles the run once", async () => {
+  const { cwd, runRoot, parentRunId, store, runId } = createQueuedRun();
+  const child = refusingChild(cwd, 99);
+
+  const result = await runSupervisor({
+    runId,
+    runRoot,
+    cwd,
+    parentRunId,
+    agentName: "scout",
+    command: child,
+    transientRetry: {
+      maxAttempts: 2,
+      backoffMs: 10,
+      command: { command: join(cwd, "does-not-exist"), args: [], cwd, env: {} },
+    },
+  });
+
+  assert.equal(result.state, "failed");
+  assert.equal(result.error?.code, "SPAWN_FAILED");
+  assert.equal(store.readStatus(runId).state, "failed");
 });

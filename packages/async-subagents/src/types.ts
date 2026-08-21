@@ -198,6 +198,8 @@ export interface RunStatus {
   stdoutPath?: string;
   stderrPath?: string;
   processHealth?: "unknown" | "alive" | "dead";
+  /** Children relaunched after a transient upstream refusal; absent when none. */
+  transientRetries?: number;
   livenessState?: ClaudeLivenessState;
   lastTerminalOutputAt?: string;
   terminalOutputBytes?: number;
