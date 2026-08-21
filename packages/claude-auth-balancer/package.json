@@ -1,6 +1,6 @@
 {
   "name": "@bravo/claude-auth-balancer",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
   "description": "Cache-affinity-first Claude OAuth balancer: a local proxy that pins each Claude Code session to one account and routes on unified rate-limit claims.",
