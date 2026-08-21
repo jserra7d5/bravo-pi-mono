@@ -1,6 +1,6 @@
 {
   "name": "@bravo/async-subagents",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "type": "module",
   "description": "Durable async subagent runtime for Pi and Claude harnesses.",
