@@ -345,9 +345,9 @@ flagged as potentially violating our usage policy`. Nothing is billed and the re
 probabilistic — the same context usually succeeds on an immediate retry — but Pi treats it as fatal
 and exits non-zero, which used to kill the whole lane.
 
-The supervisor now relaunches instead. It matches only a stderr line starting with Pi's
-`Codex error: Invalid prompt:` prefix, so a child that merely prints or quotes that text and then
-fails for its own reasons is never relaunched. Two attempts, 2s apart, and only when the run records
+The supervisor now relaunches instead. It matches only a stderr line starting with Pi's full
+`Error: Codex error: Invalid prompt:` framing, so a child that merely prints or quotes the nested
+upstream message and then fails for its own reasons is never relaunched. Two attempts, 2s apart, and only when the run records
 a Pi session: the relaunch points Pi at the same `--session` file with `artifacts/resume.md` as the
 prompt, so the child resumes its own history rather than restarting the brief. Because the turn died
 mid-reply, `resume.md` tells the child to reconcile half-applied edits before continuing.

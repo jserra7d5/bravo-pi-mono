@@ -236,19 +236,19 @@ export function augmentChildFailureDiagnostics(command: PiCommand, stderr: strin
  *
  * The wording says "prompt" but the request was accepted and billed nothing, and
  * there is no error code to match on — Pi passes the upstream string through as a
- * diagnostic line of its own. So anchor on that framing: a line that STARTS with
- * Pi's `Codex error:` prefix and carries the flag text. A bare substring search
- * would also fire on a child that merely printed the message — quoting it from a
- * brief, a log, or tool output — and then exited non-zero for an unrelated reason,
- * which would relaunch a genuinely broken run against a tree it may have half
- * edited. Every observed occurrence (32 of 32 in the run store) matches this shape,
- * and all of them arrive on stderr.
+ * diagnostic line of its own. Anchor on Pi's complete error framing — a line that
+ * starts `Error: Codex error: Invalid prompt:` — and carries the flag text. A bare
+ * substring search would also fire on a child that merely printed the message,
+ * quoting it from a brief, a log, or tool output, and then exited non-zero for an
+ * unrelated reason. The earlier implementation accidentally anchored on the
+ * nested `Codex error:` text and omitted Pi's leading `Error: ` wrapper, so it
+ * could not match the real stderr shown by Pi.
  *
  * Deliberately biased toward under-matching. A missed refusal costs one lane, which
  * is the behaviour that already exists; a false match spends budget and resumes a
  * dirty working tree.
  */
-const UPSTREAM_REFUSAL_PATTERN = /^Codex error: Invalid prompt:[^\n]*flagged as potentially violating our usage policy/im;
+const UPSTREAM_REFUSAL_PATTERN = /^Error: Codex error: Invalid prompt:[^\n]*flagged as potentially violating our usage policy/im;
 
 export function isTransientUpstreamRefusal(stderr: string): boolean {
   return UPSTREAM_REFUSAL_PATTERN.test(stderr);

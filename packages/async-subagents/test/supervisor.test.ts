@@ -267,8 +267,10 @@ test("supervisor removes lifecycle listeners after child settles", async () => {
   }
 });
 
+// Verbatim Pi stderr framing captured from the failed runtime. The leading
+// `Error: ` is part of Pi's output, not part of the upstream message.
 const UPSTREAM_REFUSAL =
-  "Codex error: Invalid prompt: your prompt was flagged as potentially violating our usage policy. Please try again with a different prompt: https://platform.openai.com/docs/guides/reasoning#advice-on-prompting";
+  "Error: Codex error: Invalid prompt: your prompt was flagged as potentially violating our usage policy. Please try again with a different prompt: https://platform.openai.com/docs/guides/reasoning#advice-on-prompting";
 
 /**
  * A real child process that refuses on its first N invocations exactly the way Pi
@@ -427,6 +429,33 @@ test("pausing during the relaunch backoff holds the relaunch until resume", asyn
   const result = await supervisor;
   assert.equal(result.state, "completed");
   assert.equal(readFileSync(child.counterPath, "utf8"), "2");
+});
+
+test("the nested upstream message without Pi's Error wrapper is not treated as Pi's fatal diagnostic", async () => {
+  const { cwd, runRoot, parentRunId, runId } = createQueuedRun();
+  const counterPath = join(cwd, "unwrapped-count");
+  const unwrapped = UPSTREAM_REFUSAL.replace(/^Error: /, "");
+  const script = `
+    const { existsSync, readFileSync, writeFileSync } = require("node:fs");
+    const counter = ${JSON.stringify(counterPath)};
+    const seen = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;
+    writeFileSync(counter, String(seen + 1), "utf8");
+    process.stderr.write(${JSON.stringify(unwrapped)} + "\\n");
+    process.exit(1);
+  `;
+
+  const result = await runSupervisor({
+    runId,
+    runRoot,
+    cwd,
+    parentRunId,
+    agentName: "scout",
+    command: { command: process.execPath, args: ["-e", script], cwd, env: {} },
+    transientRetry: { maxAttempts: 2, backoffMs: 10 },
+  });
+
+  assert.equal(result.state, "failed");
+  assert.equal(readFileSync(counterPath, "utf8"), "1");
 });
 
 test("a child that merely prints the refusal text is not relaunched", async () => {
