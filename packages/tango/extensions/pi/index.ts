@@ -490,7 +490,7 @@ function targetLabel(args: { name?: string; runId?: string; runDir?: string }): 
 // Import durable lease store from compiled dist to keep the Pi extension
 // aligned with the CLI runtime modules it already executes.
 // @ts-ignore: dist has no declarations, but the module exists after build.
-import { acquireRootOwnerLease, heartbeatRootOwnerLease, ownsRootLease, type RootOwnerLease } from "../../dist/leases.js";
+import { acquireRootOwnerLease, heartbeatRootOwnerLease, ownsRootLease, type RootOwnerLease } from "../../src/leases.js";
 
 let ownerId = `pi_${process.pid}_${randomBytes(4).toString("hex")}`;
 let ownerLease: RootOwnerLease | undefined;
