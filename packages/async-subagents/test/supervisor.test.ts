@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSupervisor } from "../src/supervisor.js";
@@ -9,6 +9,19 @@ import { createInitialStatus } from "../src/status.js";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Poll for a condition instead of sleeping a guessed interval. The timeout is a
+ * failure bound, not a timing assertion — generous on a loaded box, and it names
+ * what it was waiting for so a real hang is not mistaken for scheduling noise.
+ */
+async function waitUntil(predicate: () => boolean, description: string, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${description}`);
+    await delay(20);
+  }
 }
 
 function createQueuedRun() {
@@ -73,18 +86,21 @@ test("manual pause suspends runtime budget and resume reinstalls timeout", async
 });
 
 test("expiration error summary wins while harmless stderr remains the body", async () => {
-  const { cwd, runRoot, parentRunId, runId } = createQueuedRun();
+  const { cwd, runRoot, parentRunId, runId, paths } = createQueuedRun();
   const warning = 'Warning: No models match pattern "bravo-codex-balanced/gpt-5.6-luna"';
 
-  const result = await runSupervisor({
+  // What this asserts is that expiry keeps the child's stderr as the body. Racing a
+  // short wall-clock budget against node's startup made that a coin flip under the
+  // parallel suite: if the process had not flushed yet, the body was empty. Instead
+  // give the budget room it cannot reach on its own, wait until the supervisor has
+  // actually recorded the stderr, then drive expiry from the control channel.
+  const supervisor = runSupervisor({
     runId,
     runRoot,
     cwd,
     parentRunId,
     agentName: "scout",
-    // Leave enough scheduling headroom for the spawned process to flush stderr
-    // under the parallel suite; expiration itself, not its exact timing, is asserted.
-    effectiveMaxRunMs: 500,
+    effectiveMaxRunMs: 60_000,
     command: {
       command: process.execPath,
       args: ["-e", `console.error(${JSON.stringify(warning)}); setInterval(() => {}, 1000);`],
@@ -93,6 +109,17 @@ test("expiration error summary wins while harmless stderr remains the body", asy
     },
   });
 
+  const stderrPath = join(paths.logsDir, "stderr.log");
+  await waitUntil(
+    () => existsSync(stderrPath) && readFileSync(stderrPath, "utf8").includes(warning),
+    "supervisor to record the child's stderr",
+  );
+  // Smallest budget the runtime accepts, applied from zero elapsed: expiry fires on
+  // the next timer tick, through the same expireForBudget path a wall-clock deadline
+  // would take.
+  appendFileSync(join(paths.runDir, "control.jsonl"), `${JSON.stringify({ action: "extend", additionalRunSeconds: 0.001 })}\n`, "utf8");
+
+  const result = await supervisor;
   assert.equal(result.state, "expired");
   assert.equal(result.error?.code, "MAX_RUN_SECONDS_EXPIRED");
   assert.equal(result.summary, "Time budget expired");

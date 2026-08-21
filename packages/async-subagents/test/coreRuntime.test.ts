@@ -149,7 +149,10 @@ function createStoredRun(store: RunStore, root: string, parentRunId: string) {
   return runId;
 }
 
-async function waitForStatusState(store: RunStore, runId: string, state: string, timeoutMs = 1000): Promise<void> {
+// Same failure bound as the supervisor and watch pollers: a second is not enough for
+// a detached supervisor to spawn and settle on a loaded box, and a bound that only
+// has to hold when something is genuinely stuck costs nothing when the test passes.
+async function waitForStatusState(store: RunStore, runId: string, state: string, timeoutMs = 20_000): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     if (store.readStatus(runId).state === state) return;

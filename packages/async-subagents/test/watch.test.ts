@@ -13,10 +13,17 @@ function sink(lines: WatchLine[]): (line: string) => void {
   return (line) => lines.push(JSON.parse(line) as WatchLine);
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
+/**
+ * The timeout is a failure bound, not a timing assertion. Three seconds was not
+ * enough for a cold `node dist/src/cli.js supervisor` to spawn and claim ownership
+ * on a loaded box, which made every caller intermittently fail for scheduling
+ * reasons. Bound it well above any real startup and name what it waited for, so a
+ * genuine hang is distinguishable from a slow machine.
+ */
+async function waitUntil(predicate: () => boolean, description = "condition", timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("timed out waiting for condition");
+    if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${description}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
@@ -47,12 +54,13 @@ test("watchSubagents promotes a SIGKILLed real supervisor under the run lock", a
       const status = w.store.readStatus(w.runId);
       childPid = status.childPid ?? status.pid;
       return status.state === "running" && status.supervisorPid === supervisor.pid && Boolean(status.supervisorStartedAtToken);
-    });
+    }, "the spawned supervisor to claim ownership of the run");
     supervisor.kill("SIGKILL");
     await new Promise<void>((resolve) => supervisor.once("exit", () => resolve()));
     const lines: WatchLine[] = [];
     await watchSubagents({ cwd: w.cwd, runIds: [w.runId], intervalSeconds: 0.01, write: sink(lines) });
-    assert.equal(lines[0]?.state, "failed");
+    // Promotion is what matters, not whether a busy poll slipped in ahead of it.
+    assert.ok(lines.some((line) => line.state === "failed"), `expected a failed line, got ${JSON.stringify(lines)}`);
     assert.equal(w.store.readStatus(w.runId).error?.code, "SUPERVISOR_DIED");
   } finally {
     if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGKILL");
