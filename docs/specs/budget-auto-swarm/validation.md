@@ -9,7 +9,7 @@ Green unit tests alone are insufficient. Done means the real Pi extension entryp
 | Boundary | Runtime invariant | Faithful seam | Fault / edge case | Required evidence |
 |---|---|---|---|---|
 | Command → sticky state | A valid state change appends exactly one branch entry; idempotent/status/invalid commands append none. | Load the real TypeScript Pi extension entrypoint in the existing host test harness with a real `SessionManager` temp session. | Empty/on/off/status, invalid arg, repeated on/off. | Session entries plus command notifications/status calls. |
-| Branch/session restore | Latest valid entry on the active branch determines desired mode; only successfully reconciled state is published, and malformed/other-branch state does not leak. | Real source extension loaded with Pi `DefaultResourceLoader` and a real temp `SessionManager`; invoke actual session/tree lifecycle events. | Fork before enable, navigate branches, unsupported version, malformed payload, tool reconciliation failure. | Desired entry state versus published runtime/prompt/guard/badge state per branch. |
+| Global session/process restore | The user-global state determines desired mode across new sessions, branches, reloads, and independent Pi processes; only successfully reconciled state is published. Historical transcript markers are inert. | Real source extension loaded with Pi `DefaultResourceLoader` and real temp `SessionManager` instances plus a subprocess reading the same temporary `ASYNC_SUBAGENTS_HOME`. | New session, fork/tree navigation with conflicting legacy markers, reload/resume, malformed global state, task/tool reconciliation failure. | Global file state versus published runtime/prompt/guard/badge state in each runtime. |
 | Task coupling | Published budget mode always has task tools/state enabled; activation/restore failures publish budget disabled while preserving durable desired state for retry. | Real extension entrypoint loaded through Pi’s source loader with a real `SessionManager`, active-tool host, and temp task root. | Tasks initially off; task-store failure; `getActiveTools`/`setActiveTools` failure on command/start/tree; attempt `/tasks off`; mode off leaves tasks on. | Stored markers, published runtime state, prompt/guard state, active tools, badges, errors. |
 | Prompt injection | Enabled prompt contains one exact overlay and one compact state line, removes conflicting base thinking/fast-track rules, and renders armed fast-track unavailable; disabled prompt is byte-compatible with current guidance. | Real source extension loaded through Pi’s host loader; invoke actual `before_agent_start`. | Repeated turns, stale markers, fast-track on/off, toggle on/off, compaction/resume. | Exact rendered prompt checked structurally and shown verbatim once in review evidence. |
 | Catalog/variant resolution | Each built-in role exposes pure `luna` and `sol` overlays while preserving role body/tools/extensions. | Real `discoverAgentDefinitions()` and `applyAgentVariant()` over shipped files. | User/project role override; missing variant; project `luna` name mapped to wrong model. | Resolved definitions and catalog render. |
@@ -42,9 +42,11 @@ Prefer extending existing host/task/prompt/installer suites when that exercises 
 
 Properties:
 
-- any sequence of valid/malformed state entries resolves to the last valid enabled value on the selected branch;
-- `on,on,status` adds one enabled entry;
-- `off,off,status` adds at most one disabled entry after an enabled state;
+- missing global state defaults disabled and malformed/unsupported global state fails closed with an error;
+- `on,on,status` performs at most one effective global enabled write;
+- `off,off,status` performs at most one effective global disabled write after enable;
+- a fresh controller and independent process restore the same global value without session entries;
+- an already-running controller observes another process's change before its next lead turn;
 - prompt transform is idempotent for any input containing zero, one, or stale duplicate marker blocks;
 - accepted launch matrix equals the table in `contracts.md`, including Pi-only harness;
 - every rejected launch has zero allocation/index/preflight/spawn/task mutation;
@@ -89,7 +91,7 @@ Required deterministic faults:
 - run index write counter proves zero on rejection;
 - project role shadows a built-in and spoofs variant names;
 - stale duplicate prompt markers;
-- malformed branch state after a valid entry;
+- malformed global state and conflicting historical branch markers;
 - compaction with a ready task and no run rows, plus result-ready and blocked rows;
 - each installer destination contains a real user-authored path in turn; an injected later mutation fails after preflight;
 - Claude organization blocks `claude-opus-5` (documented invocation limitation, not installer behavior).

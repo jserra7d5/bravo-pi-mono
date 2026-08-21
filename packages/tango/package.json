@@ -1,6 +1,6 @@
 {
   "name": "@bravo/tango",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "private": true,
   "type": "module",
   "description": "Native tmux agent orchestration CLI with pi and other CLI harnesses.",

@@ -672,6 +672,8 @@ export default function asyncSubagentsPiExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
+    try { await budgetController.sync(ctx); }
+    catch (error) { ctx.ui.notify(`Budget auto swarm global sync failed closed: ${error instanceof Error ? error.message : String(error)}`, "error"); }
     const cwd = cwdOf(ctx);
     const identity = ensureRoot(cwd, piSessionIdOf(ctx));
     const store = new RunStore({ cwd });

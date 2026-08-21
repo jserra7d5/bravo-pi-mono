@@ -47,32 +47,32 @@ The state is reconstructed rather than treated as durable by itself.
 
 On `session_start` and `session_tree`, one combined reconciler:
 
-1. Replay valid `bravo-budget-auto-swarm-state` entries from `getBranch()` into a desired state without publishing it.
+1. Read the user-global `budget-auto-swarm.json` under `ASYNC_SUBAGENTS_HOME` into desired state without publishing it.
 2. Restore/reconcile the existing task-runtime state through its canonical owner.
 3. If desired budget state is enabled, ensure task state is enabled and successfully apply active task tools.
 4. Only after success, publish in-memory budget enabled state, prompt/guard state, and both statuses.
-5. On failure, publish budget disabled for this runtime, clear its badge/overlay/guard, preserve durable entries for retry, and notify/log the reconciliation error.
+5. On failure, publish budget disabled for this runtime, clear its badge/overlay/guard, preserve the durable global value for retry, and notify/log the reconciliation error.
 
-Branch replay is authoritative. Process state from the prior branch must not leak into a newly selected branch. The same reconciler runs for command activation, session start, and tree navigation so failure semantics cannot drift.
+The global file is authoritative across sessions and processes. Branch navigation re-runs reconciliation but cannot change desired mode. `before_agent_start` also re-reads it so a change from another live Pi process applies before the next lead turn. The same reconciler runs for command activation, every session lifecycle restore, and cross-process refresh so failure semantics cannot drift.
 
-Fork/resume/reload behavior follows Pi’s normal branch/session entries. No environment propagation is required because child models must not inherit lead orchestration mode.
+No environment propagation is required because child models must not inherit lead orchestration mode; `ASYNC_SUBAGENTS_HOME` only relocates the shared state root.
 
 ### Enable command
 
 Command handler:
 
 1. Parse `on`/empty.
-2. If already enabled, refresh UI and notify current state; append no duplicate entry.
+2. If already enabled globally and published in this runtime, refresh UI and notify current state; perform no write.
 3. Reconcile task runtime and active tools through the combined lifecycle reconciler.
-4. Only after success, append the budget-enabled state entry and publish enabled prompt/guard/badge state.
+4. Only after success, atomically write the global enabled value and publish enabled prompt/guard/badge state.
 5. Notify the operator that Pi’s lead model is unchanged and launches are now budget-policy guarded.
 
-If task state or active-tool application fails, no budget-enabled entry is appended and runtime budget state remains disabled.
+If task state or active-tool application fails, the global value is not changed by the command and runtime budget state remains disabled.
 
 ### Disable command
 
-1. If already disabled, refresh UI and return without a state entry.
-2. Append `{ version: 1, enabled: false }`.
+1. If already disabled globally and in this runtime, refresh UI and return without a write.
+2. Atomically write global `enabled: false`.
 3. Clear in-memory state and badge.
 4. Leave tasks and fast-track state unchanged.
 
@@ -182,11 +182,11 @@ The exact rendered prompt is reviewed for dispatch and backpressure policy, but 
 
 ## Compaction and resume
 
-Budget state survives through the custom branch entry. Task/run truth already survives in runtime stores.
+Budget state survives through the user-global atomic state file. Task/run truth already survives in runtime stores.
 
 On `session_compact`:
 
-- do not append a redundant budget state entry;
+- do not rewrite unchanged user-global budget state;
 - read canonical task projections before deciding whether a reminder is needed;
 - treat any nonterminal task (`open`, `active`, `blocked`, or `failed` requiring lead disposition), including a ready task with no run row, as independently reminder-worthy;
 - build the reminder from canonical task/run projections;

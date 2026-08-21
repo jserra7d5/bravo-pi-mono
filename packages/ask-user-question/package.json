@@ -1,6 +1,6 @@
 {
   "name": "@bravo/ask-user-question",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "private": true,
   "type": "module",
   "description": "Structured interactive question tool for Pi coding agent.",

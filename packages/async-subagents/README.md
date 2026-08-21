@@ -82,13 +82,13 @@ failure retries instead of dropping or double-sending a parent message.
 
 ## Budget auto swarm
 
-Pi exposes a sticky, branch-scoped mode:
+Pi exposes a sticky, user-global mode that survives new sessions and Pi processes:
 
 ```text
 /budget-auto-swarm on|off|status
 ```
 
-Enabling it also enables task orchestration, displays the lavender `SWARM:auto` status, injects the durable ready-set scheduling policy, and guards every new Pi child start before allocation. New starts must use `variant: "luna"` with `thinkingLevel: high|xhigh|max` or `variant: "sol"` with `thinkingLevel: low|medium`; `fastTrack` is forbidden. Existing continuations retain their recorded launch identity. Turning the mode off leaves tasks enabled.
+Its authoritative value is stored atomically at `${ASYNC_SUBAGENTS_HOME:-~/.async-subagents}/budget-auto-swarm.json`. Enabling it also enables task orchestration, displays the lavender `SWARM:auto` status, injects the durable ready-set scheduling policy, and guards every new Pi child start before allocation. New starts must use `variant: "luna"` with `thinkingLevel: high|xhigh|max` or `variant: "sol"` with `thinkingLevel: low|medium`; `fastTrack` is forbidden. Existing continuations retain their recorded launch identity. Turning the mode off leaves tasks enabled.
 
 Claude Code users explicitly invoke `/budget-auto-swarm <objective>`. Its Opus 5 medium override lasts only for that invocation turn; reinvoke after user-authored continuation. Claude Code native Tasks are the sole Claude dependency graph and progress ledger; the CLI owns child-run lifecycle only. Installation links both Claude skills.
 

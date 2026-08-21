@@ -23,7 +23,7 @@ When active, the lead acts as the control plane for a durable task graph:
 2. Represent coarse milestones and hard dependencies in the existing `task_*` plane.
 3. Dispatch every safe ready lane up to the useful concurrency limit.
 4. Refill capacity immediately when a lane completes, blocks, or makes a downstream milestone ready.
-5. Use Luna for the bulk of reasoning and implementation; use Sol only for a justified capability escalation.
+5. Use Luna xhigh/max for the bulk of substantive execution; use Sol medium for intelligence-critical judgment or step-constrained critical-path work.
 6. Continue until every required milestone is terminal, integrated, and validated, or until a real user decision/authorization block is reached.
 
 The lead remains accountable for scope, scheduling, cross-lane synthesis, conflict resolution, and final evidence. Children remain bounded non-orchestrators.
@@ -74,7 +74,7 @@ No second graph store, queue, supervisor, or child protocol is introduced. Pi ke
 
 | Concern | Owner |
 |---|---|
-| Whether budget-auto-swarm is active in a Pi session | Sticky custom session entry plus in-memory restored state. |
+| Whether budget-auto-swarm is active in Pi | Atomic user-global state under `ASYNC_SUBAGENTS_HOME` plus successfully reconciled in-memory runtime state. |
 | What the lead should do | Conditional lead prompt overlay. |
 | What model portfolio may launch | `subagent_start` launch-policy validation. |
 | Work/dependency truth | Pi: existing `TaskStore` through `task_*`. Claude: Claude Code native task management. |
@@ -89,7 +89,7 @@ The prompt does not own enforcement. The badge does not own policy. The graph do
 
 ### Evidence informing the default
 
-As of the design snapshot, DeepSWE v1.1 reports Luna max at 67% pass@1 and about $0.61 per task, while Sol max reports 73% and about $8.39 per task. Artificial Analysis reports Luna and Sol on its intelligence/cost Pareto frontier while Terra is dominated by another family/effort point. These are routing priors, not universal truth: harness, effort, repository, and task mix matter.
+As of the design snapshot, DeepSWE v1.1 reports Luna max at 67% pass@1, about $0.61 per task, and roughly 102 agent steps per task. Sol medium reports 61%, about $1.86 per task, and roughly 31 steps; Sol max reaches about 73% at roughly $8.39 per task. Luna max therefore dominates Sol medium on score and dollar cost, while Sol medium uses about one-third the agent steps. Artificial Analysis reports Luna and Sol on its intelligence/cost Pareto frontier while Terra is dominated by another family/effort point. These are routing priors, not universal truth: harness, latency per step, repository, and task mix matter.
 
 Primary evidence:
 
@@ -117,11 +117,13 @@ The base role prompts, tools, extensions, run mode, and depth limits do not chan
 
 | Route | Use |
 |---|---|
-| Luna high | Default for bounded implementation, investigation, analysis, validation, and routine review. |
-| Luna xhigh | Harder planning, diagnosis, multi-file implementation, adversarial review, or a failed Luna-high attempt with a still-credible approach. |
-| Luna max | Rare bounded escalation when xhigh lacks sufficient reasoning depth and the expected value exceeds another independent high/xhigh lane. |
-| Sol low | Bounded task where stronger base-model behavior matters but deep reasoning is unnecessary. |
-| Sol medium | Capability escalation for a critical-path task after the brief and proof seam are already tight. |
+| Luna high | Support work: scouting, retrieval, summarization, mechanical checks, and tightly specified small edits. |
+| Luna xhigh | Default execution route for routine implementation, investigation, validation, and ordinary code review against a concrete contract. |
+| Luna max | Complex execution: difficult diagnosis, multi-file implementation, subtle integration, regression review, or work whose retries are expensive. It is a normal route when the task warrants depth, not a post-failure exception. |
+| Sol low | Narrow judgment route for bounded intelligence-sensitive decisions that do not require deep analysis; use sparingly. |
+| Sol medium | Highest-judgment route for architecture and planning, adversarial design review, security or safety analysis, ambiguous diagnosis, cross-lane synthesis, and decisions that shape the graph. Also use when fewer agent steps or shorter critical-path occupancy matters more than dollar efficiency. |
+
+Route by the cognitive bottleneck, not the task label. Ordinary code review belongs on Luna xhigh; difficult implementation or regression review belongs on Luna max; adversarial design, architecture, security, or invariant review belongs on Sol medium. Do not require a cheaper route to fail before selecting the effort the task already warrants.
 
 The lead may use the same role at different model/effort points for independent or adversarial lanes. Model diversity alone does not justify duplicate work; the second lane needs a distinct question, proof obligation, or independence purpose.
 
@@ -197,14 +199,16 @@ A child reporting completion, an empty ready set, or all current children becomi
 
 ## Pi activation behavior
 
-Pi mode is session-scoped and branch-correct, like Caveman and `/tasks`:
+Pi mode is user-global and survives new sessions, branches, reloads, and independent Pi processes:
 
 - `/budget-auto-swarm` and `/budget-auto-swarm on` enable it.
 - `/budget-auto-swarm off` disables it.
 - `/budget-auto-swarm status` reports state and effective policy.
 - activation enables task orchestration if it is off;
 - disabling budget mode does not disable tasks;
-- mode restores on startup, reload, resume, fork/tree navigation from the active branch’s latest state entry.
+- every session lifecycle restore reads the same user-global state file;
+- branch navigation does not change the mode;
+- historical session transcript markers are inert and do not override the global value.
 
 Pi does not change the lead’s model or thinking level. The operator chooses the lead model independently.
 
@@ -232,7 +236,7 @@ The skill drives task briefs, `start`, and one combined `watch`; it updates Clau
 
 ### Included
 
-- sticky Pi mode command/state/prompt/status;
+- user-global sticky Pi mode command/state/prompt/status;
 - purple badge;
 - task-mode coupling;
 - Luna/Sol variants on built-in roles;

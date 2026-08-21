@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type Context } from "@earendil-works/pi-ai";
 import { DefaultResourceLoader, ModelRuntime, SettingsManager, SessionManager, createAgentSession } from "@earendil-works/pi-coding-agent";
 import { ASYNC_SUBAGENT_TOOL_NAMES, TASK_TOOL_NAMES } from "../extensions/pi/tools.js";
+import { readBudgetAutoSwarmGlobalState } from "../src/budgetAutoSwarmState.js";
 import { RunStore } from "../src/runStore.js";
 import { TaskStore } from "../src/taskStore.js";
 
@@ -42,7 +43,8 @@ test("real Pi loader/session command activates task tools, persists state, and i
     await bounded(session.prompt("/budget-auto-swarm on"));
     assert.equal(themeFgCalls, 0, "budget badge called theme.fg");
     assert.ok(TASK_TOOL_NAMES.every((name) => session!.getActiveToolNames().includes(name)), `active=${session!.getActiveToolNames().join(",")} all=${session!.getAllTools().map((tool: any) => tool.name).join(",")}`);
-    assert.equal(manager.getBranch().filter((entry: any) => entry.type === "custom" && entry.customType === "bravo-budget-auto-swarm-state").length, 1, JSON.stringify({ branch: manager.getBranch(), entries: manager.getEntries(), extensionErrors, notifications }));
+    assert.equal(readBudgetAutoSwarmGlobalState().enabled, true, JSON.stringify({ branch: manager.getBranch(), entries: manager.getEntries(), extensionErrors, notifications }));
+    assert.equal(manager.getBranch().filter((entry: any) => entry.type === "custom" && entry.customType === "bravo-budget-auto-swarm-state").length, 0, "global mode wrote a session transcript marker");
     const enabledLeaf = manager.getLeafId()!;
     const forkPoint = manager.appendMessage({ role: "user", content: "branch point", timestamp: Date.now() } as any);
     manager.appendCustomEntry("bravo-budget-auto-swarm-state", { version: 1, enabled: false });
@@ -57,12 +59,12 @@ test("real Pi loader/session command activates task tools, persists state, and i
     assert.equal(statuses.at(-1)?.[1], BUDGET_BADGE);
     assert.ok(!manager.getBranch().some((entry: any) => entry.parentId === enabledLeaf && entry.data?.enabled === false), "other branch leaked into active branch");
     manager.branch(otherLeaf); await bounded((session as any).extensionRunner.emit({ type: "session_tree" }));
-    assert.equal(statuses.at(-1)?.[1], undefined, "other branch latest valid off state was not restored");
+    assert.equal(statuses.at(-1)?.[1], BUDGET_BADGE, "legacy branch off marker overrode the global setting");
     manager.branch(localLeaf); await bounded((session as any).extensionRunner.emit({ type: "session_tree" }));
-    assert.equal(statuses.at(-1)?.[1], BUDGET_BADGE, "local branch latest valid on state was not restored");
-    const replayEntryCount = manager.getBranch().filter((entry: any) => entry.type === "custom" && entry.customType === "bravo-budget-auto-swarm-state").length;
+    assert.equal(statuses.at(-1)?.[1], BUDGET_BADGE, "global setting did not survive branch navigation");
+    const legacyEntryCount = manager.getBranch().filter((entry: any) => entry.type === "custom" && entry.customType === "bravo-budget-auto-swarm-state").length;
     await bounded(session.prompt("/budget-auto-swarm on"));
-    assert.equal(manager.getBranch().filter((entry: any) => entry.type === "custom" && entry.customType === "bravo-budget-auto-swarm-state").length, replayEntryCount);
+    assert.equal(manager.getBranch().filter((entry: any) => entry.type === "custom" && entry.customType === "bravo-budget-auto-swarm-state").length, legacyEntryCount);
     let seen: Context | undefined; faux.setResponses([(context) => { seen = context; return fauxAssistantMessage("ok"); }]);
     await bounded(session.prompt("render policy"));
     assert.match(seen?.systemPrompt ?? "", /## Budget Auto Swarm/);
@@ -141,11 +143,11 @@ test("real Pi loader/session command activates task tools, persists state, and i
     let failedTreeContext: Context | undefined; faux.setResponses([(context) => { failedTreeContext = context; return fauxAssistantMessage("tree failure observed"); }]);
     await bounded(session.prompt("tree failure policy"));
     assert.doesNotMatch(failedTreeContext?.systemPrompt ?? "", /## Budget Auto Swarm/);
-    assert.match(notifications.at(-1) ?? "", /restore failed.*required task tools/i);
+    assert.match(notifications.at(-1) ?? "", /(?:restore|global sync) failed(?: closed)?:.*required task tools/i);
     assert.equal(statuses.at(-1)?.[1], undefined);
     const treeGuardOff: any = await bounded<any>(invokeStart({}));
     assert.equal(treeGuardOff.isError, undefined, "failed session_tree restore left launch guard enabled"); await waitResult(treeGuardOff.details.runId as string);
-    assert.equal(manager.getBranch().filter((entry: any) => entry.type === "custom" && entry.customType === "bravo-budget-auto-swarm-state" && entry.data?.version === 1 && entry.data?.enabled === true).length, 2, "durable desired-on branch state was altered");
+    assert.equal(readBudgetAutoSwarmGlobalState().enabled, true, "restore failure altered the durable global desired state");
     (session as any).setActiveToolsByName = originalSet;
     await bounded((session as any).extensionRunner.emit({ type: "session_tree" }));
     assert.equal(statuses.at(-1)?.[1], BUDGET_BADGE);
@@ -156,7 +158,7 @@ test("real Pi loader/session command activates task tools, persists state, and i
     await bounded(session.prompt("start failure policy"));
     assert.doesNotMatch(failedStartContext?.systemPrompt ?? "", /## Budget Auto Swarm/);
     assert.equal(statuses.at(-1)?.[1], undefined);
-    assert.match(notifications.at(-1) ?? "", /restore failed.*required task tools/i);
+    assert.match(notifications.at(-1) ?? "", /(?:restore|global sync) failed(?: closed)?:.*required task tools/i);
     const startGuardOff: any = await bounded<any>(invokeStart({}));
     assert.equal(startGuardOff.isError, undefined, "failed session_start restore left launch guard enabled"); await waitResult(startGuardOff.details.runId as string);
     (session as any).setActiveToolsByName = originalSet;
@@ -176,26 +178,17 @@ test("real Pi loader/session command activates task tools, persists state, and i
     assert.equal(modeOffFastTrack.details.fastTrack.reason, "disabled");
     assert.ok(!String(runStore.readResult(modeOffFastTrack.details.runId as string)?.error?.code ?? "").startsWith("BUDGET_SWARM_"));
 
-    const appendCustomEntry = manager.appendCustomEntry.bind(manager);
-    (manager as any).appendCustomEntry = () => { throw new Error("durable append failed"); };
-    const enabledBadgesBefore = statuses.filter(([, value]) => value === BUDGET_BADGE).length;
     await bounded(session.prompt("/budget-auto-swarm on"));
-    assert.match(notifications.at(-1) ?? "", /could not be enabled.*durable append failed/i);
-    assert.equal(statuses.filter(([, value]) => value === BUDGET_BADGE).length, enabledBadgesBefore, "append failure rendered a success badge");
-    let appendFailureContext: Context | undefined; faux.setResponses([(context) => { appendFailureContext = context; return fauxAssistantMessage("append failure stayed off"); }]);
-    await bounded(session.prompt("append failure policy"));
-    assert.doesNotMatch(appendFailureContext?.systemPrompt ?? "", /## Budget Auto Swarm/);
-    (manager as any).appendCustomEntry = appendCustomEntry;
-    await bounded(session.prompt("/budget-auto-swarm on"));
+    assert.equal(readBudgetAutoSwarmGlobalState().enabled, true);
     assert.equal(statuses.at(-1)?.[1], BUDGET_BADGE);
     await bounded(session.prompt("/budget-auto-swarm off"));
+    assert.equal(readBudgetAutoSwarmGlobalState().enabled, false);
 
     session.setActiveToolsByName(["bash"]);
     (session as any).setActiveToolsByName = () => undefined;
     await bounded(session.prompt("/budget-auto-swarm on"));
     assert.match(notifications.at(-1) ?? "", /could not be enabled.*did not activate required task tools/i);
-    const budgetEntries = manager.getBranch().filter((entry: any) => entry.type === "custom" && entry.customType === "bravo-budget-auto-swarm-state") as any[];
-    assert.deepEqual(budgetEntries.filter((entry) => entry.data?.version === 1 && typeof entry.data.enabled === "boolean").map((entry) => entry.data.enabled), [true, true, false, true, false]);
+    assert.equal(readBudgetAutoSwarmGlobalState().enabled, false, "failed activation changed the global setting");
     (session as any).setActiveToolsByName = originalSet;
     let disabledContext: Context | undefined; faux.setResponses([(context) => { disabledContext = context; return fauxAssistantMessage("ok"); }]);
     await bounded(session.prompt("policy remains off"));

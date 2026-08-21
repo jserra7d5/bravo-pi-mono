@@ -48,10 +48,13 @@ Act as the control plane for a durable mixture-of-experts task graph. Your scarc
 
 Use the existing role that matches the work; role and model are separate choices. Every new child launch must select `variant: "luna"` or `variant: "sol"` and an explicit `thinkingLevel`.
 
-- Luna `high` is the default workhorse for investigation, analysis, implementation, validation, and routine review.
-- Luna `xhigh` is for harder planning, diagnosis, multi-file implementation, or adversarial review.
-- Luna `max` is a rare bounded escalation when xhigh is insufficient and another independent lane has lower expected value.
-- Sol `low` or `medium` is a selective capability escalation. Record the task-specific reason; stronger-sounding output is not a reason.
+- Luna `high` is the support route for scouting, retrieval, summarization, mechanical checks, and tightly specified small edits.
+- Luna `xhigh` is the default execution route for routine implementation, investigation, validation, and ordinary code review against a concrete contract.
+- Luna `max` is the complex execution route for difficult diagnosis, multi-file implementation, subtle integration, regression review, or work whose retries are expensive. Select it directly when the task warrants depth; it is not a post-failure exception.
+- Sol `low` is a narrow route for bounded intelligence-sensitive judgment that does not require deep analysis; use it sparingly.
+- Sol `medium` is the highest-judgment route for architecture and planning, adversarial design review, security or safety analysis, ambiguous diagnosis, cross-lane synthesis, and decisions that shape the graph. It is also the critical-path route when fewer agent steps matter more than dollar efficiency.
+
+Route by the cognitive bottleneck, not the task label: ordinary code review uses Luna xhigh; difficult implementation or regression review uses Luna max; adversarial design, architecture, security, or invariant review uses Sol medium. Record the task-specific reason for Sol; stronger-sounding output alone is not a reason.
 
 Never request `fastTrack`; budget auto swarm uses normal service priority. Do not use model diversity as an excuse for duplicate work: parallel lanes need distinct ownership, evidence, or adversarial purpose.
 
@@ -81,7 +84,7 @@ Ask the user only for a real authorization, credential, destructive-action appro
 When enabled, append this inside the existing async-subagents session-state marker:
 
 ```md
-Budget auto swarm: enabled (normal service tier; Luna high/xhigh is the default workhorse; Sol low/medium requires a task-specific reason).
+Budget auto swarm: enabled (normal service tier; Luna xhigh/max executes substantive work; Sol medium owns intelligence-critical judgment and step-constrained critical paths).
 ```
 
 If fast-track is armed, its normal live-state guidance is replaced with:
@@ -135,7 +138,7 @@ Use Claude Code's native task management as the sole dependency graph and progre
 Use the stable root ID `root_${CLAUDE_SESSION_ID}` for child runs; Claude Code substitutes the current session ID when loading this skill:
 
 ```text
-~/.async-subagents/bin/async-subagents start --root-session-id root_${CLAUDE_SESSION_ID} --store-cwd "$PWD" --cwd <EXECUTION_CHECKOUT> --agent <ROLE> --variant luna --thinking high --task-file <BRIEF>
+~/.async-subagents/bin/async-subagents start --root-session-id root_${CLAUDE_SESSION_ID} --store-cwd "$PWD" --cwd <EXECUTION_CHECKOUT> --agent <ROLE> --variant luna --thinking xhigh --task-file <BRIEF>
 ```
 
 Treat the skill invocation `$PWD` as the immutable canonical run-store cwd. Keep the lead there; pass that same `--store-cwd` to every run lifecycle command. `start --cwd` may point at a separate worktree without moving run storage. Reinvocation in this Claude session reuses the same child-run group; do not create an implicit second root session or store.
@@ -153,10 +156,13 @@ Treat the skill invocation `$PWD` as the immutable canonical run-store cwd. Keep
 
 Keep role and model separate. Use the narrowest role and select a model variant plus explicit thinking level for each new run:
 
-- `--variant luna --thinking high`: default workhorse for investigation, analysis, implementation, validation, and routine review.
-- `--variant luna --thinking xhigh`: harder planning, diagnosis, multi-file implementation, or adversarial review.
-- `--variant luna --thinking max`: rare bounded escalation after xhigh is insufficient.
-- `--variant sol --thinking low|medium`: selective capability escalation when stronger base-model behavior is worth the cost. Record why the task needs Sol.
+- `--variant luna --thinking high`: support work such as scouting, retrieval, summarization, mechanical checks, and tightly specified small edits.
+- `--variant luna --thinking xhigh`: default execution route for routine implementation, investigation, validation, and ordinary code review against a concrete contract.
+- `--variant luna --thinking max`: complex execution such as difficult diagnosis, multi-file implementation, subtle integration, regression review, or work whose retries are expensive. Select it directly when warranted.
+- `--variant sol --thinking low`: narrow intelligence-sensitive judgment that does not require deep analysis; use sparingly.
+- `--variant sol --thinking medium`: highest-judgment work such as architecture and planning, adversarial design review, security or safety analysis, ambiguous diagnosis, cross-lane synthesis, and graph-shaping decisions. Also use it when fewer agent steps matter more than dollar efficiency.
+
+Route by the cognitive bottleneck, not the task label: ordinary code review uses Luna xhigh; difficult implementation or regression review uses Luna max; adversarial design, architecture, security, or invariant review uses Sol medium. Record the task-specific reason for Sol; stronger-sounding output alone is not a reason.
 
 Never pass `--fast-track`. Use normal service priority. Parallel lanes need distinct ownership, evidence, or adversarial purpose; model diversity alone does not justify duplicate work.
 

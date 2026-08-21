@@ -1,6 +1,6 @@
 {
   "name": "@bravo/tui-enhancements",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "private": true,
   "type": "module",
   "description": "Pi extension for inline slash completion, multi-skill expansion, and terminal link UX helpers.",

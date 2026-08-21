@@ -1,6 +1,6 @@
 {
   "name": "@bravo/showcase",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "private": true,
   "type": "module",
   "description": "Pi extension that shows requested file slices inline without returning large content to the model.",

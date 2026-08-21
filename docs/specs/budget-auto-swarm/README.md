@@ -8,10 +8,10 @@ Draft design for review. No implementation exists yet.
 
 Add one autonomous orchestration policy with two activation surfaces:
 
-- Pi: a sticky, session-scoped `/budget-auto-swarm on|off|status` mode inside `@bravo/async-subagents`.
+- Pi: a sticky, user-global `/budget-auto-swarm on|off|status` mode inside `@bravo/async-subagents` that survives new sessions and Pi processes.
 - Claude Code: a user-invoked `/budget-auto-swarm` skill that runs its invocation turn on Claude Opus 5 at medium effort and coordinates the same async-subagents runtime.
 
-The policy is for long-running task graphs with complex dependencies. It keeps every safe ready lane moving, uses Luna as the default worker model, selectively escalates to Sol, and never requests fast-track priority.
+The policy is for long-running task graphs with complex dependencies. It keeps every safe ready lane moving, uses Luna xhigh/max for substantive execution, routes intelligence-critical judgment and step-constrained critical paths to Sol medium, and never requests fast-track priority.
 
 ## Source-of-truth map
 

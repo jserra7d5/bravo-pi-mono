@@ -22,34 +22,37 @@ Commands do not trigger an LLM turn.
 
 ### Durable state
 
-Custom entry:
+User-global state file:
+
+```text
+${ASYNC_SUBAGENTS_HOME:-~/.async-subagents}/budget-auto-swarm.json
+```
 
 ```ts
-const BUDGET_AUTO_SWARM_STATE_ENTRY_TYPE = "bravo-budget-auto-swarm-state";
-
-type BudgetAutoSwarmStateEntry = {
-  version: 1;
+type BudgetAutoSwarmGlobalState = {
+  schemaVersion: 1;
   enabled: boolean;
+  updatedAt: string;
 };
 ```
 
 Rules:
 
-- Append one entry only when the effective state changes.
-- Restore by replaying matching entries from `ctx.sessionManager.getBranch()` in order; latest valid entry wins.
-- Ignore malformed entries and unsupported versions.
-- No process environment variable is authoritative for lead state.
-- State is session/branch scoped, not global.
+- The user-global file is the sole authority for Pi budget-auto-swarm state across projects, sessions, branches, reloads, and processes. Existing processes re-read it before each lead turn.
+- `/budget-auto-swarm on|off` writes it atomically only when the persisted value changes.
+- Missing state defaults to disabled. Malformed or unsupported state fails closed and surfaces an error rather than guessing.
+- `ASYNC_SUBAGENTS_HOME` relocates the whole async-subagents state root for testing or operator configuration; no boolean process environment variable is authoritative.
+- Historical `bravo-budget-auto-swarm-state` transcript entries are inert and are neither read nor written.
 
 ### Task coupling
 
 Enabling budget-auto-swarm requires task orchestration:
 
 1. Reconcile the existing task-runtime owner to enabled and activate its tools.
-2. Only after that succeeds, publish in-memory budget state and persist the budget-enabled marker.
+2. Only after that succeeds, atomically persist the user-global value and publish in-memory budget state.
 3. Refresh both badges.
 
-One combined reconciler owns activation and restore. If task state or active-tool application fails, budget mode remains unpublished for that runtime: no lead overlay, launch guard, or badge becomes active. Durable prior entries are preserved for retry on a later start/tree event, and the extension surfaces the reconciliation error.
+One combined reconciler owns activation and restore. If task state or active-tool application fails, budget mode remains unpublished for that runtime: no lead overlay, launch guard, or badge becomes active. The durable global desired state is preserved for retry on a later session lifecycle event, and the extension surfaces the reconciliation error.
 
 Turning `/tasks off` while budget mode is enabled fails with:
 
@@ -61,19 +64,19 @@ Disabling budget mode leaves task orchestration unchanged. This avoids silently 
 
 ### Published-state transition table
 
-`desired` is replayed branch state; `published` controls prompt, launch guard, and badge.
+`desired` is read from user-global state; `published` controls the current runtime's prompt, launch guard, and badge.
 
 | Event | Desired before | Reconciliation | Persist | Published after |
 |---|---|---|---|---|
-| command `on` | off | enable task runtime + apply task tools succeeds | task marker if changed, then budget `enabled:true` | on |
-| command `on` | off | task/tool step fails | no budget entry | off; error surfaced |
-| command `off` | on | no task disable | budget `enabled:false` | off |
-| start/tree restore | on | task runtime + tools succeed | no new budget entry | on |
-| start/tree restore | on | task/tool step fails | no new entry; retain desired durable state | off for this runtime; retry on later lifecycle event |
-| start/tree restore | off/absent | restore normal task state | no budget entry | off |
+| command `on` | off | enable task runtime + apply task tools succeeds | task marker if changed, then global `enabled:true` | on |
+| command `on` | off | task/tool step fails | no global change | off; error surfaced |
+| command `off` | on | no task disable | global `enabled:false` | off |
+| session start/reload/resume/fork/tree | on | task runtime + tools succeed | no global change | on |
+| session start/reload/resume/fork/tree | on | task/tool step fails | retain global desired state | off for this runtime; retry on later lifecycle event |
+| session start/reload/resume/fork/tree | off/absent | restore normal task state | no global change | off |
 | `/tasks off` | on | rejected before task mutation | none | on |
 
-Only published state is visible to `before_agent_start` and the start policy hook. A durable desired-on entry never enables enforcement by itself.
+Only successfully published state is visible to `before_agent_start` and the start policy hook. A durable desired-on value never enables enforcement before task reconciliation succeeds.
 
 ### Status badge
 
@@ -166,7 +169,7 @@ No new `variant`, `thinkingLevel`, or `fastTrack` fields are added to `subagent_
 When budget mode is enabled, the async-subagents session-state block includes:
 
 ```md
-Budget auto swarm: enabled (normal service tier; Luna high/xhigh is the default workhorse; Sol low/medium requires a task-specific reason).
+Budget auto swarm: enabled (normal service tier; Luna xhigh/max executes substantive work; Sol medium owns intelligence-critical judgment and step-constrained critical paths).
 ```
 
 When disabled, the line is omitted rather than rendering negative instructions.
@@ -352,7 +355,7 @@ Children do not receive the lead swarm overlay. Their role remains bounded execu
 
 ## Compatibility and cutover
 
-- Existing sessions without a budget state entry remain disabled.
+- If the user-global state file is absent, budget auto swarm defaults disabled in every session.
 - Existing agent calls without variants continue unchanged when mode is disabled.
 - Existing `gemini` variants remain available when mode is disabled.
 - Existing run records and task records need no migration.

@@ -1,24 +1,10 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { budgetAutoSwarmStatePath, readBudgetAutoSwarmGlobalState, writeBudgetAutoSwarmGlobalState } from "../../src/budgetAutoSwarmState.js";
 
-export const BUDGET_AUTO_SWARM_STATE_ENTRY_TYPE = "bravo-budget-auto-swarm-state";
 export const BUDGET_AUTO_SWARM_STATUS_KEY = "budget-auto-swarm";
-export type BudgetAutoSwarmStateEntry = { version: 1; enabled: boolean };
-
-type SessionEntry = { type?: unknown; customType?: unknown; data?: unknown };
 type StatusUi = { setStatus?: (key: string, value: string | undefined) => void; notify?: (message: string, level?: "info" | "error") => void };
 const BUDGET_AUTO_SWARM_BADGE = "\x1b[38;2;213;163;233mSWARM:auto\x1b[0m";
 const lastStatus = new WeakMap<object, string | undefined>();
-
-export function isBudgetAutoSwarmStateEntry(value: unknown): value is BudgetAutoSwarmStateEntry {
-  const state = value as Partial<BudgetAutoSwarmStateEntry> | undefined;
-  return state?.version === 1 && typeof state.enabled === "boolean";
-}
-
-export function replayBudgetAutoSwarmState(entries: SessionEntry[]): boolean {
-  let enabled = false;
-  for (const entry of entries) if (entry.type === "custom" && entry.customType === BUDGET_AUTO_SWARM_STATE_ENTRY_TYPE && isBudgetAutoSwarmStateEntry(entry.data)) enabled = entry.data.enabled;
-  return enabled;
-}
 
 export function parseBudgetAutoSwarmCommand(value: string): "on" | "off" | "status" | undefined {
   const arg = value.trim();
@@ -43,6 +29,7 @@ export function renderBudgetAutoSwarmStatus(ctx: ExtensionContext | ExtensionCom
 export interface BudgetAutoSwarmControllerOptions {
   reconcileTasks: (ctx: ExtensionContext | ExtensionCommandContext) => Promise<void>;
   refreshTasks: (ctx: ExtensionContext | ExtensionCommandContext) => void;
+  stateEnv?: NodeJS.ProcessEnv;
 }
 
 export function createBudgetAutoSwarmController(pi: ExtensionAPI, options: BudgetAutoSwarmControllerOptions) {
@@ -56,8 +43,16 @@ export function createBudgetAutoSwarmController(pi: ExtensionAPI, options: Budge
   const reconcileDesired = async (ctx: ExtensionContext | ExtensionCommandContext, target: boolean) => {
     if (target) await options.reconcileTasks(ctx);
   };
+  const stateEnv = options.stateEnv ?? process.env;
   const restore = async (ctx: ExtensionContext) => {
-    desired = replayBudgetAutoSwarmState(ctx.sessionManager.getBranch() as SessionEntry[]);
+    desired = readBudgetAutoSwarmGlobalState(stateEnv).enabled;
+    try { await reconcileDesired(ctx, desired); publish(ctx, desired); }
+    catch (error) { publish(ctx, false); throw error; }
+  };
+  const sync = async (ctx: ExtensionContext) => {
+    const persisted = readBudgetAutoSwarmGlobalState(stateEnv).enabled;
+    if (persisted === desired && persisted === published) return;
+    desired = persisted;
     try { await reconcileDesired(ctx, desired); publish(ctx, desired); }
     catch (error) { publish(ctx, false); throw error; }
   };
@@ -67,24 +62,33 @@ export function createBudgetAutoSwarmController(pi: ExtensionAPI, options: Budge
       const command = parseBudgetAutoSwarmCommand(args);
       if (!command) { ctx.ui.notify("Usage: /budget-auto-swarm [on|off|status]", "error"); return; }
       if (command === "status") {
-        renderBudgetAutoSwarmStatus(ctx, published);
-        ctx.ui.notify(`Budget auto swarm: ${published ? "enabled" : "disabled"}. Task orchestration is required; allowed routes are Luna high/xhigh/max or Sol low/medium at normal priority.`, "info");
+        try {
+          desired = readBudgetAutoSwarmGlobalState(stateEnv).enabled;
+          if (desired !== published) { await reconcileDesired(ctx, desired); publish(ctx, desired); }
+          else renderBudgetAutoSwarmStatus(ctx, published);
+          ctx.ui.notify(`Budget auto swarm: ${published ? "enabled" : "disabled"} globally (${budgetAutoSwarmStatePath(stateEnv)}). Task orchestration is required; Luna high supports bounded work, Luna xhigh/max executes substantive work, and Sol medium owns intelligence-critical judgment or step-constrained critical paths at normal priority.`, "info");
+        } catch (error) {
+          desired = false;
+          publish(ctx, false);
+          ctx.ui.notify(`Budget auto swarm status failed closed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
         return;
       }
       const target = command === "on";
-      if (target === desired && target === published) { renderBudgetAutoSwarmStatus(ctx, published); ctx.ui.notify(`Budget auto swarm already ${target ? "enabled" : "disabled"}.`, "info"); return; }
       try {
-        const stateChanged = target !== desired;
+        const persisted = readBudgetAutoSwarmGlobalState(stateEnv).enabled;
+        if (target === persisted && target === published) { renderBudgetAutoSwarmStatus(ctx, published); ctx.ui.notify(`Budget auto swarm already ${target ? "enabled" : "disabled"} globally.`, "info"); return; }
         await reconcileDesired(ctx, target);
-        if (stateChanged) pi.appendEntry(BUDGET_AUTO_SWARM_STATE_ENTRY_TYPE, { version: 1, enabled: target });
+        if (target !== persisted) writeBudgetAutoSwarmGlobalState(target, stateEnv);
         desired = target;
         publish(ctx, target);
-        ctx.ui.notify(target ? "Budget auto swarm enabled. The Pi lead model is unchanged; new launches are budget-policy guarded." : "Budget auto swarm disabled. Task orchestration remains unchanged.", "info");
+        ctx.ui.notify(target ? "Budget auto swarm enabled globally. New Pi sessions and processes inherit it; the lead model is unchanged and new launches are budget-policy guarded." : "Budget auto swarm disabled globally. Task orchestration remains unchanged.", "info");
       } catch (error) {
+        try { desired = readBudgetAutoSwarmGlobalState(stateEnv).enabled; } catch { desired = false; }
         publish(ctx, desired);
         ctx.ui.notify(`Budget auto swarm could not be ${target ? "enabled" : "disabled"}: ${error instanceof Error ? error.message : String(error)}`, "error");
       }
     },
   });
-  return { enabled: () => published, restore, publish };
+  return { enabled: () => published, restore, sync, publish };
 }

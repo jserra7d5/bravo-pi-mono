@@ -62,7 +62,7 @@ Any contract change discovered during implementation returns to the root lead fo
 
 ### Work
 
-- Add `budgetAutoSwarm.ts` state/parser/command/status module.
+- Add `budgetAutoSwarm.ts` parser/command/status module plus atomic user-global state under `ASYNC_SUBAGENTS_HOME`.
 - Expose or reuse the existing canonical task-runtime enable mutator; do not duplicate marker/store logic.
 - Register `/budget-auto-swarm`.
 - Guard `/tasks off` while mode is enabled.
@@ -71,8 +71,8 @@ Any contract change discovered during implementation returns to the root lead fo
 
 ### Gate
 
-- Real extension host/session tests prove branch-correct restoration and task coupling.
-- Task-store or active-tool failure on command/start/tree cannot publish budget enabled with tasks unavailable; durable desired state remains retryable.
+- Real extension host/session and cross-process tests prove user-global restoration, inert legacy branch markers, and task coupling.
+- Task-store or active-tool failure on command/start/tree cannot publish budget enabled with tasks unavailable; durable global desired state remains retryable.
 - UI failure cannot change policy state.
 - Badge is one status surface, not a widget/footer duplicate.
 
