@@ -432,3 +432,110 @@ test("pollWakeups remaps a question event onto waiting_for_input so the wake car
   // wake-card glyph/badge selection lights up amber instead of plain `?`.
   assert.equal(deliveries[0]?.message.state, "waiting_for_input");
 });
+
+/**
+ * A terminal run written exactly the way the supervisor writes one, with the
+ * subscription and the status flag under the test's control. `resultReady: false`
+ * with a durable result.json on disk is the torn finalization the store really
+ * contains — 818 such runs at the time this was written.
+ */
+function createTerminalRun(store: RunStore, cwd: string, parentRunId: string, options: {
+  state: "completed" | "failed" | "cancelled" | "expired";
+  notifyOn: string[];
+  resultReady: boolean;
+}): string {
+  const { runId } = store.createRunDirectory({ cwd, parentRunId, rootSessionId: parentRunId });
+  const status = createInitialStatus({
+    runId,
+    parentRunId,
+    rootSessionId: parentRunId,
+    agentName: "worker",
+    agentSource: "builtin",
+    definitionPath: "/builtin/worker.md",
+    mode: "oneshot",
+    cwd,
+    state: options.state,
+  });
+  store.writeStatus({ ...status, resultReady: options.resultReady });
+  store.writeResult(createRunResult({
+    runId,
+    parentRunId,
+    agentName: "worker",
+    state: options.state,
+    summary: options.state === "expired" ? "Time budget expired" : "Done",
+  }));
+  writeDeliverySubscription(store, {
+    schemaVersion: SCHEMA_VERSION,
+    parentRunId,
+    runId,
+    notifyOn: options.notifyOn as never,
+    createdAt: new Date().toISOString(),
+  });
+  return runId;
+}
+
+test("a terminal result is delivered even when notifyOn omits its state", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_notifyon";
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a" });
+  // The subscription a Pi lead actually wrote in the field. It omits "expired",
+  // so the lane went quiet and the lead waited on a child that was already dead.
+  const runId = createTerminalRun(store, root, parentRunId, {
+    state: "expired",
+    notifyOn: ["completed", "failed", "blocked"],
+    resultReady: true,
+  });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0]?.runId, runId);
+  assert.equal(deliveries[0]?.message.state, "expired");
+});
+
+test("cancellation is delivered to a parent subscribed only to attention events", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_notifyon_cancel";
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a" });
+  const runId = createTerminalRun(store, root, parentRunId, {
+    state: "cancelled",
+    notifyOn: ["blocked"],
+    resultReady: true,
+  });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0]?.runId, runId);
+  assert.equal(deliveries[0]?.message.state, "cancelled");
+});
+
+test("a durable result is delivered when status.json never recorded resultReady", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_torn";
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a" });
+  const runId = createTerminalRun(store, root, parentRunId, {
+    state: "expired",
+    notifyOn: ["result", "completed", "failed", "cancelled", "expired"],
+    resultReady: false,
+  });
+
+  const deliveries = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0]?.runId, runId);
+  assert.equal(deliveries[0]?.message.state, "expired");
+});
+
+test("terminal delivery stays idempotent once handled", () => {
+  const { root, store } = workspace();
+  const parentRunId = "root_notifyon_dedupe";
+  acquireRootSessionLease({ cwd: root, rootSessionId: parentRunId, ownerId: "owner_a" });
+  createTerminalRun(store, root, parentRunId, {
+    state: "expired",
+    notifyOn: ["completed"],
+    resultReady: false,
+  });
+
+  const [delivery] = pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" });
+  assert.ok(delivery);
+  markWakeupHandled(store, parentRunId, delivery.runId);
+  assert.equal(pollWakeups({ store, parentRunId, rootSessionId: parentRunId, ownerId: "owner_a" }).length, 0);
+});

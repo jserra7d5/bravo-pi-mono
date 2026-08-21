@@ -362,6 +362,20 @@ than recover. That case is not a lane to continue — start a fresh lane with a 
 
 Continue useful unfinished work from the recorded session by calling `subagent_continue` on the terminal run. This creates a new continuation run that replays the session state; use `additionalRunSeconds` to choose the smallest reasonable budget for the remaining work.
 
+## Wakeup delivery
+
+Under a Pi parent the wakeup is the only channel a child has. `notifyOn` on a subscription selects
+which **attention** events are worth interrupting the parent for — `question`, `blocked`,
+`liveness`, `progress`. It never gates the terminal result: a lane ending is not optional news, so
+`completed`, `failed`, `cancelled`, and `expired` are always delivered whatever the subscription
+says. A parent that subscribed to a narrow set otherwise waits forever on a child that is already
+dead.
+
+Terminal discovery reads `result.json` whenever the run is in a terminal state, not only when
+`status.resultReady` is set. `result.json` is written first and is the durable terminal fact;
+`status.json` follows it and can lag or be lost to a torn finalization. Redelivery stays idempotent
+through the delivery key, which carries the result's `createdAt`.
+
 ## Parent Tools
 
 - `subagent_start`: start a durable async child run and return immediately; accepts `fastTrack: true` for armed, allowlisted critical-path launches.

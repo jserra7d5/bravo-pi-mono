@@ -21,7 +21,7 @@ export const subagentStartSchema = Type.Object({
   protect: Type.Optional(Type.Array(Type.String(), { description: "Prompt-enforced protected paths the child must never create, edit, or delete even when they match the write scope (specs, ledgers, reference files). Reading stays allowed. Entries must be non-empty single-line strings." })),
   skills: Type.Optional(Type.Array(Type.String(), { description: "Additional skill names to enable for this child run, merged with the agent definition skills. Children do not inherit parent-session skills automatically. Pass skill names only; path-like values are rejected." })),
   attachments: Type.Optional(Type.Array(Attachment)),
-  notifyOn: Type.Optional(Type.Array(StringEnum(EVENT_TYPES as readonly string[]))),
+  notifyOn: Type.Optional(Type.Array(StringEnum(EVENT_TYPES as readonly string[]), { description: "Which ATTENTION events wake you for this child: question, blocked, liveness, progress. Terminal results are always delivered and cannot be filtered out — a lane ending is not optional news. Defaults to everything; narrow it only to cut progress noise." })),
   maxSubagentDepth: Type.Optional(Type.Number({ description: "Depth to record in the child task metadata." })),
   context: Type.Optional(StringEnum(["fresh", "fork"] as const, { default: "fresh" })),
   session: Type.Optional(StringEnum(["record", "none"] as const, { default: "record" })),
@@ -57,7 +57,7 @@ export const subagentContinueSchema = Type.Object({
   attachments: Type.Optional(Type.Array(Attachment)),
   requiresAck: Type.Optional(Type.Boolean()),
   additionalRunSeconds: Type.Optional(Type.Number({ description: "Runtime budget seconds when resuming an explicitly paused live child or continuing a terminal run." })),
-  notifyOn: Type.Optional(Type.Array(StringEnum(EVENT_TYPES as readonly string[]))),
+  notifyOn: Type.Optional(Type.Array(StringEnum(EVENT_TYPES as readonly string[]), { description: "Which ATTENTION events wake you for this child: question, blocked, liveness, progress. Terminal results are always delivered and cannot be filtered out — a lane ending is not optional news. Defaults to everything; narrow it only to cut progress noise." })),
   thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS, { description: "Set the child's Pi thinking level while resuming, if the child-control extension is active." })),
 });
 

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { atomicWriteJson } from "../../src/jsonl.js";
 import { ownsRootSessionLease } from "../../src/leases.js";
-import { isInterestingEvent } from "../../src/schemas.js";
+import { isInterestingEvent, isTerminalRunState } from "../../src/schemas.js";
 import { RunStore } from "../../src/runStore.js";
 import { withFileMutationLockSync } from "../../src/runLock.js";
 import { updateRunStatus } from "../../src/status.js";
@@ -264,15 +264,12 @@ function isActionableModelWakeup(delivery: WakeupDelivery): boolean {
 }
 
 export function isResultWakeupCurrent(store: RunStore, parentRunId: string, runId: string, result: RunResult): boolean {
-  if (isWakeupKeyHandled(store, parentRunId, resultDeliveryKey(runId, result))) return false;
-  try {
-    const status = store.readStatus(runId);
-    if (status.resultReady === false) return false;
-  } catch {
-    // If status recovery fails, fall back to handled-state only so durable results
-    // can still be delivered instead of being lost.
-  }
-  return true;
+  // A durable result.json IS the terminal fact; status.json is written after it and
+  // can lag or be lost to a torn finalization. Gating delivery on status.resultReady
+  // meant a run that had genuinely finished was never announced, and the parent had
+  // no other way to learn — the delivery key already makes redelivery idempotent, so
+  // the handled set is the only check that belongs here.
+  return !isWakeupKeyHandled(store, parentRunId, resultDeliveryKey(runId, result));
 }
 
 function isDeliverableAttentionEvent(event: RunEvent): boolean {
@@ -284,7 +281,17 @@ function pendingForRun(store: RunStore, parentRunId: string, runId: string, noti
   const allowed = notifyOn ? new Set(notifyOn) : undefined;
   const deliveries: WakeupDelivery[] = [];
   const summary = store.readRunSummary(runId);
-  if (summary?.resultReady && (!allowed || allowed.has("result") || (summary.resultState && allowed.has(summary.resultState)))) {
+  // `notifyOn` selects which ATTENTION events are worth interrupting the parent for.
+  // It must never gate the terminal result: a lane ending is not an optional
+  // notification, and under a Pi parent this wakeup is the only channel that exists.
+  // A parent that subscribed with, say, ["completed","failed","blocked"] otherwise
+  // never learns that a child expired or was cancelled — the run simply goes quiet
+  // and the parent waits on a lane that is already dead.
+  //
+  // Read the result whenever the run is terminal rather than only when the summary
+  // says resultReady: that flag lives in status.json, which is written after
+  // result.json and can lag it or be lost entirely to a torn finalization.
+  if (summary && (summary.resultReady || isTerminalRunState(summary.state))) {
     const result = store.readResult(runId);
     if (result && isResultWakeupCurrent(store, parentRunId, runId, result)) deliveries.push(resultDelivery(runId, result));
   }
