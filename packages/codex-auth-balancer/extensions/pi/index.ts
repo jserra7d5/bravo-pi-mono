@@ -7,6 +7,7 @@ import type {
   SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, parse } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -14,6 +15,9 @@ import {
   ensureFreshTokens,
   finishTokenLease,
   ingestLiveUsage,
+  listRateLimitCooldowns,
+  publishRateLimitCooldown,
+  recordCodexAttempt,
   loadAccounts,
   resolveStateRoot,
   startTokenLease,
@@ -114,6 +118,10 @@ type PiAiRuntimeModule = {
   getModels?: (provider: string) => Model<typeof API>[];
   streamSimpleOpenAICodexResponses?: (model: Model<typeof API>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 };
+
+function makeId(prefix: string): string {
+  return `${prefix}_${randomBytes(12).toString('hex')}`;
+}
 export type HostingPiAiRuntime = {
   packageRoot: string;
   modulePath: string;
@@ -407,6 +415,19 @@ function affinityFromOptions(options?: SimpleStreamOptions): string | undefined 
   return typeof options?.sessionId === 'string' && options.sessionId ? options.sessionId : undefined;
 }
 
+function normalizedOutboundContext(model: Model<typeof API>, context: Context): Context {
+  const publicId = publicModelId(model);
+  const nativeId = upstreamModelId(model);
+  return {
+    ...context,
+    messages: context.messages.map(message => {
+      if (message.role !== 'assistant') return message;
+      if (message.api !== API || message.provider !== PROVIDER || message.model !== publicId) return message;
+      return { ...message, provider: UPSTREAM_PROVIDER, model: nativeId };
+    }),
+  };
+}
+
 function redactedErrorMessage(error: unknown): string {
   return redactSecretsInText(error instanceof Error ? error.message : String(error));
 }
@@ -431,6 +452,8 @@ export type BalancedRunnerDeps = {
   createUpstream: (model: Model<typeof API>, context: Context, options: SimpleStreamOptions) => AsyncIterable<AssistantMessageEvent>;
   ingestUsage: (input: LiveUsageIngestInput) => Promise<unknown>;
   markBroken: (slot: string, code: string, message: string) => void;
+  publishCooldown: (input: { slot: string; sourceAttemptId?: string; reason?: string; expiresAt: number }) => unknown;
+  recordAttempt: typeof recordCodexAttempt;
   cooldown: Map<string, number>;
   config: RotationConfig;
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -455,10 +478,16 @@ function defaultRunnerDeps(): BalancedRunnerDeps {
   return {
     startLease: startTokenLease,
     finishLease: finishTokenLease,
-    listSlots: async (stateRoot?: string) => (await loadAccounts(stateRoot)).map(a => ({ slot: a.slot, primaryRemaining: a.usage?.primary?.remainingPercent })),
+    listSlots: async (stateRoot?: string) => {
+      const root = stateRoot || resolveStateRoot();
+      const cooldowns = new Map(listRateLimitCooldowns({ stateRoot: root }).map(c => [c.slot, c.expiresAt]));
+      return (await loadAccounts(root)).map(a => ({ slot: a.slot, primaryRemaining: a.usage?.primary?.remainingPercent, cooldownUntil: cooldowns.get(a.slot) }));
+    },
     createUpstream: (model, context, options) => hostingPiAiRuntime.streamSimpleOpenAICodexResponses(model, context, options),
     ingestUsage: ingestLiveUsage,
     markBroken: (slot, code, message) => { try { writeBrokenSnapshot(resolveStateRoot(), slot, code, message); } catch { /* ignore */ } },
+    publishCooldown: (input) => publishRateLimitCooldown({ stateRoot: resolveStateRoot(), ...input }),
+    recordAttempt: recordCodexAttempt,
     cooldown: sharedCooldown,
     config: DEFAULT_ROTATION_CONFIG,
     sleep: realSleep,
@@ -491,6 +520,39 @@ async function runBalanced(
   let activeFinish: (() => Promise<void>) | undefined;
   let lastUpstreamPartial: AssistantMessage | undefined;
   const visibleThinking = new Map<number, string>();
+  const requestId = makeId('codex_req');
+  const recordAttempt = (input: Parameters<typeof recordCodexAttempt>[0]) => {
+    try {
+      deps.recordAttempt(input);
+    } catch (error) {
+      process.stderr.write(`[codex-balanced-provider] attempt telemetry failed: ${redactedErrorMessage(error)}\n`);
+    }
+  };
+  const publishCooldown = (input: { slot: string; sourceAttemptId?: string; reason?: string; expiresAt: number }) => {
+    try {
+      deps.publishCooldown(input);
+    } catch (error) {
+      process.stderr.write(`[codex-balanced-provider] cooldown publication failed: ${redactedErrorMessage(error)}\n`);
+    }
+  };
+  const requestedTransport = options?.transport;
+  const degradedToSse = requestedTransport === 'auto' || requestedTransport === 'websocket' || requestedTransport === 'websocket-cached';
+  if (degradedToSse) {
+    recordAttempt({
+      stateRoot: deps.stateRoot,
+      attempt_id: makeId('codex_attempt'),
+      request_id: requestId,
+      session_hash: undefined,
+      public_model_id: publicModelId(model),
+      phase: 'admission',
+      outcome: 'degraded_transport_selected',
+      reason_code: 'balanced_websocket_requires_account_aware_pi_cache_seam',
+      transport_mode: 'sse',
+      transport_policy_version: 'codex-balanced-sse-until-account-aware-websocket',
+      evidence_codes: ['degraded_transport_recorded', 'transport_policy_recorded', 'global_auth_fallback_blocked'],
+      duration_ms: 0,
+    });
+  }
 
   const hardLimit = balancedHardContextLimit(model);
   const estimatedContextTokens = hardLimit === undefined ? 0 : estimateBalancedContextTokens(context);
@@ -548,11 +610,12 @@ async function runBalanced(
     const terminal: AssistantMessageEvent = { type: 'error', reason: aborted ? 'aborted' : 'error', error: message };
     for (const restored of restoreEvents(terminal, model, visibleThinking)) stream.push(restored);
   };
-
   const onAbort = () => { void activeFinish?.().catch(() => undefined); };
   if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
   const runAttempt = async (forcedSlot: string | undefined): Promise<Attempt> => {
+    const attemptId = makeId('codex_attempt');
+    const startedAt = deps.now();
     let lease: TokenLease;
     try {
       lease = await deps.startLease({
@@ -566,6 +629,19 @@ async function runBalanced(
         abort_signal: signal,
       });
     } catch (leaseError) {
+      recordAttempt({
+        stateRoot: deps.stateRoot,
+        attempt_id: attemptId,
+        request_id: requestId,
+        session_hash: undefined,
+        public_model_id: publicModelId(model),
+        phase: 'credential',
+        outcome: 'credential_unavailable',
+        reason_code: 'token_lease_failed',
+        error_code: redactedErrorMessage(leaseError),
+        evidence_codes: ['credential_unusable_before_wire', 'no_application_bytes_written', 'global_auth_fallback_blocked'],
+        duration_ms: Math.max(0, deps.now() - startedAt),
+      });
       if (signal?.aborted) { forwardError(new Error('Request was aborted'), true); return { outcome: 'aborted', slot: forcedSlot ?? '(none)' }; }
       // A lease failure (forced slot rejected, OR the round-0 auto-selected slot is
       // broken) should not abort the whole turn — record the real error and let
@@ -573,6 +649,32 @@ async function runBalanced(
       // onExhausted only if every slot fails to lease.
       lastLeaseError = leaseError;
       return { outcome: 'lease-failed', slot: forcedSlot ?? '(none)' };
+    }
+
+    if (lease.affinity_outcome) {
+      recordAttempt({
+        stateRoot: deps.stateRoot,
+        attempt_id: makeId('codex_attempt'),
+        request_id: requestId,
+        parent_attempt_id: attemptId,
+        reservation_id: lease.reservation_id,
+        launch_id: lease.launch_id,
+        session_hash: lease.session_hash,
+        public_model_id: publicModelId(model),
+        slot_id: lease.slot,
+        account_hash: lease.account_id_hash,
+        affinity_generation: lease.affinity_generation,
+        phase: 'selection',
+        outcome: lease.affinity_outcome,
+        reason_code: lease.affinity_outcome,
+        transport_policy_version: 'codex-balanced-sse-until-account-aware-websocket',
+        evidence_codes: [
+          lease.affinity_outcome === 'fresh_placed' ? 'affinity_published_before_async_work' : 'affinity_read_before_selection',
+          ...(lease.affinity_generation !== undefined ? ['affinity_generation_matched' as const] : []),
+          'selected_slot_credential_used',
+        ],
+        duration_ms: 0,
+      });
     }
 
     let finishPromise: Promise<void> | undefined;
@@ -594,11 +696,30 @@ async function runBalanced(
     if (signal?.aborted) { await finishLease('aborted'); forwardError(new Error('Request was aborted'), true); return { outcome: 'aborted', slot: lease.slot }; }
     if (!lease.access_token || lease.access_token.trim().length < 8) {
       await finishLease('failed');
+      recordAttempt({
+        stateRoot: deps.stateRoot,
+        attempt_id: attemptId,
+        request_id: requestId,
+        reservation_id: lease.reservation_id,
+        launch_id: lease.launch_id,
+        session_hash: lease.session_hash,
+        public_model_id: publicModelId(model),
+        slot_id: lease.slot,
+        account_hash: lease.account_id_hash,
+        affinity_generation: lease.affinity_generation,
+        phase: 'credential',
+        outcome: 'auth_unusable',
+        reason_code: 'empty_access_token',
+        evidence_codes: ['credential_unusable_before_wire', 'no_application_bytes_written', 'global_auth_fallback_blocked'],
+        duration_ms: Math.max(0, deps.now() - startedAt),
+      });
       forwardError(new Error('Codex balanced provider refused empty access token'));
       return { outcome: 'other-error', slot: lease.slot };
     }
 
     let sawRateLimitStatus = false;
+    let upstreamStatus: number | undefined;
+    let responseHeadersReceived = false;
     const slotAbort = new AbortController();
     const upstreamSignal = signal ? AbortSignal.any([signal, slotAbort.signal]) : slotAbort.signal;
     const upstreamModel = { ...model, id: upstreamModelId(model), provider: UPSTREAM_PROVIDER, api: API };
@@ -607,13 +728,15 @@ async function runBalanced(
       // Only SSE exposes HTTP response headers to onResponse; default the balanced
       // path to SSE so live usage ingestion and 429 detection cannot silently miss
       // rate-limit headers. Preserve an explicit caller transport for opt-in use.
-      transport: options?.transport ?? 'sse',
+      transport: 'sse',
       apiKey: lease.access_token,
       signal: upstreamSignal,
       // One leased slot gets one wire attempt. Newer host streamers honor this;
       // aborting on the first 429 also stops retry loops in older host versions.
       maxRetries: 0,
       onResponse: (response: { status: number; headers: Record<string, string> }, responseModel: Model<typeof API>) => {
+        upstreamStatus = response.status;
+        responseHeadersReceived = true;
         // This callback is inside host streamer retry logic. Establish the slot
         // state and abort that streamer's local signal before invoking any
         // caller code, so a throwing/slow observer cannot permit another wire
@@ -643,11 +766,35 @@ async function runBalanced(
     let contentPushed = false;
     let terminalError: AssistantMessageEvent | undefined;
     try {
-      for await (const event of deps.createUpstream(upstreamModel, context, upstreamOptions)) {
+      const outboundContext = normalizedOutboundContext(model, context);
+      for await (const event of deps.createUpstream(upstreamModel, outboundContext, upstreamOptions)) {
         if (signal?.aborted) break; // stop forwarding content/done once the caller aborted
         if ('partial' in event) lastUpstreamPartial = event.partial;
         if (event.type === 'done') {
           await finishLease('completed');
+          recordAttempt({
+            stateRoot: deps.stateRoot,
+            attempt_id: attemptId,
+            request_id: requestId,
+            reservation_id: lease.reservation_id,
+            launch_id: lease.launch_id,
+            session_hash: lease.session_hash,
+            public_model_id: publicModelId(model),
+            slot_id: lease.slot,
+            account_hash: lease.account_id_hash,
+            affinity_generation: lease.affinity_generation,
+            phase: 'terminal',
+            outcome: 'completed',
+            reason_code: 'upstream_done',
+            transport_mode: 'sse',
+            transport_policy_version: 'codex-balanced-sse-until-account-aware-websocket',
+            upstream_status: upstreamStatus,
+            response_headers_received: responseHeadersReceived,
+            wire_started: true,
+            content_started: contentPushed,
+            evidence_codes: ['selected_slot_credential_used', 'account_connection_attributed', 'terminal_outcome_recorded', 'transport_policy_recorded'],
+            duration_ms: Math.max(0, deps.now() - startedAt),
+          });
           forwardTerminal(event);
           return { outcome: 'done', slot: lease.slot };
         }
@@ -662,14 +809,84 @@ async function runBalanced(
     const aborted = signal?.aborted === true || (!sawRateLimitStatus && terminalError?.type === 'error' && terminalError.reason === 'aborted');
     if (aborted) {
       await finishLease('aborted');
+      recordAttempt({
+        stateRoot: deps.stateRoot,
+        attempt_id: attemptId,
+        request_id: requestId,
+        reservation_id: lease.reservation_id,
+        launch_id: lease.launch_id,
+        session_hash: lease.session_hash,
+        public_model_id: publicModelId(model),
+        slot_id: lease.slot,
+        account_hash: lease.account_id_hash,
+        affinity_generation: lease.affinity_generation,
+        phase: 'terminal',
+        outcome: 'aborted',
+        reason_code: 'caller_aborted',
+        transport_mode: 'sse',
+        transport_policy_version: 'codex-balanced-sse-until-account-aware-websocket',
+        upstream_status: upstreamStatus,
+        response_headers_received: responseHeadersReceived,
+        wire_started: responseHeadersReceived || contentPushed,
+        content_started: contentPushed,
+        evidence_codes: ['terminal_outcome_recorded', ...(contentPushed ? ['content_started_observed' as const] : ['content_not_started' as const])],
+        duration_ms: Math.max(0, deps.now() - startedAt),
+      });
       forwardTerminal(terminalError ?? { type: 'error', reason: 'aborted', error: buildErrorMessage(new Error('Request was aborted'), true) });
       return { outcome: 'aborted', slot: lease.slot };
     }
 
-    const rateLimited = classifyRateLimit({ status: sawRateLimitStatus ? 429 : undefined, errorText: errorTextOfEvent(terminalError) });
+    const rateLimited = !contentPushed && sawRateLimitStatus && classifyRateLimit({ status: 429, errorText: errorTextOfEvent(terminalError) });
     await finishLease('failed');
 
     if (rateLimited && !contentPushed) {
+      const cooldownUntil = deps.now() + deps.config.cooldownMs;
+      publishCooldown({ slot: lease.slot, sourceAttemptId: attemptId, reason: 'rate_limited_pre_content', expiresAt: cooldownUntil });
+      recordAttempt({
+        stateRoot: deps.stateRoot,
+        attempt_id: attemptId,
+        request_id: requestId,
+        reservation_id: lease.reservation_id,
+        launch_id: lease.launch_id,
+        session_hash: lease.session_hash,
+        public_model_id: publicModelId(model),
+        slot_id: lease.slot,
+        account_hash: lease.account_id_hash,
+        affinity_generation: lease.affinity_generation,
+        phase: 'headers',
+        outcome: 'rate_limited_pre_content',
+        reason_code: 'explicit_429_or_rate_limit',
+        transport_mode: 'sse',
+        transport_policy_version: 'codex-balanced-sse-until-account-aware-websocket',
+        upstream_status: sawRateLimitStatus ? 429 : upstreamStatus,
+        response_headers_received: responseHeadersReceived || sawRateLimitStatus,
+        wire_started: true,
+        content_started: false,
+        retry_eligible: false,
+        rotation_eligible: true,
+        evidence_codes: ['explicit_429_rejection', 'content_not_started', 'response_headers_received', 'rate_limit_cooldown_recorded', 'rotation_recorded'],
+        duration_ms: Math.max(0, deps.now() - startedAt),
+      });
+      recordAttempt({
+        stateRoot: deps.stateRoot,
+        attempt_id: makeId('codex_attempt'),
+        request_id: requestId,
+        parent_attempt_id: attemptId,
+        reservation_id: lease.reservation_id,
+        launch_id: lease.launch_id,
+        session_hash: lease.session_hash,
+        public_model_id: publicModelId(model),
+        slot_id: lease.slot,
+        account_hash: lease.account_id_hash,
+        affinity_generation: lease.affinity_generation,
+        phase: 'terminal',
+        outcome: 'rotated_pre_content',
+        reason_code: 'rate_limit_cooldown_published',
+        transport_mode: 'sse',
+        transport_policy_version: 'codex-balanced-sse-until-account-aware-websocket',
+        evidence_codes: ['rotation_recorded', 'content_not_started', 'rate_limit_cooldown_recorded'],
+        duration_ms: 0,
+      });
       lastSuppressedError = terminalError;
       return { outcome: 'rate-limited', slot: lease.slot };
     }
@@ -678,13 +895,90 @@ async function runBalanced(
     // finishLease('failed') already ran above (idempotent), so do not re-call it.
     if (!contentPushed && !rateLimited && isAuthRejection(errorTextOfEvent(terminalError))) {
       deps.markBroken(lease.slot, 'upstream_no_accountid', redactedErrorMessage(errorTextOfEvent(terminalError) ?? 'upstream could not extract accountId'));
+      recordAttempt({
+        stateRoot: deps.stateRoot,
+        attempt_id: attemptId,
+        request_id: requestId,
+        reservation_id: lease.reservation_id,
+        launch_id: lease.launch_id,
+        session_hash: lease.session_hash,
+        public_model_id: publicModelId(model),
+        slot_id: lease.slot,
+        account_hash: lease.account_id_hash,
+        affinity_generation: lease.affinity_generation,
+        phase: 'headers',
+        outcome: 'auth_unusable',
+        reason_code: 'upstream_no_accountid',
+        transport_mode: 'sse',
+        transport_policy_version: 'codex-balanced-sse-until-account-aware-websocket',
+        upstream_status: upstreamStatus,
+        response_headers_received: responseHeadersReceived,
+        wire_started: true,
+        content_started: false,
+        rotation_eligible: true,
+        evidence_codes: ['auth_rejected_before_content', 'content_not_started', 'rotation_recorded'],
+        duration_ms: Math.max(0, deps.now() - startedAt),
+      });
       lastAuthError = terminalError;
       return { outcome: 'auth-rejected', slot: lease.slot };
     }
     if (contentPushed) {
+      recordAttempt({
+        stateRoot: deps.stateRoot,
+        attempt_id: attemptId,
+        request_id: requestId,
+        reservation_id: lease.reservation_id,
+        launch_id: lease.launch_id,
+        session_hash: lease.session_hash,
+        public_model_id: publicModelId(model),
+        slot_id: lease.slot,
+        account_hash: lease.account_id_hash,
+        affinity_generation: lease.affinity_generation,
+        phase: 'terminal',
+        outcome: 'terminal_failure',
+        reason_code: 'streamed_error',
+        transport_mode: 'sse',
+        transport_policy_version: 'codex-balanced-sse-until-account-aware-websocket',
+        upstream_status: upstreamStatus,
+        response_headers_received: responseHeadersReceived,
+        wire_started: true,
+        content_started: true,
+        retry_eligible: false,
+        rotation_eligible: false,
+        evidence_codes: ['content_started_observed', 'terminal_outcome_recorded'],
+        duration_ms: Math.max(0, deps.now() - startedAt),
+      });
       if (terminalError) forwardTerminal(terminalError);
       return { outcome: 'streamed-error', slot: lease.slot };
     }
+    recordAttempt({
+      stateRoot: deps.stateRoot,
+      attempt_id: attemptId,
+      request_id: requestId,
+      reservation_id: lease.reservation_id,
+      launch_id: lease.launch_id,
+      session_hash: lease.session_hash,
+      public_model_id: publicModelId(model),
+      slot_id: lease.slot,
+      account_hash: lease.account_id_hash,
+      affinity_generation: lease.affinity_generation,
+      phase: 'terminal',
+      outcome: 'terminal_failure',
+      reason_code: 'pre_content_non_rate_error',
+      transport_mode: 'sse',
+      transport_policy_version: 'codex-balanced-sse-until-account-aware-websocket',
+      upstream_status: upstreamStatus,
+      response_headers_received: responseHeadersReceived,
+      // No headers is not proof of "before wire"; the upstream streamer may have
+      // written request bytes and failed before surfacing headers. Treat this as
+      // non-replayable and do not authorize rotation.
+      wire_started: true,
+      content_started: false,
+      retry_eligible: false,
+      rotation_eligible: false,
+      evidence_codes: ['content_not_started', 'terminal_outcome_recorded'],
+      duration_ms: Math.max(0, deps.now() - startedAt),
+    });
     forwardTerminal(terminalError ?? { type: 'error', reason: 'error', error: buildErrorMessage(new Error('Codex balanced provider produced no response'), false) });
     return { outcome: 'other-error', slot: lease.slot };
   };

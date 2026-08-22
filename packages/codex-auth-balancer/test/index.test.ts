@@ -8,9 +8,10 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { PROACTIVE_REFRESH_LEAD_MS, PROBE_MODEL, cleanupLaunch, getConservationQuota, getPolicy, ensureFreshTokens, finishTokenLease, getDbStatus, getSlotTokenHealth, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, isProcessAlive, listReservations, prepareLaunch, pruneDatabase, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, shouldStealRefreshLock, startTokenLease, syncBack, unbrickSlot } from '../src/index.js';
+import { PROACTIVE_REFRESH_LEAD_MS, PROBE_MODEL, cleanupLaunch, getConservationQuota, getPolicy, ensureFreshTokens, finishTokenLease, getDbStatus, getSlotTokenHealth, getUsage, ingestDirectPiLiveUsage, ingestLiveUsage, isProcessAlive, listCodexAttempts, listRateLimitCooldowns, listReservations, listSessionAffinities, prepareLaunch, pruneDatabase, publishRateLimitCooldown, recordCodexAttempt, refreshUsage, resolveStateRoot, selectSingleActivePiSlot, shouldStealRefreshLock, startTokenLease, syncBack, unbrickSlot } from '../src/index.js';
 import codexBalancedProvider, { getBalancedCodexModels, loadHostingPiAiRuntime, mapBalancedCodexModels, resolveHostingPiPackageRoot } from '../extensions/pi/index.js';
 import { getModels } from '@earendil-works/pi-ai/compat';
+import { PROVIDER_ONLY_SCENARIOS, assertAuthBalancerAttemptV1 } from '@bravo/auth-balancer-contract';
 
 const exec = promisify(execFile);
 
@@ -891,6 +892,253 @@ test('startTokenLease extracts token from slot Pi auth, honors affinity, and fin
   assert.equal(second.slot, 'a');
 });
 
+test('startTokenLease publishes SQLite affinity before token prep and mirrors mixed-version legacy state', async () => {
+  const root = await tmp();
+  await seedUsableSlot(root, 'a', 70);
+  await seedUsableSlot(root, 'b', 90);
+  const sessionKey = 'sess-sqlite-affinity';
+  const first = await startTokenLease({ ...softLeaseArgs(root), preferred_slot: 'a', session_affinity_key: sessionKey });
+  assert.equal(first.slot, 'a');
+  assert.equal(first.expires_at, first.reservation_expires_at, 'legacy expires_at is the reservation alias during migration');
+  assert.ok(first.token_expires_at > first.reservation_expires_at, 'token and reservation lifetimes are distinct');
+  assert.ok((first.affinity_expires_at ?? 0) > first.reservation_expires_at, 'affinity outlives the reservation');
+  assert.equal(first.affinity_generation, 1);
+  assert.equal(first.affinity_outcome, 'fresh_placed');
+
+  const affinities = listSessionAffinities({ stateRoot: root });
+  assert.equal(affinities.length, 1);
+  assert.equal(affinities[0].slot, 'a');
+  assert.equal(affinities[0].publicModelId, 'bravo-codex-balanced/fake');
+  assert.equal(affinities[0].generation, 1);
+  assert.equal(affinities[0].transitionReason, 'fresh_placed');
+  assert.ok(affinities[0].legacyFilePublishedAt, 'new process publishes the compatibility mirror for resident old processes');
+
+  const legacyPath = path.join(root, 'leases', 'affinity', createHash('sha256').update(sessionKey).digest('hex').slice(0, 32) + '.json');
+  const legacy = JSON.parse(await fs.readFile(legacyPath, 'utf8'));
+  assert.equal(legacy.slot, 'a');
+  assert.equal(legacy.compatibility, 'sqlite_affinity_mirror');
+  assert.equal(legacy.compatibility_state, 'published_for_mixed_resident_versions');
+  assert.equal(legacy.sqlite_generation, 1);
+  assert.equal(legacy.expires_at, first.affinity_expires_at);
+
+  const second = await startTokenLease({ ...softLeaseArgs(root), session_affinity_key: sessionKey });
+  assert.equal(second.slot, 'a', 'SQLite affinity wins over raw quota score');
+  assert.equal(second.affinity_generation, 1);
+  assert.equal(second.affinity_outcome, 'affinity_preserved');
+});
+
+test('concurrent first requests for one session converge on one affinity slot', async () => {
+  const root = await tmp();
+  await seedUsableSlot(root, 'a', 90);
+  await seedUsableSlot(root, 'b', 80);
+  const sessionKey = 'sess-concurrent-first-request';
+
+  const [first, second] = await Promise.all([
+    startTokenLease({ ...softLeaseArgs(root), session_affinity_key: sessionKey }),
+    startTokenLease({ ...softLeaseArgs(root), session_affinity_key: sessionKey }),
+  ]);
+
+  assert.equal(first.slot, second.slot, 'first concurrent selection publishes affinity before the peer selects');
+  assert.deepEqual(new Set([first.affinity_generation, second.affinity_generation]), new Set([1]));
+  assert.ok([first.affinity_outcome, second.affinity_outcome].includes('fresh_placed'));
+  assert.ok([first.affinity_outcome, second.affinity_outcome].includes('affinity_preserved'));
+  const affinities = listSessionAffinities({ stateRoot: root });
+  assert.equal(affinities.length, 1);
+  assert.equal(affinities[0].slot, first.slot);
+  assert.equal(affinities[0].generation, 1);
+});
+
+test('token prep failure invalidates provisional affinity before the next selection', async () => {
+  const root = await tmp();
+  await seedUsableSlot(root, 'good', 50);
+  await writeJson(path.join(root, 'accounts', 'bad', 'auth.json'), {
+    access_token: fakeClaimlessJwt(Math.floor((Date.now() + 600_000) / 1000)),
+    expiry_date: Date.now() + 600_000,
+  });
+  const sessionKey = 'sess-claimless-fallback';
+  await assert.rejects(startTokenLease({ ...softLeaseArgs(root), preferred_slot: 'bad', session_affinity_key: sessionKey }), /no accountId claim/);
+
+  const expired = listSessionAffinities({ stateRoot: root, includeExpired: true });
+  assert.equal(expired[0]?.slot, 'bad');
+  assert.match(expired[0]?.transitionReason ?? '', /claimless_access_token/);
+  assert.ok(expired[0]?.legacyFileRemovedAt, 'token-prep failure marks the legacy mirror removed');
+  const legacyPath = path.join(root, 'leases', 'affinity', createHash('sha256').update(sessionKey).digest('hex').slice(0, 32) + '.json');
+  assert.equal(await fs.stat(legacyPath).then(() => true).catch(() => false), false, 'old resident fallback cannot resurrect a removed legacy affinity file');
+  const next = await startTokenLease({ ...softLeaseArgs(root), session_affinity_key: sessionKey });
+  assert.equal(next.slot, 'good');
+  assert.equal(next.affinity_outcome, 'fresh_placed');
+});
+
+test('fleet-visible 429 cooldown blocks selection without mutating status reads', async () => {
+  const root = await tmp();
+  await seedUsableSlot(root, 'hot', 95);
+  await seedUsableSlot(root, 'warm', 30);
+  const cooldown = publishRateLimitCooldown({
+    stateRoot: root,
+    slot: 'hot',
+    sourceAttemptId: 'attempt-hot-429',
+    reason: 'rate_limited_pre_content',
+    observedAt: 1_000,
+    expiresAt: Date.now() + 60_000,
+  });
+  assert.equal(cooldown.slot, 'hot');
+  assert.deepEqual(listRateLimitCooldowns({ stateRoot: root }).map(c => [c.slot, c.sourceAttemptId]), [['hot', 'attempt-hot-429']]);
+
+  const selected = await startTokenLease(softLeaseArgs(root));
+  assert.equal(selected.slot, 'warm', 'selection must honor the fleet cooldown even when the cooled slot has more quota');
+  assert.deepEqual(listRateLimitCooldowns({ stateRoot: root }).map(c => c.slot), ['hot'], 'diagnostic reads leave cooldown state intact');
+});
+
+test('Codex attempt telemetry is durable, contract-valid, provider-local, and redacted', async () => {
+  assert.ok(PROVIDER_ONLY_SCENARIOS.codex.includes('codex-independent-lifetimes-enforced'));
+  assert.ok(PROVIDER_ONLY_SCENARIOS.codex.includes('codex-mixed-version-additive-state-compatible'));
+  const root = await tmp();
+  const record = recordCodexAttempt({
+    stateRoot: root,
+    attempt_id: 'attempt-1',
+    request_id: 'request-1',
+    reservation_id: 'reservation-1',
+    launch_id: 'launch-1',
+    session_hash: createHash('sha256').update('session').digest('hex'),
+    public_model_id: 'bravo-codex-balanced/fake',
+    slot_id: 's1',
+    account_hash: createHash('sha256').update('acct').digest('hex'),
+    affinity_generation: 7,
+    phase: 'terminal',
+    outcome: 'completed',
+    reason_code: 'upstream_done',
+    transport_mode: 'sse',
+    transport_policy_version: 'codex-balanced-sse-until-account-aware-websocket',
+    upstream_status: 200,
+    response_headers_received: true,
+    wire_started: true,
+    content_started: true,
+    retry_eligible: false,
+    rotation_eligible: false,
+    evidence_codes: ['selected_slot_credential_used', 'account_connection_attributed', 'terminal_outcome_recorded'],
+    duration_ms: 12,
+  });
+  assert.equal(assertAuthBalancerAttemptV1(record).provider, 'codex');
+  const listed = listCodexAttempts({ stateRoot: root });
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].affinity_generation, 7, 'non-secret generation fencing remains observable');
+  assert.ok(listed[0].evidence_codes.includes('attempt_record_durable'));
+  assert.ok(listed[0].evidence_codes.includes('redaction_applied'));
+  const raw = await fs.readFile(path.join(root, 'balancer.sqlite3'), 'utf8').catch(() => '');
+  assert.doesNotMatch(raw, /tok_|refresh_token|sk-/);
+});
+
+test('mixed-version additive state opens old schema v1 databases without bumping schema version', async () => {
+  const root = await tmp();
+  const dbPath = path.join(root, 'balancer.sqlite3');
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`
+      PRAGMA user_version = 1;
+      CREATE TABLE schema_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO schema_metadata(key, value) VALUES ('schema_version', '1');
+    `);
+  } finally {
+    db.close();
+  }
+
+  const status = await getDbStatus({ stateRoot: root });
+  assert.equal(status.schemaVersion, 1);
+  const upgraded = new DatabaseSync(dbPath);
+  try {
+    const tables = new Set((upgraded.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(row => row.name));
+    assert.ok(tables.has('session_affinity'));
+    assert.ok(tables.has('rate_limit_cooldowns'));
+    assert.ok(tables.has('auth_attempts'));
+    assert.equal(Number((upgraded.prepare('PRAGMA user_version').get() as { user_version: number }).user_version), 1);
+  } finally {
+    upgraded.close();
+  }
+});
+
+test('mixed-version additive state works while an old resident process keeps the v1 database open', async () => {
+  const root = await tmp();
+  const readyPath = path.join(root, 'old-ready');
+  const goPath = path.join(root, 'old-go');
+  const childScript = `
+    import { DatabaseSync } from 'node:sqlite';
+    import { promises as fs } from 'node:fs';
+    const root = ${JSON.stringify(root)};
+    const readyPath = ${JSON.stringify(readyPath)};
+    const goPath = ${JSON.stringify(goPath)};
+    const db = new DatabaseSync(root + '/balancer.sqlite3');
+    db.exec(\`
+      PRAGMA busy_timeout = 5000;
+      PRAGMA user_version = 1;
+      CREATE TABLE schema_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT OR REPLACE INTO schema_metadata(key, value) VALUES ('schema_version', '1');
+      CREATE TABLE accounts (
+        slot TEXT PRIMARY KEY,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        problem_json TEXT
+      );
+      CREATE TABLE reservations (
+        id TEXT PRIMARY KEY,
+        slot TEXT NOT NULL,
+        launch_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        purpose TEXT,
+        expected_runtime_ms INTEGER,
+        ttl_safety_buffer_ms INTEGER,
+        run_id TEXT,
+        root_run_id TEXT,
+        metadata_json TEXT
+      );
+      CREATE TABLE launch_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reservation_id TEXT,
+        launch_id TEXT,
+        slot TEXT,
+        event_type TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        details_json TEXT
+      );
+    \`);
+    await fs.writeFile(readyPath, 'ready');
+    while (!(await fs.stat(goPath).then(() => true).catch(() => false))) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const userVersion = db.prepare('PRAGMA user_version').get().user_version;
+    db.prepare("INSERT OR REPLACE INTO accounts(slot, first_seen_at, last_seen_at) VALUES ('oldproc', 1, 1)").run();
+    db.prepare("INSERT INTO reservations(id, slot, launch_id, state, created_at, updated_at, expires_at) VALUES ('oldres', 'oldproc', 'oldlaunch', 'pending', 1, 1, 9999999999999)").run();
+    const count = db.prepare("SELECT COUNT(*) AS count FROM reservations WHERE id = 'oldres'").get().count;
+    console.log(JSON.stringify({ userVersion, count }));
+    db.close();
+  `;
+
+  const child = exec(process.execPath, ['--input-type=module', '-e', childScript], { timeout: 5000 });
+  await eventually(async () => (await fs.stat(readyPath).then(() => 'ready').catch(() => undefined)), 1000);
+
+  const status = await getDbStatus({ stateRoot: root });
+  assert.equal(status.schemaVersion, 1);
+  await fs.writeFile(goPath, 'go');
+  const { stdout } = await child;
+  const childResult = JSON.parse(stdout.trim());
+  assert.equal(childResult.userVersion, 1, 'new additive migrations do not bump the resident old schema version');
+  assert.equal(childResult.count, 1, 'old resident process can still write its known tables after new process opens the db');
+
+  const reopened = new DatabaseSync(path.join(root, 'balancer.sqlite3'));
+  try {
+    const tables = new Set((reopened.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(row => row.name));
+    assert.ok(tables.has('session_affinity'));
+    assert.ok(tables.has('rate_limit_cooldowns'));
+    assert.ok(tables.has('auth_attempts'));
+    assert.equal(Number((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version), 1);
+  } finally {
+    reopened.close();
+  }
+});
+
 test('startTokenLease accepts Codex CLI tokens auth shape in slot Pi auth', async () => {
   const root = await tmp();
   const access = fakeCodexJwt('acct-tokens', Math.floor((Date.now() + 60_000) / 1000));
@@ -1349,6 +1597,55 @@ test('withRefreshLock does NOT steal a fresh lock held by a live owner (times ou
     else process.env.CODEX_BALANCER_REFRESH_LOCK_ACQUIRE_MS = priorEnv;
     await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
   }
+});
+
+test('refresh-lock acquisition timeout removes provisional legacy affinity and fails the reservation', async () => {
+  const root = await tmp();
+  const slot = 'lockbusy-affinity';
+  const sessionKey = 'sess-lockbusy-affinity';
+  await seedRefreshSlot(root, slot);
+  await seedUsableSlot(root, 'good-after-lock-timeout', 90);
+  const lockDir = refreshLockDirForTest(root, slot);
+  await fs.mkdir(lockDir, { recursive: true });
+  await writeJson(path.join(lockDir, 'owner.json'), { schema_version: 1, pid: process.pid, nonce: 'live-owner-nonce', created_at: Date.now() });
+  const now = new Date();
+  await fs.utimes(lockDir, now, now);
+  const priorEnv = process.env.CODEX_BALANCER_REFRESH_LOCK_ACQUIRE_MS;
+  process.env.CODEX_BALANCER_REFRESH_LOCK_ACQUIRE_MS = '200';
+  const stub = stubTokenEndpoint(() => { throw new Error('refresh should not run while another live owner holds the lock'); });
+  try {
+    await assert.rejects(
+      startTokenLease({ ...leaseArgs(root, slot), session_affinity_key: sessionKey }),
+      /timed out waiting for token refresh lock/,
+    );
+  } finally {
+    stub.restore();
+    if (priorEnv === undefined) delete process.env.CODEX_BALANCER_REFRESH_LOCK_ACQUIRE_MS;
+    else process.env.CODEX_BALANCER_REFRESH_LOCK_ACQUIRE_MS = priorEnv;
+    await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  const affinities = listSessionAffinities({ stateRoot: root, includeExpired: true });
+  assert.equal(affinities.length, 1);
+  assert.equal(affinities[0].slot, slot);
+  assert.match(affinities[0].transitionReason, /refresh_lock_acquire_timeout/);
+  assert.ok(affinities[0].legacyFileRemovedAt, 'lock-timeout failure marks the legacy mirror removed');
+
+  const legacyPath = path.join(root, 'leases', 'affinity', createHash('sha256').update(sessionKey).digest('hex').slice(0, 32) + '.json');
+  assert.equal(await fs.stat(legacyPath).then(() => true).catch(() => false), false, 'old resident fallback cannot resurrect the provisional affinity file');
+
+  const inactive = await listReservations({ stateRoot: root, includeInactive: true });
+  assert.equal(inactive.length, 1);
+  assert.equal(inactive[0].state, 'failed');
+  assert.equal(latestFailedDetails(root, inactive[0].id)?.reason, 'refresh_lock_acquire_timeout');
+  assert.equal(stub.calls.length, 0);
+
+  const next = await startTokenLease({ ...softLeaseArgs(root), session_affinity_key: sessionKey });
+  assert.equal(next.slot, 'good-after-lock-timeout', 'removed legacy mirror must not prefer/resurrect the non-broken lock-timeout slot');
+  assert.equal(next.affinity_outcome, 'fresh_placed');
+  const republished = JSON.parse(await fs.readFile(legacyPath, 'utf8'));
+  assert.equal(republished.slot, 'good-after-lock-timeout');
+  assert.equal(republished.compatibility_state, 'published_for_mixed_resident_versions');
 });
 
 // FIX A.1: the lock holder's `finally` must NOT delete a lock that another owner has stolen and

@@ -19,11 +19,11 @@ test('classifyRateLimit: non-429 status alone is not a rate limit', () => {
   assert.equal(classifyRateLimit({ status: 400 }), false);
   assert.equal(classifyRateLimit({ status: 200 }), false);
 });
-test('classifyRateLimit: the {"detail":"Rate limit exceeded"} body is detected', () => {
-  assert.equal(classifyRateLimit({ errorText: '{"detail":"Rate limit exceeded"}' }), true);
+test('classifyRateLimit: the {"detail":"Rate limit exceeded"} body alone is diagnostic, not a contract outcome', () => {
+  assert.equal(classifyRateLimit({ errorText: '{"detail":"Rate limit exceeded"}' }), false);
 });
-test('classifyRateLimit: friendly "usage limit" message is detected', () => {
-  assert.equal(classifyRateLimit({ errorText: 'You have hit your ChatGPT usage limit (pro plan). Try again in ~5 min.' }), true);
+test('classifyRateLimit: friendly "usage limit" message alone is diagnostic, not a contract outcome', () => {
+  assert.equal(classifyRateLimit({ errorText: 'You have hit your ChatGPT usage limit (pro plan). Try again in ~5 min.' }), false);
 });
 test('classifyRateLimit: unrelated errors are not rate limits', () => {
   assert.equal(classifyRateLimit({ errorText: "invalid_request_error: Tool 'image_generation' is not supported." }), false);

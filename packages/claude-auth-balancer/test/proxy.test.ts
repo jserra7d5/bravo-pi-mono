@@ -15,6 +15,7 @@ import { after, test } from 'node:test';
 import { writeSlotObservation } from '../src/accounts.js';
 import { AffinityStore } from '../src/affinity.js';
 import { MetricsStore } from '../src/metrics.js';
+import { AttemptStore } from '../src/attempts.js';
 import { SESSION_HEADER, startProxy } from '../src/proxy.js';
 
 const cleanups: (() => void)[] = [];
@@ -123,6 +124,7 @@ async function boot(options: {
     allowOverage: options.allowOverage,
     metrics: options.metrics ?? false,
     upstreamHeaderTimeoutMs: options.upstreamHeaderTimeoutMs,
+    requireGatewayAuth: false,
   });
   cleanups.push(() => server.close());
   return { url, stateRoot };
@@ -500,7 +502,44 @@ test('metrics attribute usage to the account that actually served the request', 
   }
 });
 
-// --- pre-header transport retry -------------------------------------------
+test('429 rotation attempts are durable without double-counting final usage rows', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  const up = await upstream((call, res) => {
+    if (call.authorization === 'Bearer tok-1') {
+      res.writeHead(429, {});
+      res.end('{}');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream', ...OK_HEADERS });
+    res.end(sseBody('claude-opus-5', 2000, 20));
+  });
+  const { url, stateRoot } = await boot({ authswapRoot, upstreamUrl: up.url, metrics: true });
+
+  await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'durable-attempts' });
+  await new Promise(r => setTimeout(r, 150));
+
+  const metrics = new MetricsStore(stateRoot);
+  const attempts = new AttemptStore(stateRoot);
+  try {
+    const usageRows = metrics.query('SELECT slot, cache_read_tokens FROM requests') as Record<string, number | string>[];
+    assert.equal(usageRows.length, 1, 'final usage is request-level, not attempt-level');
+    assert.equal(usageRows[0]!['slot'], '2');
+
+    const attemptRows = attempts.query(
+      "SELECT outcome, slot_id FROM auth_balancer_attempts WHERE outcome IN ('rate_limited_pre_content', 'rotated_pre_content', 'completed') ORDER BY id",
+    ) as Record<string, string>[];
+    assert.deepEqual(attemptRows.map(row => row.outcome), ['rate_limited_pre_content', 'rotated_pre_content', 'completed']);
+    assert.deepEqual(attemptRows.map(row => row.slot_id), ['1', '1', '2']);
+  } finally {
+    metrics.close();
+    attempts.close();
+  }
+});
+
+// --- generation transport failure ------------------------------------------
 //
 // Faithful seam: the upstream is a real socket that really dies mid-request,
 // so the proxy's own error path, retry, and relay all run for real. Provenance
@@ -526,7 +565,7 @@ async function flakyUpstream(n: number, onServe?: (res: http.ServerResponse) => 
   });
 }
 
-test('a connection that dies before any response byte is re-sent on the same account', async () => {
+test('a generation connection that dies after request bytes are written is terminal by default', async () => {
   const authswapRoot = fakeAuthswap([
     { slot: '1', email: 'a@x.com', token: 'tok-1' },
     { slot: '2', email: 'b@x.com', token: 'tok-2' },
@@ -536,24 +575,19 @@ test('a connection that dies before any response byte is re-sent on the same acc
 
   const res = await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'transport-retry' });
 
-  assert.equal(res.status, 200, 'the client never sees the broken socket');
-  assert.equal(up.calls.length, 2, 'exactly one re-send');
-  assert.equal(
-    up.calls[0]!.authorization,
-    up.calls[1]!.authorization,
-    'the retry stays on the same account: the socket broke, the account did not',
-  );
+  assert.equal(res.status, 502, 'the proxy does not replay non-idempotent generation after wire start');
+  assert.equal(up.calls.length, 1, 'no re-send after request bytes may have reached upstream');
 });
 
-test('two consecutive broken connections still recover inside the retry budget', async () => {
+test('conservative generation retry policy does not spend the retry budget after wire start', async () => {
   const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
   const up = await flakyUpstream(2);
   const { url } = await boot({ authswapRoot, upstreamUrl: up.url });
 
   const res = await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'transport-retry-2' });
 
-  assert.equal(res.status, 200);
-  assert.equal(up.calls.length, 3, 'first attempt plus the two allowed retries');
+  assert.equal(res.status, 502);
+  assert.equal(up.calls.length, 1);
 });
 
 test('a transport failure that never recovers ends as one 502, not an account rotation', async () => {
@@ -567,7 +601,7 @@ test('a transport failure that never recovers ends as one 502, not an account ro
   const res = await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'transport-dead' });
 
   assert.equal(res.status, 502);
-  assert.equal(up.calls.length, 3, 'the budget is bounded; it does not spin');
+  assert.equal(up.calls.length, 1, 'the budget is not used for after-wire generation failures');
   const accounts = new Set(up.calls.map(c => c.authorization));
   assert.equal(accounts.size, 1, 'a dead socket is not a reason to abandon the warm account');
 });

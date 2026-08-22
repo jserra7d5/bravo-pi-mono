@@ -10,7 +10,7 @@
     "build": "npm run build --workspaces --if-present",
     "check": "node scripts/check-versions.mjs && node scripts/check-extension-imports.mjs && npm run check --workspaces --if-present",
     "version:set": "node scripts/set-version.mjs",
-    "build:bundle": "npm run build --workspace @bravo/async-subagents --workspace @bravo/codex-auth-balancer --workspace @bravo/web-evidence-cache --workspace @bravo/gemini-code-assist",
+    "build:bundle": "npm run build --workspace @bravo/auth-balancer-contract --workspace @bravo/async-subagents --workspace @bravo/codex-auth-balancer --workspace @bravo/web-evidence-cache --workspace @bravo/gemini-code-assist",
     "prepare": "node scripts/prepare-install.mjs"
   },
   "//pi-bundle": "`pi install git:github.com/jserra7d5/bravo-pi-mono#release` reads the `pi.extensions` list below. It is the dependency closure of the shipped async-subagents role templates, not the whole monorepo: async-subagents itself, the balancer that serves every template's `bravo-codex-balanced/*` model id, and the two extensions the templates name in frontmatter. Adding another package to the bundle is one line here plus a `--workspace` in build:bundle. Everything else in packages/ stays a local-only tool.",

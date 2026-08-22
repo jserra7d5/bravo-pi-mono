@@ -13,13 +13,15 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { after, test } from 'node:test';
 
-import { isOriginFormTarget, isRetryableTransportError, retryAfterMs, startProxy } from '../src/proxy.js';
+import { MAX_CONFIGURABLE_REQUEST_BODY_BYTES, REPORT_ONLY_MEMORY_CEILING_BYTES, isOriginFormTarget, isRetryableTransportError, retryAfterMs, startProxy } from '../src/proxy.js';
 import { mergeClaims } from '../src/accounts.js';
 import { parseClaims } from '../src/claims.js';
 import { computeHeadroom, selectAccount } from '../src/policy.js';
 import type { AccountState } from '../src/policy.js';
 import { MAX_PENDING_FRAME_BYTES, UsageCollector } from '../src/usage.js';
-import { GATEWAY_API_KEY_SENTINEL } from '../src/client-launch.js';
+import { readRuntimeCredential } from '../src/admission.js';
+import { AttemptStore } from '../src/attempts.js';
+import { MetricsStore } from '../src/metrics.js';
 
 const cleanups: (() => void)[] = [];
 after(() => {
@@ -98,6 +100,7 @@ test('an absolute-form request target cannot exfiltrate an account token', async
     authswapRoot,
     metrics: false,
     usageProbe: false,
+    requireGatewayAuth: false,
   });
   cleanups.push(() => server.close());
 
@@ -128,6 +131,7 @@ test('a protocol-relative target is refused for the same reason', async () => {
     authswapRoot,
     metrics: false,
     usageProbe: false,
+    requireGatewayAuth: false,
   });
   cleanups.push(() => server.close());
 
@@ -145,6 +149,97 @@ test('normal origin-form targets are still accepted', () => {
   assert.equal(isOriginFormTarget('/\\evil.example'), false);
   assert.equal(isOriginFormTarget('*'), false);
   assert.equal(isOriginFormTarget(undefined), false);
+});
+
+test('an invalid local nonce rejects before body buffering and credential selection', async () => {
+  const authswapRoot = fakeAuthswap('SECRET-TOKEN-MUST-NOT-LOAD');
+  let upstreamHit = false;
+  const upstreamPort = await listen(
+    http.createServer((_req, res) => {
+      upstreamHit = true;
+      res.writeHead(200).end('{}');
+    }),
+  );
+  const stateRoot = tmp('cab-sec-st-');
+  const { server, port } = await startProxy({
+    port: 0,
+    upstream: `http://127.0.0.1:${upstreamPort}`,
+    stateRoot,
+    authswapRoot,
+    metrics: false,
+    usageProbe: false,
+  });
+  cleanups.push(() => server.close());
+
+  const body = 'x'.repeat(256 * 1024);
+  const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': 'wrong' },
+    body,
+  });
+  assert.equal(res.status, 401);
+  assert.equal(upstreamHit, false);
+
+  const store = new AttemptStore(stateRoot);
+  try {
+    const rows = store.query('SELECT outcome, reason_code, wire_started FROM auth_balancer_attempts') as Record<string, number | string>[];
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!['outcome'], 'security_rejected');
+    assert.equal(rows[0]!['reason_code'], 'invalid_local_nonce');
+    assert.equal(rows[0]!['wire_started'], 0);
+  } finally {
+    store.close();
+  }
+});
+
+test('the daemon runtime credential authenticates and is removed on clean shutdown', async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  const upstreamPort = await listen(
+    http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => res.writeHead(200, {}).end('{}'));
+    }),
+  );
+  const stateRoot = tmp('cab-runtime-');
+  const { server, port } = await startProxy({
+    port: 0,
+    upstream: `http://127.0.0.1:${upstreamPort}`,
+    stateRoot,
+    authswapRoot,
+    metrics: false,
+    usageProbe: false,
+  });
+  const credential = readRuntimeCredential(stateRoot);
+  assert.ok(credential);
+
+  const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': credential.nonce },
+    body: JSON.stringify({ model: 'claude-opus-5' }),
+  });
+  assert.equal(res.status, 200);
+
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  assert.equal(readRuntimeCredential(stateRoot), undefined);
+});
+
+test('a listen failure removes the daemon runtime credential', async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  const occupied = http.createServer();
+  const occupiedPort = await listen(occupied);
+  const stateRoot = tmp('cab-runtime-listen-fail-');
+
+  await assert.rejects(
+    startProxy({
+      port: occupiedPort,
+      upstream: 'http://127.0.0.1:1',
+      stateRoot,
+      authswapRoot,
+      metrics: false,
+      usageProbe: false,
+    }),
+  );
+  assert.equal(readRuntimeCredential(stateRoot), undefined);
 });
 
 // --- claim observation merging -------------------------------------------
@@ -242,6 +337,7 @@ test('every account is tried before reporting exhaustion', async () => {
     authswapRoot: root,
     metrics: false,
     usageProbe: false,
+    requireGatewayAuth: false,
   });
   cleanups.push(() => server.close());
 
@@ -287,6 +383,7 @@ test('concurrent opening requests for one session land on the same account', asy
     authswapRoot: root,
     metrics: false,
     usageProbe: false,
+    requireGatewayAuth: false,
   });
   cleanups.push(() => server.close());
 
@@ -305,7 +402,7 @@ test('concurrent opening requests for one session land on the same account', asy
 
 // --- stream failure -------------------------------------------------------
 
-test('an upstream that dies mid-body does not hang the client forever', async () => {
+test('an upstream that dies mid-body records terminal_failure without completed usage', async () => {
   const authswapRoot = fakeAuthswap('tok-1');
   const upstreamPort = await listen(
     http.createServer((req, res) => {
@@ -316,14 +413,16 @@ test('an upstream that dies mid-body does not hang the client forever', async ()
       setTimeout(() => res.socket?.destroy(), 50);
     }),
   );
+  const stateRoot = tmp('cab-sec-stream-dies-');
 
   const { server, port } = await startProxy({
     port: 0,
     upstream: `http://127.0.0.1:${upstreamPort}`,
-    stateRoot: tmp('cab-sec-st-'),
+    stateRoot,
     authswapRoot,
-    metrics: false,
+    metrics: true,
     usageProbe: false,
+    requireGatewayAuth: false,
   });
   cleanups.push(() => server.close());
 
@@ -339,6 +438,93 @@ test('an upstream that dies mid-body does not hang the client forever', async ()
     new Promise(r => setTimeout(() => r('HUNG'), 5000)),
   ]);
   assert.equal(finished, 'settled', 'the client request terminated rather than hanging');
+
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const attempts = new AttemptStore(stateRoot);
+  const metrics = new MetricsStore(stateRoot);
+  try {
+    const rows = attempts.query('SELECT outcome FROM auth_balancer_attempts ORDER BY id') as Record<string, string>[];
+    assert.ok(rows.some(row => row.outcome === 'content_started'));
+    assert.ok(rows.some(row => row.outcome === 'terminal_failure'));
+    assert.equal(rows.some(row => row.outcome === 'completed'), false);
+    assert.equal(metrics.query('SELECT id FROM requests').length, 0, 'stream failure must not finalize usage');
+  } finally {
+    attempts.close();
+    metrics.close();
+  }
+});
+
+test('a downstream client abort records aborted without completed usage', async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  let upstreamClosed!: () => void;
+  const upstreamClosedPromise = new Promise<void>(resolve => {
+    upstreamClosed = resolve;
+  });
+  const upstreamPort = await listen(
+    http.createServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('event: message_start\ndata: {"type":"message_start"}\n\n');
+      const timer = setInterval(() => res.write(': keepalive\n\n'), 50);
+      res.on('close', () => {
+        clearInterval(timer);
+        upstreamClosed();
+      });
+    }),
+  );
+  const stateRoot = tmp('cab-client-abort-');
+  const { server, port } = await startProxy({
+    port: 0,
+    upstream: `http://127.0.0.1:${upstreamPort}`,
+    stateRoot,
+    authswapRoot,
+    metrics: true,
+    usageProbe: false,
+    requireGatewayAuth: false,
+  });
+  cleanups.push(() => server.close());
+
+  await new Promise<void>((resolve, reject) => {
+    const body = JSON.stringify({ model: 'claude-opus-5', stream: true });
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: '/v1/messages',
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      },
+    }, res => {
+      res.once('data', () => {
+        res.destroy();
+        resolve();
+      });
+    });
+    req.on('error', error => {
+      if ((error as NodeJS.ErrnoException).code !== 'ECONNRESET') reject(error);
+    });
+    req.end(body);
+  });
+  await Promise.race([
+    upstreamClosedPromise,
+    new Promise<void>((_resolve, reject) => setTimeout(() => reject(new Error('upstream was not cancelled')), 2000)),
+  ]);
+  await new Promise(resolve => setTimeout(resolve, 100));
+
+  const attempts = new AttemptStore(stateRoot);
+  const metrics = new MetricsStore(stateRoot);
+  try {
+    const rows = attempts.query('SELECT outcome, reason_code FROM auth_balancer_attempts ORDER BY id') as Record<string, string>[];
+    assert.ok(rows.some(row => row.outcome === 'content_started'));
+    assert.ok(rows.some(row => row.outcome === 'aborted' && row.reason_code === 'client_aborted'));
+    assert.equal(rows.some(row => row.outcome === 'completed'), false);
+    assert.equal(rows.some(row => row.outcome === 'terminal_failure'), false);
+    assert.equal(metrics.query('SELECT id FROM requests').length, 0, 'client abort must not finalize usage');
+  } finally {
+    attempts.close();
+    metrics.close();
+  }
 });
 
 test('the response body is forwarded with its bytes unchanged', async () => {
@@ -367,6 +553,7 @@ test('the response body is forwarded with its bytes unchanged', async () => {
     authswapRoot,
     metrics: false,
     usageProbe: false,
+    requireGatewayAuth: false,
   });
   cleanups.push(() => server.close());
 
@@ -393,6 +580,71 @@ test('the response body is forwarded with its bytes unchanged', async () => {
   assert.ok(bodyBytes.equals(gz), 'compressed bytes must be relayed verbatim, not re-encoded');
 });
 
+test('a malformed compressed 200 still records one completed terminal attempt without usage', async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  const invalidGzip = Buffer.from('not a gzip stream', 'utf8');
+  const upstreamPort = await listen(
+    http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'content-encoding': 'gzip',
+          'content-length': String(invalidGzip.length),
+        });
+        res.end(invalidGzip);
+      });
+    }),
+  );
+  const stateRoot = tmp('cab-invalid-gzip-');
+  const { server, port } = await startProxy({
+    port: 0,
+    upstream: `http://127.0.0.1:${upstreamPort}`,
+    stateRoot,
+    authswapRoot,
+    metrics: true,
+    usageProbe: false,
+    requireGatewayAuth: false,
+  });
+  cleanups.push(() => server.close());
+
+  const raw = await new Promise<Buffer>(resolve => {
+    const chunks: Buffer[] = [];
+    const socket = net.connect(port, '127.0.0.1', () => {
+      const body = JSON.stringify({ model: 'claude-opus-5' });
+      socket.write(
+        `POST /v1/messages HTTP/1.1\r\nHost: x\r\ncontent-type: application/json\r\n` +
+          `Content-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+      );
+    });
+    socket.on('data', d => chunks.push(d as Buffer));
+    socket.on('close', () => resolve(Buffer.concat(chunks)));
+    setTimeout(() => {
+      socket.destroy();
+      resolve(Buffer.concat(chunks));
+    }, 4000);
+  });
+  assert.match(raw.toString('latin1'), /^HTTP\/1\.1 200/);
+  const sep = raw.indexOf('\r\n\r\n');
+  assert.ok(raw.subarray(sep + 4).equals(invalidGzip), 'malformed compressed bytes are still relayed unchanged');
+  await new Promise(resolve => setTimeout(resolve, 100));
+
+  const attempts = new AttemptStore(stateRoot);
+  const metrics = new MetricsStore(stateRoot);
+  try {
+    const rows = attempts.query(
+      "SELECT outcome, reason_code FROM auth_balancer_attempts WHERE phase = 'terminal' ORDER BY id",
+    ) as Record<string, string>[];
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!['outcome'], 'completed');
+    assert.equal(rows[0]!['reason_code'], 'upstream_completed_observation_failed');
+    assert.equal(metrics.query('SELECT id FROM requests').length, 0, 'malformed observation must not invent a usage row');
+  } finally {
+    attempts.close();
+    metrics.close();
+  }
+});
+
 // --- observer memory ------------------------------------------------------
 
 test('a body with no frame delimiter does not grow the collector without bound', () => {
@@ -404,6 +656,167 @@ test('a body with no frame delimiter does not grow the collector without bound',
     c['buffer'].length <= MAX_PENDING_FRAME_BYTES,
     `collector retained ${c['buffer'].length} bytes`,
   );
+});
+
+test('an enforced request body limit returns local 413 without upstream bytes', async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  let upstreamHit = false;
+  const upstreamPort = await listen(
+    http.createServer((req, res) => {
+      upstreamHit = true;
+      req.resume();
+      req.on('end', () => res.writeHead(200, {}).end('{}'));
+    }),
+  );
+  const stateRoot = tmp('cab-body-limit-');
+  const { server, port } = await startProxy({
+    port: 0,
+    upstream: `http://127.0.0.1:${upstreamPort}`,
+    stateRoot,
+    authswapRoot,
+    metrics: false,
+    usageProbe: false,
+    requireGatewayAuth: false,
+    bodyLimitMode: 'enforce',
+    maxRequestBodyBytes: 32,
+  });
+  cleanups.push(() => server.close());
+
+  const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-opus-5', prompt: 'x'.repeat(128) }),
+  });
+  assert.equal(res.status, 413);
+  assert.equal(upstreamHit, false);
+
+  const store = new AttemptStore(stateRoot);
+  try {
+    const rows = store.query('SELECT outcome, wire_started FROM auth_balancer_attempts') as Record<string, number | string>[];
+    assert.equal(rows[0]!['outcome'], 'body_limit_rejected');
+    assert.equal(rows[0]!['wire_started'], 0);
+  } finally {
+    store.close();
+  }
+});
+
+test('invalid proxy request body caps fail closed for enforce and report-only modes', async () => {
+  const invalidValues = [
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    -1,
+    0,
+    1.5,
+    MAX_CONFIGURABLE_REQUEST_BODY_BYTES + 1,
+  ];
+  for (const bodyLimitMode of ['enforce', 'report-only'] as const) {
+    for (const maxRequestBodyBytes of invalidValues) {
+      await assert.rejects(
+        startProxy({
+          port: 0,
+          upstream: 'http://127.0.0.1:1',
+          stateRoot: tmp('cab-invalid-body-cap-'),
+          authswapRoot: fakeAuthswap('tok-1'),
+          metrics: false,
+          usageProbe: false,
+          requireGatewayAuth: false,
+          bodyLimitMode,
+          maxRequestBodyBytes,
+        }),
+        /maxRequestBodyBytes must be/,
+        `${bodyLimitMode} accepted ${String(maxRequestBodyBytes)}`,
+      );
+    }
+  }
+});
+
+test('report-only body observation still forwards below the hard memory ceiling', async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  let upstreamBytes = 0;
+  const upstreamPort = await listen(
+    http.createServer((req, res) => {
+      req.on('data', (chunk: Buffer) => {
+        upstreamBytes += chunk.length;
+      });
+      req.on('end', () => res.writeHead(200, {}).end('{}'));
+    }),
+  );
+  const stateRoot = tmp('cab-body-report-');
+  const { server, port } = await startProxy({
+    port: 0,
+    upstream: `http://127.0.0.1:${upstreamPort}`,
+    stateRoot,
+    authswapRoot,
+    metrics: false,
+    usageProbe: false,
+    requireGatewayAuth: false,
+    bodyLimitMode: 'report-only',
+    maxRequestBodyBytes: 32,
+  });
+  cleanups.push(() => server.close());
+
+  const body = JSON.stringify({ model: 'claude-opus-5', prompt: 'x'.repeat(128) });
+  const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body,
+  });
+  assert.equal(res.status, 200);
+  assert.equal(upstreamBytes, Buffer.byteLength(body));
+
+  const store = new AttemptStore(stateRoot);
+  try {
+    const rows = store.query("SELECT outcome, reason_code, wire_started FROM auth_balancer_attempts WHERE reason_code = 'request_body_limit_report_only'") as Record<string, number | string>[];
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!['wire_started'], 0);
+  } finally {
+    store.close();
+  }
+});
+
+test('report-only request bodies hit a non-configurable memory ceiling before upstream bytes', { timeout: 15000 }, async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  let upstreamHit = false;
+  const upstreamPort = await listen(
+    http.createServer((req, res) => {
+      upstreamHit = true;
+      req.resume();
+      req.on('end', () => res.writeHead(200, {}).end('{}'));
+    }),
+  );
+  const stateRoot = tmp('cab-body-memory-ceiling-');
+  const { server, port } = await startProxy({
+    port: 0,
+    upstream: `http://127.0.0.1:${upstreamPort}`,
+    stateRoot,
+    authswapRoot,
+    metrics: false,
+    usageProbe: false,
+    requireGatewayAuth: false,
+    bodyLimitMode: 'report-only',
+    maxRequestBodyBytes: REPORT_ONLY_MEMORY_CEILING_BYTES,
+  });
+  cleanups.push(() => server.close());
+
+  const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: Buffer.alloc(REPORT_ONLY_MEMORY_CEILING_BYTES + 1),
+  });
+  assert.equal(res.status, 413);
+  assert.equal(upstreamHit, false);
+
+  const store = new AttemptStore(stateRoot);
+  try {
+    const rows = store.query('SELECT outcome, reason_code, wire_started, evidence_codes_json FROM auth_balancer_attempts') as Record<string, number | string>[];
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!['outcome'], 'body_limit_rejected');
+    assert.equal(rows[0]!['reason_code'], 'request_body_memory_ceiling');
+    assert.equal(rows[0]!['wire_started'], 0);
+    assert.match(String(rows[0]!['evidence_codes_json']), /body_size_observed/);
+  } finally {
+    store.close();
+  }
 });
 
 test('usage still parses correctly after an overflow-triggering preamble', () => {
@@ -511,12 +924,13 @@ test('a stray x-api-key is not forwarded alongside the substituted bearer', asyn
     authswapRoot,
     metrics: false,
     usageProbe: false,
+    requireGatewayAuth: false,
   });
   cleanups.push(() => server.close());
 
   await fetch(`http://127.0.0.1:${port}/v1/messages`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': GATEWAY_API_KEY_SENTINEL },
+    headers: { 'content-type': 'application/json', 'x-api-key': 'local-nonce' },
     body: JSON.stringify({ model: 'claude-opus-5' }),
   });
 
@@ -563,6 +977,7 @@ test('a short retry-after is waited out rather than paying a cache re-create', a
     authswapRoot: root,
     metrics: false,
     usageProbe: false,
+    requireGatewayAuth: false,
   });
   cleanups.push(() => server.close());
 
@@ -573,6 +988,67 @@ test('a short retry-after is waited out rather than paying a cache re-create', a
   });
   assert.equal(res.status, 200);
   assert.deepEqual(seen, ['Bearer tok-1', 'Bearer tok-1'], 'waited on the warm account');
+});
+
+test('a never-ending 429 control body is bounded and cannot hang rotation', async () => {
+  const root = tmp('cab-sec-as-');
+  const dir = path.join(root, 'providers', 'anthropic', 'credentials');
+  mkdirSync(dir, { recursive: true });
+  for (const slot of ['1', '2']) {
+    writeFileSync(
+      path.join(dir, `.credentials-${slot}-s${slot}@x.com.json`),
+      JSON.stringify({
+        claudeAiOauth: { accessToken: `tok-${slot}`, expiresAt: Date.now() + 3_600_000 },
+      }),
+    );
+  }
+
+  let first = true;
+  const upstreamPort = await listen(
+    http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        if (first) {
+          first = false;
+          res.writeHead(429, {});
+          res.write('{"type":"error"');
+          return;
+        }
+        res.writeHead(200, {}).end('{"ok":true}');
+      });
+    }),
+  );
+  const stateRoot = tmp('cab-429-bound-');
+  const { server, port } = await startProxy({
+    port: 0,
+    upstream: `http://127.0.0.1:${upstreamPort}`,
+    stateRoot,
+    authswapRoot: root,
+    metrics: false,
+    usageProbe: false,
+    requireGatewayAuth: false,
+  });
+  cleanups.push(() => server.close());
+
+  const started = Date.now();
+  const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'bounded-429' },
+    body: JSON.stringify({ model: 'claude-opus-5' }),
+  });
+  assert.equal(res.status, 200);
+  assert.ok(Date.now() - started < 3000, '429 body was abandoned at the bounded control deadline');
+
+  const store = new AttemptStore(stateRoot);
+  try {
+    const rows = store.query(
+      "SELECT outcome, evidence_codes_json FROM auth_balancer_attempts WHERE outcome = 'rate_limited_pre_content'",
+    ) as Record<string, string>[];
+    assert.equal(rows.length, 1);
+    assert.match(rows[0]!['evidence_codes_json'], /control_body_deadline_reached/);
+  } finally {
+    store.close();
+  }
 });
 
 test('retry-after parses both delta-seconds and an HTTP date', () => {
@@ -586,7 +1062,8 @@ test('retry-after parses both delta-seconds and an HTTP date', () => {
 
 // --- transport retry eligibility ------------------------------------------
 
-test('only a broken pre-header connection is re-sent', () => {
+test('only a broken pre-wire connection is eligible for hidden retry', () => {
+  assert.equal(isRetryableTransportError({ phase: 'pre-wire', code: 'ECONNRESET' }), true);
   assert.equal(isRetryableTransportError({ phase: 'pre-header', code: 'ECONNRESET' }), true);
   assert.equal(
     isRetryableTransportError({ phase: 'pre-header', code: 'ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC' }),

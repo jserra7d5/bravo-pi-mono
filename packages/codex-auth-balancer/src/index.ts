@@ -5,6 +5,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
+import {
+  assertAuthBalancerAttemptV1,
+  type AuthBalancerAttemptV1,
+  type AttemptOutcome,
+  type AttemptPhase,
+  type EvidenceCode,
+} from '@bravo/auth-balancer-contract';
 import { refreshCodexToken, type CodexTokenSet } from './codex-oauth.js';
 import { classifyOAuthRefreshError, redactSecretsInText, type OAuthErrorKind } from './oauth-error.js';
 import pkg from '../package.json' with { type: 'json' };
@@ -61,6 +68,10 @@ type SelectionMetadata = {
   tie_break: string;
   candidates_considered: number;
   penalties: string[];
+  session_hash?: string;
+  affinity_generation?: number;
+  affinity_outcome?: 'fresh_placed' | 'affinity_preserved' | 'affinity_replaced';
+  affinity_expires_at?: number;
 };
 type ReservedAccount = InternalAccount & { reservationId: string; launchId: string; selection: SelectionMetadata };
 type LaunchMetadata = {
@@ -130,11 +141,21 @@ export type TokenLease = {
   access_token: string;
   slot: string;
   label?: string;
+  /**
+   * Temporary compatibility alias for `reservation_expires_at`.
+   * New consumers must read the explicit lifetime fields below.
+   */
   expires_at: number;
+  reservation_expires_at: number;
+  token_expires_at: number;
+  affinity_expires_at?: number;
   account_id_hash?: string;
   reservation_id: string;
   launch_id: string;
   session_affinity_key?: string;
+  session_hash?: string;
+  affinity_generation?: number;
+  affinity_outcome?: 'fresh_placed' | 'affinity_preserved' | 'affinity_replaced';
 };
 export type FinishTokenLeaseInput = {
   lease_id: string;
@@ -166,6 +187,27 @@ export type LiveUsageIngestInput = {
   updated_at?: number;
 };
 export type LiveUsageIngestResult = { ok: boolean; ingested: boolean; slot?: string; skipped?: string; error?: string };
+
+export type CodexAttemptRecord = AuthBalancerAttemptV1;
+export type CodexRateLimitCooldown = {
+  slot: string;
+  sourceAttemptId?: string;
+  reason: string;
+  observedAt: number;
+  expiresAt: number;
+};
+export type CodexSessionAffinity = {
+  sessionHash: string;
+  publicModelId: string;
+  slot: string;
+  generation: number;
+  createdAt: number;
+  lastUsedAt: number;
+  expiresAt: number;
+  transitionReason: string;
+  legacyFilePublishedAt?: number;
+  legacyFileRemovedAt?: number;
+};
 
 export function selectSingleActivePiSlot(usage: CodexUsage): string | undefined {
   const slots = usage.accounts.filter(account => account.activePi).map(account => account.slot);
@@ -616,6 +658,51 @@ function openDb(stateRoot: string): DatabaseSync {
       created_at INTEGER NOT NULL,
       details_json TEXT
     );
+    CREATE TABLE IF NOT EXISTS session_affinity (
+      session_hash TEXT NOT NULL,
+      public_model_id TEXT NOT NULL,
+      slot TEXT NOT NULL REFERENCES accounts(slot) ON DELETE CASCADE,
+      generation INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_used_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      transition_reason TEXT NOT NULL,
+      legacy_file_published_at INTEGER,
+      legacy_file_removed_at INTEGER,
+      PRIMARY KEY (session_hash, public_model_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_affinity_slot ON session_affinity(slot, expires_at);
+    CREATE TABLE IF NOT EXISTS rate_limit_cooldowns (
+      slot TEXT PRIMARY KEY REFERENCES accounts(slot) ON DELETE CASCADE,
+      source_attempt_id TEXT,
+      reason TEXT NOT NULL,
+      observed_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_rate_limit_cooldowns_expires ON rate_limit_cooldowns(expires_at);
+    CREATE TABLE IF NOT EXISTS auth_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      attempt_id TEXT NOT NULL UNIQUE,
+      request_id TEXT NOT NULL,
+      reservation_id TEXT,
+      launch_id TEXT,
+      slot TEXT,
+      session_hash TEXT,
+      public_model_id TEXT NOT NULL,
+      phase TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      reason_code TEXT,
+      transport_mode TEXT,
+      upstream_status INTEGER,
+      wire_started INTEGER NOT NULL,
+      content_started INTEGER NOT NULL,
+      retry_eligible INTEGER NOT NULL,
+      rotation_eligible INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      record_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_auth_attempts_request ON auth_attempts(request_id, id);
+    CREATE INDEX IF NOT EXISTS idx_auth_attempts_reservation ON auth_attempts(reservation_id);
     -- Retention indexes. idx_launch_events_reservation is not optional: launch_events
     -- references reservations ON DELETE SET NULL, so without it every reservation delete
     -- full-scans the whole launch_events table. On the live database (791k events, 286k
@@ -1133,7 +1220,7 @@ function statusOf(entry: UsageEntry | undefined): CodexAccountStatus {
  *    otherwise selection falls back to the full account set. A preference must never
  *    turn a usable install into `slot unavailable by policy`.
  */
-function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageEntry>, activeCounts: Record<string, number>, stateRoot: string, requestedSlot: string | undefined, requestedSlotMode: 'hard' | 'soft', now: number, effective: EffectivePolicy): { account: InternalAccount; selection: SelectionMetadata } {
+function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageEntry>, activeCounts: Record<string, number>, activeCooldowns: Record<string, CodexRateLimitCooldown>, stateRoot: string, requestedSlot: string | undefined, requestedSlotMode: 'hard' | 'soft', now: number, effective: EffectivePolicy): { account: InternalAccount; selection: SelectionMetadata } {
   const POLICY = effective.values;
   const candidates: Array<{ account: InternalAccount; selection: SelectionMetadata }> = [];
   const hardSlot = requestedSlotMode === 'hard' ? requestedSlot : undefined;
@@ -1143,6 +1230,7 @@ function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageE
     const entry = usage[account.slot];
     const status = statusOf(entry);
     const active = activeCounts[account.slot] || 0;
+    const cooldown = activeCooldowns[account.slot];
     const primary = normalizeWindow('primary', entry?.primary);
     const secondary = normalizeWindow('secondary', entry?.secondary);
     const generatedAt = entry?.updatedAt;
@@ -1157,6 +1245,7 @@ function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageE
     const weeklyRemaining = weeklyWindow?.remainingPercent;
     const penalties: string[] = [];
     if (status === 'broken') { penalties.push('rejected:broken'); continue; }
+    if (cooldown && cooldown.expiresAt > now) { penalties.push(`rejected:rate_limit_cooldown:${cooldown.reason}`); continue; }
     if (!usageStale && shortRemaining != null && shortRemaining < POLICY.hardFloorPrimaryPercent) { penalties.push('rejected:primary_hard_floor'); continue; }
     if (!usageStale && weeklyRemaining != null && weeklyRemaining < POLICY.hardFloorSecondaryPercent) { penalties.push('rejected:secondary_hard_floor'); continue; }
     let score = 50;
@@ -1227,31 +1316,54 @@ function selectAccount(accounts: InternalAccount[], usage: Record<string, UsageE
   }
   return candidates[0];
 }
-export async function chooseSlot(stateRoot = resolveStateRoot(), slot?: string, opts: { runId?: string; rootRunId?: string; reservationTtlMs?: number; softSlot?: boolean } = {}): Promise<ReservedAccount> {
+export async function chooseSlot(stateRoot = resolveStateRoot(), slot?: string, opts: { runId?: string; rootRunId?: string; reservationTtlMs?: number; softSlot?: boolean; sessionAffinityKey?: string; publicModelId?: string } = {}): Promise<ReservedAccount> {
   const accounts = await scanInternalAccounts(stateRoot);
   if (accounts.length === 0) throw new Error('no accounts found');
+  const sessionHash = await sessionHashForKey(stateRoot, opts.sessionAffinityKey);
+  const legacyPreferred = !sessionHash ? undefined : await readLegacyAffinitySlot(stateRoot, opts.sessionAffinityKey);
   const db = openDb(stateRoot);
   try {
     syncAccountInventory(db, accounts);
     const now = Date.now();
     db.exec('BEGIN IMMEDIATE');
+    let committed = false;
     try {
       releaseExpiredReservations(db, now);
       const usage = latestUsageEntries(db);
       const activeCounts = activeReservationCounts(db, now);
-      const selected = selectAccount(accounts, usage, activeCounts, stateRoot, slot, opts.softSlot ? 'soft' : 'hard', now, readEffectivePolicy(db));
+      const activeCooldowns = activeCooldownRows(db, now);
+      const affinity = readSessionAffinityRow(db, sessionHash, opts.publicModelId, now);
+      const requested = affinity?.slot ?? slot ?? legacyPreferred;
+      const selected = selectAccount(accounts, usage, activeCounts, activeCooldowns, stateRoot, requested, opts.softSlot ? 'soft' : 'hard', now, readEffectivePolicy(db));
       const expiresAt = now + (opts.reservationTtlMs && opts.reservationTtlMs > 0 ? opts.reservationTtlMs : DEFAULT_RESERVATION_TTL_MS);
       selected.selection.reservation_expires_at = expiresAt;
+      const affinityPublication = publishSessionAffinityInTx(db, {
+        sessionHash,
+        publicModelId: opts.publicModelId,
+        slot: selected.account.slot,
+        now,
+        expiresAt: expiresAt + DEFAULT_RESERVATION_TTL_MS,
+        existing: affinity,
+      });
+      if (sessionHash) selected.selection.session_hash = sessionHash;
+      if (affinityPublication.generation !== undefined) selected.selection.affinity_generation = affinityPublication.generation;
+      if (affinityPublication.outcome !== undefined) selected.selection.affinity_outcome = affinityPublication.outcome;
+      if (affinityPublication.expiresAt !== undefined) selected.selection.affinity_expires_at = affinityPublication.expiresAt;
       db.prepare(`
         INSERT INTO reservations(id, slot, launch_id, state, created_at, updated_at, expires_at, run_id, root_run_id, selected_score, active_reservations, metadata_json)
         VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(selected.selection.reservation_id, selected.account.slot, selected.selection.launch_id, now, now, expiresAt, opts.runId ?? null, opts.rootRunId ?? null, selected.selection.score, selected.selection.active_reservations, JSON.stringify(selected.selection));
       db.prepare('INSERT INTO launch_events(reservation_id, launch_id, slot, event_type, created_at, details_json) VALUES (?, ?, ?, ?, ?, ?)').run(selected.selection.reservation_id, selected.selection.launch_id, selected.account.slot, 'reserved', now, JSON.stringify(selected.selection));
       db.exec('COMMIT');
+      committed = true;
+      if (opts.sessionAffinityKey && selected.selection.affinity_expires_at) {
+        await writeLegacyAffinitySlot(stateRoot, opts.sessionAffinityKey, selected.account.slot, selected.selection.affinity_expires_at, selected.selection.affinity_generation);
+        markSessionAffinityLegacyPublished(stateRoot, sessionHash, opts.publicModelId, Date.now());
+      }
       const withUsage = { ...selected.account, usage: usage[selected.account.slot] };
       return { ...withUsage, reservationId: selected.selection.reservation_id, launchId: selected.selection.launch_id, selection: selected.selection };
     } catch (error) {
-      db.exec('ROLLBACK');
+      if (!committed) db.exec('ROLLBACK');
       throw error;
     }
   } finally {
@@ -1475,14 +1587,385 @@ function assertTokenLeaseInput(input: StartTokenLeaseInput) {
   if (input.abort_signal?.aborted) throw new Error('token lease aborted');
 }
 function affinityPath(stateRoot: string, key: string) { return path.join(stateRoot, 'leases', 'affinity', sha(key).slice(0, 32) + '.json'); }
-async function readAffinitySlot(stateRoot: string, key: string | undefined): Promise<string | undefined> {
-  if (!key) return undefined;
-  const entry = await readJson<{ slot?: string; expires_at?: number } | null>(affinityPath(stateRoot, key), null);
-  return entry?.slot && (!entry.expires_at || entry.expires_at > Date.now()) ? entry.slot : undefined;
+async function sessionHashForKey(stateRoot: string, key: string | undefined): Promise<string | undefined> {
+  return key ? sha(`${await salt(stateRoot)}:session:${key}`) : undefined;
 }
-async function writeAffinitySlot(stateRoot: string, key: string | undefined, slot: string, expiresAt: number) {
+async function readLegacyAffinitySlot(stateRoot: string, key: string | undefined): Promise<string | undefined> {
+  if (!key) return undefined;
+  const file = affinityPath(stateRoot, key);
+  const entry = await readJson<{ slot?: string; expires_at?: number; tombstone?: boolean } | null>(file, null);
+  if (!entry?.slot) return undefined;
+  const now = Date.now();
+  if (entry.tombstone === true || (entry.expires_at !== undefined && entry.expires_at <= now)) {
+    await fs.rm(file, { force: true }).catch(() => undefined);
+    return undefined;
+  }
+  return entry.slot;
+}
+async function writeLegacyAffinitySlot(stateRoot: string, key: string | undefined, slot: string, expiresAt: number, generation?: number) {
   if (!key) return;
-  await writeJson(affinityPath(stateRoot, key), { schema_version: 1, slot, expires_at: expiresAt });
+  await writeJson(affinityPath(stateRoot, key), {
+    schema_version: 1,
+    slot,
+    expires_at: expiresAt,
+    compatibility: 'sqlite_affinity_mirror',
+    compatibility_state: 'published_for_mixed_resident_versions',
+    sqlite_generation: generation,
+    removal_gate: 'remove_after_one_release_boundary_and_old_process_drain',
+  });
+}
+async function removeLegacyAffinitySlot(stateRoot: string, key: string | undefined, slot: string | undefined, reason: string, generation?: number) {
+  if (!key) return;
+  // Unlink, do not write an expired marker: the legacy reader treated
+  // `!expires_at` as no-expiry, so `expires_at: 0` resurrected the slot. File
+  // removal is the only representation both old and new readers agree means
+  // "no legacy preference"; SQLite launch_events/session_affinity keep the
+  // migration metadata.
+  void slot;
+  void reason;
+  void generation;
+  await fs.rm(affinityPath(stateRoot, key), { force: true });
+}
+function activeCooldownRows(db: DatabaseSync, now = Date.now()): Record<string, CodexRateLimitCooldown> {
+  db.prepare('DELETE FROM rate_limit_cooldowns WHERE expires_at <= ?').run(now);
+  const rows = db.prepare('SELECT * FROM rate_limit_cooldowns WHERE expires_at > ?').all(now) as SqlRow[];
+  const out: Record<string, CodexRateLimitCooldown> = {};
+  for (const row of rows) {
+    const slot = rowString(row.slot);
+    if (!slot) continue;
+    out[slot] = {
+      slot,
+      sourceAttemptId: rowString(row.source_attempt_id),
+      reason: rowString(row.reason) ?? 'rate_limit',
+      observedAt: rowNumber(row.observed_at) ?? now,
+      expiresAt: rowNumber(row.expires_at) ?? now,
+    };
+  }
+  return out;
+}
+export function publishRateLimitCooldown(input: { stateRoot?: string; slot: string; sourceAttemptId?: string; reason?: string; observedAt?: number; expiresAt: number }): CodexRateLimitCooldown {
+  const stateRoot = input.stateRoot || resolveStateRoot();
+  const observedAt = input.observedAt ?? Date.now();
+  const reason = input.reason || 'rate_limited_pre_content';
+  const db = openDb(stateRoot);
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare('INSERT INTO accounts(slot, first_seen_at, last_seen_at) VALUES (?, ?, ?) ON CONFLICT(slot) DO UPDATE SET last_seen_at = excluded.last_seen_at')
+        .run(input.slot, observedAt, observedAt);
+      db.prepare(`
+        INSERT INTO rate_limit_cooldowns(slot, source_attempt_id, reason, observed_at, expires_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(slot) DO UPDATE SET
+          source_attempt_id = excluded.source_attempt_id,
+          reason = excluded.reason,
+          observed_at = excluded.observed_at,
+          expires_at = MAX(rate_limit_cooldowns.expires_at, excluded.expires_at)
+      `).run(input.slot, input.sourceAttemptId ?? null, reason, observedAt, input.expiresAt);
+      db.prepare('INSERT INTO launch_events(slot, event_type, created_at, details_json) VALUES (?, ?, ?, ?)')
+        .run(input.slot, 'rate_limit_cooldown_published', observedAt, JSON.stringify({ source_attempt_id: input.sourceAttemptId, reason, expires_at: input.expiresAt }));
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } finally {
+    closeDb(db);
+  }
+  return { slot: input.slot, sourceAttemptId: input.sourceAttemptId, reason, observedAt, expiresAt: input.expiresAt };
+}
+export function listRateLimitCooldowns(options: { stateRoot?: string; includeExpired?: boolean } = {}): CodexRateLimitCooldown[] {
+  const stateRoot = options.stateRoot || resolveStateRoot();
+  const db = openDb(stateRoot);
+  try {
+    const now = Date.now();
+    const rows = db.prepare(`SELECT * FROM rate_limit_cooldowns ${options.includeExpired ? '' : 'WHERE expires_at > ?'} ORDER BY slot`).all(...(options.includeExpired ? [] : [now])) as SqlRow[];
+    return rows.flatMap(row => {
+      const slot = rowString(row.slot);
+      if (!slot) return [];
+      return [{
+        slot,
+        sourceAttemptId: rowString(row.source_attempt_id),
+        reason: rowString(row.reason) ?? 'rate_limit',
+        observedAt: rowNumber(row.observed_at) ?? 0,
+        expiresAt: rowNumber(row.expires_at) ?? 0,
+      }];
+    });
+  } finally {
+    closeDb(db);
+  }
+}
+function readSessionAffinityRow(db: DatabaseSync, sessionHash: string | undefined, publicModelId: string | undefined, now = Date.now()): CodexSessionAffinity | undefined {
+  if (!sessionHash || !publicModelId) return undefined;
+  const row = db.prepare('SELECT * FROM session_affinity WHERE session_hash = ? AND public_model_id = ? AND expires_at > ?').get(sessionHash, publicModelId, now) as SqlRow | undefined;
+  if (!row) return undefined;
+  const slot = rowString(row.slot);
+  const generation = rowNumber(row.generation);
+  const createdAt = rowNumber(row.created_at);
+  const lastUsedAt = rowNumber(row.last_used_at);
+  const expiresAt = rowNumber(row.expires_at);
+  if (!slot || generation == null || createdAt == null || lastUsedAt == null || expiresAt == null) return undefined;
+  return {
+    sessionHash,
+    publicModelId,
+    slot,
+    generation,
+    createdAt,
+    lastUsedAt,
+    expiresAt,
+    transitionReason: rowString(row.transition_reason) ?? 'unknown',
+    legacyFilePublishedAt: rowNumber(row.legacy_file_published_at),
+    legacyFileRemovedAt: rowNumber(row.legacy_file_removed_at),
+  };
+}
+function publishSessionAffinityInTx(db: DatabaseSync, input: {
+  sessionHash?: string;
+  publicModelId?: string;
+  slot: string;
+  now: number;
+  expiresAt: number;
+  existing?: CodexSessionAffinity;
+}): { generation?: number; outcome?: 'fresh_placed' | 'affinity_preserved' | 'affinity_replaced'; expiresAt?: number } {
+  if (!input.sessionHash || !input.publicModelId) return {};
+  const outcome = !input.existing ? 'fresh_placed' : input.existing.slot === input.slot ? 'affinity_preserved' : 'affinity_replaced';
+  const generation = !input.existing ? 1 : input.existing.slot === input.slot ? input.existing.generation : input.existing.generation + 1;
+  if (!input.existing) {
+    db.prepare(`
+      INSERT INTO session_affinity(session_hash, public_model_id, slot, generation, created_at, last_used_at, expires_at, transition_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_hash, public_model_id) DO UPDATE SET
+        slot = excluded.slot,
+        generation = session_affinity.generation + 1,
+        last_used_at = excluded.last_used_at,
+        expires_at = excluded.expires_at,
+        transition_reason = excluded.transition_reason,
+        legacy_file_removed_at = NULL
+    `).run(input.sessionHash, input.publicModelId, input.slot, generation, input.now, input.now, input.expiresAt, outcome);
+    const row = db.prepare('SELECT generation FROM session_affinity WHERE session_hash = ? AND public_model_id = ?').get(input.sessionHash, input.publicModelId) as SqlRow | undefined;
+    return { generation: rowNumber(row?.generation) ?? generation, outcome, expiresAt: input.expiresAt };
+  } else {
+    const result = db.prepare(`
+      UPDATE session_affinity
+      SET slot = ?, generation = ?, last_used_at = ?, expires_at = ?, transition_reason = ?, legacy_file_removed_at = NULL
+      WHERE session_hash = ? AND public_model_id = ? AND generation = ?
+    `).run(input.slot, generation, input.now, input.expiresAt, outcome, input.sessionHash, input.publicModelId, input.existing.generation);
+    if (Number(result.changes) !== 1) throw new Error('session affinity generation conflict');
+  }
+  return { generation, outcome, expiresAt: input.expiresAt };
+}
+function markSessionAffinityLegacyPublished(stateRoot: string, sessionHash: string | undefined, publicModelId: string | undefined, at: number) {
+  if (!sessionHash || !publicModelId) return;
+  const db = openDb(stateRoot);
+  try {
+    db.prepare('UPDATE session_affinity SET legacy_file_published_at = ? WHERE session_hash = ? AND public_model_id = ?').run(at, sessionHash, publicModelId);
+  } finally {
+    closeDb(db);
+  }
+}
+function markSessionAffinityLegacyRemoved(stateRoot: string, sessionHash: string | undefined, publicModelId: string | undefined, at: number) {
+  if (!sessionHash || !publicModelId) return;
+  const db = openDb(stateRoot);
+  try {
+    db.prepare('UPDATE session_affinity SET legacy_file_removed_at = ? WHERE session_hash = ? AND public_model_id = ?').run(at, sessionHash, publicModelId);
+  } finally {
+    closeDb(db);
+  }
+}
+function invalidateSessionAffinity(stateRoot: string, sessionHash: string | undefined, publicModelId: string | undefined, expectedSlot: string | undefined, reason: string) {
+  if (!sessionHash || !publicModelId) return;
+  const db = openDb(stateRoot);
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const now = Date.now();
+      const result = db.prepare(`
+        UPDATE session_affinity
+        SET expires_at = ?, last_used_at = ?, transition_reason = ?
+        WHERE session_hash = ? AND public_model_id = ? AND (? IS NULL OR slot = ?)
+      `).run(now, now, reason, sessionHash, publicModelId, expectedSlot ?? null, expectedSlot ?? null);
+      if (Number(result.changes) > 0) {
+        db.prepare('INSERT INTO launch_events(slot, event_type, created_at, details_json) VALUES (?, ?, ?, ?)')
+          .run(expectedSlot ?? null, 'session_affinity_invalidated', now, JSON.stringify({ public_model_id: publicModelId, reason }));
+      }
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } finally {
+    closeDb(db);
+  }
+}
+async function invalidateSessionAffinityAndLegacy(stateRoot: string, input: {
+  sessionHash: string | undefined;
+  publicModelId: string;
+  expectedSlot: string | undefined;
+  reason: string;
+  legacyKey: string | undefined;
+  generation: number | undefined;
+}) {
+  invalidateSessionAffinity(stateRoot, input.sessionHash, input.publicModelId, input.expectedSlot, input.reason);
+  await removeLegacyAffinitySlot(stateRoot, input.legacyKey, input.expectedSlot, input.reason, input.generation);
+  markSessionAffinityLegacyRemoved(stateRoot, input.sessionHash, input.publicModelId, Date.now());
+}
+export function listSessionAffinities(options: { stateRoot?: string; includeExpired?: boolean } = {}): CodexSessionAffinity[] {
+  const stateRoot = options.stateRoot || resolveStateRoot();
+  const db = openDb(stateRoot);
+  try {
+    const now = Date.now();
+    const rows = db.prepare(`SELECT * FROM session_affinity ${options.includeExpired ? '' : 'WHERE expires_at > ?'} ORDER BY session_hash, public_model_id`).all(...(options.includeExpired ? [] : [now])) as SqlRow[];
+    return rows.flatMap(row => {
+      const sessionHash = rowString(row.session_hash);
+      const publicModelId = rowString(row.public_model_id);
+      const slot = rowString(row.slot);
+      const generation = rowNumber(row.generation);
+      const createdAt = rowNumber(row.created_at);
+      const lastUsedAt = rowNumber(row.last_used_at);
+      const expiresAt = rowNumber(row.expires_at);
+      if (!sessionHash || !publicModelId || !slot || generation == null || createdAt == null || lastUsedAt == null || expiresAt == null) return [];
+      return [{
+        sessionHash,
+        publicModelId,
+        slot,
+        generation,
+        createdAt,
+        lastUsedAt,
+        expiresAt,
+        transitionReason: rowString(row.transition_reason) ?? 'unknown',
+        legacyFilePublishedAt: rowNumber(row.legacy_file_published_at),
+        legacyFileRemovedAt: rowNumber(row.legacy_file_removed_at),
+      }];
+    });
+  } finally {
+    closeDb(db);
+  }
+}
+function normalizeEvidenceCodes(codes: EvidenceCode[] | undefined): EvidenceCode[] {
+  return Array.from(new Set([...(codes ?? []), 'attempt_record_durable', 'redaction_applied'] satisfies EvidenceCode[]));
+}
+export function recordCodexAttempt(input: {
+  stateRoot?: string;
+  attempt_id: string;
+  request_id: string;
+  parent_attempt_id?: string;
+  reservation_id?: string;
+  launch_id?: string;
+  session_hash?: string;
+  public_model_id: string;
+  endpoint_class?: string;
+  slot_id?: string;
+  account_hash?: string;
+  affinity_generation?: number;
+  phase: AttemptPhase;
+  outcome: AttemptOutcome;
+  reason_code?: string;
+  transport_mode?: string;
+  transport_policy_version?: string;
+  connection_phase?: string;
+  socket_reused?: boolean;
+  request_bytes_written?: number;
+  response_headers_received?: boolean;
+  upstream_status?: number;
+  wire_started?: boolean;
+  content_started?: boolean;
+  retry_eligible?: boolean;
+  rotation_eligible?: boolean;
+  wait_ms?: number;
+  duration_ms?: number;
+  evidence_codes?: EvidenceCode[];
+  error_code?: string;
+  created_at_ms?: number;
+}): CodexAttemptRecord {
+  const stateRoot = input.stateRoot || resolveStateRoot();
+  const createdAtMs = input.created_at_ms ?? Date.now();
+  const record = assertAuthBalancerAttemptV1({
+    schema_version: 1,
+    attempt_id: input.attempt_id,
+    request_id: input.request_id,
+    parent_attempt_id: input.parent_attempt_id,
+    provider: 'codex',
+    session_hash: input.session_hash,
+    public_model_id: input.public_model_id,
+    endpoint_class: input.endpoint_class ?? 'codex-responses',
+    slot_id: input.slot_id,
+    account_hash: input.account_hash,
+    affinity_generation: input.affinity_generation,
+    phase: input.phase,
+    outcome: input.outcome,
+    reason_code: input.reason_code,
+    transport_mode: input.transport_mode,
+    transport_policy_version: input.transport_policy_version,
+    connection_phase: input.connection_phase,
+    socket_reused: input.socket_reused,
+    request_bytes_written: input.request_bytes_written,
+    response_headers_received: input.response_headers_received,
+    upstream_status: input.upstream_status,
+    error_code: input.error_code,
+    evidence_codes: normalizeEvidenceCodes(input.evidence_codes),
+    wire_started: input.wire_started ?? false,
+    content_started: input.content_started ?? false,
+    retry_eligible: input.retry_eligible ?? false,
+    rotation_eligible: input.rotation_eligible ?? false,
+    wait_ms: input.wait_ms,
+    duration_ms: input.duration_ms ?? 0,
+    created_at: new Date(createdAtMs).toISOString(),
+  } satisfies AuthBalancerAttemptV1);
+  const stored = redactForJson(record);
+  const db = openDb(stateRoot);
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare(`
+        INSERT OR IGNORE INTO auth_attempts(
+          attempt_id, request_id, reservation_id, launch_id, slot, session_hash, public_model_id,
+          phase, outcome, reason_code, transport_mode, upstream_status,
+          wire_started, content_started, retry_eligible, rotation_eligible, created_at, record_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        stored.attempt_id,
+        stored.request_id,
+        input.reservation_id ?? null,
+        input.launch_id ?? null,
+        stored.slot_id ?? null,
+        stored.session_hash ?? null,
+        stored.public_model_id,
+        stored.phase,
+        stored.outcome,
+        stored.reason_code ?? null,
+        stored.transport_mode ?? null,
+        stored.upstream_status ?? null,
+        stored.wire_started ? 1 : 0,
+        stored.content_started ? 1 : 0,
+        stored.retry_eligible ? 1 : 0,
+        stored.rotation_eligible ? 1 : 0,
+        createdAtMs,
+        JSON.stringify(stored),
+      );
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } finally {
+    closeDb(db);
+  }
+  return stored;
+}
+export function listCodexAttempts(options: { stateRoot?: string; requestId?: string; reservationId?: string } = {}): CodexAttemptRecord[] {
+  const stateRoot = options.stateRoot || resolveStateRoot();
+  const db = openDb(stateRoot);
+  try {
+    let rows: SqlRow[];
+    if (options.requestId) rows = db.prepare('SELECT record_json FROM auth_attempts WHERE request_id = ? ORDER BY id').all(options.requestId) as SqlRow[];
+    else if (options.reservationId) rows = db.prepare('SELECT record_json FROM auth_attempts WHERE reservation_id = ? ORDER BY id').all(options.reservationId) as SqlRow[];
+    else rows = db.prepare('SELECT record_json FROM auth_attempts ORDER BY id').all() as SqlRow[];
+    return rows.flatMap(row => {
+      try { return [assertAuthBalancerAttemptV1(JSON.parse(String(row.record_json)))]; }
+      catch { return []; }
+    });
+  } finally {
+    closeDb(db);
+  }
 }
 function refreshLockDir(stateRoot: string, slot: string) { return path.join(stateRoot, 'leases', 'refresh-locks', sha(slot).slice(0, 32)); }
 async function wait(ms: number) { await new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -1729,14 +2212,23 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
   assertTokenLeaseInput(input);
   const stateRoot = input.stateRoot || resolveStateRoot();
   const ttlMs = input.expected_runtime_ms + input.ttl_safety_buffer_ms;
-  const preferred = input.preferred_slot || await readAffinitySlot(stateRoot, input.session_affinity_key);
   // Without this the reservations table records run_id NULL for every provider lease, and
   // "who is burning the shared window" has no answer but a fleet-wide average (incident #6).
   const runId = input.run_id ?? process.env.ASYNC_SUBAGENTS_RUN_ID ?? process.env.ASYNC_SUBAGENT_RUN_ID;
   const rootRunId = input.root_run_id ?? process.env.ASYNC_SUBAGENTS_PARENT_RUN_ID ?? process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID;
-  const account = await chooseSlot(stateRoot, preferred, { reservationTtlMs: ttlMs, softSlot: true, runId, rootRunId });
+  const sessionHash = await sessionHashForKey(stateRoot, input.session_affinity_key);
+  const account = await chooseSlot(stateRoot, input.preferred_slot, { reservationTtlMs: ttlMs, softSlot: true, runId, rootRunId, sessionAffinityKey: input.session_affinity_key, publicModelId: input.model });
+  const invalidateAffinity = (reason: string) => invalidateSessionAffinityAndLegacy(stateRoot, {
+    sessionHash: account.selection.session_hash,
+    publicModelId: input.model,
+    expectedSlot: account.slot,
+    reason,
+    legacyKey: input.session_affinity_key,
+    generation: account.selection.affinity_generation,
+  });
   if (input.abort_signal?.aborted) {
     markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'aborted_after_reservation' });
+    await invalidateAffinity('credential_unavailable:aborted_after_reservation');
     throw new Error('token lease aborted');
   }
   const authPath = account.piAuthPath || account.authPath;
@@ -1745,6 +2237,7 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
   const requiredUntil = Date.now() + ttlMs;
   if ((!parsed.accessToken || parsed.accessToken.trim().length < 8) && !parsed.refreshToken) {
     markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'empty_access_token' });
+    await invalidateAffinity('credential_unavailable:empty_access_token');
     throw new Error('selected slot has no usable access token');
   }
   if (!parsed.expiresAt || parsed.expiresAt <= requiredUntil || !accessTokenAccountId(parsed.accessToken)) {
@@ -1781,9 +2274,11 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
             if (!accessTokenAccountId(parsed.accessToken)) {
               writeBrokenSnapshot(stateRoot, account.slot, 'claimless_access_token', 'access token has no chatgpt_account_id claim and cannot be refreshed');
               markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'claimless_access_token' });
+              await invalidateAffinity('auth_unusable:claimless_access_token');
               throw new Error('selected slot access token has no accountId claim');
             }
             markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: parsed.expiresAt ? 'access_token_ttl_insufficient' : 'access_token_expiry_unknown' });
+            await invalidateAffinity(parsed.expiresAt ? 'credential_unavailable:access_token_ttl_insufficient' : 'credential_unavailable:access_token_expiry_unknown');
             throw new Error(parsed.expiresAt ? 'selected slot access token expires before requested lease ttl and cannot refresh' : 'selected slot access token expiry is unknown and cannot refresh');
           }
           let refreshed: CodexTokenSet;
@@ -1823,12 +2318,14 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
           }
           if (input.abort_signal?.aborted) {
             markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'aborted_after_refresh' });
+            await invalidateAffinity('credential_unavailable:aborted_after_refresh');
             throw new Error('token lease aborted');
           }
           auth = await persistRefreshedCredential(authPath, auth, refreshed);
           parsed = tokenFromAuth(auth);
           if (!accessTokenAccountId(parsed.accessToken)) {
             writeBrokenSnapshot(stateRoot, account.slot, 'refresh_claimless_token', 'refreshed access token has no chatgpt_account_id claim');
+            await invalidateAffinity('auth_unusable:refresh_claimless_token');
             const err = new Error('selected slot access token refresh failed');
             (err as any).errorKind = 'invalid_grant';
             (err as any).redactedUpstream = 'refreshed access token has no chatgpt_account_id claim';
@@ -1839,7 +2336,12 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (input.abort_signal?.aborted || message.includes('cannot refresh')) throw error;
+      if (input.abort_signal?.aborted) {
+        markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'aborted_during_refresh_lock', slot: account.slot });
+        await invalidateAffinity('credential_unavailable:aborted_during_refresh_lock');
+        throw error;
+      }
+      if (message.includes('cannot refresh')) throw error;
       // FIX E: a claimless poison-pill thrown from inside the lock already wrote a broken snapshot
       // and recorded the failed reservation; surface its message verbatim (mirroring the existing
       // final-guard) instead of relabeling it as a generic refresh failure.
@@ -1849,26 +2351,31 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
       // of mislabeling it as a refresh failure (which would brick-adjacent the slot in telemetry).
       if (message.includes('timed out waiting for token refresh lock')) {
         markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'refresh_lock_acquire_timeout', slot: account.slot });
+        await invalidateAffinity('credential_unavailable:refresh_lock_acquire_timeout');
         throw error;
       }
       const error_kind = (error as any)?.errorKind ?? 'unknown';
       const redactedMessage = (error as any)?.redactedUpstream ?? redactSecretsInText(message);
       markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'access_token_refresh_failed', error_kind, message: redactedMessage });
+      await invalidateAffinity(`credential_unavailable:access_token_refresh_failed:${error_kind}`);
       throw new Error('selected slot access token refresh failed');
     }
   }
   const { accessToken, expiresAt } = parsed;
   if (!accessToken || accessToken.trim().length < 8) {
     markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'empty_access_token' });
+    await invalidateAffinity('credential_unavailable:empty_access_token_after_refresh');
     throw new Error('selected slot has no usable access token');
   }
   if (!expiresAt || expiresAt <= requiredUntil) {
     markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'access_token_ttl_insufficient_after_refresh' });
+    await invalidateAffinity('credential_unavailable:access_token_ttl_insufficient_after_refresh');
     throw new Error('selected slot access token expires before requested lease ttl');
   }
   if (!accessTokenAccountId(accessToken)) {
     writeBrokenSnapshot(stateRoot, account.slot, 'claimless_access_token', 'access token has no chatgpt_account_id claim and cannot be refreshed');
     markReservation(stateRoot, account.reservationId, account.launchId, 'failed', { stage: 'token-lease', reason: 'claimless_access_token' });
+    await invalidateAffinity('auth_unusable:claimless_access_token');
     throw new Error('selected slot access token has no accountId claim');
   }
   const lease: TokenLease = {
@@ -1880,13 +2387,20 @@ export async function startTokenLease(input: StartTokenLeaseInput): Promise<Toke
     access_token: accessToken,
     slot: account.slot,
     label: account.slot,
+    // Temporary compatibility alias. Keep this equal to reservation_expires_at
+    // until in-repo consumers have migrated to the explicit fields.
     expires_at: account.selection.reservation_expires_at,
+    reservation_expires_at: account.selection.reservation_expires_at,
+    token_expires_at: expiresAt,
+    affinity_expires_at: account.selection.affinity_expires_at,
     account_id_hash: account.accountIdHash || account.idHash,
     reservation_id: account.reservationId,
     launch_id: account.launchId,
     session_affinity_key: input.session_affinity_key,
+    session_hash: account.selection.session_hash ?? sessionHash,
+    affinity_generation: account.selection.affinity_generation,
+    affinity_outcome: account.selection.affinity_outcome,
   };
-  await writeAffinitySlot(stateRoot, input.session_affinity_key, account.slot, lease.expires_at + DEFAULT_RESERVATION_TTL_MS);
   return lease;
 }
 
@@ -2147,4 +2661,4 @@ export async function getPolicy(options: { stateRoot?: string } | string = {}) {
     closeDb(db);
   }
 }
-export function redactForJson<T>(v: T): T { return JSON.parse(JSON.stringify(v, (k, val) => /token|secret|refresh|key|auth_hash|expected_generation|generation|authHash/i.test(k) ? '[REDACTED]' : val)); }
+export function redactForJson<T>(v: T): T { return JSON.parse(JSON.stringify(v, (k, val) => /token|secret|refresh|key|auth_hash|expected_generation|authHash/i.test(k) ? '[REDACTED]' : val)); }

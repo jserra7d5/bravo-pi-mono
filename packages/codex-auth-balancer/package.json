@@ -21,6 +21,9 @@
     "codex-auth-balancer": "./dist/src/cli.js",
     "pi-balanced": "./dist/src/pi-balanced.js"
   },
+  "dependencies": {
+    "@bravo/auth-balancer-contract": "file:../auth-balancer-contract"
+  },
   "scripts": {
     "check": "node scripts/check-pi-ai-drift.mjs && tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json && chmod +x dist/src/cli.js dist/src/pi-balanced.js",

@@ -4,7 +4,7 @@
 // isolation. The stateful streaming wiring in index.ts injects real I/O via the
 // RotationDeps interface.
 
-export type SlotInfo = { slot: string; primaryRemaining?: number };
+export type SlotInfo = { slot: string; primaryRemaining?: number; cooldownUntil?: number };
 
 export type AttemptOutcome =
   | 'done'           // upstream succeeded; terminal event already forwarded to the user
@@ -31,12 +31,13 @@ export const DEFAULT_ROTATION_CONFIG: RotationConfig = {
   backoffCapMs: 8_000,
 };
 
-const RATE_LIMIT_TEXT = /rate.?limit|usage limit|too many requests|\b429\b|"detail"\s*:\s*"rate limit/i;
-
-/** True when an outcome looks like a rate limit we should rotate accounts on. */
+/** True only when transport evidence proves a rate limit we may rotate accounts on. */
 export function classifyRateLimit(input: { status?: number; errorText?: string }): boolean {
   if (input.status === 429) return true;
-  return input.errorText ? RATE_LIMIT_TEXT.test(input.errorText) : false;
+  // Error text is diagnostic only. A model can emit "rate limit" inside a generic
+  // failure body without proving that no application bytes were written. Rotation
+  // and cooldown publication require observed transport evidence such as HTTP 429.
+  return false;
 }
 
 /**
@@ -52,7 +53,7 @@ export function chooseNextSlot(
 ): string | undefined {
   const available = accounts.filter(a => !triedSlots.has(a.slot));
   if (available.length === 0) return undefined;
-  const notCooled = available.filter(a => (cooldown.get(a.slot) ?? 0) <= now);
+  const notCooled = available.filter(a => Math.max(cooldown.get(a.slot) ?? 0, a.cooldownUntil ?? 0) <= now);
   const pool = notCooled.length > 0 ? notCooled : available;
   const sorted = [...pool].sort((a, b) => {
     const ar = a.primaryRemaining ?? -1;

@@ -66,6 +66,7 @@ async function runTlsWireProof(): Promise<void> {
       stateRoot,
       metrics: false,
       usageProbe: false,
+    requireGatewayAuth: false,
     });
     proxy = started.server;
 

@@ -3,12 +3,10 @@ import { access, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-/** Selects Claude's API-key auth mode; stripped by the local proxy, never secret. */
-export const GATEWAY_API_KEY_SENTINEL = 'claude-auth-balancer-local-gateway';
-
 export type LaunchClaudeOptions = {
   args: string[];
   baseUrl: string;
+  gatewayApiKey: string;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   stdio?: 'inherit' | 'pipe';
@@ -57,6 +55,7 @@ export async function resolveClaudeBin(env: NodeJS.ProcessEnv, selfPath?: string
 /** Launch Claude with gateway selection scoped to the child process only. */
 export async function launchClaude(options: LaunchClaudeOptions): Promise<LaunchResult> {
   validateBaseUrl(options.baseUrl);
+  if (!options.gatewayApiKey) throw new Error('gateway API key is required');
   const env = options.env ?? process.env;
   const bin = await resolveClaudeBin(env, options.selfPath);
   const child = spawn(bin, options.args, {
@@ -64,7 +63,7 @@ export async function launchClaude(options: LaunchClaudeOptions): Promise<Launch
     env: {
       ...env,
       ANTHROPIC_BASE_URL: options.baseUrl,
-      ANTHROPIC_API_KEY: GATEWAY_API_KEY_SENTINEL,
+      ANTHROPIC_API_KEY: options.gatewayApiKey,
     },
     stdio: options.stdio ?? 'inherit',
   });

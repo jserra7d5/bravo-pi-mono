@@ -69,18 +69,15 @@ session on one account until it genuinely cannot serve.
    on the warm account rather than paying a cache re-create to dodge a few
    seconds. Only a long or absent `Retry-After` rotates. Either way the client
    never sees the 429.
-6. **A broken connection is re-sent on the same account.** A transport failure
-   at `phase=pre-header` — no status line reached the client, so nothing can be
-   duplicated — is retried up to twice with a 150ms/600ms backoff, on the same
-   slot: the socket failed, not the account, and rotating would pay a cache
-   re-create for it. A header TIMEOUT is excluded despite sharing that phase,
-   because the inference may still be running upstream and re-sending would bill
-   a second one; unclassified error codes are terminal too. Measured provenance:
-   34 such failures in two days (33 `bad record mac`, one `ECONNRESET`), each
-   previously surfacing to the client as a hard 502.
-7. **The session is pinned at selection time**, not after the response, so a
-   session's concurrent opening requests (`/v1/messages` and `count_tokens` fire
-   ~20ms apart) cannot split across two accounts and both pay a full cache write.
+6. **Generation retries are conservative.** No client-visible response is not
+   proof that Anthropic did no work. A generation failure after application bytes
+   may have been written is terminal by default, including header timeout and
+   unknown socket phase. Only a proven pre-wire transport failure may be retried
+   silently on the same slot.
+7. **Opening sessions are fenced.** The first request for one `(session, model)`
+   owns a keyed singleflight covering usage probes, selection, refresh, and lease
+   publication. Concurrent openers wait and then re-read the published lease
+   instead of selecting independently.
 
 ## Quota model
 
@@ -195,12 +192,20 @@ Authswap slot files are the sole OAuth credential owners:
 
 Slot ids are authswap account numbers, so `slot 2` here is `authswap` account 2.
 The balancer never reads or writes `~/.claude/.credentials.json` or Claude's
-settings. `claude-auth-balancer claude [args...]` launches the real `claude`
-executable with this child-only environment block:
+settings. On each daemon start it writes a random local gateway credential to:
+
+```
+~/.bravo/claude-auth-balancer/runtime/claude-gateway-credential.json
+```
+
+The file is mode `0600`, owner-checked, instance-bound, replaced on restart,
+and removed on clean shutdown, listen failure, and normal `SIGINT`/`SIGTERM`
+daemon stop. `claude-auth-balancer claude [args...]` reads that active file and
+launches the real `claude` executable with this child-only environment block:
 
 ```
 ANTHROPIC_BASE_URL=http://127.0.0.1:8789
-ANTHROPIC_API_KEY=claude-auth-balancer-local-gateway
+ANTHROPIC_API_KEY=<daemon runtime nonce>
 ```
 
 Override the URL for a non-default daemon port with
@@ -208,9 +213,12 @@ Override the URL for a non-default daemon port with
 ambiguous, set `CLAUDE_BIN` to the absolute real Claude executable. All Claude
 arguments, cwd, stdio, exit status, and signal termination are preserved.
 
-The API-key value is a documented, non-secret mode selector. It makes Claude
-Code send requests without requiring local OAuth state; the proxy strips it and
-injects the selected canonical OAuth token. It never goes upstream.
+The nonce makes Claude Code send requests without requiring local OAuth state.
+The proxy validates it with a timing-safe comparison before request buffering,
+account selection, or credential access, then strips it and injects the selected
+canonical OAuth token. It never goes upstream or into logs/metrics. A missing or
+unreadable runtime credential, or one whose daemon PID is no longer live, is a
+launcher error; manual clients must read the same file or use the launcher.
 
 ### Token refresh
 
@@ -273,7 +281,10 @@ not cover. A lock whose pid is gone is taken over automatically.
 ## Commands
 
 ```
-claude-auth-balancer serve    [--port N] [--allow-overage]
+claude-auth-balancer serve    [--port N] [--allow-overage] [--enforce-body-limit]
+                              [--max-request-body-mib N]
+                              [--tls-policy fresh_tls_quarantine|keepalive_no_tls_cache|keepalive_with_tls_cache]
+                              [--strict-generation-retry]
 claude-auth-balancer status   [--model M]     # headroom, claims, live leases
 claude-auth-balancer accounts                 # slots, health, token expiry
 claude-auth-balancer refresh                  # refresh near-expiry slots now
@@ -290,14 +301,15 @@ claude-auth-balancer uninstall-service
 Connecting, TLS negotiation, and waiting for upstream response headers are
 bounded to 90 seconds by default (`upstreamHeaderTimeoutMs` in the programmatic
 API). Once headers arrive, streaming responses are not subject to that deadline,
-so long generations remain safe. HTTPS inference forwarding uses one
-proxy-owned agent with connection keep-alive disabled and TLS session caching
-disabled, guaranteeing a fresh TCP connection and full TLS handshake for every
-inference attempt. Pre-header failures log only safe diagnostics. A failure
-whose code shows the connection itself broke is re-sent on the same account (see
-routing rule 6); everything else — a header timeout above all — returns 502
-without replay, because `/v1/messages` is not idempotent and the inference may
-already be running upstream.
+so long generations remain safe. The default inference policy is
+`fresh_tls_quarantine`: one proxy-owned HTTPS agent with connection keep-alive
+disabled and TLS session caching disabled, yielding a fresh TCP connection and
+full TLS handshake for every inference attempt. Two opt-in experiment policies
+exist behind `--tls-policy`: `keepalive_no_tls_cache` and
+`keepalive_with_tls_cache`. Attempt rows record policy, socket reuse,
+TLS-session reuse when visible, connection phase, error code, and request bytes
+written. Usage probes and OAuth refresh keep their own provider-appropriate
+transports; the inference quarantine is not a global network claim.
 
 Observed on this deployment at ~0.16% of requests, on both accounts, at every
 hour, and on freshly started processes as well as long-lived ones — 74 of 76
@@ -305,12 +317,38 @@ failing within 400ms of connect, i.e. on the first records read after the
 handshake. It did not reproduce outside the balancer: 3,400 requests and 0.6 GB
 of TLS reads over the same host and path produced zero MAC failures.
 
+## Request and attempt evidence
+
+Every request receives durable redacted attempt rows in the
+`auth_balancer_attempts` table inside
+`~/.bravo/claude-auth-balancer/metrics.sqlite3`. These rows are separate from
+final token usage rows: hidden 429s, waits, rotations, transport failures, local
+413s, and security rejections are reconstructable without double-counting model
+usage. The rows store scoped hashes for session/account correlation and never
+store bearer tokens, the daemon nonce, authorization headers, or request bodies.
+
+Request bodies are buffered because Claude Code speaks HTTP to the local
+gateway. The body is never partially forwarded. The default configured cap is
+64 MiB in report-only mode: over-limit requests below the hard memory ceiling
+are forwarded and recorded as `request_body_limit_report_only`. The same 64 MiB
+value is also a non-configurable report-only memory ceiling in this implementation;
+crossing it returns a local 413 with `request_body_memory_ceiling` before any
+upstream bytes are written. `--enforce-body-limit` turns configured over-limit
+requests into a local 413. If configured through the CLI, the cap must be a
+finite positive integer MiB value at or below 512 MiB; the programmatic byte
+option accepts finite positive integer bytes at or below the same ceiling.
+Invalid values fail closed instead of falling back to an unlimited comparison.
+429 response-control bodies that are not sent to Claude Code are consumed or
+abandoned with a byte cap and a deadline.
+
 ## What the proxy does not do
 
 It never rewrites a request body. Anthropic's prompt cache is a prefix match
 over `tools` -> `system` -> `messages`, and the invalidation hierarchy means
 touching `tools` or `system` invalidates everything after it. Only the
-`Authorization` header changes.
+`Authorization` header changes. Headers are semantically forwarded with an
+explicit strip-and-replace policy; this package does not claim raw header or full
+HTTP-message byte fidelity.
 
 ## Security
 
@@ -322,13 +360,12 @@ request target is validated before any account is selected:
   from any local process would otherwise redirect a token off-origin. This was
   reproduced against an earlier revision; it now returns 400 before the
   credential store is touched, with a second origin check at forward time.
-- **`x-api-key` and `anthropic-auth-token` are stripped from requests.** This
-  includes the non-secret gateway selector set by the `claude` launcher; it
-  is consumed locally and can never displace the injected subscription bearer
-  or reach Anthropic.
-- Bind address defaults to `127.0.0.1`. There is no authentication on the proxy
-  itself, so anything that can reach the port can spend your quota — do not bind
-  it to a routable interface.
+- **`x-api-key` and `anthropic-auth-token` are stripped from requests.** The
+  daemon runtime nonce is consumed locally and can never displace the injected
+  subscription bearer or reach Anthropic.
+- Bind address defaults to `127.0.0.1`. The runtime nonce gates local callers,
+  but this is still single-user loopback tooling; do not bind it to a routable
+  interface.
 
 ## Testing
 

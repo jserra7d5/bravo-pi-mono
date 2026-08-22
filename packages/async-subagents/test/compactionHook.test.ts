@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import asyncSubagentsPiExtension from "../extensions/pi/index.js";
@@ -13,6 +13,19 @@ import type { RunState } from "../src/types.js";
 function workspace() {
   const root = mkdtempSync(join(tmpdir(), "async-subagents-compact-hook-"));
   return { root, store: new RunStore({ cwd: root }), parentRunId: "root_hook" };
+}
+
+async function withIsolatedAsyncSubagentsHome<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = process.env.ASYNC_SUBAGENTS_HOME;
+  const root = mkdtempSync(join(tmpdir(), "async-subagents-compact-home-"));
+  process.env.ASYNC_SUBAGENTS_HOME = root;
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env.ASYNC_SUBAGENTS_HOME;
+    else process.env.ASYNC_SUBAGENTS_HOME = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function addRun(input: { store: RunStore; root: string; parentRunId: string; displayName?: string; state: RunState; summary?: string; resultReady?: boolean }) {
@@ -58,42 +71,46 @@ function loadExtensionHarness() {
 }
 
 test("session_compact hook injects an async status reminder when runs need attention", async () => {
-  const w = workspace();
-  const { handlers, sent } = loadExtensionHarness();
+  await withIsolatedAsyncSubagentsHome(async () => {
+    const w = workspace();
+    const { handlers, sent } = loadExtensionHarness();
 
-  const start = handlers.get("session_start")?.[0];
-  const compact = handlers.get("session_compact")?.[0];
-  assert.ok(start);
-  assert.ok(compact);
+    const start = handlers.get("session_start")?.[0];
+    const compact = handlers.get("session_compact")?.[0];
+    assert.ok(start);
+    assert.ok(compact);
 
-  const ctx = { cwd: w.root, hasUI: false, ui: { setStatus() {}, setWidget() {} }, sessionManager };
-  await start({}, ctx);
-  const identity = readRootSession({ cwd: w.root });
-  assert.ok(identity);
-  const runId = addRun({ ...w, parentRunId: identity.parentRunId, displayName: "Alex", state: "running", summary: "auditing compaction" });
-  await compact({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+    const ctx = { cwd: w.root, hasUI: false, ui: { setStatus() {}, setWidget() {}, notify() {} }, sessionManager };
+    await start({}, ctx);
+    const identity = readRootSession({ cwd: w.root });
+    assert.ok(identity);
+    const runId = addRun({ ...w, parentRunId: identity.parentRunId, displayName: "Alex", state: "running", summary: "auditing compaction" });
+    await compact({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
 
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0]?.message.customType, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE);
-  assert.match(sent[0]?.message.content, new RegExp(runId));
-  assert.match(sent[0]?.message.content, /@Alex \(scout\).*running/);
-  assert.deepEqual(sent[0]?.options, { deliverAs: "steer" });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.message.customType, ASYNC_SUBAGENT_COMPACTION_MESSAGE_TYPE);
+    assert.match(sent[0]?.message.content, new RegExp(runId));
+    assert.match(sent[0]?.message.content, /@Alex \(scout\).*running/);
+    assert.deepEqual(sent[0]?.options, { deliverAs: "steer" });
 
-  const shutdown = handlers.get("session_shutdown")?.[0];
-  await shutdown?.({}, ctx);
+    const shutdown = handlers.get("session_shutdown")?.[0];
+    await shutdown?.({}, ctx);
+  });
 });
 
 test("session_compact hook stays quiet when there is no in-flight or unread async work", async () => {
-  const w = workspace();
-  const { handlers, sent } = loadExtensionHarness();
-  const ctx = { cwd: w.root, hasUI: false, ui: { setStatus() {}, setWidget() {} }, sessionManager };
+  await withIsolatedAsyncSubagentsHome(async () => {
+    const w = workspace();
+    const { handlers, sent } = loadExtensionHarness();
+    const ctx = { cwd: w.root, hasUI: false, ui: { setStatus() {}, setWidget() {}, notify() {} }, sessionManager };
 
-  await handlers.get("session_start")?.[0]?.({}, ctx);
-  const identity = readRootSession({ cwd: w.root });
-  assert.ok(identity);
-  addRun({ ...w, parentRunId: identity.parentRunId, displayName: "Done", state: "completed", summary: "already handled" });
-  await handlers.get("session_compact")?.[0]?.({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
+    await handlers.get("session_start")?.[0]?.({}, ctx);
+    const identity = readRootSession({ cwd: w.root });
+    assert.ok(identity);
+    addRun({ ...w, parentRunId: identity.parentRunId, displayName: "Done", state: "completed", summary: "already handled" });
+    await handlers.get("session_compact")?.[0]?.({ type: "session_compact", compactionEntry: {}, fromExtension: false }, ctx);
 
-  assert.equal(sent.length, 0);
-  await handlers.get("session_shutdown")?.[0]?.({}, ctx);
+    assert.equal(sent.length, 0);
+    await handlers.get("session_shutdown")?.[0]?.({}, ctx);
+  });
 });

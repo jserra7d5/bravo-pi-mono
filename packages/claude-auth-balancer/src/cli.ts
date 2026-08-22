@@ -22,9 +22,10 @@ import { acquireSingletonLock, renderUnit, userUnitPath } from './daemon.js';
 import type { SingletonLock } from './daemon.js';
 import { MetricsStore } from './metrics.js';
 import { computeHeadroom } from './policy.js';
-import { DEFAULT_PORT, startProxy } from './proxy.js';
+import { DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_PORT, MAX_CONFIGURABLE_REQUEST_BODY_BYTES, startProxy } from './proxy.js';
 import type { ProxyLogEvent } from './proxy.js';
 import { launchClaude } from './client-launch.js';
+import { assertRuntimeCredentialForLaunch, runtimeCredentialPath } from './admission.js';
 
 function flag(argv: string[], name: string): boolean {
   return argv.includes(`--${name}`);
@@ -43,6 +44,22 @@ function displayedWarnings(stateRoot: string): string[] {
   return conciseWarnings(readAuthWarnings(stateRoot));
 }
 
+function parseMaxRequestBodyBytes(argv: string[]): number {
+  const index = argv.indexOf('--max-request-body-mib');
+  if (index < 0) return DEFAULT_MAX_REQUEST_BODY_BYTES;
+  const raw = argv[index + 1];
+  const maxMiB = MAX_CONFIGURABLE_REQUEST_BODY_BYTES / 1024 / 1024;
+  if (!raw || raw.startsWith('--') || !/^(?:0|[1-9]\d*)$/.test(raw)) {
+    throw new Error(`--max-request-body-mib must be a finite positive integer MiB value at or below ${maxMiB}`);
+  }
+  const mib = Number(raw);
+  const bytes = mib * 1024 * 1024;
+  if (!Number.isFinite(mib) || mib <= 0 || !Number.isInteger(mib) || bytes > MAX_CONFIGURABLE_REQUEST_BODY_BYTES) {
+    throw new Error(`--max-request-body-mib must be a finite positive integer MiB value at or below ${maxMiB}`);
+  }
+  return bytes;
+}
+
 function ago(ms: number | undefined, now: number): string {
   if (ms === undefined) return 'never';
   const s = Math.max(0, Math.round((now - ms) / 1000));
@@ -54,6 +71,14 @@ function ago(ms: number | undefined, now: number): string {
 async function cmdServe(argv: string[]): Promise<void> {
   const port = Number(value(argv, 'port') ?? DEFAULT_PORT);
   const allowOverage = flag(argv, 'allow-overage');
+  const maxRequestBodyBytes = parseMaxRequestBodyBytes(argv);
+  const enforceBodyLimit = flag(argv, 'enforce-body-limit');
+  const strictGenerationRetry = flag(argv, 'strict-generation-retry');
+  const tlsPolicyRaw = value(argv, 'tls-policy');
+  const tlsPolicy =
+    tlsPolicyRaw === 'keepalive_no_tls_cache' || tlsPolicyRaw === 'keepalive_with_tls_cache'
+      ? tlsPolicyRaw
+      : 'fresh_tls_quarantine';
 
   // Claimed before the port is bound. Two balancers on different ports would
   // both succeed at binding and then quietly share one state root — the exact
@@ -66,13 +91,30 @@ async function cmdServe(argv: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  let activeServer: Awaited<ReturnType<typeof startProxy>>['server'] | undefined;
+  let shutdownStarted = false;
   const drop = () => lock.release();
-  process.on('exit', drop);
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-    process.on(signal, () => {
+  const shutdown = () => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
       drop();
       process.exit(0);
-    });
+    };
+    if (activeServer?.listening) {
+      activeServer.close(() => finish());
+      const timer = setTimeout(finish, 2000);
+      timer.unref();
+      return;
+    }
+    finish();
+  };
+  process.on('exit', drop);
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, shutdown);
   }
   const log = (e: ProxyLogEvent) => {
     const bits = [
@@ -88,10 +130,23 @@ async function cmdServe(argv: string[]): Promise<void> {
     console.log(bits.join('  '));
   };
 
-  const { url } = await startProxy({ port, allowOverage, log });
+  const started = await startProxy({
+    port,
+    allowOverage,
+    log,
+    maxRequestBodyBytes,
+    bodyLimitMode: enforceBodyLimit ? 'enforce' : 'report-only',
+    strictGenerationRetry,
+    tlsPolicy,
+  });
+  activeServer = started.server;
+  const { url } = started;
   console.log(`claude-auth-balancer listening on ${url}`);
   console.log(`state root : ${resolveStateRoot()}`);
   console.log(`credentials: ${resolveAuthswapRoot()}/providers/anthropic/credentials`);
+  console.log(`gateway key: ${runtimeCredentialPath(resolveStateRoot())}`);
+  console.log(`body cap  : ${maxRequestBodyBytes / 1024 / 1024} MiB (${enforceBodyLimit ? 'enforced' : 'report-only'})`);
+  console.log(`TLS policy: ${tlsPolicy}`);
   console.log(`overage    : ${allowOverage ? 'ALLOWED (will spend money past 100%)' : 'blocked'}`);
   console.log('');
   console.log('Launch new Claude Code sessions through this gateway:');
@@ -217,9 +272,11 @@ function cmdInstallService(argv: string[]): void {
 
 async function cmdClaude(argv: string[]): Promise<void> {
   const baseUrl = process.env.CLAUDE_AUTH_BALANCER_URL ?? `http://127.0.0.1:${DEFAULT_PORT}`;
+  const credential = assertRuntimeCredentialForLaunch(resolveStateRoot());
   const result = await launchClaude({
     args: argv,
     baseUrl,
+    gatewayApiKey: credential.nonce,
     selfPath: fileURLToPath(import.meta.url),
   });
   if (result.signal) {
@@ -435,7 +492,7 @@ async function main(): Promise<void> {
       console.error(`unknown command: ${command}`);
       console.error(
         'usage: claude-auth-balancer <serve|claude|status|accounts|metrics|refresh|sweep|prune|install-service>\n' +
-          '  serve            [--port N] [--allow-overage]\n' +
+          '  serve            [--port N] [--allow-overage] [--enforce-body-limit] [--max-request-body-mib N] [--tls-policy fresh_tls_quarantine|keepalive_no_tls_cache|keepalive_with_tls_cache] [--strict-generation-retry]\n' +
           '  status           [--model M]\n' +
           '  metrics          [--days N] [--daily] [--json] [--sql "SELECT ..."]\n' +
           '  refresh          refresh any account near expiry, now\n' +

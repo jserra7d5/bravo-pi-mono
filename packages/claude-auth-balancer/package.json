@@ -22,6 +22,9 @@
     "build": "tsc -p tsconfig.json && chmod +x dist/src/cli.js dist/src/statusline-cli.js",
     "test": "npm run build && node --test dist/test/*.test.js"
   },
+  "dependencies": {
+    "@bravo/auth-balancer-contract": "file:../auth-balancer-contract"
+  },
   "devDependencies": {
     "@types/node": "latest",
     "typescript": "latest"

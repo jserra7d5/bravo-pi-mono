@@ -1,10 +1,21 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { isContextOverflow, streamSimpleOpenAICodexResponses } from '@earendil-works/pi-ai/compat';
 import { createBalancedStreamRunner, estimateBalancedContextTokens, type BalancedRunnerDeps } from '../extensions/pi/index.js';
 
 const MODEL = { id: 'bravo-codex-balanced/gpt-5.5', provider: 'bravo-codex-balanced', api: 'openai-codex-responses', baseUrl: 'https://x' } as any;
+const previousBalancerHome = process.env.CODEX_AUTH_BALANCER_HOME;
+const rotationTestStateRoot = mkdtempSync(path.join(tmpdir(), 'cab-rotation-'));
+process.env.CODEX_AUTH_BALANCER_HOME = rotationTestStateRoot;
+after(() => {
+  if (previousBalancerHome === undefined) delete process.env.CODEX_AUTH_BALANCER_HOME;
+  else process.env.CODEX_AUTH_BALANCER_HOME = previousBalancerHome;
+  rmSync(rotationTestStateRoot, { recursive: true, force: true });
+});
 
 function fakeMsg(extra: Record<string, unknown> = {}) {
   return {
@@ -20,10 +31,18 @@ function fakeMsg(extra: Record<string, unknown> = {}) {
   } as any;
 }
 
-type Recorder = { leaseCalls: Array<string | undefined>; finished: Array<{ lease_id: string; status: string }>; sleeps: number[]; upstreamOptions?: any[] };
+type Recorder = {
+  leaseCalls: Array<string | undefined>;
+  finished: Array<{ lease_id: string; status: string }>;
+  sleeps: number[];
+  upstreamOptions?: any[];
+  attempts?: any[];
+  cooldowns?: any[];
+  upstreamContexts?: any[];
+};
 
 function makeDeps(behavior: (slot: string) => 'rate-limit' | 'ok'): { deps: Partial<BalancedRunnerDeps>; rec: Recorder } {
-  const rec: Recorder = { leaseCalls: [], finished: [], sleeps: [], upstreamOptions: [] };
+  const rec: Recorder = { leaseCalls: [], finished: [], sleeps: [], upstreamOptions: [], attempts: [], cooldowns: [], upstreamContexts: [] };
   const deps: Partial<BalancedRunnerDeps> = {
     startLease: async (input: any) => {
       rec.leaseCalls.push(input.preferred_slot);
@@ -39,6 +58,7 @@ function makeDeps(behavior: (slot: string) => 'rate-limit' | 'ok'): { deps: Part
     ingestUsage: async () => ({} as any),
     createUpstream: ((_model: any, _context: any, options: any) => (async function* () {
       rec.upstreamOptions?.push(options);
+      rec.upstreamContexts?.push(_context);
       const slot = String(options.apiKey).includes('slot1') ? '1' : '2';
       if (behavior(slot) === 'rate-limit') {
         await options.onResponse?.({ status: 429, headers: {} }, _model);
@@ -48,6 +68,8 @@ function makeDeps(behavior: (slot: string) => 'rate-limit' | 'ok'): { deps: Part
         yield { type: 'done', reason: 'stop', message: fakeMsg() };
       }
     })()) as any,
+    publishCooldown: (input: any) => { rec.cooldowns?.push(input); },
+    recordAttempt: ((input: any) => { rec.attempts?.push(input); return input; }) as any,
     sleep: async (ms: number) => { rec.sleeps.push(ms); },
     rand: () => 0.5,
     now: () => 1000,
@@ -382,6 +404,82 @@ test('rotate-on-429: a 429 on slot 1 silently rotates to slot 2 and forwards its
     { lease_id: 'lease-1', status: 'failed' },
     { lease_id: 'lease-2', status: 'completed' },
   ]);
+});
+
+test('balanced provider degrades unsafe WebSocket requests to SSE and records cooldown-backed rotation', async () => {
+  const { deps, rec } = makeDeps(slot => (slot === '1' ? 'rate-limit' : 'ok'));
+  const signedReasoning = { type: 'thinking', thinking: 'keep native replay bytes', thinkingSignature: 'signed-replay-payload' };
+  const toolCall = { type: 'tool_call', id: 'call_preserve_1', name: 'lookup', args: '{"q":"x"}' };
+  const savedBalancedAssistant = fakeMsg({
+    provider: 'bravo-codex-balanced',
+    model: 'bravo-codex-balanced/gpt-5.5',
+    content: [signedReasoning, toolCall],
+  });
+
+  const events = await collect(createBalancedStreamRunner(deps)(
+    MODEL,
+    { messages: [savedBalancedAssistant, { role: 'user', content: 'continue', timestamp: 1 }] } as any,
+    { sessionId: 's1', transport: 'websocket-cached' } as any,
+  ));
+
+  assert.equal(events.at(-1)?.type, 'done');
+  assert.ok(rec.upstreamOptions?.every(options => options.transport === 'sse'), 'unsafe balanced WebSocket modes stay on SSE');
+  assert.deepEqual(rec.leaseCalls, [undefined, '2']);
+  assert.deepEqual(rec.cooldowns?.map(c => [c.slot, c.sourceAttemptId, c.reason]), [['1', rec.attempts?.find(a => a.outcome === 'rate_limited_pre_content')?.attempt_id, 'rate_limited_pre_content']]);
+  assert.ok(rec.attempts?.some(a => a.outcome === 'degraded_transport_selected' && a.reason_code === 'balanced_websocket_requires_account_aware_pi_cache_seam'));
+  assert.ok(rec.attempts?.some(a => a.outcome === 'rate_limited_pre_content' && a.upstream_status === 429 && a.rotation_eligible === true));
+  assert.ok(rec.attempts?.some(a => a.outcome === 'rotated_pre_content'));
+  assert.ok(rec.attempts?.some(a => a.outcome === 'completed' && a.slot_id === '2'));
+
+  const normalized = rec.upstreamContexts?.[0]?.messages?.[0];
+  assert.equal(normalized.provider, 'openai-codex', 'ephemeral outbound replay sees native provider identity');
+  assert.equal(normalized.model, 'gpt-5.5');
+  assert.deepEqual(normalized.content, [signedReasoning, toolCall], 'reasoning signatures and tool-call ids survive normalization unchanged');
+
+  const publicDone = events.at(-1)?.message;
+  assert.equal(publicDone.provider, 'bravo-codex-balanced', 'public saved identity remains balanced');
+  assert.equal(publicDone.model, 'bravo-codex-balanced/gpt-5.5');
+});
+
+test('error text alone never publishes cooldown, records 429 evidence, or authorizes rotation/replay', async () => {
+  const rec: Recorder = { leaseCalls: [], finished: [], sleeps: [], attempts: [], cooldowns: [] };
+  const deps: Partial<BalancedRunnerDeps> = {
+    startLease: async (input: any) => {
+      rec.leaseCalls.push(input.preferred_slot);
+      return {
+        schema_version: 1, provider: 'bravo-codex-balanced', model: input.model, purpose: input.purpose,
+        lease_id: 'lease-1', access_token: 'tok_slot1_xxxxxxxx', slot: '1', label: '1',
+        expires_at: 0, reservation_id: 'res-1', launch_id: 'launch-1',
+      } as any;
+    },
+    finishLease: async (input: any) => { rec.finished.push({ lease_id: input.lease_id, status: input.status }); return {} as any; },
+    listSlots: async () => [{ slot: '1', primaryRemaining: 80 }, { slot: '2', primaryRemaining: 90 }],
+    ingestUsage: async () => ({} as any),
+    createUpstream: (() => (async function* () {
+      yield { type: 'error', reason: 'error', error: fakeMsg({ stopReason: 'error', errorMessage: '{"detail":"Rate limit exceeded"}' }) };
+    })()) as any,
+    publishCooldown: (input: any) => { rec.cooldowns?.push(input); },
+    recordAttempt: ((input: any) => { rec.attempts?.push(input); return input; }) as any,
+    sleep: async (ms: number) => { rec.sleeps.push(ms); },
+    rand: () => 0.5,
+    now: () => 1000,
+    cooldown: new Map<string, number>(),
+  };
+
+  const events = await collect(createBalancedStreamRunner(deps)(MODEL, { messages: [] } as any, { sessionId: 'text-only-rate-limit' } as any));
+
+  assert.equal(events.filter(e => e.type === 'error').length, 1, 'text-only diagnostics surface as the original terminal error');
+  assert.ok(!events.some(e => e.type === 'done'));
+  assert.deepEqual(rec.leaseCalls, [undefined], 'no rotation without observed upstream 429');
+  assert.deepEqual(rec.finished, [{ lease_id: 'lease-1', status: 'failed' }]);
+  assert.deepEqual(rec.cooldowns, [], 'no fleet cooldown from diagnostic text alone');
+  assert.ok(!rec.attempts?.some(a => a.outcome === 'rate_limited_pre_content'));
+  assert.ok(!rec.attempts?.some(a => a.evidence_codes?.includes('explicit_429_rejection')));
+  const terminal = rec.attempts?.find(a => a.outcome === 'terminal_failure');
+  assert.equal(terminal?.wire_started, true, 'missing headers are unknown/possibly after-wire, not proven before-wire');
+  assert.equal(terminal?.response_headers_received, false);
+  assert.equal(terminal?.rotation_eligible, false);
+  assert.equal(terminal?.retry_eligible, false);
 });
 
 // Runs the REAL host streamer against a real socket, so it proves the
