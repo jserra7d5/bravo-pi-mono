@@ -31,7 +31,7 @@ import type { Account } from './accounts.js';
 import { selectAccount } from './policy.js';
 import { REFRESH_SWEEP_INTERVAL_MS, TokenRefresher } from './refresh.js';
 import { UsageProbe } from './usage-probe.js';
-import { RUNTIME_CREDENTIAL_HEADER, createRuntimeCredential, removeRuntimeCredential, timingSafeNonceEqual } from './admission.js';
+import { ClientCredentialStore, RUNTIME_CREDENTIAL_HEADER, createRuntimeCredential, removeRuntimeCredential, timingSafeNonceEqual } from './admission.js';
 import { AttemptStore, newAttemptId, newRequestId, scopedAttemptHash } from './attempts.js';
 import type { EvidenceCode } from '@bravo/auth-balancer-contract';
 
@@ -688,6 +688,10 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
   if (runtimeCredential) {
     server_close_hooks.push(() => removeRuntimeCredential(opts.stateRoot, runtimeCredential.nonce));
   }
+  // Per-client nonces live on disk and survive daemon restarts, so clients
+  // launched against a previous daemon instance keep authenticating. The
+  // per-instance nonce above remains for manual clients.
+  const clientCredentials = opts.requireGatewayAuth ? new ClientCredentialStore(opts.stateRoot) : undefined;
   // A proxy instance owns exactly one inference HTTPS agent. Disabling both
   // socket keep-alive and the TLS session cache ensures every attempt gets a
   // fresh TCP connection and a full TLS handshake.
@@ -820,7 +824,8 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
 
     const presentedCredential = req.headers[RUNTIME_CREDENTIAL_HEADER];
     const presentedNonce = Array.isArray(presentedCredential) ? presentedCredential[0] : presentedCredential;
-    if (runtimeCredential && !timingSafeNonceEqual(presentedNonce, runtimeCredential.nonce)) {
+    const instanceNonceOk = runtimeCredential ? timingSafeNonceEqual(presentedNonce, runtimeCredential.nonce) : true;
+    if (runtimeCredential && !instanceNonceOk && !clientCredentials!.verify(presentedNonce)) {
       opts.log({
         kind: 'error',
         method,

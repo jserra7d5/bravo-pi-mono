@@ -7,7 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { launchClaude, resolveClaudeBin } from '../src/client-launch.js';
-import { createRuntimeCredential, readRuntimeCredential } from '../src/admission.js';
+import { clientCredentialDir, createRuntimeCredential, readRuntimeCredential } from '../src/admission.js';
 
 const roots: string[] = [];
 after(() => roots.forEach(root => rmSync(root, { recursive: true, force: true })));
@@ -22,7 +22,15 @@ function fixture() {
   const claude = path.join(bin, 'claude');
   writeFileSync(claude, `#!/usr/bin/env node
 const fs = require('node:fs');
-fs.writeFileSync(process.env.TEST_OUTPUT, JSON.stringify({ args: process.argv.slice(2), base: process.env.ANTHROPIC_BASE_URL, key: process.env.ANTHROPIC_API_KEY, cwd: process.cwd() }));
+const path = require('node:path');
+const seen = { args: process.argv.slice(2), base: process.env.ANTHROPIC_BASE_URL, key: process.env.ANTHROPIC_API_KEY, cwd: process.cwd() };
+if (process.env.TEST_CLIENTS_DIR) {
+  try {
+    seen.clients = fs.readdirSync(process.env.TEST_CLIENTS_DIR)
+      .map(name => JSON.parse(fs.readFileSync(path.join(process.env.TEST_CLIENTS_DIR, name), 'utf8')).nonce);
+  } catch { seen.clients = []; }
+}
+fs.writeFileSync(process.env.TEST_OUTPUT, JSON.stringify(seen));
 if (process.argv.includes('--signal')) process.kill(process.pid, 'SIGTERM');
 else process.exit(Number(process.env.TEST_EXIT || 0));
 `);
@@ -60,7 +68,7 @@ test('launcher reports Claude exit code and signal exactly', async () => {
   assert.deepEqual(await launchClaude({ args: ['--signal'], baseUrl: 'http://localhost:8789', gatewayApiKey: 'runtime-nonce', env, stdio: 'pipe' }), { code: null, signal: 'SIGTERM' });
 });
 
-test('claude CLI command preserves the child exit status', () => {
+test('claude CLI command preserves the child exit status and mints a per-client nonce', () => {
   const f = fixture();
   const stateRoot = path.join(f.root, 'state');
   const credential = createRuntimeCredential(stateRoot);
@@ -73,6 +81,7 @@ test('claude CLI command preserves the child exit status', () => {
       CLAUDE_AUTH_BALANCER_HOME: stateRoot,
       CLAUDE_AUTH_BALANCER_URL: 'http://127.0.0.1:9999',
       TEST_OUTPUT: f.output,
+      TEST_CLIENTS_DIR: clientCredentialDir(stateRoot),
       TEST_EXIT: '29',
     },
   });
@@ -80,7 +89,13 @@ test('claude CLI command preserves the child exit status', () => {
   const seen = JSON.parse(readFileSync(f.output, 'utf8'));
   assert.deepEqual(seen.args, ['--flag', 'value']);
   assert.equal(seen.base, 'http://127.0.0.1:9999');
-  assert.equal(seen.key, credential.nonce);
+  // The child authenticates with its OWN nonce — never the daemon instance
+  // nonce, which dies on restart. The registry entry must exist while the
+  // child runs and be removed once it exits.
+  assert.notEqual(seen.key, credential.nonce);
+  assert.ok(typeof seen.key === 'string' && seen.key.length >= 32);
+  assert.deepEqual(seen.clients, [seen.key]);
+  assert.deepEqual(readdirSync(clientCredentialDir(stateRoot)), []);
 });
 
 test('claude CLI command fails closed when no daemon runtime credential exists', () => {

@@ -19,7 +19,7 @@ import { parseClaims } from '../src/claims.js';
 import { computeHeadroom, selectAccount } from '../src/policy.js';
 import type { AccountState } from '../src/policy.js';
 import { MAX_PENDING_FRAME_BYTES, UsageCollector } from '../src/usage.js';
-import { readRuntimeCredential } from '../src/admission.js';
+import { ClientCredentialStore, clientCredentialDir, createClientCredential, readRuntimeCredential, removeClientCredential } from '../src/admission.js';
 import { AttemptStore } from '../src/attempts.js';
 import { MetricsStore } from '../src/metrics.js';
 
@@ -221,6 +221,127 @@ test('the daemon runtime credential authenticates and is removed on clean shutdo
 
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   assert.equal(readRuntimeCredential(stateRoot), undefined);
+});
+
+// --- per-client credentials -----------------------------------------------
+//
+// The property under test is hot-reload: a client launched against daemon A
+// must keep authenticating against daemon B on the same state root, because
+// its nonce lives in the on-disk registry, not in daemon memory.
+
+async function bootAuthProxy(stateRoot: string, authswapRoot: string) {
+  const upstreamPort = await listen(
+    http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => res.writeHead(200, {}).end('{}'));
+    }),
+  );
+  const { server, port } = await startProxy({
+    port: 0,
+    upstream: `http://127.0.0.1:${upstreamPort}`,
+    stateRoot,
+    authswapRoot,
+    metrics: false,
+    usageProbe: false,
+  });
+  cleanups.push(() => server.close());
+  return { server, port };
+}
+
+function postMessages(port: number, nonce: string): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': nonce },
+    body: JSON.stringify({ model: 'claude-opus-5' }),
+  });
+}
+
+test('a per-client credential authenticates across a daemon restart', async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  const stateRoot = tmp('cab-client-restart-');
+
+  const a = await bootAuthProxy(stateRoot, authswapRoot);
+  const { credential, filePath } = createClientCredential(stateRoot);
+  cleanups.push(() => removeClientCredential(filePath));
+  assert.equal((await postMessages(a.port, credential.nonce)).status, 200);
+
+  // "Restart": daemon A shuts down cleanly (deleting ITS instance nonce),
+  // daemon B boots on the same state root with a fresh instance nonce.
+  await new Promise<void>((resolve, reject) => a.server.close(e => e ? reject(e) : resolve()));
+  const b = await bootAuthProxy(stateRoot, authswapRoot);
+
+  assert.equal((await postMessages(b.port, credential.nonce)).status, 200,
+    'the registry nonce must survive the restart');
+  const instanceB = readRuntimeCredential(stateRoot);
+  assert.ok(instanceB);
+  assert.equal((await postMessages(b.port, instanceB.nonce)).status, 200,
+    'the new instance nonce works too');
+});
+
+test('a dead-pid client credential is rejected and swept', async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  const stateRoot = tmp('cab-client-dead-');
+  const proxy = await bootAuthProxy(stateRoot, authswapRoot);
+
+  const { credential, filePath } = createClientCredential(stateRoot);
+  const dead = { ...credential, client_pid: 999_999_999 };
+  writeFileSync(filePath, JSON.stringify(dead), { mode: 0o600 });
+
+  assert.equal((await postMessages(proxy.port, credential.nonce)).status, 401,
+    'an entry whose launcher is gone must not authenticate');
+  assert.equal(new ClientCredentialStore(stateRoot).sweep(), 1);
+});
+
+test('an expired adopted credential is rejected; a live one authenticates', async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  const stateRoot = tmp('cab-client-adopted-');
+  const proxy = await bootAuthProxy(stateRoot, authswapRoot);
+  const dir = clientCredentialDir(stateRoot);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+
+  const write = (name: string, entry: object) =>
+    writeFileSync(path.join(dir, name), JSON.stringify(entry), { mode: 0o600 });
+
+  write('adopted-live.json', {
+    schema_version: 1, nonce: 'adopted-live-nonce', expires_at_ms: Date.now() + 60_000, created_at: new Date().toISOString(),
+  });
+  write('adopted-expired.json', {
+    schema_version: 1, nonce: 'adopted-expired-nonce', expires_at_ms: Date.now() - 1, created_at: new Date().toISOString(),
+  });
+  // No pid and no expiry would be a permanent secret; it must not load.
+  write('adopted-unbounded.json', {
+    schema_version: 1, nonce: 'adopted-unbounded-nonce', created_at: new Date().toISOString(),
+  });
+
+  assert.equal((await postMessages(proxy.port, 'adopted-live-nonce')).status, 200);
+  assert.equal((await postMessages(proxy.port, 'adopted-expired-nonce')).status, 401);
+  assert.equal((await postMessages(proxy.port, 'adopted-unbounded-nonce')).status, 401);
+});
+
+test('a group- or world-readable client credential does not authenticate', async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  const stateRoot = tmp('cab-client-mode-');
+  const proxy = await bootAuthProxy(stateRoot, authswapRoot);
+
+  const { credential, filePath } = createClientCredential(stateRoot);
+  const { chmodSync } = await import('node:fs');
+  chmodSync(filePath, 0o644);
+
+  assert.equal((await postMessages(proxy.port, credential.nonce)).status, 401,
+    'an entry another local user could have read is not a secret');
+});
+
+test('a freshly written client credential is honored despite the scan cache', async () => {
+  const authswapRoot = fakeAuthswap('tok-1');
+  const stateRoot = tmp('cab-client-fresh-');
+  const proxy = await bootAuthProxy(stateRoot, authswapRoot);
+
+  // Prime the store's cache with an empty registry via a failed auth.
+  assert.equal((await postMessages(proxy.port, 'nonsense')).status, 401);
+  const { credential, filePath } = createClientCredential(stateRoot);
+  cleanups.push(() => removeClientCredential(filePath));
+  assert.equal((await postMessages(proxy.port, credential.nonce)).status, 200,
+    'a miss must rescan the registry before rejecting');
 });
 
 test('a listen failure removes the daemon runtime credential', async () => {

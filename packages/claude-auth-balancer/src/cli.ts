@@ -25,7 +25,7 @@ import { computeHeadroom } from './policy.js';
 import { DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_PORT, MAX_CONFIGURABLE_REQUEST_BODY_BYTES, startProxy } from './proxy.js';
 import type { ProxyLogEvent } from './proxy.js';
 import { launchClaude } from './client-launch.js';
-import { assertRuntimeCredentialForLaunch, runtimeCredentialPath } from './admission.js';
+import { ClientCredentialStore, assertRuntimeCredentialForLaunch, createClientCredential, removeClientCredential, runtimeCredentialPath } from './admission.js';
 
 function flag(argv: string[], name: string): boolean {
   return argv.includes(`--${name}`);
@@ -272,17 +272,28 @@ function cmdInstallService(argv: string[]): void {
 
 async function cmdClaude(argv: string[]): Promise<void> {
   const baseUrl = process.env.CLAUDE_AUTH_BALANCER_URL ?? `http://127.0.0.1:${DEFAULT_PORT}`;
-  const credential = assertRuntimeCredentialForLaunch(resolveStateRoot());
-  const result = await launchClaude({
-    args: argv,
-    baseUrl,
-    gatewayApiKey: credential.nonce,
-    selfPath: fileURLToPath(import.meta.url),
-  });
-  if (result.signal) {
-    process.kill(process.pid, result.signal);
-  } else {
-    process.exitCode = result.code ?? 1;
+  const stateRoot = resolveStateRoot();
+  // Liveness gate only: the launch still requires a running daemon, but the
+  // client authenticates with its own per-client nonce, which survives daemon
+  // restarts. This launcher process stays alive wrapping the child, so the
+  // registry entry is pid-bound to it and dies with the session.
+  assertRuntimeCredentialForLaunch(stateRoot);
+  const { credential, filePath } = createClientCredential(stateRoot);
+  try {
+    const result = await launchClaude({
+      args: argv,
+      baseUrl,
+      gatewayApiKey: credential.nonce,
+      selfPath: fileURLToPath(import.meta.url),
+    });
+    if (result.signal) {
+      removeClientCredential(filePath);
+      process.kill(process.pid, result.signal);
+    } else {
+      process.exitCode = result.code ?? 1;
+    }
+  } finally {
+    removeClientCredential(filePath);
   }
 }
 
@@ -357,8 +368,11 @@ function cmdInstallStatusline(): void {
 }
 
 function cmdSweep(): void {
-  const removed = new AffinityStore({ stateRoot: resolveStateRoot() }).maybeSweep(true);
+  const stateRoot = resolveStateRoot();
+  const removed = new AffinityStore({ stateRoot }).maybeSweep(true);
   console.log(`removed ${removed} expired lease file(s)`);
+  const clients = new ClientCredentialStore(stateRoot).sweep();
+  console.log(`removed ${clients} dead client credential(s)`);
 }
 
 /**

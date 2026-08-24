@@ -231,6 +231,36 @@ canonical OAuth token. It never goes upstream or into logs/metrics. A missing or
 unreadable runtime credential, or one whose daemon PID is no longer live, is a
 launcher error; manual clients must read the same file or use the launcher.
 
+### Per-client credentials: daemon restarts keep clients alive
+
+The instance nonce above rotates on every daemon start, and a launched client
+can never re-read it — the launcher injected it into the child's environment
+once. If clients authenticated only with it, every daemon restart (an upgrade,
+say) would orphan every running Claude session.
+
+So the launcher does not hand out the instance nonce. It mints a **per-client
+nonce**, records it in an owner-checked `0600` registry entry under:
+
+```
+~/.bravo/claude-auth-balancer/runtime/clients/
+```
+
+bound to the launcher's pid (the launcher stays alive wrapping the child), and
+deletes it when the client exits. The daemon accepts its own instance nonce or
+any live registry entry — nonces are compared timing-safely against every live
+entry, with a rescan on miss so a fresh launch is never rejected by the cache.
+The registry lives on disk, so a daemon restart is a non-event for client auth:
+routing leases, quota observations, and metrics were already disk-backed, and
+in-flight requests that die with the old daemon are retried by Claude Code onto
+the same slot's still-warm cache.
+
+This also tightens the leak story: a client's nonce dies with that client
+instead of living until the next daemon restart. An entry whose pid is dead or
+whose file is group/world-readable does not authenticate; `sweep` removes dead
+entries. Entries without a pid are "adopted" nonces for migrating already-
+running clients across the upgrade to this scheme — they must carry an expiry,
+and an entry with neither pid nor expiry is rejected outright.
+
 ### Token refresh
 
 The balancer refreshes its own tokens, so idle slots stay usable. Without this
