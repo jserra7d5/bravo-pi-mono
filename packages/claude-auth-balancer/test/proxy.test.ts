@@ -239,7 +239,9 @@ test('fresh non-Fable routing waits for probes and drains the earliest weekly re
     const fiveHourReset = new Date(Date.now() + (busy ? 5 : 1) * 60 * 60 * 1000).toISOString();
     const weeklyReset = new Date(Date.now() + (busy ? 24 : 144) * 60 * 60 * 1000).toISOString();
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
-      five_hour: { utilization: busy ? 80 : 1, resets_at: fiveHourReset },
+      // 60% keeps the busy slot under the 70% fresh-pick 5h soft ceiling; the
+      // soft ceiling's own routing has dedicated policy tests.
+      five_hour: { utilization: busy ? 60 : 1, resets_at: fiveHourReset },
       seven_day: { utilization: busy ? 80 : 1, resets_at: weeklyReset },
     }));
   });

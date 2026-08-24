@@ -19,6 +19,12 @@
 // ignored when every account is above the ceiling, because at that point the
 // move buys nothing and the cheapest account is whichever ranking already
 // prefers.
+//
+// Fresh picks additionally prefer accounts below a softer 5h ceiling (70%),
+// so the population of warm sessions that can exhaust one 5h bucket — and
+// then all migrate at once, each paying a cache re-create on the next account
+// — stops growing well before the hard ceiling. See
+// DEFAULT_FRESH_5H_SOFT_CEILING.
 
 import type { Claim, ClaimId, Claims } from './claims.js';
 import { claimHasReset, projectExpiredClaims } from './claims.js';
@@ -95,6 +101,18 @@ export type AccountState = {
  */
 export const DEFAULT_EVACUATE_UTILIZATION = 0.95;
 
+/**
+ * Soft 5h ceiling for FRESH picks only. Drain-first ignores the 5h claim until
+ * the 95% hard ceiling, so with many concurrent warm sessions the drain target
+ * collects every new session from ~50% to 95% and they later exhaust — and
+ * migrate — together, each paying a 20x cache re-create on arrival at the next
+ * account. Preferring 5h-cool accounts for cacheless fresh sessions caps that
+ * herd at zero cost. Soft: when every serviceable account is at or above it,
+ * the filter is dropped and ranking decides. A 5h window that refills within
+ * the cache horizon never counts as hot, same as the hard ceiling.
+ */
+export const DEFAULT_FRESH_5H_SOFT_CEILING = 0.7;
+
 export type HeadroomBreakdown = {
   slot: string;
   /** Normalized request-units of this model that still fit. 0 = exhausted. */
@@ -117,6 +135,13 @@ export type HeadroomBreakdown = {
    * picks avoid such accounts for any model; warm Fable sessions leave them.
    */
   evacuating: boolean;
+  /**
+   * True when the observed 5h utilization is at or above the fresh-pick soft
+   * ceiling and the window does not refill within the cache horizon. Fresh
+   * picks prefer accounts where this is false; affinity and eligibility are
+   * never affected by it.
+   */
+  fiveHourHot: boolean;
   /** True when serving this request would require spending overage. */
   requiresOverage: boolean;
   /** True when the account can spend overage at all. */
@@ -164,10 +189,12 @@ export function computeHeadroom(
   nowMs: number,
   evacuateThreshold: number = DEFAULT_EVACUATE_UTILIZATION,
   evacuationHorizonMs: number = DEFAULT_EVACUATION_HORIZON_MS,
+  fresh5hCeiling: number = DEFAULT_FRESH_5H_SOFT_CEILING,
 ): HeadroomBreakdown {
   const quota = quotaForModel(model);
   const claims = projectExpiredClaims(account.claims, nowMs);
   let evacuationTriggered = false;
+  let fiveHourHot = false;
   const overage = claims?.byId['overage'];
   const overageAvailable = overage?.status === 'allowed';
   const weeklyReset = claims?.byId['7d']?.reset;
@@ -177,6 +204,7 @@ export function computeHeadroom(
     headroom: 0,
     spendableHeadroom: 0,
     projectedWeeklyResetAt: weeklyReset === undefined ? undefined : weeklyReset * 1000,
+    fiveHourHot: false,
     evacuating: false,
     requiresOverage: false,
     overageAvailable,
@@ -218,6 +246,7 @@ export function computeHeadroom(
       const resetsSoon =
         claim.reset !== undefined && claim.reset * 1000 - nowMs <= evacuationHorizonMs;
       if (observed >= evacuateThreshold && !resetsSoon) evacuationTriggered = true;
+      if (id === '5h' && observed >= fresh5hCeiling && !resetsSoon) fiveHourHot = true;
     }
 
     // Put every claim in the same unit: normalized requests-of-this-model as a
@@ -259,6 +288,7 @@ export function computeHeadroom(
     spendableHeadroom,
     bindingClaim: sawAny ? binding : undefined,
     peakUtilization: peak,
+    fiveHourHot,
     evacuating,
     requiresOverage: headroom <= 0,
     eligible: headroom > 0 || overageAvailable,
@@ -288,6 +318,11 @@ export type SelectInput = {
    * (all models) and a warm Fable session is evacuated.
    */
   evacuateThreshold?: number;
+  /**
+   * 5h utilization at or above which an account is deprioritized — never
+   * excluded — for fresh sessions. See DEFAULT_FRESH_5H_SOFT_CEILING.
+   */
+  fresh5hCeiling?: number;
 };
 
 export type Selection = {
@@ -317,9 +352,10 @@ export function selectAccount(input: SelectInput): Selection {
   const floor = input.affinityFloor ?? DEFAULT_AFFINITY_FLOOR;
   const allowOverage = input.allowOverage ?? false;
   const threshold = input.evacuateThreshold ?? DEFAULT_EVACUATE_UTILIZATION;
+  const softCeiling = input.fresh5hCeiling ?? DEFAULT_FRESH_5H_SOFT_CEILING;
   const fable = quotaForModel(input.model).extraClaim !== undefined;
   const breakdown = input.accounts.map(a =>
-    computeHeadroom(a, input.model, input.nowMs, threshold),
+    computeHeadroom(a, input.model, input.nowMs, threshold, DEFAULT_EVACUATION_HORIZON_MS, softCeiling),
   );
   const bySlot = new Map(breakdown.map(b => [b.slot, b]));
 
@@ -375,14 +411,23 @@ export function selectAccount(input: SelectInput): Selection {
   }
 
   const allAboveCeiling = belowCeiling.length === 0 && serviceable.length > 0;
-  const pick = rank(healthy)[0];
+  // The 5h soft ceiling shrinks the herd that can exhaust one 5h bucket
+  // together: fresh sessions have no cache to lose, so steering them off a hot
+  // account is free. Soft — when every candidate is hot, ranking decides.
+  const fiveHourCool = healthy.filter(b => !b.fiveHourHot);
+  const freshPool = fiveHourCool.length > 0 ? fiveHourCool : healthy;
+  const softSkipped = healthy.length - freshPool.length;
+  const softNote = softSkipped > 0
+    ? `; skipped ${softSkipped} account(s) at or above the ${(softCeiling * 100).toFixed(0)}% 5h soft ceiling`
+    : '';
+  const pick = rank(freshPool)[0];
   if (pick) {
     const broke = Boolean(input.affinitySlot && input.affinitySlot !== pick.slot);
     const evacuated = fable && broke && bySlot.get(input.affinitySlot!)?.evacuating === true;
     return {
       slot: pick.slot,
       decision: broke ? 'affinity-broken' : 'fresh',
-      reason: broke
+      reason: (broke
         ? evacuated
           ? `sticky Fable slot ${input.affinitySlot} at ${((bySlot.get(input.affinitySlot!)?.peakUtilization ?? 0) * 100).toFixed(1)}%; evacuated to ${pick.slot}`
           : `sticky slot ${input.affinitySlot} could not serve; moved to ${pick.slot} (one cache re-create)`
@@ -392,7 +437,7 @@ export function selectAccount(input: SelectInput): Selection {
             ? `every account at or above ${(threshold * 100).toFixed(0)}%; draining ${pick.slot} anyway (moving buys nothing)`
             : pick.projectedWeeklyResetAt === undefined
               ? `draining ${pick.slot}; general 7d reset unknown (stable slot order)`
-              : `draining ${pick.slot}; earliest projected general 7d reset ${new Date(pick.projectedWeeklyResetAt).toISOString()}`,
+              : `draining ${pick.slot}; earliest projected general 7d reset ${new Date(pick.projectedWeeklyResetAt).toISOString()}`) + softNote,
       breakdown,
     };
   }

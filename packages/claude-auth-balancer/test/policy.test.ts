@@ -439,6 +439,106 @@ test('a non-Fable session whose slot exhausted lands below the ceiling, not on t
   assert.equal(s.decision, 'affinity-broken');
 });
 
+// --- the 5h soft ceiling on fresh picks ------------------------------------
+//
+// Reproduces the observed live state on 2026-08-24: slot 2 at 51% 5h carrying
+// 14 of 17 warm leases while slots 1 and 3 sat near zero. Drain-first keeps
+// feeding fresh sessions to slot 2 until the 95% hard ceiling, growing the
+// herd that later exhausts its 5h bucket — and migrates — together.
+
+const fiveHour = (utilization: string, resetInMs: number, weekly: Record<string, string> = {}) => ({
+  'anthropic-ratelimit-unified-5h-status': 'allowed',
+  'anthropic-ratelimit-unified-5h-reset': String(Math.floor((NOW + resetInMs) / 1000)),
+  'anthropic-ratelimit-unified-5h-utilization': utilization,
+  ...weekly,
+});
+
+const EARLY_WEEKLY = {
+  'anthropic-ratelimit-unified-7d-utilization': '0.35',
+  'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + 2 * 86400),
+};
+const LATE_WEEKLY = {
+  'anthropic-ratelimit-unified-7d-utilization': '0.0',
+  'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + 5 * 86400),
+};
+
+test('a fresh non-Fable session avoids a 5h-hot account even when it resets first', () => {
+  // Slot 2 wins drain-first (earlier weekly reset) but is 78% into its 5h.
+  const s = selectAccount({
+    accounts: [nad(fiveHour('0.05', 3 * 60 * 60 * 1000, LATE_WEEKLY)), joseph(fiveHour('0.78', 3 * 60 * 60 * 1000, EARLY_WEEKLY))],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(s.slot, '1', 'fresh sessions must stop joining the herd on the hot 5h account');
+  assert.equal(s.decision, 'fresh');
+  assert.match(s.reason, /5h soft ceiling/);
+});
+
+test('the 5h soft ceiling is soft: with every account hot, drain-first decides', () => {
+  const s = selectAccount({
+    accounts: [nad(fiveHour('0.85', 3 * 60 * 60 * 1000, LATE_WEEKLY)), joseph(fiveHour('0.78', 3 * 60 * 60 * 1000, EARLY_WEEKLY))],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(s.slot, '2', 'earliest weekly reset wins when nowhere is cool');
+  assert.equal(s.decision, 'fresh');
+  assert.doesNotMatch(s.reason, /5h soft ceiling/);
+});
+
+test('warm affinity holds straight through the 5h soft ceiling', () => {
+  const s = selectAccount({
+    accounts: [nad(fiveHour('0.05', 3 * 60 * 60 * 1000, LATE_WEEKLY)), joseph(fiveHour('0.90', 3 * 60 * 60 * 1000, EARLY_WEEKLY))],
+    model: 'claude-opus-5',
+    affinitySlot: '2',
+    nowMs: NOW,
+  });
+  assert.equal(s.slot, '2', 'the soft ceiling steers cacheless sessions only');
+  assert.equal(s.decision, 'affinity-hold');
+});
+
+test('a hot 5h window refilling within the cache horizon is not soft-ceilinged', () => {
+  // 78% but resetting in 20 minutes: the bucket refills before a new session
+  // could meaningfully burn it, so drain-first keeps the earliest weekly reset.
+  const s = selectAccount({
+    accounts: [nad(fiveHour('0.05', 3 * 60 * 60 * 1000, LATE_WEEKLY)), joseph(fiveHour('0.78', 20 * 60 * 1000, EARLY_WEEKLY))],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(s.slot, '2');
+  assert.doesNotMatch(s.reason, /5h soft ceiling/);
+});
+
+test('fresh Fable picks also avoid a 5h-hot account', () => {
+  // Both accounts pace to zero spendable, so Fable ranking falls to the raw
+  // headroom tiebreak, where the hot account wins (0.14 vs 0.10); the soft
+  // ceiling must override that.
+  const hot: AccountState = {
+    slot: '2',
+    health: 'ok',
+    claims: parseClaims(fiveHour('0.72', 3 * 60 * 60 * 1000, {
+      'anthropic-ratelimit-unified-7d-utilization': '0.05',
+      'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + 1 * 86400),
+      'anthropic-ratelimit-unified-7d_oi-utilization': '0.05',
+      'anthropic-ratelimit-unified-7d_oi-reset': String(Math.floor(NOW / 1000) + 1 * 86400),
+    })),
+  };
+  const cool: AccountState = {
+    slot: '1',
+    health: 'ok',
+    claims: parseClaims(fiveHour('0.05', 3 * 60 * 60 * 1000, {
+      'anthropic-ratelimit-unified-7d-utilization': '0.60',
+      'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + 6 * 86400),
+      'anthropic-ratelimit-unified-7d_oi-utilization': '0.60',
+      'anthropic-ratelimit-unified-7d_oi-reset': String(Math.floor(NOW / 1000) + 6 * 86400),
+    })),
+  };
+  const unfiltered = selectAccount({ accounts: [cool, hot], model: 'claude-fable-5', nowMs: NOW, fresh5hCeiling: 1.01 });
+  assert.equal(unfiltered.slot, '2', 'precondition: spendable ranking alone prefers the hot account');
+  const s = selectAccount({ accounts: [cool, hot], model: 'claude-fable-5', nowMs: NOW });
+  assert.equal(s.slot, '1');
+  assert.match(s.reason, /5h soft ceiling/);
+});
+
 test('a 5h window refilling within the cache horizon does not block a fresh non-Fable pick', () => {
   const soon = {
     'anthropic-ratelimit-unified-5h-status': 'allowed_warning',

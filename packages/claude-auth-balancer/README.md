@@ -48,9 +48,10 @@ session on one account until it genuinely cannot serve.
    account with the earliest known projected general `7d` reset and keep
    draining it until it cannot serve. Known resets sort before missing resets;
    ties use stable slot order. The `5h` and `7d` claims remain hard gates, but
-   their utilization, headroom, and `5h` reset do not rank fresh non-Fable work.
-   The 95% ceiling in (3) filters this pool first: a session with no cache to
-   lose is never started on a near-spent account.
+   their headroom and `5h` reset do not rank fresh non-Fable work. The ceilings
+   in (3) and (4) filter this pool first: a session with no cache to lose is
+   never started on a near-spent account, and prefers one below the `5h` soft
+   ceiling.
 3. **95% blocks fresh picks for every model; only Fable evacuates a warm one.**
    An account at or above 95% raw utilization on a claim the requested model is
    gated on takes no new sessions. Existing non-Fable `(session, model)` leases
@@ -63,18 +64,28 @@ session on one account until it genuinely cannot serve.
    at that point moving buys no quota, so ranking decides and the sticky slot
    keeps its cache. A window that refills within the cache TTL never triggers
    the ceiling either.
-4. **Overage is never spent silently.** Accounts with `overage-status: allowed`
+4. **A softer 70% ceiling on the `5h` claim steers fresh picks early.** Warm
+   sessions hold through the hard ceiling, so with many concurrent sessions the
+   drain target collects every fresh session until 95%, and that whole herd
+   later exhausts its `5h` bucket — and migrates — together, each arrival
+   paying a ~20x cache write on the next account. Fresh sessions (all models)
+   therefore prefer accounts below 70% raw `5h` utilization, which caps the
+   herd at zero cost since a fresh session has no cache to lose. Soft in the
+   same two ways as the hard ceiling: dropped when every serviceable account is
+   at or above it, and never triggered by a `5h` window that refills within the
+   cache TTL. Warm affinity and eligibility are unaffected.
+5. **Overage is never spent silently.** Accounts with `overage-status: allowed`
    can bill real money past 100%; that path requires `--allow-overage`.
-5. **429 waits before it rotates.** With a short `Retry-After`, the proxy waits
+6. **429 waits before it rotates.** With a short `Retry-After`, the proxy waits
    on the warm account rather than paying a cache re-create to dodge a few
    seconds. Only a long or absent `Retry-After` rotates. Either way the client
    never sees the 429.
-6. **Generation retries are conservative.** No client-visible response is not
+7. **Generation retries are conservative.** No client-visible response is not
    proof that Anthropic did no work. A generation failure after application bytes
    may have been written is terminal by default, including header timeout and
    unknown socket phase. Only a proven pre-wire transport failure may be retried
    silently on the same slot.
-7. **Opening sessions are fenced.** The first request for one `(session, model)`
+8. **Opening sessions are fenced.** The first request for one `(session, model)`
    owns a keyed singleflight covering usage probes, selection, refresh, and lease
    publication. Concurrent openers wait and then re-read the published lease
    instead of selecting independently.
