@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { finishTokenLease, cleanupLaunch, getDbStatus, getPolicy, getUsage, listReservations, loadAccounts, prepareLaunch, pruneDatabase, redactForJson, refreshUsage, resolveStateRoot, startTokenLease, syncBack } from './index.js';
+import { checkCodex, reloginCodexSlot } from './relogin.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -18,7 +19,7 @@ async function writeUniqueJson(p: string, v: unknown) {
   try { await handle.writeFile(JSON.stringify(redactForJson(v), null, 2) + '\n'); } finally { await handle.close(); }
 }
 async function main() {
-  if (has('--version')) { needJson(); out({ schema_version: 1, name: '@bravo/codex-auth-balancer', version: pkg.version, capabilities: { codex_usage_json: 1, codex_refresh_usage_json: 1, codex_prepare_launch_json: 1, codex_sync_back_json: 1, codex_db_status_json: 1, codex_reservations_json: 1, codex_policy_json: 1, codex_token_lease: 1, codex_prune_json: 1 } }); return; }
+  if (has('--version')) { needJson(); out({ schema_version: 1, name: '@bravo/codex-auth-balancer', version: pkg.version, capabilities: { codex_usage_json: 1, codex_refresh_usage_json: 1, codex_prepare_launch_json: 1, codex_sync_back_json: 1, codex_db_status_json: 1, codex_reservations_json: 1, codex_policy_json: 1, codex_token_lease: 1, codex_prune_json: 1, codex_relogin_json: 1 } }); return; }
   const cmd = process.argv[2]; const stateRoot = resolveStateRoot();
   switch (cmd) {
     case 'usage': needJson(); out({ schema_version: 1, ...(await getUsage({ stateRoot })) }); break;
@@ -41,6 +42,19 @@ async function main() {
       break;
     }
     case 'policy': needJson(); out({ schema_version: 1, stateRoot, ...(await getPolicy({ stateRoot })) }); break;
+    case 'relogin': {
+      needJson();
+      if (has('--check')) {
+        out({ schema_version: 1, provider: 'codex', ...checkCodex(stateRoot) });
+        break;
+      }
+      const slot = arg('--slot');
+      if (!slot) throw new Error('--slot required');
+      const result = await reloginCodexSlot({ stateRoot, slot, ifNeeded: has('--if-needed') });
+      out({ schema_version: 1, ...result });
+      process.exitCode = result.ok ? 0 : result.action === 'usage' ? 2 : result.action === 'aborted' ? 4 : 1;
+      break;
+    }
     case 'token': {
       const provider = arg('--provider');
       const leaseKey = arg('--lease-key');

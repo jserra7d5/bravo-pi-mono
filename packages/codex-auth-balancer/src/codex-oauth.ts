@@ -41,10 +41,10 @@ type TokenResponse = { access_token?: unknown; refresh_token?: unknown; expires_
  * is replayed. Callers must persist the result before issuing another refresh,
  * and must never retry with a different refresh token on failure.
  */
-export async function refreshCodexToken(refreshToken: string, signal?: AbortSignal): Promise<CodexTokenSet> {
+export async function refreshCodexToken(refreshToken: string, signal?: AbortSignal, tokenUrl?: string): Promise<CodexTokenSet> {
   let response: Response;
   try {
-    response = await fetch(TOKEN_URL, {
+    response = await fetch(tokenUrl ?? TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({

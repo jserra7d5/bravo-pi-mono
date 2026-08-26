@@ -300,6 +300,38 @@ warnings persist in independently owned files under the balancer state root and 
 clears them. Tokens are never included. `needs-reauth` means no credential, or
 an expired access token with no live refresh token behind it.
 
+A displayed warning is filtered against the credential it describes: once the
+slot's `expiresAt` is newer than the warning's timestamp, the warning is stale
+and is not shown. Without that filter an out-of-band re-login left a "needs
+login" warning standing for up to ~12h, because warnings are only cleared from
+inside a refresh attempt and the sweep skips any slot outside the 30-minute
+window.
+
+### The session deadline, and `relogin`
+
+Refreshing keeps the *access* token alive. It does not keep the *session* alive.
+A Claude refresh token has a hard ~30-day life anchored to the interactive login
+that created it, and the server counts it down from that login regardless of how
+often the token is refreshed — `refresh_token_expires_in` comes back on every
+refresh response and keeps shrinking. Only an interactive login resets it.
+
+So the balancer cannot be fully unattended, and pretending otherwise means a
+slot dies with no warning. `relogin claude <slot>` performs that login and
+installs the result into the slot file; `relogin --check` shows every slot's
+deadline for both providers and names the slots that need attention. Deadlines
+inside 7 days are yellow, inside 2 days red, in `status`, `accounts`, and the
+statusline.
+
+`relogin claude <slot>` always logs in. `--if-needed` skips the login only when
+the deadline is more than 7 days out *and* a forced refresh succeeds — a refresh
+alone must never be treated as a substitute, because it leaves the original
+clock untouched, which is the thing the command exists to reset.
+
+Deadlines cluster: slots logged in together die together, and a three-slot pool
+whose deadlines fall in the same week has no failover at all. `relogin --check`
+reports pairs within 5 days of each other, and a successful relogin warns when
+its new deadline lands next to another slot's.
+
 ## Running it as a daemon
 
 ```bash
@@ -329,6 +361,8 @@ claude-auth-balancer serve    [--port N] [--allow-overage] [--enforce-body-limit
 claude-auth-balancer status   [--model M]     # headroom, claims, live leases
 claude-auth-balancer accounts                 # slots, health, token expiry
 claude-auth-balancer refresh                  # refresh near-expiry slots now
+claude-auth-balancer relogin <slot> [--if-needed]  # interactive login; resets the
+                                              # ~30-day session deadline
 claude-auth-balancer metrics  [--days N] [--daily] [--json] [--sql "..."]
 claude-auth-balancer sweep                    # drop expired lease files
 claude-auth-balancer prune    [--days N]      # drop old raw metric rows

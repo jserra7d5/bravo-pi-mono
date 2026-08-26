@@ -838,12 +838,9 @@ test("codexHealthWarnings is silent for a healthy slot", () => {
 	assert.deepEqual(codexHealthWarnings([{ slot: "1", expiresAt: NOW + 9 * DAY, needsReauth: false }], NOW), []);
 });
 
-test("codexHealthWarnings calls out a slot that cannot refresh itself, with the SSH-safe recipe", () => {
+test("codexHealthWarnings names the safe relogin command for the slot", () => {
 	const [warning] = codexHealthWarnings([{ slot: "2", expiresAt: NOW + 2 * DAY, needsReauth: true }], NOW);
-	assert.match(warning, /slot 2 cannot refresh itself/);
-	assert.match(warning, /expires 2d/);
-	// /reauth logs out first and needs a browser, so it is the wrong advice here.
-	assert.match(warning, /--device-auth/);
+	assert.equal(warning, "Codex slot 2 cannot refresh itself and expires 2d — run: relogin codex 2");
 });
 
 test("codexHealthWarnings explains a near-expiry slot by why proactive refresh has not fixed it", () => {

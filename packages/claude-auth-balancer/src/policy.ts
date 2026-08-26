@@ -89,6 +89,8 @@ export type AccountState = {
   observedAt?: number;
   /** Access-token expiry (ms). Expired accounts are not selectable. */
   tokenExpiresAt?: number;
+  /** Hard interactive-login session deadline (ms), when supplied by Claude. */
+  refreshTokenExpiresAt?: number;
 };
 
 /**

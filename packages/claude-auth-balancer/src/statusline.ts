@@ -28,7 +28,7 @@ import {
 import { claimHasReset } from './claims.js';
 import type { Claim } from './claims.js';
 import { DEFAULT_EVACUATE_UTILIZATION, DEFAULT_EVACUATION_HORIZON_MS, quotaForModel } from './policy.js';
-import { conciseWarnings, readAuthWarnings } from './health.js';
+import { conciseWarnings, readActiveAuthWarnings } from './health.js';
 
 /**
  * The subset of Claude Code's statusline payload this uses.
@@ -70,6 +70,7 @@ export type AccountView = {
   fableWeekly?: number;
   fiveHourResetAt?: number;
   sevenDayResetAt?: number;
+  refreshTokenExpiresAt?: number;
   /**
    * The server told us this account may exceed its included quota. This is a
    * permission, not the daemon's `--allow-overage` setting — the daemon may
@@ -306,6 +307,7 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
         fableWeekly: pct(byId?.['7d_oi'], nowMs),
         fiveHourResetAt: futureReset(byId?.['5h'], nowMs),
         sevenDayResetAt: futureReset(byId?.['7d'], nowMs),
+        refreshTokenExpiresAt: oauth?.refreshTokenExpiresAt,
         overageAllowed: byId?.['overage']?.status === 'allowed',
         // Same test `loadAccountStates` uses for health: dead is no credential
         // at all, or an expired one with no live refresh token behind it. An
@@ -347,7 +349,7 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
     accounts,
     balancerUnknown,
     sessionAttributed: accounts.some(a => a.active),
-    warnings: conciseWarnings(readAuthWarnings(stateRoot)),
+    warnings: conciseWarnings(readActiveAuthWarnings(stateRoot, discoverAccounts(options.authswapRoot ?? resolveAuthswapRoot()), nowMs)),
   };
 }
 

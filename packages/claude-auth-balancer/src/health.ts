@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import type { Account } from './accounts.js';
+import { readOAuth } from './accounts.js';
 
 export type AuthWarning = {
   code: 'refresh-terminal' | 'refresh-backoff';
@@ -42,6 +44,22 @@ export function readAuthWarnings(stateRoot: string): AuthWarning[] {
     /* no refresh warnings */
   }
   return warnings;
+}
+
+/** Hide warnings made obsolete by a newer credential write. */
+export function readActiveAuthWarnings(
+  stateRoot: string,
+  accounts: readonly Account[],
+  _nowMs = Date.now(),
+): AuthWarning[] {
+  const bySlot = new Map(accounts.map(account => [account.slot, account]));
+  return readAuthWarnings(stateRoot).filter(warning => {
+    if (!warning.slot) return true;
+    const account = bySlot.get(warning.slot);
+    if (!account) return true;
+    const expiresAt = readOAuth(account.credentialPath)?.expiresAt;
+    return expiresAt === undefined || expiresAt <= warning.at;
+  });
 }
 
 function writeOwnedWarning(file: string, warning?: AuthWarning): void {

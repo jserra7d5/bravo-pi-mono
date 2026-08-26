@@ -2,6 +2,10 @@
 
 The balancer owns account credentials, leases, usage normalization, and persistent SQLite state under `CODEX_AUTH_BALANCER_HOME` (normally `~/.bravo/codex-auth-balancer`).
 
+## Re-authentication
+
+Reset a slot's OAuth session safely with `relogin codex <slot>`. The command backs up the live credential before starting device authorization, verifies account identity, and restores the original credential on every failed or interrupted login.
+
 ## Shared live SQLite compatibility contract
 
 > **Read this before changing schema, persistence, affinity, selection, or any live-state behavior.** The SQLite file is shared by long-lived Pi and service processes. Deployed processes may keep an older build resident while a newer process opens the same database.

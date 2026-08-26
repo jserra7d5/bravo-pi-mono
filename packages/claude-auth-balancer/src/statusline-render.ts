@@ -15,6 +15,7 @@
 //   3. Salience tracks relevance. The account serving this session renders at
 //      full strength; every other account renders one step down, hue intact.
 
+import { RED_MS, WARN_MS } from '@bravo/auth-balancer-contract';
 import type { AccountView, StatuslineModel } from './statusline.js';
 
 export const RESET = '\u001b[0m';
@@ -434,6 +435,14 @@ function renderAccountLine(
   // different problems and get different words.
   if (account.stale) optional.push(paint('no data', DIM, c));
   else if (account.aged) optional.push(paint('stale', DIM, c));
+
+  const reloginIn = account.refreshTokenExpiresAt === undefined
+    ? undefined
+    : account.refreshTokenExpiresAt - nowMs;
+  if (reloginIn !== undefined && reloginIn < WARN_MS) {
+    const days = Math.max(0, Math.ceil(reloginIn / 86_400_000));
+    optional.push(paint(`relogin ${days}d`, reloginIn < RED_MS ? RED : YELLOW, c));
+  }
 
   return assemble(required, optional, '  ', opts.width, c, g.ellipsis);
 }

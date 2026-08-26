@@ -15,9 +15,11 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { AffinityStore } from './affinity.js';
+import { RED_MS, WARN_MS } from '@bravo/auth-balancer-contract';
 import { discoverAccounts, loadAccountStates, resolveAuthswapRoot, resolveStateRoot } from './accounts.js';
 import { TokenRefresher } from './refresh.js';
-import { conciseWarnings, readAuthWarnings } from './health.js';
+import { conciseWarnings, readActiveAuthWarnings } from './health.js';
+import { checkClaude, reloginClaudeSlot } from './relogin.js';
 import { acquireSingletonLock, renderUnit, userUnitPath } from './daemon.js';
 import type { SingletonLock } from './daemon.js';
 import { MetricsStore } from './metrics.js';
@@ -41,7 +43,14 @@ function pct(n: number | undefined): string {
 }
 
 function displayedWarnings(stateRoot: string): string[] {
-  return conciseWarnings(readAuthWarnings(stateRoot));
+  return conciseWarnings(readActiveAuthWarnings(stateRoot, discoverAccounts(), Date.now()));
+}
+
+function reloginCountdown(deadline: number | undefined, now: number): string {
+  if (deadline === undefined) return '-';
+  const text = `${((deadline - now) / 86_400_000).toFixed(1)}d`;
+  if (!process.stdout.isTTY || deadline - now >= WARN_MS) return text;
+  return `\u001b[${deadline - now < RED_MS ? '31' : '33'}m${text}\u001b[0m`;
 }
 
 function parseMaxRequestBodyBytes(argv: string[]): number {
@@ -168,7 +177,7 @@ function cmdStatus(argv: string[]): void {
   }
 
   console.log(`accounts (model=${model ?? 'any'})`);
-  console.log('slot  email                                  5h      7d      7d_oi   headroom  binding  health');
+  console.log('slot  email                                  5h      7d      7d_oi   headroom  binding  health       relogin');
   for (const s of states) {
     const h = computeHeadroom(s, model, now);
     const c = s.claims?.byId;
@@ -186,6 +195,7 @@ function cmdStatus(argv: string[]): void {
         ' ',
         (h.bindingClaim ?? '-').padEnd(8),
         s.health.padEnd(13),
+        reloginCountdown(s.refreshTokenExpiresAt, now).padEnd(10),
         (h.evacuating ? 'EVACUATING ' : '') + (h.overageAvailable ? 'overage ' : ''),
         `obs ${ago(s.observedAt, now)}`,
       ].join(''),
@@ -210,7 +220,7 @@ function cmdAccounts(): void {
       s.tokenExpiresAt === undefined
         ? 'unknown'
         : `${((s.tokenExpiresAt - now) / 3_600_000).toFixed(1)}h`;
-    console.log(`slot ${s.slot}  ${s.email ?? '(unknown)'}  health=${s.health}  token expires in ${exp}`);
+    console.log(`slot ${s.slot}  ${s.email ?? '(unknown)'}  health=${s.health}  token expires in ${exp}  relogin ${reloginCountdown(s.refreshTokenExpiresAt, now)}`);
   }
 }
 
@@ -490,6 +500,18 @@ async function main(): Promise<void> {
     case 'refresh':
       await cmdRefresh();
       return;
+    case 'relogin':
+      if (argv[0] === '--check-json') {
+        console.log(JSON.stringify({ schema_version: 1, provider: 'claude', accounts: checkClaude() }));
+        return;
+      }
+      if (!argv[0] || (argv.length > 1 && argv[1] !== '--if-needed') || argv.length > 2) {
+        console.error('usage: claude-auth-balancer relogin <slot> [--if-needed] | relogin --check-json');
+        process.exitCode = 2;
+        return;
+      }
+      process.exitCode = await reloginClaudeSlot(argv[0], argv[1] === '--if-needed');
+      return;
     case 'install-statusline':
       cmdInstallStatusline();
       return;
@@ -505,11 +527,12 @@ async function main(): Promise<void> {
     default:
       console.error(`unknown command: ${command}`);
       console.error(
-        'usage: claude-auth-balancer <serve|claude|status|accounts|metrics|refresh|sweep|prune|install-service>\n' +
+        'usage: claude-auth-balancer <serve|claude|status|accounts|metrics|refresh|relogin|sweep|prune|install-service>\n' +
           '  serve            [--port N] [--allow-overage] [--enforce-body-limit] [--max-request-body-mib N] [--tls-policy fresh_tls_quarantine|keepalive_no_tls_cache|keepalive_with_tls_cache] [--strict-generation-retry]\n' +
           '  status           [--model M]\n' +
           '  metrics          [--days N] [--daily] [--json] [--sql "SELECT ..."]\n' +
           '  refresh          refresh any account near expiry, now\n' +
+          '  relogin          <slot> [--if-needed] | --check-json\n' +
           '  install-statusline  point the Claude Code status bar at this package\n' +
           '  claude           [args...] launch Claude through the local gateway\n' +
           '  prune            [--days N]\n' +

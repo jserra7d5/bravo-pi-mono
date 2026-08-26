@@ -87,6 +87,7 @@ Incident ledgers:
 
 Design/spec docs:
 
+- `docs/specs/auth-relogin/` — the `relogin` CLI: session-deadline surfacing for both balancers, and non-destructive re-login for a Codex flow that deletes the credential before replacing it.
 - `docs/specs/codex-auth-balancer/` — package-owned Codex account monitoring and process-boundary launch balancing for Pi/async subagents; authswap is import-only migration input, not a runtime provider.
 - `docs/specs/tango-v1/design.md` / `plan.md` — v1.0 baseline
 - `docs/specs/tango-v1/design-v1.1.md` / `plan-v1.1.md` — tool-first Pi UX and CLI-first core follow-up

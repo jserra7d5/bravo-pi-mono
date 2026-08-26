@@ -1,5 +1,12 @@
 export const AUTH_BALANCER_ATTEMPT_SCHEMA_VERSION = 1 as const;
 
+/** Shared relogin policy thresholds. Keep every provider surface on one clock. */
+export const WARN_MS = 7 * 24 * 60 * 60 * 1000;
+export const RED_MS = 2 * 24 * 60 * 60 * 1000;
+export const CLUSTER_WINDOW_MS = 5 * 24 * 60 * 60 * 1000;
+export const DEVICE_AUTH_TIMEOUT_MS = 16 * 60 * 1000;
+export const CLAUDE_REFRESH_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
 export const AUTH_BALANCER_PROVIDERS = ["codex", "claude"] as const;
 export type AuthBalancerProvider = (typeof AUTH_BALANCER_PROVIDERS)[number];
 

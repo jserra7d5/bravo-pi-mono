@@ -107,7 +107,7 @@ export function mergeCredentialFile(raw: string, tokens: ClaudeTokenSet): string
   return `${JSON.stringify(parsed, null, 2)}\n`;
 }
 
-function writeCredentialFile(credentialPath: string, contents: string): void {
+export function writeCredentialFile(credentialPath: string, contents: string): void {
   const tmp = `${credentialPath}.tmp.${process.pid}`;
   writeFileSync(tmp, contents, { mode: 0o600 });
   renameSync(tmp, credentialPath);
@@ -122,7 +122,7 @@ function lockPath(credentialPath: string): string {
 }
 
 /** Take the lock, or return false if someone else holds a live one. */
-function acquireLock(credentialPath: string, nowMs: number): boolean {
+export function acquireLock(credentialPath: string, nowMs: number): boolean {
   const file = lockPath(credentialPath);
   try {
     closeSync(openSync(file, 'wx', 0o600));
@@ -143,7 +143,7 @@ function acquireLock(credentialPath: string, nowMs: number): boolean {
   }
 }
 
-function releaseLock(credentialPath: string): void {
+export function releaseLock(credentialPath: string): void {
   try {
     unlinkSync(lockPath(credentialPath));
   } catch {
@@ -190,11 +190,11 @@ export class TokenRefresher {
    * Concurrent callers for the same slot share one exchange rather than each
    * issuing their own — which, with rotation, would invalidate each other.
    */
-  async ensureFresh(account: Account): Promise<RefreshOutcome> {
+  async ensureFresh(account: Account, force = false): Promise<RefreshOutcome> {
     const existing = this.inflight.get(account.slot);
     if (existing) return existing;
 
-    const run = this.refreshSlot(account).then(outcome => {
+    const run = this.refreshSlot(account, force).then(outcome => {
       if (outcome.status === 'fresh' && this.deps.stateRoot) {
         setRefreshWarning(this.deps.stateRoot, account.slot);
       }
@@ -228,7 +228,7 @@ export class TokenRefresher {
     return outcome;
   }
 
-  private async refreshSlot(account: Account): Promise<RefreshOutcome> {
+  private async refreshSlot(account: Account, force = false): Promise<RefreshOutcome> {
     const nowMs = this.deps.now();
 
     const blockedUntil = this.backoffUntil.get(account.slot);
@@ -245,7 +245,7 @@ export class TokenRefresher {
 
     const before = readOAuth(account.credentialPath);
     if (!before) return this.emit(account, { status: 'skipped', reason: 'no credential' }, nowMs);
-    if (!this.needsRefresh(before, nowMs)) return { status: 'fresh', oauth: before };
+    if (!force && !this.needsRefresh(before, nowMs)) return { status: 'fresh', oauth: before };
     if (!before.refreshToken) {
       return this.emit(account, { status: 'skipped', reason: 'no refresh token' }, nowMs);
     }
@@ -254,7 +254,7 @@ export class TokenRefresher {
       // Someone else is refreshing this slot right now. Re-read rather than
       // wait: if they already finished we get their result for free.
       const current = readOAuth(account.credentialPath);
-      if (current && !this.needsRefresh(current, this.deps.now())) {
+      if (!force && current && !this.needsRefresh(current, this.deps.now())) {
         return { status: 'fresh', oauth: current };
       }
       return this.emit(account, { status: 'skipped', reason: 'locked by another refresher' }, nowMs);
@@ -270,7 +270,7 @@ export class TokenRefresher {
         return this.emit(account, { status: 'skipped', reason: 'credential vanished' }, nowMs);
       }
       const checkedAt = this.deps.now();
-      if (!this.needsRefresh(current, checkedAt)) {
+      if (!force && !this.needsRefresh(current, checkedAt)) {
         return { status: 'fresh', oauth: current };
       }
 

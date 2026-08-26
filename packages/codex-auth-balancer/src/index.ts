@@ -1992,7 +1992,7 @@ function refreshLockAcquireMs(): number {
   const parsed = Number.parseInt(raw, 10);
   return Number.isNaN(parsed) || parsed <= 0 ? REFRESH_LOCK_ACQUIRE_DEFAULT_MS : parsed;
 }
-async function withRefreshLock<T>(stateRoot: string, slot: string, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
+export async function withRefreshLock<T>(stateRoot: string, slot: string, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
   const lockDir = refreshLockDir(stateRoot, slot);
   const ownerPath = path.join(lockDir, 'owner.json');
   await fs.mkdir(path.dirname(lockDir), { recursive: true, mode: 0o700 });
@@ -2097,6 +2097,12 @@ function readProactiveAttempt(stateRoot: string, slot: string): ProactiveAttempt
 }
 
 export type ProactiveAttempt = { at: number; ok: boolean; error?: string; errorKind?: OAuthErrorKind };
+
+export function clearProactiveRefreshFailure(stateRoot: string, slot: string): void {
+  const db = openDb(stateRoot);
+  try { db.prepare('DELETE FROM policy WHERE key = ?').run(`proactive_refresh:${slot}`); }
+  finally { closeDb(db); }
+}
 export type ProactiveRefreshOutcome = {
   slot: string;
   /** 'fresh': still far from expiry. 'cooldown': attempted too recently. 'adopted': another process had already refreshed it. */
@@ -2119,12 +2125,13 @@ export type ProactiveRefreshOutcome = {
  * Never throws: every outcome is reported per slot so callers can run it
  * fire-and-forget from a session hook.
  */
-export async function ensureFreshTokens(options: { stateRoot?: string; leadMs?: number; signal?: AbortSignal; force?: boolean } = {}): Promise<ProactiveRefreshOutcome[]> {
+export async function ensureFreshTokens(options: { stateRoot?: string; leadMs?: number; signal?: AbortSignal; force?: boolean; slot?: string; tokenUrl?: string } = {}): Promise<ProactiveRefreshOutcome[]> {
   const stateRoot = options.stateRoot || resolveStateRoot();
   const leadMs = options.leadMs ?? PROACTIVE_REFRESH_LEAD_MS;
   const accounts = await scanInternalAccounts(stateRoot).catch(() => [] as InternalAccount[]);
   const out: ProactiveRefreshOutcome[] = [];
   for (const account of accounts) {
+    if (options.slot !== undefined && account.slot !== options.slot) continue;
     const authPath = account.piAuthPath || account.authPath;
     const due = (expiresAt: number | undefined) => !expiresAt || expiresAt - Date.now() <= leadMs;
     if (!options.force && !due(account.tokenExpiresAt) && account.claimBearing) {
@@ -2150,7 +2157,7 @@ export async function ensureFreshTokens(options: { stateRoot?: string; leadMs?: 
           return { slot: account.slot, action: 'adopted', expiresAt: parsed.expiresAt };
         }
         if (!parsed.refreshToken) return { slot: account.slot, action: 'unrefreshable', expiresAt: parsed.expiresAt };
-        const exchanged = await refreshCodexToken(parsed.refreshToken, options.signal);
+        const exchanged = await refreshCodexToken(parsed.refreshToken, options.signal, options.tokenUrl);
         const next = await persistRefreshedCredential(authPath, auth, { ...exchanged, accountId: parsed.accountId });
         return { slot: account.slot, action: 'refreshed', expiresAt: tokenFromAuth(next).expiresAt };
       });

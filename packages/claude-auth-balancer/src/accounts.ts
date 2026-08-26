@@ -174,6 +174,7 @@ export function loadAccountStates(options: {
       claims: projectExpiredClaims(prior?.claims, options.nowMs),
       observedAt: prior?.observedAt,
       tokenExpiresAt: expiresAt,
+      refreshTokenExpiresAt: oauth?.refreshTokenExpiresAt,
     });
   }
 

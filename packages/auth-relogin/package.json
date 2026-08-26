@@ -1,0 +1,22 @@
+{
+  "name": "@bravo/auth-relogin",
+  "version": "0.3.5",
+  "private": true,
+  "type": "module",
+  "description": "Safe interactive OAuth session reset dispatcher for Bravo auth balancers.",
+  "main": "./dist/src/cli.js",
+  "types": "./dist/src/cli.d.ts",
+  "bin": { "relogin": "./dist/src/cli.js" },
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json && chmod +x dist/src/cli.js",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "dependencies": {
+    "@bravo/auth-balancer-contract": "file:../auth-balancer-contract",
+    "@bravo/claude-auth-balancer": "file:../claude-auth-balancer",
+    "@bravo/codex-auth-balancer": "file:../codex-auth-balancer"
+  },
+  "devDependencies": { "@types/node": "latest", "typescript": "latest" },
+  "engines": { "node": ">=22.13" }
+}
