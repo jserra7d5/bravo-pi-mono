@@ -64,16 +64,19 @@ session on one account until it genuinely cannot serve.
    at that point moving buys no quota, so ranking decides and the sticky slot
    keeps its cache. A window that refills within the cache TTL never triggers
    the ceiling either.
-4. **A softer 70% ceiling on the `5h` claim steers fresh picks early.** Warm
+4. **Fresh picks rank on a 25%-wide `5h` bucket before anything else.** Warm
    sessions hold through the hard ceiling, so with many concurrent sessions the
    drain target collects every fresh session until 95%, and that whole herd
    later exhausts its `5h` bucket — and migrates — together, each arrival
-   paying a ~20x cache write on the next account. Fresh sessions (all models)
-   therefore prefer accounts below 70% raw `5h` utilization, which caps the
-   herd at zero cost since a fresh session has no cache to lose. Soft in the
-   same two ways as the hard ceiling: dropped when every serviceable account is
-   at or above it, and never triggered by a `5h` window that refills within the
-   cache TTL. Warm affinity and eligibility are unaffected.
+   paying a ~20x cache write on the next account. A single threshold only moves
+   that cliff: below it every fresh session still stacks on one account, and at
+   it they all switch together. So fresh picks (all models) sort on
+   `floor(5h utilization / 0.25)` first and fall through to the model's own
+   ranking within a bucket — drain-first still consolidates weekly burn among
+   accounts under equal `5h` pressure, while concurrent sessions spread from
+   the first quarter of the window. It never excludes: a hotter bucket is still
+   selected when it is the only one. A `5h` window that refills within the
+   cache TTL buckets as cool. Warm affinity and eligibility are unaffected.
 5. **Overage is never spent silently.** Accounts with `overage-status: allowed`
    can bill real money past 100%; that path requires `--allow-overage`.
 6. **429 waits before it rotates.** With a short `Retry-After`, the proxy waits

@@ -20,11 +20,12 @@
 // move buys nothing and the cheapest account is whichever ranking already
 // prefers.
 //
-// Fresh picks additionally prefer accounts below a softer 5h ceiling (70%),
-// so the population of warm sessions that can exhaust one 5h bucket — and
-// then all migrate at once, each paying a cache re-create on the next account
-// — stops growing well before the hard ceiling. See
-// DEFAULT_FRESH_5H_SOFT_CEILING.
+// Fresh picks additionally rank on a coarse 5h-utilization bucket before any
+// other term, so the population of warm sessions that can exhaust one 5h
+// bucket — and then all migrate at once, each paying a cache re-create on the
+// next account — is spread across accounts from the first quarter of the
+// window rather than piling onto one until a single threshold trips. See
+// DEFAULT_FRESH_5H_BUCKET.
 
 import type { Claim, ClaimId, Claims } from './claims.js';
 import { claimHasReset, projectExpiredClaims } from './claims.js';
@@ -108,12 +109,23 @@ export const DEFAULT_EVACUATE_UTILIZATION = 0.95;
  * the 95% hard ceiling, so with many concurrent warm sessions the drain target
  * collects every new session from ~50% to 95% and they later exhaust — and
  * migrate — together, each paying a 20x cache re-create on arrival at the next
- * account. Preferring 5h-cool accounts for cacheless fresh sessions caps that
- * herd at zero cost. Soft: when every serviceable account is at or above it,
- * the filter is dropped and ranking decides. A 5h window that refills within
- * the cache horizon never counts as hot, same as the hard ceiling.
+ * account.
+ *
+ * A single threshold only moves that cliff: below it every fresh session still
+ * stacks on one account, and at it they all switch to the next one together.
+ * Bucketing makes the 5h term a gradient instead. Fresh picks sort on
+ * `floor(utilization / bucket)` FIRST and fall through to the model's own
+ * ranking within a bucket, so drain-first still consolidates weekly burn among
+ * accounts under equal 5h pressure while concurrent sessions spread from the
+ * first quarter of the window.
+ *
+ * It never excludes: an account in a hotter bucket is still selected when it
+ * is the only one, so this degrades to the previous ranking with one account.
+ * A 5h window refilling within the cache horizon buckets as cool, same
+ * exemption the hard ceiling makes — a bucket that refills before a new
+ * session could meaningfully burn it is not pressure.
  */
-export const DEFAULT_FRESH_5H_SOFT_CEILING = 0.7;
+export const DEFAULT_FRESH_5H_BUCKET = 0.25;
 
 export type HeadroomBreakdown = {
   slot: string;
@@ -138,12 +150,12 @@ export type HeadroomBreakdown = {
    */
   evacuating: boolean;
   /**
-   * True when the observed 5h utilization is at or above the fresh-pick soft
-   * ceiling and the window does not refill within the cache horizon. Fresh
-   * picks prefer accounts where this is false; affinity and eligibility are
-   * never affected by it.
+   * Coarse 5h-pressure bucket, `floor(utilization / DEFAULT_FRESH_5H_BUCKET)`.
+   * 0 is coolest. Leading term in fresh-pick ranking; affinity and eligibility
+   * are never affected by it. A window refilling within the cache horizon, or
+   * one with no observed utilization, buckets as 0.
    */
-  fiveHourHot: boolean;
+  fiveHourBucket: number;
   /** True when serving this request would require spending overage. */
   requiresOverage: boolean;
   /** True when the account can spend overage at all. */
@@ -191,12 +203,12 @@ export function computeHeadroom(
   nowMs: number,
   evacuateThreshold: number = DEFAULT_EVACUATE_UTILIZATION,
   evacuationHorizonMs: number = DEFAULT_EVACUATION_HORIZON_MS,
-  fresh5hCeiling: number = DEFAULT_FRESH_5H_SOFT_CEILING,
+  fresh5hBucket: number = DEFAULT_FRESH_5H_BUCKET,
 ): HeadroomBreakdown {
   const quota = quotaForModel(model);
   const claims = projectExpiredClaims(account.claims, nowMs);
   let evacuationTriggered = false;
-  let fiveHourHot = false;
+  let fiveHourBucket = 0;
   const overage = claims?.byId['overage'];
   const overageAvailable = overage?.status === 'allowed';
   const weeklyReset = claims?.byId['7d']?.reset;
@@ -206,7 +218,7 @@ export function computeHeadroom(
     headroom: 0,
     spendableHeadroom: 0,
     projectedWeeklyResetAt: weeklyReset === undefined ? undefined : weeklyReset * 1000,
-    fiveHourHot: false,
+    fiveHourBucket: 0,
     evacuating: false,
     requiresOverage: false,
     overageAvailable,
@@ -248,7 +260,9 @@ export function computeHeadroom(
       const resetsSoon =
         claim.reset !== undefined && claim.reset * 1000 - nowMs <= evacuationHorizonMs;
       if (observed >= evacuateThreshold && !resetsSoon) evacuationTriggered = true;
-      if (id === '5h' && observed >= fresh5hCeiling && !resetsSoon) fiveHourHot = true;
+      if (id === '5h' && !resetsSoon && fresh5hBucket > 0) {
+        fiveHourBucket = Math.floor(observed / fresh5hBucket);
+      }
     }
 
     // Put every claim in the same unit: normalized requests-of-this-model as a
@@ -290,7 +304,7 @@ export function computeHeadroom(
     spendableHeadroom,
     bindingClaim: sawAny ? binding : undefined,
     peakUtilization: peak,
-    fiveHourHot,
+    fiveHourBucket,
     evacuating,
     requiresOverage: headroom <= 0,
     eligible: headroom > 0 || overageAvailable,
@@ -321,10 +335,11 @@ export type SelectInput = {
    */
   evacuateThreshold?: number;
   /**
-   * 5h utilization at or above which an account is deprioritized — never
-   * excluded — for fresh sessions. See DEFAULT_FRESH_5H_SOFT_CEILING.
+   * Width of the 5h-pressure buckets that lead fresh-pick ranking. A larger
+   * value spreads less; a value at or above 1 disables spreading entirely by
+   * putting every account in bucket 0. See DEFAULT_FRESH_5H_BUCKET.
    */
-  fresh5hCeiling?: number;
+  fresh5hBucket?: number;
 };
 
 export type Selection = {
@@ -354,10 +369,10 @@ export function selectAccount(input: SelectInput): Selection {
   const floor = input.affinityFloor ?? DEFAULT_AFFINITY_FLOOR;
   const allowOverage = input.allowOverage ?? false;
   const threshold = input.evacuateThreshold ?? DEFAULT_EVACUATE_UTILIZATION;
-  const softCeiling = input.fresh5hCeiling ?? DEFAULT_FRESH_5H_SOFT_CEILING;
+  const bucketWidth = input.fresh5hBucket ?? DEFAULT_FRESH_5H_BUCKET;
   const fable = quotaForModel(input.model).extraClaim !== undefined;
   const breakdown = input.accounts.map(a =>
-    computeHeadroom(a, input.model, input.nowMs, threshold, DEFAULT_EVACUATION_HORIZON_MS, softCeiling),
+    computeHeadroom(a, input.model, input.nowMs, threshold, DEFAULT_EVACUATION_HORIZON_MS, bucketWidth),
   );
   const bySlot = new Map(breakdown.map(b => [b.slot, b]));
 
@@ -369,22 +384,25 @@ export function selectAccount(input: SelectInput): Selection {
   // Fable keeps its dedicated all-evacuating path below, which prefers the
   // sticky slot's cache. Non-Fable has no such path, so it falls back here.
   const healthy = fable || belowCeiling.length > 0 ? belowCeiling : serviceable;
-  const rankFable = (pool: HeadroomBreakdown[]) =>
-    [...pool].sort((a, b) =>
-      b.spendableHeadroom - a.spendableHeadroom ||
-      b.headroom - a.headroom ||
-      a.slot.localeCompare(b.slot),
-    );
-  const rankDrainFirst = (pool: HeadroomBreakdown[]) =>
-    [...pool].sort((a, b) => {
-      const aReset = a.projectedWeeklyResetAt;
-      const bReset = b.projectedWeeklyResetAt;
-      if (aReset !== undefined && bReset !== undefined && aReset !== bReset) return aReset - bReset;
-      if (aReset !== undefined && bReset === undefined) return -1;
-      if (aReset === undefined && bReset !== undefined) return 1;
-      return a.slot.localeCompare(b.slot, undefined, { numeric: true });
-    });
-  const rank = fable ? rankFable : rankDrainFirst;
+  const cmpFable = (a: HeadroomBreakdown, b: HeadroomBreakdown) =>
+    b.spendableHeadroom - a.spendableHeadroom ||
+    b.headroom - a.headroom ||
+    a.slot.localeCompare(b.slot);
+  const cmpDrainFirst = (a: HeadroomBreakdown, b: HeadroomBreakdown) => {
+    const aReset = a.projectedWeeklyResetAt;
+    const bReset = b.projectedWeeklyResetAt;
+    if (aReset !== undefined && bReset !== undefined && aReset !== bReset) return aReset - bReset;
+    if (aReset !== undefined && bReset === undefined) return -1;
+    if (aReset === undefined && bReset !== undefined) return 1;
+    return a.slot.localeCompare(b.slot, undefined, { numeric: true });
+  };
+  // Within a bucket the model's own ranking is untouched, so drain-first still
+  // consolidates weekly burn among accounts under equal 5h pressure.
+  const cmpBase = fable ? cmpFable : cmpDrainFirst;
+  const cmpBucketed = (a: HeadroomBreakdown, b: HeadroomBreakdown) =>
+    a.fiveHourBucket - b.fiveHourBucket || cmpBase(a, b);
+  const rankBase = (pool: HeadroomBreakdown[]) => [...pool].sort(cmpBase);
+  const rank = (pool: HeadroomBreakdown[]) => [...pool].sort(cmpBucketed);
 
   if (input.affinitySlot) {
     const held = bySlot.get(input.affinitySlot);
@@ -413,16 +431,15 @@ export function selectAccount(input: SelectInput): Selection {
   }
 
   const allAboveCeiling = belowCeiling.length === 0 && serviceable.length > 0;
-  // The 5h soft ceiling shrinks the herd that can exhaust one 5h bucket
-  // together: fresh sessions have no cache to lose, so steering them off a hot
-  // account is free. Soft — when every candidate is hot, ranking decides.
-  const fiveHourCool = healthy.filter(b => !b.fiveHourHot);
-  const freshPool = fiveHourCool.length > 0 ? fiveHourCool : healthy;
-  const softSkipped = healthy.length - freshPool.length;
-  const softNote = softSkipped > 0
-    ? `; skipped ${softSkipped} account(s) at or above the ${(softCeiling * 100).toFixed(0)}% 5h soft ceiling`
+  // The 5h bucket shrinks the herd that can exhaust one 5h bucket together:
+  // fresh sessions have no cache to lose, so steering them onto a cooler
+  // account is free. `rankBase` is the same pool without the bucket term, so
+  // the reason can say when the bucket actually changed the outcome.
+  const pick = rank(healthy)[0];
+  const unbucketed = rankBase(healthy)[0];
+  const bucketNote = pick && unbucketed && pick.slot !== unbucketed.slot
+    ? `; 5h bucket ${pick.fiveHourBucket} on ${pick.slot} beat bucket ${unbucketed.fiveHourBucket} on ${unbucketed.slot}`
     : '';
-  const pick = rank(freshPool)[0];
   if (pick) {
     const broke = Boolean(input.affinitySlot && input.affinitySlot !== pick.slot);
     const evacuated = fable && broke && bySlot.get(input.affinitySlot!)?.evacuating === true;
@@ -439,7 +456,7 @@ export function selectAccount(input: SelectInput): Selection {
             ? `every account at or above ${(threshold * 100).toFixed(0)}%; draining ${pick.slot} anyway (moving buys nothing)`
             : pick.projectedWeeklyResetAt === undefined
               ? `draining ${pick.slot}; general 7d reset unknown (stable slot order)`
-              : `draining ${pick.slot}; earliest projected general 7d reset ${new Date(pick.projectedWeeklyResetAt).toISOString()}`) + softNote,
+              : `draining ${pick.slot}; earliest projected general 7d reset ${new Date(pick.projectedWeeklyResetAt).toISOString()}`) + bucketNote,
       breakdown,
     };
   }
