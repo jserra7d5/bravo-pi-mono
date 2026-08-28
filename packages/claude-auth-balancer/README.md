@@ -212,9 +212,15 @@ settings. On each daemon start it writes a random local gateway credential to:
 ~/.bravo/claude-auth-balancer/runtime/claude-gateway-credential.json
 ```
 
-The file is mode `0600`, owner-checked, instance-bound, replaced on restart,
-and removed on clean shutdown, listen failure, and normal `SIGINT`/`SIGTERM`
-daemon stop. `claude-auth-balancer claude [args...]` reads that active file and
+The file is mode `0600` and owner-checked. Its `nonce` is **persistent**: each
+start reuses the stored one and refreshes only `instance_id`, `pid`, and
+`created_at`. Nothing removes it — not clean shutdown, not a listen failure,
+not `SIGINT`/`SIGTERM` — because unlinking it regenerates it on the next start,
+and clients that read the old value via `apiKeyHelper` cannot re-read it on
+demand. They would 401 until their helper TTL happened to refresh, which is a
+guaranteed breakage traded for no security: the listener is loopback-only, and
+anyone who can read this `0600` file is the uid that can read the authswap
+OAuth files directly. `claude-auth-balancer claude [args...]` reads that file and
 launches the real `claude` executable with this child-only environment block:
 
 ```
@@ -233,13 +239,15 @@ account selection, or credential access, then strips it and injects the selected
 canonical OAuth token. It never goes upstream or into logs/metrics. A missing or
 unreadable runtime credential, or one whose daemon PID is no longer live, is a
 launcher error; manual clients must read the same file or use the launcher.
+The stale `pid` left behind by a stopped daemon is what makes the launcher
+refuse — the nonce staying put does not make a dead daemon look alive.
 
 ### Per-client credentials: daemon restarts keep clients alive
 
-The instance nonce above rotates on every daemon start, and a launched client
-can never re-read it — the launcher injected it into the child's environment
-once. If clients authenticated only with it, every daemon restart (an upgrade,
-say) would orphan every running Claude session.
+A launched client can never re-read its key — the launcher injected it into the
+child's environment once. The gateway nonce is now stable, so that alone no
+longer orphans a session on restart, but a per-client nonce is still the tighter
+grant: it dies with its own client instead of living as long as the file.
 
 So the launcher does not hand out the instance nonce. It mints a **per-client
 nonce**, records it in an owner-checked `0600` registry entry under:

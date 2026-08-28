@@ -7,7 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { launchClaude, resolveClaudeBin } from '../src/client-launch.js';
-import { clientCredentialDir, createRuntimeCredential, readRuntimeCredential } from '../src/admission.js';
+import { clientCredentialDir, ensureRuntimeCredential, isRuntimeCredentialLive, readRuntimeCredential } from '../src/admission.js';
 
 const roots: string[] = [];
 after(() => roots.forEach(root => rmSync(root, { recursive: true, force: true })));
@@ -71,7 +71,7 @@ test('launcher reports Claude exit code and signal exactly', async () => {
 test('claude CLI command preserves the child exit status and mints a per-client nonce', () => {
   const f = fixture();
   const stateRoot = path.join(f.root, 'state');
-  const credential = createRuntimeCredential(stateRoot);
+  const credential = ensureRuntimeCredential(stateRoot);
   const cli = fileURLToPath(new URL('../src/cli.js', import.meta.url));
   const result = spawnSync(process.execPath, [cli, 'claude', '--flag', 'value'], {
     cwd: f.root,
@@ -118,7 +118,7 @@ test('claude CLI command fails closed when no daemon runtime credential exists',
 test('claude CLI command fails closed when daemon runtime credential is stale', () => {
   const f = fixture();
   const stateRoot = path.join(f.root, 'state');
-  createRuntimeCredential(stateRoot, 9_999_999);
+  ensureRuntimeCredential(stateRoot, 9_999_999);
   const cli = fileURLToPath(new URL('../src/cli.js', import.meta.url));
   const result = spawnSync(process.execPath, [cli, 'claude'], {
     cwd: f.root,
@@ -135,7 +135,7 @@ test('claude CLI command fails closed when daemon runtime credential is stale', 
   assert.match(result.stderr, /dead daemon instance/);
 });
 
-test('serve removes the daemon runtime credential on SIGTERM', async () => {
+test('serve keeps the gateway nonce across SIGTERM, retiring only the pid', async () => {
   const f = fixture();
   const stateRoot = path.join(f.root, 'state');
   const authswapRoot = path.join(f.root, 'authswap');
@@ -168,7 +168,8 @@ test('serve removes the daemon runtime credential on SIGTERM', async () => {
         }
       });
     });
-    assert.ok(readRuntimeCredential(stateRoot));
+    const before = readRuntimeCredential(stateRoot);
+    assert.ok(before);
     child.kill('SIGTERM');
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('serve did not exit after SIGTERM')), 5000);
@@ -178,7 +179,11 @@ test('serve removes the daemon runtime credential on SIGTERM', async () => {
         else reject(new Error(`serve exited with code ${code}`));
       });
     });
-    assert.equal(readRuntimeCredential(stateRoot), undefined);
+    const after = readRuntimeCredential(stateRoot);
+    assert.ok(after, 'unlinking the nonce would regenerate it and 401 every running client');
+    assert.equal(after.nonce, before.nonce, 'apiKeyHelper clients hold this value across a restart');
+    assert.equal(after.pid, before.pid);
+    assert.equal(isRuntimeCredentialLive(after), false, 'the dead pid still blocks a launch');
   } finally {
     if (!child.killed) child.kill('SIGKILL');
   }

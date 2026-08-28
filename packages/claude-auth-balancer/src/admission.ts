@@ -17,13 +17,27 @@ export function runtimeCredentialPath(stateRoot: string): string {
   return path.join(stateRoot, 'runtime', 'claude-gateway-credential.json');
 }
 
-export function createRuntimeCredential(stateRoot: string, pid = process.pid): RuntimeCredential {
+/**
+ * Write this instance's runtime credential, reusing the stored nonce.
+ *
+ * The nonce is persistent, not per-instance. It gates a loopback-only listener
+ * against callers who are already this uid — and this uid can read the authswap
+ * OAuth files directly, so rotating it bounds no threat that the filesystem
+ * does not already bound. What rotation DID do was break every running client
+ * on restart: `apiKeyHelper` clients hold the value they read at launch, and a
+ * regenerated nonce 401s them until the helper's TTL happens to refresh.
+ *
+ * `instance_id`, `pid`, and `created_at` still move on every start, because
+ * `assertRuntimeCredentialForLaunch` uses the pid to refuse launching a client
+ * against a dead daemon. Only the secret is stable.
+ */
+export function ensureRuntimeCredential(stateRoot: string, pid = process.pid): RuntimeCredential {
   const credential: RuntimeCredential = {
     schema_version: RUNTIME_CREDENTIAL_VERSION,
     instance_id: randomBytes(16).toString('hex'),
     pid,
     created_at: new Date().toISOString(),
-    nonce: randomBytes(32).toString('base64url'),
+    nonce: readRuntimeCredential(stateRoot)?.nonce ?? randomBytes(32).toString('base64url'),
   };
   const target = runtimeCredentialPath(stateRoot);
   mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
@@ -31,19 +45,6 @@ export function createRuntimeCredential(stateRoot: string, pid = process.pid): R
   writeFileSync(tmp, `${JSON.stringify(credential, null, 2)}\n`, { mode: 0o600 });
   renameSync(tmp, target);
   return credential;
-}
-
-export function removeRuntimeCredential(stateRoot: string, expectedNonce?: string): void {
-  const target = runtimeCredentialPath(stateRoot);
-  try {
-    if (expectedNonce !== undefined) {
-      const current = readRuntimeCredential(stateRoot);
-      if (current?.nonce !== expectedNonce) return;
-    }
-    rmSync(target, { force: true });
-  } catch {
-    /* best effort on shutdown */
-  }
 }
 
 export function readRuntimeCredential(stateRoot: string): RuntimeCredential | undefined {

@@ -192,7 +192,7 @@ test('an invalid local nonce rejects before body buffering and credential select
   }
 });
 
-test('the daemon runtime credential authenticates and is removed on clean shutdown', async () => {
+test('the daemon runtime credential authenticates and survives clean shutdown', async () => {
   const authswapRoot = fakeAuthswap('tok-1');
   const upstreamPort = await listen(
     http.createServer((req, res) => {
@@ -220,7 +220,8 @@ test('the daemon runtime credential authenticates and is removed on clean shutdo
   assert.equal(res.status, 200);
 
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-  assert.equal(readRuntimeCredential(stateRoot), undefined);
+  assert.equal(readRuntimeCredential(stateRoot)?.nonce, credential.nonce,
+    'the nonce is persistent: removing it here regenerates it on the next start');
 });
 
 // --- per-client credentials -----------------------------------------------
@@ -265,8 +266,8 @@ test('a per-client credential authenticates across a daemon restart', async () =
   cleanups.push(() => removeClientCredential(filePath));
   assert.equal((await postMessages(a.port, credential.nonce)).status, 200);
 
-  // "Restart": daemon A shuts down cleanly (deleting ITS instance nonce),
-  // daemon B boots on the same state root with a fresh instance nonce.
+  // "Restart": daemon A shuts down cleanly and daemon B boots on the same
+  // state root. Both the registry entry and the gateway nonce carry over.
   await new Promise<void>((resolve, reject) => a.server.close(e => e ? reject(e) : resolve()));
   const b = await bootAuthProxy(stateRoot, authswapRoot);
 
@@ -275,7 +276,7 @@ test('a per-client credential authenticates across a daemon restart', async () =
   const instanceB = readRuntimeCredential(stateRoot);
   assert.ok(instanceB);
   assert.equal((await postMessages(b.port, instanceB.nonce)).status, 200,
-    'the new instance nonce works too');
+    'the gateway nonce works too');
 });
 
 test('a dead-pid client credential is rejected and swept', async () => {
@@ -344,7 +345,7 @@ test('a freshly written client credential is honored despite the scan cache', as
     'a miss must rescan the registry before rejecting');
 });
 
-test('a listen failure removes the daemon runtime credential', async () => {
+test('a listen failure keeps the nonce; the dead pid is what blocks a launch', async () => {
   const authswapRoot = fakeAuthswap('tok-1');
   const occupied = http.createServer();
   const occupiedPort = await listen(occupied);
@@ -360,7 +361,12 @@ test('a listen failure removes the daemon runtime credential', async () => {
       usageProbe: false,
     }),
   );
-  assert.equal(readRuntimeCredential(stateRoot), undefined);
+  // Unlinking here would mint a new nonce on the next successful start, which
+  // is the breakage this change exists to remove. A real daemon exits after a
+  // failed listen, so its pid dies and the launcher refuses — but that pid is
+  // this test process, so it is alive here; the dead-pid refusal is proven in
+  // client-launch.test.ts instead.
+  assert.ok(readRuntimeCredential(stateRoot));
 });
 
 // --- claim observation merging -------------------------------------------

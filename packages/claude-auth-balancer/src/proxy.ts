@@ -31,7 +31,7 @@ import type { Account } from './accounts.js';
 import { selectAccount } from './policy.js';
 import { REFRESH_SWEEP_INTERVAL_MS, TokenRefresher } from './refresh.js';
 import { UsageProbe } from './usage-probe.js';
-import { ClientCredentialStore, RUNTIME_CREDENTIAL_HEADER, createRuntimeCredential, removeRuntimeCredential, timingSafeNonceEqual } from './admission.js';
+import { ClientCredentialStore, RUNTIME_CREDENTIAL_HEADER, ensureRuntimeCredential, timingSafeNonceEqual } from './admission.js';
 import { AttemptStore, newAttemptId, newRequestId, scopedAttemptHash } from './attempts.js';
 import type { EvidenceCode } from '@bravo/auth-balancer-contract';
 
@@ -684,13 +684,13 @@ function isGenerationEndpoint(className: string): boolean {
 export function createProxy(options: ProxyOptions = {}): http.Server {
   const opts = resolveOptions(options);
   const server_close_hooks: (() => void)[] = [];
-  const runtimeCredential = opts.requireGatewayAuth ? createRuntimeCredential(opts.stateRoot) : undefined;
-  if (runtimeCredential) {
-    server_close_hooks.push(() => removeRuntimeCredential(opts.stateRoot, runtimeCredential.nonce));
-  }
+  // The nonce persists across restarts, so it is never removed on shutdown:
+  // unlinking it would regenerate it on the next start and 401 every client
+  // that read the old value.
+  const runtimeCredential = opts.requireGatewayAuth ? ensureRuntimeCredential(opts.stateRoot) : undefined;
   // Per-client nonces live on disk and survive daemon restarts, so clients
   // launched against a previous daemon instance keep authenticating. The
-  // per-instance nonce above remains for manual clients.
+  // gateway nonce above remains for manual and apiKeyHelper clients.
   const clientCredentials = opts.requireGatewayAuth ? new ClientCredentialStore(opts.stateRoot) : undefined;
   // A proxy instance owns exactly one inference HTTPS agent. Disabling both
   // socket keep-alive and the TLS session cache ensures every attempt gets a
