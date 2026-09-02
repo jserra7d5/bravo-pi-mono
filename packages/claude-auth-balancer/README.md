@@ -55,8 +55,9 @@ session on one account until it genuinely cannot serve.
    remaining `7d_oi` times its share of the weekly is subtracted from their
    spendable headroom, so Opus and Sonnet prefer accounts whose Fable budget is
    already spent. Ties break on raw headroom, then earliest known reset, then
-   stable slot order. The `5h` and `7d` claims remain hard gates. The ceilings
-   in (3) and (4) filter this pool first.
+   stable slot order. The `5h` and `7d` claims remain hard gates. The ceiling
+   in (3) filters this pool first and the terms in (4) and (5) rank ahead of
+   pacing.
 3. **95% blocks fresh picks for every model; only Fable evacuates a warm one.**
    An account at or above 95% raw utilization on a claim the requested model is
    gated on takes no new sessions. Existing non-Fable `(session, model)` leases
@@ -69,20 +70,24 @@ session on one account until it genuinely cannot serve.
    at that point moving buys no quota, so ranking decides and the sticky slot
    keeps its cache. A window that refills within the cache TTL never triggers
    the ceiling either.
-4. **Fresh picks rank on a 25%-wide projected `5h` bucket ahead of pacing.**
-   Warm sessions hold through the hard ceiling, so with many concurrent
-   sessions the pacing target collects every fresh session until 95%, and that
-   whole herd later exhausts its `5h` window — and migrates — together, each
-   arrival paying a ~20x cache write on the next account. A single threshold
-   only moves that cliff. So fresh picks (all models) sort on
-   `floor(projected / 0.25)` first, where `projected` is the utilization the
-   window will reach at its reset if the average burn rate so far continues
-   (`utilization / elapsed`, capped at 100%): 60% with thirty minutes left is
-   cooler than 30% with four hours left. Under 30 minutes into a window the raw
-   level is used. Within a bucket pacing decides. It never excludes: a hotter
-   bucket is still selected when it is the only one. A `5h` window that
-   refills within the cache TTL buckets as cool. Warm affinity and eligibility
-   are unaffected.
+4. **Fresh picks drain the earliest weekly reset, then spread on a 25%-wide
+   projected `5h` bucket, then pace.** The weekly reset is floored to whole
+   days: the account(s) resetting soonest take every fresh session, because
+   that quota has the nearest deadline while the `5h` window refills by itself.
+   Among accounts resetting the same day, warm sessions hold through the hard
+   ceiling, so with many concurrent sessions one target collects every fresh
+   session until 95%, and that whole herd later exhausts its `5h` window — and
+   migrates — together, each arrival paying a ~20x cache write on the next
+   account. A single threshold only moves that cliff. So within a reset day,
+   fresh picks (all models) sort on `floor(projected / 0.25)`, where
+   `projected` is the utilization the window will reach at its reset if the
+   average burn rate so far continues (`utilization / elapsed`, capped at
+   100%): 60% with thirty minutes left is cooler than 30% with four hours left.
+   Under 30 minutes into a window the raw level is used. Within a bucket
+   pacing decides. Neither term excludes: a later reset or a hotter bucket is
+   still selected when it is the only one. A `5h` window that refills within
+   the cache TTL buckets as cool. An unobserved account sorts first so it gets
+   probed. Warm affinity and eligibility are unaffected.
 5. **Expiring weekly quota outranks everything, affinity included.** An
    account whose general `7d` window resets within 12 hours while it still has
    at least 10% model-normalized headroom (and is below the ceiling) is

@@ -161,19 +161,19 @@ test('expired tokens and reauth-needed accounts are not selectable', () => {
 // Selection
 // ---------------------------------------------------------------------------
 
-test('the captured fixture pair is the herd case: 5h pressure outranks drain-first', () => {
-  // Verbatim 2026-08-13 headers. Slot 2 is further ahead of weekly pace but
+test('the captured fixture pair drains the earliest weekly reset despite 5h pressure', () => {
+  // Verbatim 2026-08-13 headers. Slot 2 resets in 1.3d, slot 1 in 3.5d. Slot 2
   // sits at 46% 5h with 72% of the window gone — projected 64%, bucket 2 —
-  // against slot 1's 1%, bucket 0. Under a single 70% ceiling slot 2 kept
-  // collecting fresh sessions all the way to the threshold; that is exactly
-  // the herd the bucket exists to break up.
+  // against slot 1's 1%, bucket 0. The earlier reset day wins; the bucket only
+  // spreads within one reset day.
   const s = selectAccount({
     accounts: [nad(NAD_FABLE), joseph(JOSEPH_HAIKU)],
     model: 'claude-opus-5',
     nowMs: NOW,
   });
-  assert.equal(s.slot, '1');
+  assert.equal(s.slot, '2');
   assert.equal(s.decision, 'fresh');
+  assert.match(s.reason, /weekly on 2 resets in 1\.3d, earliest, beat 1 \(3\.5d\)/);
   const b = Object.fromEntries(s.breakdown.map(x => [x.slot, x]));
   assert.equal(b['2']!.fiveHourBucket, 2, '46% at 72% elapsed projects to 64%');
   assert.equal(b['1']!.fiveHourBucket, 0);
@@ -495,31 +495,53 @@ const LATE_WEEKLY = {
   'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + 5 * 86400),
 };
 
-test('a fresh non-Fable session avoids a 5h-hot account even when it resets first', () => {
-  // Slot 2 wins pacing (35% used, resets in 2d) but is 78% into its 5h with
-  // 40% of the window gone — projected past 100%, bucket 4 — against slot 1's
-  // 5%, projected 12.5%, bucket 0.
+test('a fresh non-Fable session drains the earliest weekly reset even through a hot 5h', () => {
+  // Slot 2 resets in 2d and is 78% into its 5h with 40% of the window gone —
+  // projected past 100%, bucket 4 — against slot 1's 5%, bucket 0, resetting
+  // in 5d. The 5h window refills; the weekly deadline does not.
   const s = selectAccount({
     accounts: [nad(fiveHour('0.05', 3 * 60 * 60 * 1000, LATE_WEEKLY)), joseph(fiveHour('0.78', 3 * 60 * 60 * 1000, EARLY_WEEKLY))],
     model: 'claude-opus-5',
     nowMs: NOW,
   });
-  assert.equal(s.slot, '1', 'fresh sessions must stop joining the herd on the hot 5h account');
+  assert.equal(s.slot, '2');
   assert.equal(s.decision, 'fresh');
-  assert.match(s.reason, /projected 5h bucket 0 on 1 beat bucket 4 on 2/);
+  assert.match(s.reason, /weekly on 2 resets in 2\.0d, earliest, beat 1 \(5\.0d\)/);
 });
 
-test('the 5h bucket spreads well before the old 70% threshold', () => {
-  // 55% is under any single ceiling that would have fired, but at 40% elapsed
-  // it projects past 100% — this is the case a threshold could not catch.
+test('the 5h bucket spreads within one reset day', () => {
+  // Same reset day (2.0d and 2.9d both floor to 2). 55% at 40% elapsed
+  // projects past 100% — bucket 4 — against 10%, bucket 1: the cooler one wins.
+  const sameDay = { ...EARLY_WEEKLY, 'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + Math.floor(2.9 * 86400)) };
   const s = selectAccount({
-    accounts: [nad(fiveHour('0.10', 3 * 60 * 60 * 1000, LATE_WEEKLY)), joseph(fiveHour('0.55', 3 * 60 * 60 * 1000, EARLY_WEEKLY))],
+    accounts: [nad(fiveHour('0.10', 3 * 60 * 60 * 1000, sameDay)), joseph(fiveHour('0.55', 3 * 60 * 60 * 1000, EARLY_WEEKLY))],
     model: 'claude-opus-5',
     nowMs: NOW,
   });
-  assert.equal(s.slot, '1', 'a cooler bucket outranks weekly pacing');
+  assert.equal(s.slot, '1', 'a cooler bucket decides among accounts resetting the same day');
   assert.equal(s.decision, 'fresh');
   assert.match(s.reason, /projected 5h bucket 1 on 1 beat bucket 4 on 2/);
+});
+
+test('reproduces 2026-09-02: a fresh Opus session no longer lands on the latest-resetting account', () => {
+  // Slots 2 and 3 reset in 2.3d and 2.5d; slot 1 in 4.6d, behind pace, but
+  // with the coolest 5h bucket. Old ranking sent the session to slot 1. Now 2
+  // and 3 tie on reset day and the 5h bucket picks between them.
+  const day = (d: number, u7d: string) => ({
+    'anthropic-ratelimit-unified-7d-utilization': u7d,
+    'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + Math.floor(d * 86400)),
+  });
+  const s = selectAccount({
+    accounts: [
+      nad(fiveHour('0.02', 3 * 60 * 60 * 1000, day(4.6, '0.60'))),
+      joseph(fiveHour('0.26', 3 * 60 * 60 * 1000, day(2.3, '0.11'))),
+      { ...joseph(fiveHour('0.12', 3 * 60 * 60 * 1000, day(2.5, '0.07'))), slot: '3' },
+    ],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(s.slot, '3');
+  assert.match(s.reason, /weekly on 3 resets in 2\.5d, earliest, beat 1 \(4\.6d\)/);
 });
 
 test('within one 5h bucket, weekly pacing still decides', () => {
@@ -567,17 +589,18 @@ test('a hot 5h window refilling within the cache horizon buckets as cool', () =>
   assert.doesNotMatch(s.reason, /5h bucket/);
 });
 
-test('fresh Fable picks also avoid a 5h-hot account', () => {
-  // The hot account is far ahead of weekly pace (95% left, resets tomorrow)
-  // and wins on spendable headroom; the bucket term must override that.
+test('fresh Fable picks spread on the 5h bucket within one reset day', () => {
+  // The hot account is far ahead of weekly pace (95% left) and wins on
+  // spendable headroom; the bucket term must override that. Both accounts
+  // reset the same day so the reset-day term is neutral.
   const hot: AccountState = {
     slot: '2',
     health: 'ok',
     claims: parseClaims(fiveHour('0.72', 3 * 60 * 60 * 1000, {
       'anthropic-ratelimit-unified-7d-utilization': '0.05',
-      'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + 1 * 86400),
+      'anthropic-ratelimit-unified-7d-reset': String(Math.floor(NOW / 1000) + 6 * 86400 + 3600),
       'anthropic-ratelimit-unified-7d_oi-utilization': '0.05',
-      'anthropic-ratelimit-unified-7d_oi-reset': String(Math.floor(NOW / 1000) + 1 * 86400),
+      'anthropic-ratelimit-unified-7d_oi-reset': String(Math.floor(NOW / 1000) + 6 * 86400 + 3600),
     })),
   };
   const cool: AccountState = {
@@ -640,11 +663,15 @@ const weekly = (slot: string, util7d: string, util7dOi: string | undefined, rese
   }),
 });
 
-test('pacing sends fresh sessions to the account furthest ahead of pace, not the earliest reset', () => {
+test('the earliest weekly reset takes fresh sessions even when it is behind pace', () => {
   // Slot 2 resets first but has spent 60% with 4 of 7 days left: behind pace.
   // Slot 3 resets later and has spent 5% with 6 days left: 9% ahead of pace.
+  // The deadline wins; pacing only ranks within one reset day.
   const s = selectAccount({ accounts: [weekly('2', '0.60', undefined, 4), weekly('3', '0.05', undefined, 6)], model: 'claude-opus-5', nowMs: NOW });
-  assert.equal(s.slot, '3');
+  assert.equal(s.slot, '2');
+  assert.match(s.reason, /weekly on 2 resets in 4\.0d, earliest, beat 3 \(6\.0d\)/);
+  const same = selectAccount({ accounts: [weekly('2', '0.60', undefined, 4), weekly('3', '0.05', undefined, 4.5)], model: 'claude-opus-5', nowMs: NOW });
+  assert.equal(same.slot, '3', 'within one reset day, furthest ahead of pace wins');
   const b = Object.fromEntries(s.breakdown.map(x => [x.slot, x]));
   assert.equal(Number(b['2']!.spendableHeadroom.toFixed(3)), -0.171, 'behind pace reads negative');
   assert.equal(Number(b['3']!.spendableHeadroom.toFixed(3)), 0.093);

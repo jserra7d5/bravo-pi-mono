@@ -39,6 +39,15 @@
 // not the current level: 60% with thirty minutes left is cooler than 30% with
 // four hours left. See DEFAULT_FRESH_5H_BUCKET.
 //
+// Ahead of the 5h bucket, fresh picks drain the earliest weekly reset, floored
+// to whole days. Observed 2026-09-02: slots 2 and 3 resetting in 2.3d and 2.5d
+// with real headroom, and a fresh Opus session sent to slot 1 (4.6d out,
+// behind pace) purely on a cooler 5h bucket. Quota on the earliest-resetting
+// accounts is the quota with the nearest deadline; the 5h window refills by
+// itself. Accounts resetting on the same day still spread on 5h pressure, so
+// the herd guard survives among the cohort that matters. Warm sessions are
+// untouched: only the 12h expiring pull moves them.
+//
 // One thing outranks all of that, affinity included: weekly quota that is
 // about to expire unspent. A weekly window resetting within the horizon still
 // holding meaningful headroom is value with a hard deadline; nothing routed
@@ -544,10 +553,28 @@ export function selectAccount(input: SelectInput): Selection {
     (a.weeklyExpiring && b.weeklyExpiring
       ? (a.projectedWeeklyResetAt ?? 0) - (b.projectedWeeklyResetAt ?? 0)
       : 0);
-  const cmpBucketed = (a: HeadroomBreakdown, b: HeadroomBreakdown) =>
-    cmpExpiring(a, b) || a.fiveHourBucket - b.fiveHourBucket || cmpBase(a, b);
+  // Earliest weekly reset, in whole days. An unknown reset means an
+  // unobserved account; it sorts first so it gets observed, matching cmpBase.
+  const resetDay = (b: HeadroomBreakdown) =>
+    b.projectedWeeklyResetAt === undefined
+      ? -1
+      : Math.floor((b.projectedWeeklyResetAt - input.nowMs) / 86_400_000);
+  const cmpResetDay = (a: HeadroomBreakdown, b: HeadroomBreakdown) => {
+    const da = resetDay(a);
+    const db = resetDay(b);
+    return da === db ? 0 : da < db ? -1 : 1;
+  };
+  const days = (b: HeadroomBreakdown) =>
+    b.projectedWeeklyResetAt === undefined
+      ? 'unobserved'
+      : `${((b.projectedWeeklyResetAt - input.nowMs) / 86_400_000).toFixed(1)}d`;
+  const cmpBucket = (a: HeadroomBreakdown, b: HeadroomBreakdown) => a.fiveHourBucket - b.fiveHourBucket;
+  const cmpFresh = (a: HeadroomBreakdown, b: HeadroomBreakdown) =>
+    cmpExpiring(a, b) || cmpResetDay(a, b) || cmpBucket(a, b) || cmpBase(a, b);
   const rankBase = (pool: HeadroomBreakdown[]) => [...pool].sort(cmpBase);
-  const rank = (pool: HeadroomBreakdown[]) => [...pool].sort(cmpBucketed);
+  const rankNoResetDay = (pool: HeadroomBreakdown[]) =>
+    [...pool].sort((a, b) => cmpExpiring(a, b) || cmpBucket(a, b) || cmpBase(a, b));
+  const rank = (pool: HeadroomBreakdown[]) => [...pool].sort(cmpFresh);
   // Only accounts that can take a fresh session count: an expiring account
   // above the ceiling is not somewhere a session should be moved.
   const expiring = healthy.filter(b => b.weeklyExpiring);
@@ -589,9 +616,14 @@ export function selectAccount(input: SelectInput): Selection {
   // the reason can say when the bucket actually changed the outcome.
   const pick = rank(healthy)[0];
   const unbucketed = rankBase(healthy)[0];
-  const bucketNote = pick && unbucketed && pick.slot !== unbucketed.slot
-    ? `; projected 5h bucket ${pick.fiveHourBucket} on ${pick.slot} beat bucket ${unbucketed.fiveHourBucket} on ${unbucketed.slot}`
-    : '';
+  const noResetDay = rankNoResetDay(healthy)[0];
+  // The reset-day term is reported when it changed the outcome; the bucket
+  // note otherwise, so a reason names the one term that decided.
+  const bucketNote = pick && noResetDay && pick.slot !== noResetDay.slot
+    ? `; weekly on ${pick.slot} resets in ${days(pick)}, earliest, beat ${noResetDay.slot} (${days(noResetDay)})`
+    : pick && unbucketed && pick.slot !== unbucketed.slot
+      ? `; projected 5h bucket ${pick.fiveHourBucket} on ${pick.slot} beat bucket ${unbucketed.fiveHourBucket} on ${unbucketed.slot}`
+      : '';
   if (pick) {
     const broke = Boolean(input.affinitySlot && input.affinitySlot !== pick.slot);
     const evacuated = fable && broke && bySlot.get(input.affinitySlot!)?.evacuating === true;

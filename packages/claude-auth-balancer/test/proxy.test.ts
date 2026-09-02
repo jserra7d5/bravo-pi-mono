@@ -237,11 +237,11 @@ test('fresh non-Fable routing waits for probes and picks the account ahead of pa
   }, (call, res) => {
     const busy = call.authorization === 'Bearer tok-1';
     const fiveHourReset = new Date(Date.now() + (busy ? 5 : 1) * 60 * 60 * 1000).toISOString();
-    const weeklyReset = new Date(Date.now() + (busy ? 24 : 144) * 60 * 60 * 1000).toISOString();
+    const weeklyReset = new Date(Date.now() + (busy ? 140 : 143) * 60 * 60 * 1000).toISOString();
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
-      // Both slots sit in the same 5h bucket so this test isolates pacing; the
-      // bucket term's own routing has dedicated policy tests. Unprobed, both
-      // slots read as full and slot order would pick tok-1.
+      // Both slots reset the same day and sit in the same 5h bucket so this
+      // test isolates pacing; those terms have dedicated policy tests.
+      // Unprobed, both slots read as full and slot order would pick tok-1.
       five_hour: { utilization: busy ? 20 : 1, resets_at: fiveHourReset },
       seven_day: { utilization: busy ? 80 : 1, resets_at: weeklyReset },
     }));
@@ -253,7 +253,7 @@ test('fresh non-Fable routing waits for probes and picks the account ahead of pa
   assert.equal(
     up.calls[0]!.authorization,
     'Bearer tok-2',
-    '99% left with 6 days to run is further ahead of pace than 20% left with one day',
+    '99% left is further ahead of pace than 20% left over the same six days',
   );
   assert.equal(up.probes.length, 2);
   assert.ok(up.probes.every(call => call.body === ''), 'probe made no messages/body call');
