@@ -27,7 +27,7 @@ import {
 } from './accounts.js';
 import { claimHasReset } from './claims.js';
 import type { Claim } from './claims.js';
-import { DEFAULT_EVACUATE_UTILIZATION, DEFAULT_EVACUATION_HORIZON_MS, quotaForModel } from './policy.js';
+import { DEFAULT_EVACUATE_UTILIZATION, DEFAULT_EVACUATION_HORIZON_MS, quotaForModel, computeHeadroom } from './policy.js';
 import { conciseWarnings, readActiveAuthWarnings } from './health.js';
 
 /**
@@ -87,6 +87,8 @@ export type AccountView = {
   aged: boolean;
   /** The router would move sessions off this account. Mirrors `computeHeadroom`. */
   evacuating: boolean;
+  /** The router pulls sessions onto this account: weekly quota expiring unspent. */
+  expiring: boolean;
 };
 
 /**
@@ -320,6 +322,11 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
           observed.observedAt !== undefined &&
           nowMs - observed.observedAt > OBSERVATION_STALE_MS,
         evacuating: isEvacuating(byId, nowMs, payload.model?.id),
+        expiring: computeHeadroom(
+          { slot: account.slot, health: 'ok', claims: observed?.claims },
+          payload.model?.id,
+          nowMs,
+        ).weeklyExpiring,
       };
     });
   } catch {

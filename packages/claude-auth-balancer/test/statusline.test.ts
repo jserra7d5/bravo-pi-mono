@@ -14,6 +14,7 @@ import {
   contextColor,
   formatPercent,
   formatReset,
+  formatResetClock,
   formatTokens,
   quotaColor,
   render,
@@ -726,4 +727,47 @@ test('every line fits, including the status note that only appears when somethin
       assert.ok(visibleWidth(line) <= width, `width=${width}: ${visibleWidth(line)} cols: ${line}`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// Reset clocks
+// ---------------------------------------------------------------------------
+
+const LA = 'America/Los_Angeles';
+
+test('a weekly reset reads as its fixed weekday and local time, a 5h reset as a clock', () => {
+  // NOW is 2026-08-14T00:00Z = Thu 5:00pm PDT.
+  const at = (iso: string) => Date.parse(iso) / 1000;
+  assert.equal(formatResetClock(at('2026-08-19T16:00:00Z'), NOW, '7d', LA), 'Wed 9a');
+  assert.equal(formatResetClock(at('2026-08-15T05:00:00Z'), NOW, '7d', LA), 'Fri 10p');
+  assert.equal(formatResetClock(at('2026-08-17T11:30:00Z'), NOW, '7d', LA), 'Mon 4:30a');
+  assert.equal(formatResetClock(at('2026-08-14T07:00:00Z'), NOW, '7d', LA), 'Fri 12a', 'midnight is 12a, never 0a or 24a');
+  assert.equal(formatResetClock(at('2026-08-14T22:50:00Z'), NOW, '5h', LA), '3:50p');
+  assert.equal(formatResetClock(at('2026-08-14T04:00:00Z'), NOW, '5h', LA), '9p');
+});
+
+test('inside the last hour a reset goes back to a countdown; past resets and unknowns are empty', () => {
+  assert.equal(formatResetClock(NOW / 1000 + 25 * 60, NOW, '5h', LA), '25m');
+  assert.equal(formatResetClock(NOW / 1000 + 59 * 60, NOW, '7d', LA), '59m');
+  assert.equal(formatResetClock(NOW / 1000 - 5, NOW, '5h', LA), '');
+  assert.equal(formatResetClock(undefined, NOW, '7d', LA), '');
+});
+
+test('every account row shows both resets in the same columns, and an expiring account says so', () => {
+  const { stateRoot, authswapRoot } = world([
+    { slot: '1', email: 'info@nad.com', u5h: 0.34, u7d: 0.07, reset5h: 2.5 * 3600, reset7d: 5 * 86400 },
+    // Weekly resets in 8h with 84% left: the router's expiring pull target.
+    { slot: '2', email: 'joseph@gmail.com', u5h: 0.10, u7d: 0.16, reset5h: 3 * 3600, reset7d: 8 * 3600 },
+  ]);
+  const model = gather({ model: { id: 'claude-opus-5' } }, { stateRoot, authswapRoot, nowMs: NOW });
+  assert.equal(model.accounts[0]!.expiring, false);
+  assert.equal(model.accounts[1]!.expiring, true);
+
+  const rows = render(model, { width: 120, color: false, timeZone: LA }, NOW).split('\n');
+  const one = rows.find(r => r.includes('1 info'))!;
+  const two = rows.find(r => r.includes('2 joseph'))!;
+  // NOW is Thu 5:00pm PDT: +2.5h -> 7:30p, +5d -> Tue 5p, +3h -> 8p, +8h -> Fri 1a.
+  assert.match(one, /5h \S+  34% ↺7:30p  7d \S+   7% ↺Tue 5p/);
+  assert.match(two, /5h \S+  10% ↺8p  7d \S+  16% ↺Fri 1a  expiring/);
+  assert.doesNotMatch(one, /expiring/);
 });

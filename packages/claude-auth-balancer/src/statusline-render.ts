@@ -112,7 +112,11 @@ export type RenderOptions = {
   width?: number;
   color?: boolean;
   glyphs?: Glyphs;
+  /** IANA zone for reset clocks. Defaults to the process's local zone. */
+  timeZone?: string;
 };
+
+type ResolvedOptions = Required<Omit<RenderOptions, 'timeZone'>> & Pick<RenderOptions, 'timeZone'>;
 
 function paint(text: string, color: string, enabled: boolean): string {
   return enabled ? `${color}${text}${RESET}` : text;
@@ -208,6 +212,56 @@ export function formatReset(resetAtSeconds: number | undefined, nowMs: number): 
     return remH > 0 ? `${days}d${remH}h` : `${days}d`;
   }
   return rem > 0 ? `${hours}h${rem}m` : `${hours}h`;
+}
+
+const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/** `9a`, `10:30p` — hour12 with minutes only when they are not zero. */
+function clock(parts: { hour: number; minute: number }): string {
+  const h12 = parts.hour % 12 === 0 ? 12 : parts.hour % 12;
+  const suffix = parts.hour < 12 ? 'a' : 'p';
+  return parts.minute === 0 ? `${h12}${suffix}` : `${h12}:${String(parts.minute).padStart(2, '0')}${suffix}`;
+}
+
+function localParts(ms: number, timeZone: string | undefined): { weekday: number; hour: number; minute: number } {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  });
+  const got: Record<string, string> = {};
+  for (const part of fmt.formatToParts(new Date(ms))) got[part.type] = part.value;
+  return {
+    weekday: WEEKDAY.indexOf(got['weekday'] ?? ''),
+    // Some ICU builds print midnight as 24 under hour12:false.
+    hour: Number(got['hour']) % 24,
+    minute: Number(got['minute']),
+  };
+}
+
+/**
+ * When a window resets, as a local clock reading rather than a countdown.
+ *
+ * A weekly reset is a fixed phase per account — the same weekday and time
+ * every week — so `Wed 9a` is the answer once and for all, where `5d3h` makes
+ * the reader do date arithmetic every glance. A 5h reset is within the day, so
+ * the clock time alone (`3:50p`) is enough. Inside the last hour the countdown
+ * comes back, because that is when minutes matter. Empty when already past.
+ */
+export function formatResetClock(
+  resetAtSeconds: number | undefined,
+  nowMs: number,
+  window: '5h' | '7d',
+  timeZone?: string,
+): string {
+  if (resetAtSeconds === undefined) return '';
+  const resetMs = resetAtSeconds * 1000;
+  if (resetMs <= nowMs) return '';
+  if (resetMs - nowMs < 60 * 60_000) return formatReset(resetAtSeconds, nowMs);
+  const parts = localParts(resetMs, timeZone);
+  return window === '7d' ? `${WEEKDAY[parts.weekday]} ${clock(parts)}` : clock(parts);
 }
 
 /**
@@ -313,7 +367,7 @@ export function assemble(
  * something is already wrong, and a note that wraps pushes the account rows off
  * the visible status region — hiding the data at the exact moment it matters.
  */
-function note(text: string, opts: Required<RenderOptions>): string {
+function note(text: string, opts: ResolvedOptions): string {
   const full = `balancer: ${text}`;
   const fitted =
     visibleWidth(full) <= opts.width
@@ -336,7 +390,7 @@ function effortSegment(effort: StatuslineModel['effort'], enabled: boolean): str
   return `${paint('effort', DIM, enabled)} ${paint(effort.level, style, enabled)}`;
 }
 
-function renderContextLine(model: StatuslineModel, opts: Required<RenderOptions>): string {
+function renderContextLine(model: StatuslineModel, opts: ResolvedOptions): string {
   const c = opts.color;
   const g = opts.glyphs;
 
@@ -380,7 +434,7 @@ function renderContextLine(model: StatuslineModel, opts: Required<RenderOptions>
 
 function renderAccountLine(
   account: AccountView,
-  opts: Required<RenderOptions>,
+  opts: ResolvedOptions,
   nowMs: number,
   labelWidth: number,
 ): string {
@@ -409,24 +463,23 @@ function renderAccountLine(
     );
   }
 
-  // Required: identity plus both quota windows. Anything past this is a bonus
-  // and gets dropped, in this order, when the terminal is narrow.
+  // Required: identity plus both quota windows, each with its own reset so the
+  // rows compare column for column. Anything past this is a bonus and gets
+  // dropped, in this order, when the terminal is narrow.
+  const resetOf = (at: number | undefined, window: '5h' | '7d') => {
+    const text = formatResetClock(at, nowMs, window, opts.timeZone);
+    return text ? ` ${paint(`${g.reset}${text}`, DIM, c)}` : '';
+  };
   const required =
     `${mark} ${name} ` +
-    `${paint('5h', DIM, c)} ${bar(account.fiveHour, w, quotaColor, c, off, g)} ${formatPercent(account.fiveHour)}  ` +
-    `${paint('7d', DIM, c)} ${bar(account.sevenDay, w, quotaColor, c, off, g)} ${formatPercent(account.sevenDay)}`;
+    `${paint('5h', DIM, c)} ${bar(account.fiveHour, w, quotaColor, c, off, g)} ${formatPercent(account.fiveHour)}${resetOf(account.fiveHourResetAt, '5h')}  ` +
+    `${paint('7d', DIM, c)} ${bar(account.sevenDay, w, quotaColor, c, off, g)} ${formatPercent(account.sevenDay)}${resetOf(account.sevenDayResetAt, '7d')}`;
 
   const optional: string[] = [];
 
-  // The reset time leads the optional tail — it is the only thing here the bars
-  // and evacuation marker do not already say.
-  const sevenHotter = (account.sevenDay ?? 0) >= (account.fiveHour ?? 0);
-  const binding = sevenHotter
-    ? formatReset(account.sevenDayResetAt, nowMs)
-    : formatReset(account.fiveHourResetAt, nowMs);
-  // Labelled with its window: an unlabelled `↺ 3h14m` next to two bars is read
-  // against whichever one the eye landed on last.
-  if (binding) optional.push(paint(`${sevenHotter ? '7d' : '5h'}${g.reset}${binding}`, DIM, c));
+  // The router is about to pull sessions onto this account: its weekly quota
+  // expires soon with real headroom left.
+  if (account.expiring) optional.push(paint('expiring', off ? DIM : YELLOW, c));
 
   if (!account.evacuating && account.overageAllowed && (account.sevenDay ?? 0) >= 90) {
     optional.push(paint('overage ok', off ? DIM : YELLOW, c));
@@ -466,10 +519,11 @@ export function render(
   options: RenderOptions = {},
   nowMs = Date.now(),
 ): string {
-  const opts: Required<RenderOptions> = {
+  const opts: ResolvedOptions = {
     width: options.width ?? 80,
     color: options.color ?? true,
     glyphs: options.glyphs ?? UNICODE_GLYPHS,
+    timeZone: options.timeZone,
   };
 
   const lines: string[] = [];
