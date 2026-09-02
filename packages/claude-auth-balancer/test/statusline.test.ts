@@ -753,7 +753,7 @@ test('inside the last hour a reset goes back to a countdown; past resets and unk
   assert.equal(formatResetClock(undefined, NOW, '7d', LA), '');
 });
 
-test('every account row shows both resets in the same columns, and an expiring account says so', () => {
+test('every account row shows both resets in the same columns, and an expiring account is yellow', () => {
   const { stateRoot, authswapRoot } = world([
     { slot: '1', email: 'info@nad.com', u5h: 0.34, u7d: 0.07, reset5h: 2.5 * 3600, reset7d: 5 * 86400 },
     // Weekly resets in 8h with 84% left: the router's expiring pull target.
@@ -767,7 +767,16 @@ test('every account row shows both resets in the same columns, and an expiring a
   const one = rows.find(r => r.includes('1 info'))!;
   const two = rows.find(r => r.includes('2 joseph'))!;
   // NOW is Thu 5:00pm PDT: +2.5h -> 7:30p, +5d -> Tue 5p, +3h -> 8p, +8h -> Fri 1a.
-  assert.match(one, /5h \S+  34% ↺7:30p  7d \S+   7% ↺Tue 5p/);
-  assert.match(two, /5h \S+  10% ↺8p  7d \S+  16% ↺Fri 1a  expiring/);
-  assert.doesNotMatch(one, /expiring/);
+  assert.match(one, /5h \S+  34% ↺7:30p  7d \S+   7% ↺Tue 5p$/);
+  assert.match(two, /5h \S+  10% ↺8p  7d \S+  16% ↺Fri 1a$/);
+  assert.doesNotMatch(two, /expiring/, 'colour carries it, not a word');
+
+  const coloured = render(model, { width: 120, color: true, timeZone: LA }, NOW).split('\n');
+  const hot = coloured.find(r => r.includes('2 joseph'))!;
+  assert.ok(
+    hot.startsWith(`${ESC}[33m·${ESC}[0m ${ESC}[33m2 joseph`),
+    `an expiring account has a yellow marker and label: ${JSON.stringify(hot)}`,
+  );
+  const cool = coloured.find(r => r.includes('1 info'))!;
+  assert.ok(cool.startsWith(`${ESC}[2m·${ESC}[0m ${ESC}[2m1 info`), JSON.stringify(cool));
 });

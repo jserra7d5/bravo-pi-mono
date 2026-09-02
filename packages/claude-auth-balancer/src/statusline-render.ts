@@ -443,12 +443,20 @@ function renderAccountLine(
   const w = barWidth(opts.width);
   const off = !account.active;
   const markGlyph = account.active ? g.active : g.inactive;
+  // Red marker: the router moves sessions off this account. Yellow marker and
+  // label: the router pulls sessions onto it, its weekly quota is expiring
+  // unspent. Red wins when both hold; an account above the ceiling is not a
+  // pull target.
   const markStyle = account.evacuating
     ? account.active ? `${BOLD}${RED}` : RED
-    : account.active ? `${BOLD}${GREEN}` : DIM;
+    : account.expiring
+      ? account.active ? `${BOLD}${YELLOW}` : YELLOW
+      : account.active ? `${BOLD}${GREEN}` : DIM;
   const mark = paint(markGlyph, markStyle, c);
   const label = padVisible(account.label, labelWidth);
-  const name = account.active ? paint(label, BOLD, c) : paint(label, DIM, c);
+  const name = account.expiring && !account.evacuating
+    ? paint(label, account.active ? `${BOLD}${YELLOW}` : YELLOW, c)
+    : account.active ? paint(label, BOLD, c) : paint(label, DIM, c);
 
   if (account.needsReauth) {
     // Through `assemble` like every other row, so it cannot be the one line in
@@ -476,10 +484,6 @@ function renderAccountLine(
     `${paint('7d', DIM, c)} ${bar(account.sevenDay, w, quotaColor, c, off, g)} ${formatPercent(account.sevenDay)}${resetOf(account.sevenDayResetAt, '7d')}`;
 
   const optional: string[] = [];
-
-  // The router is about to pull sessions onto this account: its weekly quota
-  // expires soon with real headroom left.
-  if (account.expiring) optional.push(paint('expiring', off ? DIM : YELLOW, c));
 
   if (!account.evacuating && account.overageAllowed && (account.sevenDay ?? 0) >= 90) {
     optional.push(paint('overage ok', off ? DIM : YELLOW, c));
