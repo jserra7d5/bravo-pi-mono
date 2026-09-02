@@ -404,6 +404,26 @@ test('attribution works even though the lease key includes a model the statuslin
   assert.equal(model.accounts[0]!.active, true);
 });
 
+test('the statusline finds the exact lease when its model id carries a context-window suffix', () => {
+  // Reproduces 2026-09-02: the proxy keyed the Fable lease on `claude-fable-5-1`
+  // (request body) while the statusline was handed `claude-fable-5-1[1m]`. The
+  // exact lookup missed, the most-recent scan won, and the line showed the opus
+  // subagents' account instead of the one the Fable turn was actually on.
+  const { stateRoot, authswapRoot } = world([
+    { slot: '2', email: 'fable@x.com', u5h: 0.1, u7d: 0.1 },
+    { slot: '3', email: 'opus@x.com', u5h: 0.1, u7d: 0.1 },
+  ]);
+  new AffinityStore({ stateRoot, now: () => NOW - 60_000 }).touch('sess', '2', 'claude-fable-5-1');
+  new AffinityStore({ stateRoot, now: () => NOW }).touch('sess', '3', 'claude-opus-5');
+
+  const model = gather(
+    { session_id: 'sess', model: { id: 'claude-fable-5-1[1m]' } },
+    { stateRoot, authswapRoot, nowMs: NOW },
+  );
+  assert.equal(model.accounts.find(a => a.slot === '2')!.active, true);
+  assert.equal(model.accounts.find(a => a.slot === '3')!.active, false);
+});
+
 test('an expired lease attributes the session to nobody rather than to a stale account', () => {
   const { stateRoot, authswapRoot } = world([{ slot: '1', email: 'a@b.com', u5h: 0.1, u7d: 0.1 }]);
   new AffinityStore({ stateRoot, now: () => NOW - 2 * 3600_000 }).touch('sess', '1', 'm');

@@ -55,6 +55,22 @@ export type AffinityStoreOptions = {
   now?: () => number;
 };
 
+/**
+ * The model string as the proxy sees it in the request body.
+ *
+ * Claude Code names the same model two ways: the request body carries
+ * `claude-fable-5-1`, while the statusline payload's `model.id` carries the
+ * context-window variant, `claude-fable-5-1[1m]`. The proxy keys leases on the
+ * former. Left unnormalized, the statusline's exact lookup missed every time
+ * and fell back to the most-recent-lease scan, which showed a subagent's opus
+ * account as the session's slot. Stripping the bracket suffix makes both
+ * callers hash the same key; the body never carries one, so routing keys are
+ * unchanged.
+ */
+export function normalizeModel(model: string | undefined): string {
+  return (model ?? '').replace(/\[[^\]]*\]$/, '');
+}
+
 export class AffinityStore {
   private readonly dir: string;
   private readonly ttlMs: number;
@@ -82,7 +98,7 @@ export class AffinityStore {
     return createHash('sha256')
       .update(sessionId)
       .update('\0')
-      .update(model ?? '')
+      .update(normalizeModel(model))
       .digest('hex')
       .slice(0, 32);
   }
