@@ -69,6 +69,13 @@ function parseMaxRequestBodyBytes(argv: string[]): number {
   return bytes;
 }
 
+/** Countdown to a reset, in hours under a day and days beyond it. */
+function until(ms: number | undefined, now: number): string {
+  if (ms === undefined) return '-';
+  const h = (ms - now) / 3_600_000;
+  return h < 24 ? `${h.toFixed(1)}h` : `${(h / 24).toFixed(1)}d`;
+}
+
 function ago(ms: number | undefined, now: number): string {
   if (ms === undefined) return 'never';
   const s = Math.max(0, Math.round((now - ms) / 1000));
@@ -80,6 +87,8 @@ function ago(ms: number | undefined, now: number): string {
 async function cmdServe(argv: string[]): Promise<void> {
   const port = Number(value(argv, 'port') ?? DEFAULT_PORT);
   const allowOverage = flag(argv, 'allow-overage');
+  const expiringHours = value(argv, 'expiring-horizon-hours');
+  const expiringHorizonMs = expiringHours === undefined ? undefined : Number(expiringHours) * 3_600_000;
   const maxRequestBodyBytes = parseMaxRequestBodyBytes(argv);
   const enforceBodyLimit = flag(argv, 'enforce-body-limit');
   const strictGenerationRetry = flag(argv, 'strict-generation-retry');
@@ -142,6 +151,7 @@ async function cmdServe(argv: string[]): Promise<void> {
   const started = await startProxy({
     port,
     allowOverage,
+    expiringHorizonMs,
     log,
     maxRequestBodyBytes,
     bodyLimitMode: enforceBodyLimit ? 'enforce' : 'report-only',
@@ -177,7 +187,7 @@ function cmdStatus(argv: string[]): void {
   }
 
   console.log(`accounts (model=${model ?? 'any'})`);
-  console.log('slot  email                                  5h      7d      7d_oi   headroom  binding  health       relogin');
+  console.log('slot  email                                  5h      7d      7d_oi   7d-reset  headroom  binding  health       relogin');
   for (const s of states) {
     const h = computeHeadroom(s, model, now);
     const c = s.claims?.byId;
@@ -191,12 +201,14 @@ function cmdStatus(argv: string[]): void {
         ' ',
         pct(c?.['7d_oi']?.utilization),
         ' ',
+        until(h.projectedWeeklyResetAt, now).padStart(8),
+        ' ',
         h.headroom.toFixed(3).padStart(8),
         ' ',
         (h.bindingClaim ?? '-').padEnd(8),
         s.health.padEnd(13),
         reloginCountdown(s.refreshTokenExpiresAt, now).padEnd(10),
-        (h.evacuating ? 'EVACUATING ' : '') + (h.overageAvailable ? 'overage ' : ''),
+        (h.weeklyExpiring ? 'EXPIRING ' : '') + (h.evacuating ? 'EVACUATING ' : '') + (h.overageAvailable ? 'overage ' : ''),
         `obs ${ago(s.observedAt, now)}`,
       ].join(''),
     );

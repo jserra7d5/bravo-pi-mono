@@ -44,14 +44,19 @@ session on one account until it genuinely cannot serve.
    model's budget must not move another model's warm prefix.
 2. **The lease expires exactly when the cache does** (1 hour, sliding on each
    request). Past that the prefix is gone, so an idle session is a *free*
-   rebalancing point. Fresh non-Fable sessions pick the healthy, non-overage
-   account with the earliest known projected general `7d` reset and keep
-   draining it until it cannot serve. Known resets sort before missing resets;
-   ties use stable slot order. The `5h` and `7d` claims remain hard gates, but
-   their headroom and `5h` reset do not rank fresh non-Fable work. The ceilings
-   in (3) and (4) filter this pool first: a session with no cache to lose is
-   never started on a near-spent account, and prefers one below the `5h` soft
-   ceiling.
+   rebalancing point. Fresh picks for every model **pace the weekly**: they go
+   to the healthy, non-overage account furthest ahead of pace, where "ahead of
+   pace" is model-normalized weekly headroom minus the fraction of the window
+   still to run. On a 20x Max plan the `5h` window is 4x a 5x plan's but the
+   weekly is only 1.7x, so the weekly is the scarce budget; pacing brings every
+   account to its reset near-empty together instead of draining the earliest
+   reset to the floor while a later one leaves half a week unspent. Non-Fable
+   picks also **hold back the general weekly that Fable can still use**:
+   remaining `7d_oi` times its share of the weekly is subtracted from their
+   spendable headroom, so Opus and Sonnet prefer accounts whose Fable budget is
+   already spent. Ties break on raw headroom, then earliest known reset, then
+   stable slot order. The `5h` and `7d` claims remain hard gates. The ceilings
+   in (3) and (4) filter this pool first.
 3. **95% blocks fresh picks for every model; only Fable evacuates a warm one.**
    An account at or above 95% raw utilization on a claim the requested model is
    gated on takes no new sessions. Existing non-Fable `(session, model)` leases
@@ -64,31 +69,43 @@ session on one account until it genuinely cannot serve.
    at that point moving buys no quota, so ranking decides and the sticky slot
    keeps its cache. A window that refills within the cache TTL never triggers
    the ceiling either.
-4. **Fresh picks rank on a 25%-wide `5h` bucket before anything else.** Warm
-   sessions hold through the hard ceiling, so with many concurrent sessions the
-   drain target collects every fresh session until 95%, and that whole herd
-   later exhausts its `5h` bucket — and migrates — together, each arrival
-   paying a ~20x cache write on the next account. A single threshold only moves
-   that cliff: below it every fresh session still stacks on one account, and at
-   it they all switch together. So fresh picks (all models) sort on
-   `floor(5h utilization / 0.25)` first and fall through to the model's own
-   ranking within a bucket — drain-first still consolidates weekly burn among
-   accounts under equal `5h` pressure, while concurrent sessions spread from
-   the first quarter of the window. It never excludes: a hotter bucket is still
-   selected when it is the only one. A `5h` window that refills within the
-   cache TTL buckets as cool. Warm affinity and eligibility are unaffected.
-5. **Overage is never spent silently.** Accounts with `overage-status: allowed`
+4. **Fresh picks rank on a 25%-wide projected `5h` bucket ahead of pacing.**
+   Warm sessions hold through the hard ceiling, so with many concurrent
+   sessions the pacing target collects every fresh session until 95%, and that
+   whole herd later exhausts its `5h` window — and migrates — together, each
+   arrival paying a ~20x cache write on the next account. A single threshold
+   only moves that cliff. So fresh picks (all models) sort on
+   `floor(projected / 0.25)` first, where `projected` is the utilization the
+   window will reach at its reset if the average burn rate so far continues
+   (`utilization / elapsed`, capped at 100%): 60% with thirty minutes left is
+   cooler than 30% with four hours left. Under 30 minutes into a window the raw
+   level is used. Within a bucket pacing decides. It never excludes: a hotter
+   bucket is still selected when it is the only one. A `5h` window that
+   refills within the cache TTL buckets as cool. Warm affinity and eligibility
+   are unaffected.
+5. **Expiring weekly quota outranks everything, affinity included.** An
+   account whose general `7d` window resets within 12 hours while it still has
+   at least 10% model-normalized headroom (and is below the ceiling) is
+   `EXPIRING` in `status`. Fresh picks for every model go there first, ahead of
+   the `5h` bucket; between two expiring accounts the earlier reset wins. Warm
+   sessions held elsewhere are moved onto it — the one planned case where a
+   serviceable hold is broken and a cache re-create is paid on purpose. Quota
+   unspent at the reset is lost for good; a re-create is one expensive request.
+   A session already on an expiring account holds, and once that account
+   resets it is no longer expiring, so the moved sessions stay where they are.
+   `--expiring-horizon-hours 0` on `serve` disables the term.
+6. **Overage is never spent silently.** Accounts with `overage-status: allowed`
    can bill real money past 100%; that path requires `--allow-overage`.
-6. **429 waits before it rotates.** With a short `Retry-After`, the proxy waits
+7. **429 waits before it rotates.** With a short `Retry-After`, the proxy waits
    on the warm account rather than paying a cache re-create to dodge a few
    seconds. Only a long or absent `Retry-After` rotates. Either way the client
    never sees the 429.
-7. **Generation retries are conservative.** No client-visible response is not
+8. **Generation retries are conservative.** No client-visible response is not
    proof that Anthropic did no work. A generation failure after application bytes
    may have been written is terminal by default, including header timeout and
    unknown socket phase. Only a proven pre-wire transport failure may be retried
    silently on the same slot.
-8. **Opening sessions are fenced.** The first request for one `(session, model)`
+9. **Opening sessions are fenced.** The first request for one `(session, model)`
    owns a keyed singleflight covering usage probes, selection, refresh, and lease
    publication. Concurrent openers wait and then re-read the published lease
    instead of selecting independently.

@@ -20,12 +20,31 @@
 // move buys nothing and the cheapest account is whichever ranking already
 // prefers.
 //
-// Fresh picks additionally rank on a coarse 5h-utilization bucket before any
-// other term, so the population of warm sessions that can exhaust one 5h
-// bucket — and then all migrate at once, each paying a cache re-create on the
-// next account — is spread across accounts from the first quarter of the
-// window rather than piling onto one until a single threshold trips. See
-// DEFAULT_FRESH_5H_BUCKET.
+// Fresh picks pace the weekly. On a 20x Max plan the 5h window is 4x a 5x
+// plan's but the weekly is only 1.7x, so the weekly is the scarce budget and
+// the 5h window is a self-refilling burst limiter. Every model ranks fresh
+// picks on spendable headroom: quota remaining beyond what staying on pace
+// until the reset would keep. The account furthest ahead of pace takes new
+// sessions, so all accounts reach their reset near-empty together instead of
+// the earliest-reset account being drained to the floor while a later one
+// leaves half a week unspent. Non-Fable picks also hold back the general
+// weekly that Fable's `7d_oi` sub-budget can still use: Fable burns both
+// claims, Opus and Sonnet burn only `7d`, so an Opus herd can exhaust `7d` and
+// strand a full Fable sub-budget. See `reservedForFable`.
+//
+// Ahead of pacing, fresh picks rank on a coarse 5h-pressure bucket, so the
+// population of warm sessions that can exhaust one 5h window — and then all
+// migrate at once, each paying a cache re-create on the next account — is
+// spread across accounts. The bucket is on PROJECTED utilization at the reset,
+// not the current level: 60% with thirty minutes left is cooler than 30% with
+// four hours left. See DEFAULT_FRESH_5H_BUCKET.
+//
+// One thing outranks all of that, affinity included: weekly quota that is
+// about to expire unspent. A weekly window resetting within the horizon still
+// holding meaningful headroom is value with a hard deadline; nothing routed
+// elsewhere can ever recover it. A cache re-create is a one-time ~20x request;
+// a week of unspent quota is thousands of requests. See
+// DEFAULT_EXPIRING_WEEKLY_HORIZON_MS.
 
 import type { Claim, ClaimId, Claims } from './claims.js';
 import { claimHasReset, projectExpiredClaims } from './claims.js';
@@ -127,16 +146,57 @@ export const DEFAULT_EVACUATE_UTILIZATION = 0.95;
  */
 export const DEFAULT_FRESH_5H_BUCKET = 0.25;
 
+/**
+ * Fraction of the 5h window that must have elapsed before its average burn
+ * rate is trusted to project utilization at the reset. Under this (30 minutes)
+ * the raw level is used: 5% at six minutes projects to 250%, which is noise,
+ * not pressure.
+ */
+export const DEFAULT_5H_PROJECTION_MIN_ELAPSED = 0.1;
+
+/**
+ * How close a general `7d` reset must be for an account's remaining weekly
+ * quota to count as expiring. Inside this window the account outranks every
+ * other term for fresh picks, and warm sessions held elsewhere are moved onto
+ * it — the one case where routing deliberately pays a cache re-create for a
+ * session that could have stayed put. Quota that reaches the reset unspent is
+ * gone; a re-create is one expensive request.
+ *
+ * Twelve hours is long enough for moved sessions to burn a real share of the
+ * remainder and short enough that an account spends most of its week under
+ * the ordinary ranking.
+ */
+export const DEFAULT_EXPIRING_WEEKLY_HORIZON_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * Minimum model-normalized headroom for an expiring account to be worth a
+ * move. Below this the unspent remainder is not clearly larger than the cache
+ * re-creates it would trigger, and the 5h claim may be what is binding anyway.
+ */
+export const DEFAULT_EXPIRING_MIN_HEADROOM = 0.1;
+
 export type HeadroomBreakdown = {
   slot: string;
   /** Normalized request-units of this model that still fit. 0 = exhausted. */
   headroom: number;
   /**
-   * Headroom that can be spent now while remaining on pace until each window
-   * resets. Fresh-session ranking uses this; raw headroom still governs hard
-   * eligibility and affinity because a warm session can consume its reserve.
+   * Headroom beyond what staying on pace until the weekly reset would keep, in
+   * the same normalized units as `headroom`. Negative means behind pace. Fresh
+   * ranking for every model leads on this (after expiring quota and the 5h
+   * bucket); raw headroom still governs eligibility and affinity because a
+   * warm session can consume its reserve. Only the weekly claims pace: the 5h
+   * window is handled by `fiveHourBucket`. For non-Fable models the general
+   * weekly is first reduced by `reservedForFable`.
    */
   spendableHeadroom: number;
+  /**
+   * General-weekly fraction held back from a non-Fable request's spendable
+   * headroom because Fable's `7d_oi` sub-budget can still use it: remaining
+   * `7d_oi` times the sub-budget's share of the weekly. Zero for Fable
+   * requests and when `7d_oi` has never been observed on the account. Ranking
+   * only; it never affects eligibility.
+   */
+  reservedForFable: number;
   /** Which claim is binding. */
   bindingClaim?: ClaimId;
   /** Projected reset of the general 7d claim, in milliseconds. */
@@ -150,12 +210,27 @@ export type HeadroomBreakdown = {
    */
   evacuating: boolean;
   /**
-   * Coarse 5h-pressure bucket, `floor(utilization / DEFAULT_FRESH_5H_BUCKET)`.
-   * 0 is coolest. Leading term in fresh-pick ranking; affinity and eligibility
-   * are never affected by it. A window refilling within the cache horizon, or
-   * one with no observed utilization, buckets as 0.
+   * Utilization the 5h window is projected to reach at its reset, assuming the
+   * average burn rate so far continues: `utilization / elapsed fraction`,
+   * capped at 1. Falls back to the raw level when less than
+   * DEFAULT_5H_PROJECTION_MIN_ELAPSED of the window has elapsed or the reset
+   * is unknown.
+   */
+  fiveHourProjected?: number;
+  /**
+   * Coarse 5h-pressure bucket, `floor(fiveHourProjected / DEFAULT_FRESH_5H_BUCKET)`.
+   * 0 is coolest. Leads fresh-pick ranking after expiring quota; affinity and
+   * eligibility are never affected by it. A window refilling within the cache
+   * horizon, or one with no observed utilization, buckets as 0.
    */
   fiveHourBucket: number;
+  /**
+   * True when the general 7d window resets within the expiring horizon while
+   * the account still has at least DEFAULT_EXPIRING_MIN_HEADROOM and is not
+   * evacuating. Leads fresh ranking ahead of the 5h bucket and is the only
+   * condition that moves a warm non-Fable session off a serviceable account.
+   */
+  weeklyExpiring: boolean;
   /** True when serving this request would require spending overage. */
   requiresOverage: boolean;
   /** True when the account can spend overage at all. */
@@ -190,6 +265,23 @@ function claimHeadroom(claim: Claim | undefined, nowMs: number): number | undefi
  * already denominated in this model's own units.
  */
 /**
+ * General-weekly fraction still claimable by models gated on a sub-budget of
+ * it (Fable's `7d_oi`). Only an observed sub-budget claim reserves anything:
+ * reservation reorders accounts on what is known, and a never-seen claim is
+ * the same unknown on every account.
+ */
+function reservedSubBudgets(claims: Claims | undefined, nowMs: number): number {
+  let reserved = 0;
+  for (const quota of Object.values(MODEL_QUOTAS)) {
+    if (!quota.extraClaim) continue;
+    const remaining = claimHeadroom(claims?.byId[quota.extraClaim], nowMs);
+    if (remaining === undefined) continue;
+    reserved += remaining * (claims?.fallbackPercentage ?? quota.subBudgetFraction ?? 1);
+  }
+  return reserved;
+}
+
+/**
  * How far out a claim's reset must be before crossing the evacuation threshold
  * is worth paying a cache re-create for. Defaults to the prompt-cache TTL: if
  * the window refills before the cache would have expired anyway, moving buys
@@ -204,11 +296,14 @@ export function computeHeadroom(
   evacuateThreshold: number = DEFAULT_EVACUATE_UTILIZATION,
   evacuationHorizonMs: number = DEFAULT_EVACUATION_HORIZON_MS,
   fresh5hBucket: number = DEFAULT_FRESH_5H_BUCKET,
+  expiringHorizonMs: number = DEFAULT_EXPIRING_WEEKLY_HORIZON_MS,
+  expiringMinHeadroom: number = DEFAULT_EXPIRING_MIN_HEADROOM,
 ): HeadroomBreakdown {
   const quota = quotaForModel(model);
   const claims = projectExpiredClaims(account.claims, nowMs);
   let evacuationTriggered = false;
   let fiveHourBucket = 0;
+  let fiveHourProjected: number | undefined;
   const overage = claims?.byId['overage'];
   const overageAvailable = overage?.status === 'allowed';
   const weeklyReset = claims?.byId['7d']?.reset;
@@ -218,7 +313,9 @@ export function computeHeadroom(
     headroom: 0,
     spendableHeadroom: 0,
     projectedWeeklyResetAt: weeklyReset === undefined ? undefined : weeklyReset * 1000,
+    reservedForFable: 0,
     fiveHourBucket: 0,
+    weeklyExpiring: false,
     evacuating: false,
     requiresOverage: false,
     overageAvailable,
@@ -234,6 +331,7 @@ export function computeHeadroom(
   // The response's own value wins; the model table supplies the fallback.
   const subBudget =
     claims?.fallbackPercentage ?? quota.subBudgetFraction ?? 1;
+  const reservedForFable = quota.extraClaim ? 0 : reservedSubBudgets(claims, nowMs);
 
   let min = Number.POSITIVE_INFINITY;
   let minSpendable = Number.POSITIVE_INFINITY;
@@ -260,9 +358,6 @@ export function computeHeadroom(
       const resetsSoon =
         claim.reset !== undefined && claim.reset * 1000 - nowMs <= evacuationHorizonMs;
       if (observed >= evacuateThreshold && !resetsSoon) evacuationTriggered = true;
-      if (id === '5h' && !resetsSoon && fresh5hBucket > 0) {
-        fiveHourBucket = Math.floor(observed / fresh5hBucket);
-      }
     }
 
     // Put every claim in the same unit: normalized requests-of-this-model as a
@@ -281,30 +376,66 @@ export function computeHeadroom(
       binding = id;
     }
 
-    // Conserve quota in proportion to time left in the server's own window.
-    // Example: 68% weekly remaining with 23% of the week left has 45% available
-    // to spend now; 98% remaining with 91% left has only 7% available. Ranking
-    // raw remainder alone burns the account whose reset is furthest away.
     const windowMs = id === '5h' ? 5 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
     const timeRemaining = claim?.reset === undefined
-      ? 0
+      ? undefined
       : Math.max(0, Math.min(1, (claim.reset * 1000 - nowMs) / windowMs));
-    minSpendable = Math.min(minSpendable, Math.max(0, raw - timeRemaining) * scale);
+
+    if (id === '5h') {
+      // Pressure is what the window will reach, not where it is. The window
+      // started at reset - 5h, so the average rate so far is util / elapsed.
+      const elapsed = timeRemaining === undefined ? undefined : 1 - timeRemaining;
+      const observed = claim?.utilization;
+      if (observed !== undefined && !claimHasReset(claim!, nowMs)) {
+        fiveHourProjected = elapsed !== undefined && elapsed >= DEFAULT_5H_PROJECTION_MIN_ELAPSED
+          ? Math.min(1, observed / elapsed)
+          : observed;
+        const resetsSoon =
+          claim!.reset !== undefined && claim!.reset * 1000 - nowMs <= evacuationHorizonMs;
+        if (!resetsSoon && fresh5hBucket > 0) {
+          fiveHourBucket = Math.floor(fiveHourProjected / fresh5hBucket);
+        }
+      }
+      continue;
+    }
+
+    // Conserve weekly quota in proportion to time left in the server's own
+    // window. Example: 68% remaining with 23% of the week left is 45% ahead of
+    // pace; 98% remaining with 91% left is only 7% ahead. Ranking raw
+    // remainder alone burns the account whose reset is furthest away. The
+    // general claim also gives up what Fable can still spend of it.
+    const held = id === '7d' ? reservedForFable : 0;
+    minSpendable = Math.min(minSpendable, (raw - (timeRemaining ?? 0) - held) * scale);
   }
 
   const headroom = sawAny ? min : UNKNOWN_HEADROOM;
-  const spendableHeadroom = sawAny ? minSpendable : UNKNOWN_HEADROOM;
+  const spendableHeadroom = sawAny && minSpendable !== Number.POSITIVE_INFINITY
+    ? minSpendable
+    : UNKNOWN_HEADROOM - reservedForFable;
   // Model-agnostic: `evacuationTriggered` already only saw the claims this
   // model is gated on. What differs by model is the CONSEQUENCE — see
   // `selectAccount`, where a warm non-Fable session holds through it.
   const evacuating = evacuationTriggered;
+  // Only a genuinely observed weekly window can expire; a projected or unknown
+  // reset is not a deadline. The headroom gate is model-normalized so a Fable
+  // request does not chase an account whose 7d_oi is already spent.
+  const weeklyResetMs = base.projectedWeeklyResetAt;
+  const weeklyExpiring =
+    weeklyResetMs !== undefined &&
+    weeklyResetMs > nowMs &&
+    weeklyResetMs - nowMs <= expiringHorizonMs &&
+    headroom >= expiringMinHeadroom &&
+    !evacuating;
   return {
     ...base,
     headroom,
     spendableHeadroom,
     bindingClaim: sawAny ? binding : undefined,
     peakUtilization: peak,
+    reservedForFable,
+    fiveHourProjected,
     fiveHourBucket,
+    weeklyExpiring,
     evacuating,
     requiresOverage: headroom <= 0,
     eligible: headroom > 0 || overageAvailable,
@@ -340,6 +471,12 @@ export type SelectInput = {
    * putting every account in bucket 0. See DEFAULT_FRESH_5H_BUCKET.
    */
   fresh5hBucket?: number;
+  /**
+   * Window before a general 7d reset inside which unspent weekly quota is
+   * treated as expiring. See DEFAULT_EXPIRING_WEEKLY_HORIZON_MS. A value of 0
+   * disables the term.
+   */
+  expiringHorizonMs?: number;
 };
 
 export type Selection = {
@@ -370,9 +507,12 @@ export function selectAccount(input: SelectInput): Selection {
   const allowOverage = input.allowOverage ?? false;
   const threshold = input.evacuateThreshold ?? DEFAULT_EVACUATE_UTILIZATION;
   const bucketWidth = input.fresh5hBucket ?? DEFAULT_FRESH_5H_BUCKET;
+  const expiringHorizon = input.expiringHorizonMs ?? DEFAULT_EXPIRING_WEEKLY_HORIZON_MS;
   const fable = quotaForModel(input.model).extraClaim !== undefined;
   const breakdown = input.accounts.map(a =>
-    computeHeadroom(a, input.model, input.nowMs, threshold, DEFAULT_EVACUATION_HORIZON_MS, bucketWidth),
+    computeHeadroom(
+      a, input.model, input.nowMs, threshold, DEFAULT_EVACUATION_HORIZON_MS, bucketWidth, expiringHorizon,
+    ),
   );
   const bySlot = new Map(breakdown.map(b => [b.slot, b]));
 
@@ -384,11 +524,11 @@ export function selectAccount(input: SelectInput): Selection {
   // Fable keeps its dedicated all-evacuating path below, which prefers the
   // sticky slot's cache. Non-Fable has no such path, so it falls back here.
   const healthy = fable || belowCeiling.length > 0 ? belowCeiling : serviceable;
-  const cmpFable = (a: HeadroomBreakdown, b: HeadroomBreakdown) =>
-    b.spendableHeadroom - a.spendableHeadroom ||
-    b.headroom - a.headroom ||
-    a.slot.localeCompare(b.slot);
-  const cmpDrainFirst = (a: HeadroomBreakdown, b: HeadroomBreakdown) => {
+  // Every model paces the weekly: furthest ahead of pace first, then the most
+  // raw headroom, then the earliest known reset, then stable slot order.
+  const cmpBase = (a: HeadroomBreakdown, b: HeadroomBreakdown) => {
+    if (a.spendableHeadroom !== b.spendableHeadroom) return b.spendableHeadroom - a.spendableHeadroom;
+    if (a.headroom !== b.headroom) return b.headroom - a.headroom;
     const aReset = a.projectedWeeklyResetAt;
     const bReset = b.projectedWeeklyResetAt;
     if (aReset !== undefined && bReset !== undefined && aReset !== bReset) return aReset - bReset;
@@ -396,18 +536,30 @@ export function selectAccount(input: SelectInput): Selection {
     if (aReset === undefined && bReset !== undefined) return 1;
     return a.slot.localeCompare(b.slot, undefined, { numeric: true });
   };
-  // Within a bucket the model's own ranking is untouched, so drain-first still
-  // consolidates weekly burn among accounts under equal 5h pressure.
-  const cmpBase = fable ? cmpFable : cmpDrainFirst;
+  // Expiring weekly quota leads everything, including the 5h spread: quota
+  // that vanishes at the reset is worth more than a cooler 5h bucket. Between
+  // two expiring accounts the earlier deadline wins for every model.
+  const cmpExpiring = (a: HeadroomBreakdown, b: HeadroomBreakdown) =>
+    Number(b.weeklyExpiring) - Number(a.weeklyExpiring) ||
+    (a.weeklyExpiring && b.weeklyExpiring
+      ? (a.projectedWeeklyResetAt ?? 0) - (b.projectedWeeklyResetAt ?? 0)
+      : 0);
   const cmpBucketed = (a: HeadroomBreakdown, b: HeadroomBreakdown) =>
-    a.fiveHourBucket - b.fiveHourBucket || cmpBase(a, b);
+    cmpExpiring(a, b) || a.fiveHourBucket - b.fiveHourBucket || cmpBase(a, b);
   const rankBase = (pool: HeadroomBreakdown[]) => [...pool].sort(cmpBase);
   const rank = (pool: HeadroomBreakdown[]) => [...pool].sort(cmpBucketed);
+  // Only accounts that can take a fresh session count: an expiring account
+  // above the ceiling is not somewhere a session should be moved.
+  const expiring = healthy.filter(b => b.weeklyExpiring);
 
   if (input.affinitySlot) {
     const held = bySlot.get(input.affinitySlot);
     if (held && held.headroom > (fable ? floor : 0) && !held.requiresOverage) {
-      if (!fable || !held.evacuating) {
+      // The one planned break of a serviceable hold: another account's weekly
+      // quota is about to expire unspent. A session already on an expiring
+      // account stays — moving it to an even earlier deadline gains nothing.
+      const pulled = !held.weeklyExpiring && expiring.length > 0;
+      if (!pulled && (!fable || !held.evacuating)) {
         return {
           slot: held.slot,
           decision: 'affinity-hold',
@@ -438,25 +590,28 @@ export function selectAccount(input: SelectInput): Selection {
   const pick = rank(healthy)[0];
   const unbucketed = rankBase(healthy)[0];
   const bucketNote = pick && unbucketed && pick.slot !== unbucketed.slot
-    ? `; 5h bucket ${pick.fiveHourBucket} on ${pick.slot} beat bucket ${unbucketed.fiveHourBucket} on ${unbucketed.slot}`
+    ? `; projected 5h bucket ${pick.fiveHourBucket} on ${pick.slot} beat bucket ${unbucketed.fiveHourBucket} on ${unbucketed.slot}`
     : '';
   if (pick) {
     const broke = Boolean(input.affinitySlot && input.affinitySlot !== pick.slot);
     const evacuated = fable && broke && bySlot.get(input.affinitySlot!)?.evacuating === true;
+    const expiringNote = pick.weeklyExpiring
+      ? `weekly quota on ${pick.slot} expires in ${((pick.projectedWeeklyResetAt! - input.nowMs) / 3_600_000).toFixed(1)}h with ${(pick.headroom * 100).toFixed(0)}% headroom unspent`
+      : undefined;
     return {
       slot: pick.slot,
       decision: broke ? 'affinity-broken' : 'fresh',
       reason: (broke
-        ? evacuated
-          ? `sticky Fable slot ${input.affinitySlot} at ${((bySlot.get(input.affinitySlot!)?.peakUtilization ?? 0) * 100).toFixed(1)}%; evacuated to ${pick.slot}`
-          : `sticky slot ${input.affinitySlot} could not serve; moved to ${pick.slot} (one cache re-create)`
-        : fable
-          ? `most spendable Fable headroom (${pick.spendableHeadroom.toFixed(3)} conserved, ${pick.headroom.toFixed(3)} raw on ${pick.bindingClaim ?? 'unknown'})`
+        ? expiringNote
+          ? `${expiringNote}; moved sticky slot ${input.affinitySlot} there (one cache re-create)`
+          : evacuated
+            ? `sticky Fable slot ${input.affinitySlot} at ${((bySlot.get(input.affinitySlot!)?.peakUtilization ?? 0) * 100).toFixed(1)}%; evacuated to ${pick.slot}`
+            : `sticky slot ${input.affinitySlot} could not serve; moved to ${pick.slot} (one cache re-create)`
+        : expiringNote
+          ? `${expiringNote}; draining it first`
           : allAboveCeiling
-            ? `every account at or above ${(threshold * 100).toFixed(0)}%; draining ${pick.slot} anyway (moving buys nothing)`
-            : pick.projectedWeeklyResetAt === undefined
-              ? `draining ${pick.slot}; general 7d reset unknown (stable slot order)`
-              : `draining ${pick.slot}; earliest projected general 7d reset ${new Date(pick.projectedWeeklyResetAt).toISOString()}`) + bucketNote,
+            ? `every account at or above ${(threshold * 100).toFixed(0)}%; using ${pick.slot} anyway (moving buys nothing)`
+            : `most spendable ${fable ? 'Fable ' : ''}headroom on ${pick.slot} (${pick.spendableHeadroom.toFixed(3)} ahead of pace, ${pick.headroom.toFixed(3)} raw on ${pick.bindingClaim ?? 'unknown'}${pick.reservedForFable > 0 ? `, ${pick.reservedForFable.toFixed(3)} held for Fable` : ''})`) + bucketNote,
       breakdown,
     };
   }

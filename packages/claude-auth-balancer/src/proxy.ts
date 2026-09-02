@@ -28,7 +28,7 @@ import type { Usage } from './usage.js';
 import { hasClaims, parseClaims } from './claims.js';
 import { discoverAccounts, loadAccountStates, readOAuth, readSlotObservation, recordObservation, resolveAuthswapRoot, resolveStateRoot, tokenFingerprint } from './accounts.js';
 import type { Account } from './accounts.js';
-import { selectAccount } from './policy.js';
+import { selectAccount, DEFAULT_EXPIRING_WEEKLY_HORIZON_MS } from './policy.js';
 import { REFRESH_SWEEP_INTERVAL_MS, TokenRefresher } from './refresh.js';
 import { UsageProbe } from './usage-probe.js';
 import { ClientCredentialStore, RUNTIME_CREDENTIAL_HEADER, ensureRuntimeCredential, timingSafeNonceEqual } from './admission.js';
@@ -168,6 +168,8 @@ export type ProxyOptions = {
   stateRoot?: string;
   authswapRoot?: string;
   allowOverage?: boolean;
+  /** Window before a 7d reset inside which unspent quota pulls sessions. 0 disables. */
+  expiringHorizonMs?: number;
   leaseTtlMs?: number;
   /** Retry a 429 once on a different account. Safe: 429 arrives before any body. */
   retryOnRateLimit?: boolean;
@@ -219,6 +221,7 @@ function resolveOptions(options: ProxyOptions): Resolved {
     stateRoot: options.stateRoot ?? resolveStateRoot(),
     authswapRoot: options.authswapRoot ?? resolveAuthswapRoot(),
     allowOverage: options.allowOverage ?? false,
+    expiringHorizonMs: options.expiringHorizonMs ?? DEFAULT_EXPIRING_WEEKLY_HORIZON_MS,
     leaseTtlMs: options.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
     retryOnRateLimit: options.retryOnRateLimit ?? true,
     metrics: options.metrics ?? true,
@@ -928,6 +931,7 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
         affinitySlot: affinitySlot && !excluded.has(affinitySlot) ? affinitySlot : undefined,
         nowMs: opts.now(),
         allowOverage: opts.allowOverage,
+        expiringHorizonMs: opts.expiringHorizonMs,
       });
       let selection = select();
 

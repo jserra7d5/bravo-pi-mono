@@ -227,7 +227,7 @@ test('a session sticks to one account across many requests', async () => {
   assert.equal(tokens.size, 1, `expected one account, saw ${[...tokens].join(', ')}`);
 });
 
-test('fresh non-Fable routing waits for probes and drains the earliest weekly reset', async () => {
+test('fresh non-Fable routing waits for probes and picks the account ahead of pace', async () => {
   const authswapRoot = fakeAuthswap([
     { slot: '1', email: 'a@x.com', token: 'tok-1' },
     { slot: '2', email: 'b@x.com', token: 'tok-2' },
@@ -239,8 +239,9 @@ test('fresh non-Fable routing waits for probes and drains the earliest weekly re
     const fiveHourReset = new Date(Date.now() + (busy ? 5 : 1) * 60 * 60 * 1000).toISOString();
     const weeklyReset = new Date(Date.now() + (busy ? 24 : 144) * 60 * 60 * 1000).toISOString();
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
-      // Both slots sit in the same 5h bucket so this test isolates drain-first;
-      // the bucket term's own routing has dedicated policy tests.
+      // Both slots sit in the same 5h bucket so this test isolates pacing; the
+      // bucket term's own routing has dedicated policy tests. Unprobed, both
+      // slots read as full and slot order would pick tok-1.
       five_hour: { utilization: busy ? 20 : 1, resets_at: fiveHourReset },
       seven_day: { utilization: busy ? 80 : 1, resets_at: weeklyReset },
     }));
@@ -251,8 +252,8 @@ test('fresh non-Fable routing waits for probes and drains the earliest weekly re
 
   assert.equal(
     up.calls[0]!.authorization,
-    'Bearer tok-1',
-    'earlier weekly reset wins despite worse utilization, headroom, and 5h reset',
+    'Bearer tok-2',
+    '99% left with 6 days to run is further ahead of pace than 20% left with one day',
   );
   assert.equal(up.probes.length, 2);
   assert.ok(up.probes.every(call => call.body === ''), 'probe made no messages/body call');
