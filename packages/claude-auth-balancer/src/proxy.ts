@@ -108,6 +108,15 @@ export function isRetryableTransportError(error: {
 /** Raw metric rows are pruned on this cadence, not only at startup. */
 const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * How often every account's usage reading is refreshed in the background.
+ *
+ * Bounds how long an idle account can misreport: after a window rolls over,
+ * its stored reading is only corrected by this sweep, because nothing is
+ * routing requests there to correct it.
+ */
+export const USAGE_SWEEP_INTERVAL_MS = 15 * 60 * 1000;
+
 /** True hop-by-hop headers (RFC 7230 §6.1). Forwarding them corrupts framing. */
 const HOP_BY_HOP = new Set([
   'connection',
@@ -193,6 +202,13 @@ export type ProxyOptions = {
   attempts?: boolean;
   /** Package-test seam; production defaults to probing enabled. */
   usageProbe?: boolean;
+  /**
+   * How often every account's usage reading is refreshed in the background,
+   * independently of which account is being selected. `0` disables the sweep
+   * entirely, including its run at startup — which is what a test asserting
+   * what the REQUEST path probed needs, so the timer cannot race it.
+   */
+  usageSweepIntervalMs?: number;
   now?: () => number;
   log?: (event: ProxyLogEvent) => void;
 };
@@ -234,6 +250,7 @@ function resolveOptions(options: ProxyOptions): Resolved {
     tlsPolicy: options.tlsPolicy ?? 'fresh_tls_quarantine',
     attempts: options.attempts ?? true,
     usageProbe: options.usageProbe ?? true,
+    usageSweepIntervalMs: options.usageSweepIntervalMs ?? USAGE_SWEEP_INTERVAL_MS,
     now: options.now ?? Date.now,
     log: options.log ?? (() => {}),
   };
@@ -748,6 +765,26 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
   runRefreshSweep();
   {
     const timer = setInterval(runRefreshSweep, REFRESH_SWEEP_INTERVAL_MS);
+    timer.unref();
+    server_close_hooks.push(() => clearInterval(timer));
+  }
+
+  // The reactive probe below runs only while an account is being CHOSEN, so it
+  // never reads a slot no session is being routed to — which is exactly the
+  // slot whose reading goes stale. Sweeping on a timer keeps every account's
+  // observation current whether or not it serves traffic, so a window rollover
+  // is picked up without waiting for a request to happen to land there.
+  const runUsageSweep = () => {
+    if (!opts.usageProbe || opts.usageSweepIntervalMs <= 0) return;
+    void Promise.all(
+      discoverAccounts(opts.authswapRoot)
+        .filter(account => usageProbe.isDue(readSlotObservation(opts.stateRoot, account.slot)))
+        .map(account => usageProbe.probe(account)),
+    ).catch(() => {}); // a sweep failure must never take the proxy down
+  };
+  runUsageSweep();
+  if (opts.usageSweepIntervalMs > 0) {
+    const timer = setInterval(runUsageSweep, opts.usageSweepIntervalMs);
     timer.unref();
     server_close_hooks.push(() => clearInterval(timer));
   }

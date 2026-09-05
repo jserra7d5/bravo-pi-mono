@@ -210,6 +210,19 @@ export type HeadroomBreakdown = {
   bindingClaim?: ClaimId;
   /** Projected reset of the general 7d claim, in milliseconds. */
   projectedWeeklyResetAt?: number;
+  /**
+   * The server reported the general weekly window as present but not open:
+   * observed, zero, and with no reset. Distinct from a MISSING observation,
+   * which also leaves `projectedWeeklyResetAt` undefined but means the
+   * opposite — we know nothing and should find out.
+   *
+   * The two must never be conflated in ranking. An unobserved account sorts
+   * FIRST so a request observes it; an account whose window has not opened
+   * sorts LAST, because its quota has no deadline. The server anchors the
+   * 7-day window on first use, so an unopened week is the one budget that
+   * cannot expire unspent — and is therefore the last one worth spending.
+   */
+  weeklyWindowUnopened: boolean;
   /** Highest raw utilization across the claims this model touches, unscaled. */
   peakUtilization?: number;
   /**
@@ -316,12 +329,18 @@ export function computeHeadroom(
   const overage = claims?.byId['overage'];
   const overageAvailable = overage?.status === 'allowed';
   const weeklyReset = claims?.byId['7d']?.reset;
+  const weeklyClaim = claims?.byId['7d'];
+  const weeklyWindowUnopened =
+    weeklyClaim !== undefined &&
+    weeklyClaim.utilization !== undefined &&
+    weeklyClaim.reset === undefined;
 
   const base: HeadroomBreakdown = {
     slot: account.slot,
     headroom: 0,
     spendableHeadroom: 0,
     projectedWeeklyResetAt: weeklyReset === undefined ? undefined : weeklyReset * 1000,
+    weeklyWindowUnopened,
     reservedForFable: 0,
     fiveHourBucket: 0,
     weeklyExpiring: false,
@@ -414,7 +433,14 @@ export function computeHeadroom(
     // remainder alone burns the account whose reset is furthest away. The
     // general claim also gives up what Fable can still spend of it.
     const held = id === '7d' ? reservedForFable : 0;
-    minSpendable = Math.min(minSpendable, (raw - (timeRemaining ?? 0) - held) * scale);
+    // `timeRemaining` is the fraction of the window still ahead, and pacing
+    // holds back quota in proportion to it. A window the server has not opened
+    // has its ENTIRE period ahead, not none of it: treating the missing reset
+    // as 0 inverts the term and makes the one account with no deadline look
+    // like the most urgent place to spend.
+    const remainingFraction =
+      timeRemaining ?? (id === '7d' && weeklyWindowUnopened ? 1 : 0);
+    minSpendable = Math.min(minSpendable, (raw - remainingFraction - held) * scale);
   }
 
   const headroom = sawAny ? min : UNKNOWN_HEADROOM;
@@ -553,21 +579,31 @@ export function selectAccount(input: SelectInput): Selection {
     (a.weeklyExpiring && b.weeklyExpiring
       ? (a.projectedWeeklyResetAt ?? 0) - (b.projectedWeeklyResetAt ?? 0)
       : 0);
-  // Earliest weekly reset, in whole days. An unknown reset means an
-  // unobserved account; it sorts first so it gets observed, matching cmpBase.
-  const resetDay = (b: HeadroomBreakdown) =>
-    b.projectedWeeklyResetAt === undefined
-      ? -1
-      : Math.floor((b.projectedWeeklyResetAt - input.nowMs) / 86_400_000);
+  // Earliest weekly reset, in whole days. Three states, not two:
+  //   unobserved        -> -1, sorts first so a request observes it (cmpBase)
+  //   window not opened -> last, its quota has no deadline to beat
+  //   observed reset    -> the day it falls on
+  const UNOBSERVED_FIRST = -1;
+  const NO_DEADLINE_LAST = Number.MAX_SAFE_INTEGER;
+  const resetDay = (b: HeadroomBreakdown) => {
+    if (b.projectedWeeklyResetAt !== undefined) {
+      return Math.floor((b.projectedWeeklyResetAt - input.nowMs) / 86_400_000);
+    }
+    return b.weeklyWindowUnopened ? NO_DEADLINE_LAST : UNOBSERVED_FIRST;
+  };
   const cmpResetDay = (a: HeadroomBreakdown, b: HeadroomBreakdown) => {
     const da = resetDay(a);
     const db = resetDay(b);
     return da === db ? 0 : da < db ? -1 : 1;
   };
-  const days = (b: HeadroomBreakdown) =>
-    b.projectedWeeklyResetAt === undefined
-      ? 'unobserved'
-      : `${((b.projectedWeeklyResetAt - input.nowMs) / 86_400_000).toFixed(1)}d`;
+  const days = (b: HeadroomBreakdown) => {
+    if (b.projectedWeeklyResetAt !== undefined) {
+      return `${((b.projectedWeeklyResetAt - input.nowMs) / 86_400_000).toFixed(1)}d`;
+    }
+    // A freshly-swept idle account IS observed; saying otherwise makes the
+    // routing reason lie to whoever is reading the log.
+    return b.weeklyWindowUnopened ? 'no window open' : 'unobserved';
+  };
   const cmpBucket = (a: HeadroomBreakdown, b: HeadroomBreakdown) => a.fiveHourBucket - b.fiveHourBucket;
   const cmpFresh = (a: HeadroomBreakdown, b: HeadroomBreakdown) =>
     cmpExpiring(a, b) || cmpResetDay(a, b) || cmpBucket(a, b) || cmpBase(a, b);

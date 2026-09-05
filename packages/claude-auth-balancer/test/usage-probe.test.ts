@@ -45,6 +45,68 @@ test('legacy usage mapping recognizes only existing claim semantics', () => {
   assert.equal(claims.byId.mystery_model, undefined);
 });
 
+test('a rolled-over window with no reset is recorded as an idle reading, not discarded', () => {
+  // Captured 2026-09-05 from a live Max account whose windows had rolled over:
+  // the server nulls every reset and only reopens a window on first use, so
+  // discarding this reading leaves the account unobservable until traffic
+  // happens to land on it.
+  const claims = claimsFromUsageBody({
+    five_hour: { utilization: 0.0, resets_at: null, limit_dollars: null, locked_reason: null },
+    seven_day: { utilization: 0.0, resets_at: null, limit_dollars: null, locked_reason: null },
+    seven_day_opus: null,
+  })!;
+  assert.equal(claims.byId['5h']?.utilization, 0);
+  assert.equal(claims.byId['5h']?.status, 'allowed');
+  assert.equal(claims.byId['5h']?.reset, undefined);
+  assert.equal(claims.byId['7d']?.utilization, 0);
+  assert.equal(claims.byId['7d']?.reset, undefined);
+  const headroom = computeHeadroom({ slot: '1', health: 'ok', claims }, 'claude-opus-5', Date.now());
+  assert.equal(headroom.headroom, 1, 'an unopened window is fully spendable');
+  assert.equal(headroom.weeklyExpiring, false, 'a window that has not opened cannot be expiring');
+});
+
+test('a reset-less window is only trusted at zero utilization', () => {
+  // The server has never sent "25% used, no window". Admitting the shape would
+  // let a malformed response replace a real claim through mergeClaims().
+  for (const five_hour of [
+    { utilization: 25, resets_at: null },
+    { utilization: 100, resets_at: null },
+    { utilization: 0.5, resets_at: null },
+  ]) {
+    assert.equal(claimsFromUsageBody({ five_hour }), undefined);
+  }
+});
+
+test('an idle reading refreshes the window it observed without erasing the ones it did not', async () => {
+  const root = temp();
+  const selected = account(root);
+  const now = Date.now();
+  const fableWeekly = { id: '7d_oi', utilization: 0.95, status: 'allowed_warning', reset: (now + 86_400_000) / 1000 };
+  recordObservation(root, '1', {
+    byId: {
+      '5h': { id: '5h', utilization: 0.8, status: 'allowed', reset: (now - 60_000) / 1000 },
+      '7d_oi': fableWeekly,
+    },
+  }, now - 10);
+  const url = await serve((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      five_hour: { utilization: 0.0, resets_at: null },
+      seven_day: { utilization: 0.0, resets_at: null },
+    }));
+  });
+  const probe = new UsageProbe({ upstream: url, stateRoot: root, now: () => now });
+
+  assert.equal(await probe.probe(selected), 'updated');
+  const after = readSlotObservation(root, '1')!;
+  assert.equal(after.observedAt, now, 'the observation timestamp advances, so nothing reads stale');
+  assert.equal(after.claims?.byId['5h']?.utilization, 0);
+  assert.equal(after.claims?.byId['5h']?.reset, undefined);
+  // `7d_oi` is absent from the usage endpoint's mapped windows, so the
+  // server saying nothing about it must not delete what we already knew.
+  assert.deepEqual(after.claims?.byId['7d_oi'], fableWeekly);
+});
+
 test('invalid utilization or reset does not emit a destructive partial claim', () => {
   for (const five_hour of [
     { utilization: -1, resets_at: '2026-01-01T05:00:00Z' },

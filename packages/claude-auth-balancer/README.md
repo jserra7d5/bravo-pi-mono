@@ -173,10 +173,55 @@ preserves a serviceable warm affinity never waits for a probe.
 
 The probe maps only known legacy `five_hour` and `seven_day` windows into the
 existing `5h` and `7d` claims, converting the endpoint's validated 0..100
-percentage points into internal 0..1 fractions. A window with invalid or missing
-utilization/reset is skipped rather than partially overwriting a prior claim.
-Model-specific legacy buckets are not assigned invented semantics. A response-header
-observation wins over any older probe that finishes later.
+percentage points into internal 0..1 fractions. A window with an invalid
+utilization or an invalid reset is skipped rather than partially overwriting a
+prior claim. Model-specific legacy buckets are not assigned invented semantics.
+A response-header observation wins over any older probe that finishes later.
+
+A window that has rolled over and not been reopened is reported by the endpoint
+as `{utilization: 0.0, resets_at: null}`. That is a real reading, not missing
+data: the server opens a window on first use, so an account nobody routes to
+never grows a reset. It is recorded as a zero-utilization claim with no reset,
+which the policy treats as fully spendable and which the statusline renders as
+0% with no reset clock. Only a *zero* utilization is admitted this way — a
+nonzero utilization with no window is a shape the endpoint has never sent, and
+accepting it would let a malformed response replace a real claim.
+
+### Background usage sweep
+
+Reactive probing runs only while an account is being selected, so it never
+reads a slot that nothing is routing to — which is exactly the slot whose
+reading goes stale. Every `usageSweepIntervalMs` (default
+`USAGE_SWEEP_INTERVAL_MS`, 15 minutes), and once at startup, the daemon probes
+every account whose reading is due. This bounds how long an idle account can
+misreport after a window rollover, and it costs no model tokens. `0` disables
+the sweep and its startup run, which is what a test asserting what the
+*request* path probed needs.
+
+Because `isDue` treats a reading older than two minutes as due, a 15-minute
+sweep reads every account on every tick in practice; the filter's real work is
+skipping accounts that live request traffic just refreshed.
+
+### Three weekly states, not two
+
+An undefined weekly reset is ambiguous, and the two meanings rank in opposite
+directions:
+
+| state | `7d` claim | weekly rank | why |
+|---|---|---|---|
+| unobserved | absent | **first** | a request costs nothing and observes it |
+| window not opened | present, `utilization` set, no `reset` | **last** | no deadline: the server anchors the 7-day window on first use, so this quota cannot expire unspent |
+| observed | present with a `reset` | by reset day | earliest real deadline drains first |
+
+`HeadroomBreakdown.weeklyWindowUnopened` carries the distinction. Conflating
+the middle row with the first sends every fresh session to the one account with
+no deadline while another account's weekly remainder runs out its clock — the
+inversion the reset-day ordering exists to prevent.
+
+The same distinction applies to pacing. `spendableHeadroom` holds quota back in
+proportion to the window still ahead; an unopened window has its *entire*
+period ahead, not none of it, so it contributes a full window of hold-back
+rather than looking maximally spendable.
 
 When a persisted known window has passed its reset, the balancer projects its
 utilization to zero and advances its reset by the known 5-hour or 7-day cadence.

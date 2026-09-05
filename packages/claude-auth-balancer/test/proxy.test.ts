@@ -12,7 +12,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { after, test } from 'node:test';
 
-import { writeSlotObservation } from '../src/accounts.js';
+import { readSlotObservation, writeSlotObservation } from '../src/accounts.js';
 import { AffinityStore } from '../src/affinity.js';
 import { MetricsStore } from '../src/metrics.js';
 import { AttemptStore } from '../src/attempts.js';
@@ -114,6 +114,7 @@ async function boot(options: {
   metrics?: boolean;
   upstreamHeaderTimeoutMs?: number;
   stateRoot?: string;
+  usageSweepIntervalMs?: number;
 }): Promise<{ url: string; stateRoot: string }> {
   const stateRoot = options.stateRoot ?? tmpRoot('cab-state-');
   const { server, url } = await startProxy({
@@ -124,6 +125,7 @@ async function boot(options: {
     allowOverage: options.allowOverage,
     metrics: options.metrics ?? false,
     upstreamHeaderTimeoutMs: options.upstreamHeaderTimeoutMs,
+    usageSweepIntervalMs: options.usageSweepIntervalMs,
     requireGatewayAuth: false,
   });
   cleanups.push(() => server.close());
@@ -291,6 +293,154 @@ test('real proxy retains non-Fable affinity at 99% then switches on hard exhaust
   assert.deepEqual(up.calls.map(call => call.authorization), ['Bearer tok-1', 'Bearer tok-2']);
 });
 
+/**
+ * The exact body api.anthropic.com returns for an account whose windows have
+ * rolled over and not been reopened. Captured 2026-09-05 from four live Max
+ * accounts: every window nulls out, and only real traffic reopens one.
+ */
+const IDLE_USAGE_BODY = JSON.stringify({
+  five_hour: { utilization: 0.0, resets_at: null, limit_dollars: null, locked_reason: null },
+  seven_day: { utilization: 0.0, resets_at: null, limit_dollars: null, locked_reason: null },
+  seven_day_opus: null,
+  extra_usage: { is_enabled: false, utilization: null },
+});
+
+test('an idle account is re-read by the background sweep with no client traffic at all', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  const stateRoot = tmpRoot('cab-usage-sweep-');
+  // Both accounts last observed long ago, with a 5h window that has since
+  // rolled over: the exact state that reads "stale" until traffic lands.
+  const stale = Date.now() - 20 * 60 * 60 * 1000;
+  for (const slot of ['1', '2']) {
+    writeSlotObservation(stateRoot, {
+      slot,
+      observedAt: stale,
+      claims: { byId: { '5h': { id: '5h', utilization: 0.8, reset: stale / 1000 } } },
+    });
+  }
+  const up = await upstream(
+    (_call, res) => { res.writeHead(200, OK_HEADERS).end('{}'); },
+    (_call, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(IDLE_USAGE_BODY);
+    },
+  );
+  await boot({ authswapRoot, upstreamUrl: up.url, stateRoot });
+
+  const deadline = Date.now() + 4000;
+  let observations: (number | undefined)[] = [];
+  while (Date.now() < deadline) {
+    observations = ['1', '2'].map(slot => readSlotObservation(stateRoot, slot)?.observedAt);
+    if (observations.every(at => at !== undefined && at > stale)) break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+
+  assert.ok(
+    observations.every(at => at !== undefined && at > stale),
+    `sweep did not refresh both idle observations: ${JSON.stringify(observations)}`,
+  );
+  assert.equal(up.calls.length, 0, 'the sweep must not spend inference to read usage');
+  // The rolled-over 80% reading is replaced by the server's own idle reading,
+  // not merely projected forward by the local cadence model.
+  for (const slot of ['1', '2']) {
+    const claim = readSlotObservation(stateRoot, slot)?.claims?.byId['5h'];
+    assert.equal(claim?.utilization, 0);
+    assert.equal(claim?.reset, undefined, 'an unopened window has no reset to report');
+  }
+});
+
+test('the sweep repeats on its interval rather than running once at startup', async () => {
+  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
+  const up = await upstream(
+    (_call, res) => { res.writeHead(200, OK_HEADERS).end('{}'); },
+    // A 200 carrying no window this balancer maps: the probe reports 'empty',
+    // records nothing, and takes no backoff, so the slot stays due every tick.
+    (_call, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ seven_day_cowork: null }));
+    },
+  );
+  // The daemon runs for weeks. A sweep that fires only at startup leaves every
+  // window rollover after boot unobserved, which is the whole failure this
+  // exists to prevent — so one probe is not enough to pass.
+  await boot({ authswapRoot, upstreamUrl: up.url, usageSweepIntervalMs: 30 });
+  const deadline = Date.now() + 3000;
+  while (up.probes.length < 3 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.ok(up.probes.length >= 3, `sweep did not recur: ${up.probes.length} probe(s)`);
+});
+
+test('the sweep skips an account a recent request already observed', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  const stateRoot = tmpRoot('cab-sweep-due-');
+  const future = (Date.now() + 4 * 60 * 60 * 1000) / 1000;
+  // Slot 1 was observed seconds ago with windows that have NOT rolled over;
+  // slot 2 has never been observed at all.
+  writeSlotObservation(stateRoot, {
+    slot: '1',
+    observedAt: Date.now(),
+    claims: { byId: {
+      '5h': { id: '5h', utilization: 0.1, reset: future },
+      '7d': { id: '7d', utilization: 0.1, reset: future },
+    } },
+  });
+  const up = await upstream(
+    (_call, res) => { res.writeHead(200, OK_HEADERS).end('{}'); },
+    (_call, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(IDLE_USAGE_BODY);
+    },
+  );
+  await boot({ authswapRoot, upstreamUrl: up.url, stateRoot, usageSweepIntervalMs: 30 });
+  const deadline = Date.now() + 2000;
+  while (up.probes.length < 4 && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.ok(up.probes.length > 0, 'the sweep ran at all');
+  assert.deepEqual(
+    [...new Set(up.probes.map(probe => probe.authorization))],
+    ['Bearer tok-2'],
+    'a slot observed inside the staleness horizon must not be re-probed every tick',
+  );
+});
+
+test('a failing sweep probe reaches slots no request touches, without breaking requests', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  const stateRoot = tmpRoot('cab-sweep-fault-');
+  new AffinityStore({ stateRoot }).touch('pinned-session', '1', 'claude-opus-5');
+  const up = await upstream(
+    (_call, res) => { res.writeHead(200, OK_HEADERS).end('{}'); },
+    (_call, res) => { res.writeHead(500).end('upstream usage is down'); },
+  );
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, stateRoot, usageSweepIntervalMs: 30 });
+
+  // Slot 2 serves nothing: the session is pinned to slot 1. Only the sweep can
+  // reach it, so requiring a slot-2 probe makes this test fail if the sweep is
+  // deleted — the request path alone can never satisfy it.
+  const deadline = Date.now() + 2000;
+  while (!up.probes.some(probe => probe.authorization === 'Bearer tok-2') && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.ok(
+    up.probes.some(probe => probe.authorization === 'Bearer tok-2'),
+    'the sweep never reached the unrouted slot',
+  );
+  // Every probe 500s, repeatedly, while the proxy keeps serving.
+  const out = await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'pinned-session' });
+  assert.equal(out.status, 200);
+  assert.equal(up.calls.at(-1)?.authorization, 'Bearer tok-1');
+});
+
 // --- injected faults ------------------------------------------------------
 
 test('a crossed persisted reset triggers a probe before fresh lease selection', async () => {
@@ -337,7 +487,9 @@ test('an evacuating fallback that preserves affinity never waits for or sends a 
     assert.equal(call.authorization, 'Bearer tok-2');
     res.writeHead(200, OK_HEADERS).end('{}');
   }, (_call, _res) => { /* a probe would stall until its absolute deadline */ });
-  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, stateRoot });
+  // The background sweep probes every account on its own schedule; this test is
+  // about the REQUEST path, so it is disabled here to keep the count honest.
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, stateRoot, usageSweepIntervalMs: 0 });
   const started = Date.now();
 
   assert.equal((await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'hot-session' })).status, 200);

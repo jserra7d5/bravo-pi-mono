@@ -813,3 +813,118 @@ test('a horizon of 0 disables the expiring term entirely', () => {
   assert.equal(sel.slot, '2');
   assert.equal(sel.decision, 'affinity-hold');
 });
+
+// --- an observed account whose weekly window has not opened -----------------
+//
+// `/api/oauth/usage` reports a window that has rolled over and not been
+// reopened as `{utilization: 0.0, resets_at: null}`, so the background sweep
+// stores a 7d claim with a utilization and NO reset. That is a third state:
+// not "unobserved" (we know nothing), and not "observed with a deadline".
+// The server anchors the 7-day window on first use, so this is the one budget
+// that cannot expire unspent — and therefore the last one worth spending.
+
+const DAY_MS = 86_400_000;
+
+/** The shape the usage sweep persists for an account with no window open. */
+const unopenedWeekly = (slot: string): AccountState => ({
+  slot,
+  health: 'ok',
+  claims: { byId: {
+    '5h': { id: '5h', utilization: 0, status: 'allowed' },
+    '7d': { id: '7d', utilization: 0, status: 'allowed' },
+  } },
+});
+
+/** An account mid-week: `util` of its weekly spent, resetting in `days`. */
+const openWeekly = (slot: string, util: number, days: number): AccountState => ({
+  slot,
+  health: 'ok',
+  claims: { byId: {
+    '5h': { id: '5h', utilization: 0.1, status: 'allowed', reset: (NOW + 4 * 3_600_000) / 1000 },
+    '7d': { id: '7d', utilization: util, status: 'allowed', reset: (NOW + days * DAY_MS) / 1000 },
+  } },
+});
+
+test('a weekly window that has not opened is not a deadline, and does not fake full pacing headroom', () => {
+  const open = computeHeadroom(openWeekly('2', 0.4, 1.5), 'claude-opus-5', NOW);
+  const unopened = computeHeadroom(unopenedWeekly('1'), 'claude-opus-5', NOW);
+
+  assert.equal(unopened.weeklyWindowUnopened, true);
+  assert.equal(unopened.projectedWeeklyResetAt, undefined, 'there is no reset to project');
+  assert.equal(unopened.weeklyExpiring, false, 'a window that never opened cannot expire');
+  assert.equal(unopened.headroom, 1, 'the full week is still available to spend');
+  // Pacing holds quota back in proportion to the window still ahead. An
+  // unopened window has the WHOLE period ahead, so nothing is owed to now.
+  assert.equal(unopened.spendableHeadroom, 0);
+  assert.ok(
+    open.spendableHeadroom > unopened.spendableHeadroom,
+    `a real deadline must outrank no deadline: ${open.spendableHeadroom} !> ${unopened.spendableHeadroom}`,
+  );
+});
+
+test('a fresh session drains the earliest real weekly deadline before an unopened window', () => {
+  // The regression this pins: an unopened weekly leaves `projectedWeeklyResetAt`
+  // undefined, which also means "never observed" — a sentinel that sorts FIRST.
+  // Conflating the two sends every fresh session to the one account with no
+  // deadline while a 60% weekly remainder runs out its 1.5-day clock.
+  const selection = selectAccount({
+    accounts: [unopenedWeekly('1'), openWeekly('2', 0.4, 1.5), openWeekly('3', 0.2, 3.5)],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(selection.slot, '2');
+  assert.match(selection.reason ?? '', /resets in 1\.5d/);
+});
+
+test('an unobserved account still sorts ahead of one whose window has not opened', () => {
+  // The two states share an undefined reset and must NOT share an ordering:
+  // an account we know nothing about is worth a request precisely so that the
+  // request observes it.
+  const selection = selectAccount({
+    accounts: [unopenedWeekly('1'), { slot: '2', health: 'ok' }],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(selection.slot, '2');
+});
+
+test('an unopened weekly is still spendable when nothing else can serve', () => {
+  // Ranking it last must not strand it: with every other account exhausted it
+  // is the account that serves.
+  const spent: AccountState = {
+    slot: '2',
+    health: 'ok',
+    claims: { byId: { '7d': { id: '7d', utilization: 1, status: 'rejected', reset: (NOW + 2 * DAY_MS) / 1000 } } },
+  };
+  const selection = selectAccount({
+    accounts: [unopenedWeekly('1'), spent],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(selection.slot, '1');
+});
+
+test('a routing reason calls an unopened window what it is, not "unobserved"', () => {
+  const selection = selectAccount({
+    accounts: [unopenedWeekly('1'), openWeekly('2', 0.4, 1.5)],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.match(selection.reason ?? '', /no window open/);
+  assert.doesNotMatch(selection.reason ?? '', /unobserved/);
+});
+
+test('an unopened weekly does not yank a warm session to drain a window that is not running', () => {
+  // Before the sweep recorded idle readings, a long-idle account's stale claim
+  // was projected forward into an invented reset that eventually fell inside
+  // the expiring horizon. The policy then moved a warm session there to
+  // "drain" a window the server had never opened, paying a real cache
+  // re-create for nothing.
+  const selection = selectAccount({
+    accounts: [openWeekly('1', 0.3, 5), unopenedWeekly('2')],
+    model: 'claude-opus-5',
+    affinitySlot: '1',
+    nowMs: NOW,
+  });
+  assert.equal(selection.slot, '1', 'a warm, serviceable affinity is held');
+});

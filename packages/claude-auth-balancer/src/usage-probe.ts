@@ -53,6 +53,22 @@ function windowClaim(id: string, value: unknown): Claim | undefined {
   if (utilization === undefined) return undefined;
 
   const rawReset = window.resets_at ?? window.reset;
+
+  // A window that has rolled over and not been reopened comes back as
+  // `{utilization: 0.0, resets_at: null}`. That is a real reading of an idle
+  // account, not missing data, and it is the ONLY reading an untouched account
+  // ever produces: the server opens a window on first use, so no amount of
+  // waiting will make a reset appear. Dropping it freezes `observedAt` at the
+  // account's last request, and the statusline reads "stale" until real traffic
+  // happens to land there.
+  //
+  // Only a zero utilization qualifies. A nonzero utilization with no window is
+  // a shape the server has never sent, and admitting it would let a malformed
+  // response replace a real claim through mergeClaims().
+  if (rawReset === null || rawReset === undefined) {
+    return utilization === 0 ? { id, utilization: 0, status: 'allowed' } : undefined;
+  }
+
   let reset: number | undefined;
   if (typeof rawReset === 'number' && Number.isFinite(rawReset) && rawReset > 0) {
     const seconds = rawReset > 1e12 ? rawReset / 1000 : rawReset;
