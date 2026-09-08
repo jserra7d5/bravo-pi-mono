@@ -5,8 +5,8 @@
 // Verified against a live CLI (2.1.231): the same UUID appears on all requests
 // of one run, so no body hashing is required.
 //
-// Leases outlive the 1-hour prompt-cache TTL and slide forward on every request,
-// so an active session never loses its account.
+// Leases slide with the 1-hour prompt-cache TTL within one compaction segment.
+// PostCompact clears all model leases for the session before its next request.
 //
 // Unlike the Codex balancer's affinity directory — which accumulated 9,980 files
 // / 40 MB because nothing ever unlinked them — expired leases here are swept.
@@ -215,6 +215,28 @@ export class AffinityStore {
       }
     }
     return best;
+  }
+
+  /** Completed compaction ends every model lease belonging to this session. */
+  clearSession(sessionId: string): number {
+    if (!existsSync(this.dir)) return 0;
+    const wanted = AffinityStore.hashSessionOnly(sessionId);
+    let removed = 0;
+    for (const name of readdirSync(this.dir)) {
+      if (!name.endsWith('.json')) continue;
+      const full = path.join(this.dir, name);
+      let lease: AffinityLease;
+      try {
+        lease = JSON.parse(readFileSync(full, 'utf8')) as AffinityLease;
+      } catch (error) {
+        if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      if (lease.schema_version !== 1 || lease.session_hash !== wanted) continue;
+      rmSync(full, { force: true });
+      removed += 1;
+    }
+    return removed;
   }
 
   /** Remove expired lease files. Rate-limited so it never runs per request. */

@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { AffinityStore } from './affinity.js';
+import { handlePostCompact, installCompactionHook } from './compaction.js';
 import { RED_MS, WARN_MS } from '@bravo/auth-balancer-contract';
 import { discoverAccounts, loadAccountStates, resolveAuthswapRoot, resolveStateRoot } from './accounts.js';
 import { TokenRefresher } from './refresh.js';
@@ -500,6 +501,16 @@ async function main(): Promise<void> {
     case 'accounts':
       cmdAccounts();
       return;
+    case 'post-compact':
+      handlePostCompact(JSON.parse(readFileSync(0, 'utf8')), resolveStateRoot());
+      return;
+    case 'install-compaction-hook':
+      installCompactionHook(
+        path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'settings.json'),
+        fileURLToPath(import.meta.url),
+      );
+      console.log('PostCompact hook installed; completed compaction clears all model leases for that session');
+      return;
     case 'sweep':
       cmdSweep();
       return;
@@ -545,6 +556,8 @@ async function main(): Promise<void> {
           '  metrics          [--days N] [--daily] [--json] [--sql "SELECT ..."]\n' +
           '  refresh          refresh any account near expiry, now\n' +
           '  relogin          <slot> [--if-needed] | --check-json\n' +
+          '  install-compaction-hook  rebalance after each completed compaction\n' +
+          '  post-compact     receive PostCompact hook JSON on stdin\n' +
           '  install-statusline  point the Claude Code status bar at this package\n' +
           '  claude           [args...] launch Claude through the local gateway\n' +
           '  prune            [--days N]\n' +

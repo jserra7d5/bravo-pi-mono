@@ -14,6 +14,7 @@ import { after, test } from 'node:test';
 
 import { readSlotObservation, writeSlotObservation } from '../src/accounts.js';
 import { AffinityStore } from '../src/affinity.js';
+import { handlePostCompact } from '../src/compaction.js';
 import { MetricsStore } from '../src/metrics.js';
 import { AttemptStore } from '../src/attempts.js';
 import { SESSION_HEADER, startProxy } from '../src/proxy.js';
@@ -772,4 +773,38 @@ test('a header timeout is NOT re-sent — the inference may already be running',
 
   assert.equal(res.status, 502);
   assert.equal(up.calls.length, 1, 'a timed-out inference is never duplicated');
+});
+
+
+test('a running proxy rebalances after PostCompact and then holds the new lease', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  const stateRoot = tmpRoot('cab-compaction-live-');
+  const now = Date.now();
+  const resets: Record<string, number> = {
+    '1': (now + 6 * 86_400_000) / 1000,
+    '2': (now + 3 * 86_400_000) / 1000,
+  };
+  for (const slot of ['1', '2']) writeSlotObservation(stateRoot, {
+    slot, observedAt: now,
+    claims: { byId: { '7d': { id: '7d', utilization: 0.2, reset: resets[slot] } } },
+  });
+  new AffinityStore({ stateRoot }).touch('compact-session', '1', 'claude-opus-5');
+  const up = await upstream((call, res) => {
+    const slot = call.authorization === 'Bearer tok-1' ? '1' : '2';
+    res.writeHead(200, {
+      ...OK_HEADERS,
+      'anthropic-ratelimit-unified-7d-reset': String(resets[slot]),
+      'anthropic-ratelimit-unified-7d-utilization': '0.2',
+    }).end('{}');
+  });
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, stateRoot, usageSweepIntervalMs: 0 });
+  const request = () => post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'compact-session' });
+  assert.equal((await request()).status, 200, 'summary uses the warm slot');
+  assert.equal(handlePostCompact({ hook_event_name: 'PostCompact', session_id: 'compact-session' }, stateRoot), 1);
+  assert.equal((await request()).status, 200, 'first compacted request ranks fresh');
+  assert.equal((await request()).status, 200, 'later requests hold the new lease');
+  assert.deepEqual(up.calls.map(call => call.authorization), ['Bearer tok-1', 'Bearer tok-2', 'Bearer tok-2']);
 });

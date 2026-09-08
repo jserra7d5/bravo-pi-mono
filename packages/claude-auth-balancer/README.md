@@ -39,12 +39,13 @@ session on one account until it genuinely cannot serve.
 ## Routing rules
 
 1. **Affinity first.** Each `(session, model)` pair is pinned to one account and
-   stays there. The key is `X-Claude-Code-Session-Id` plus the request's model —
+   stays there until compaction or lease expiry. The key is `X-Claude-Code-Session-Id` plus the request's model —
    caches are scoped per account *and* per model, so a decision about one
    model's budget must not move another model's warm prefix.
 2. **The lease expires exactly when the cache does** (1 hour, sliding on each
    request). Past that the prefix is gone, so an idle session is a *free*
-   rebalancing point. Fresh picks for every model **pace the weekly**: they go
+   rebalancing point. Completed compaction also ends every model lease for that
+   session: its next request ranks fresh and establishes a new lease. Fresh picks for every model **pace the weekly**: they go
    to the healthy, non-overage account furthest ahead of pace, where "ahead of
    pace" is model-normalized weekly headroom minus the fraction of the window
    still to run. On a 20x Max plan the `5h` window is 4x a 5x plan's but the
@@ -272,8 +273,8 @@ Authswap slot files are the sole OAuth credential owners:
 ```
 
 Slot ids are authswap account numbers, so `slot 2` here is `authswap` account 2.
-The balancer never reads or writes `~/.claude/.credentials.json` or Claude's
-settings. On each daemon start it writes a random local gateway credential to:
+The balancer never reads or writes `~/.claude/.credentials.json`. Explicit
+`install-statusline` and `install-compaction-hook` commands update Claude settings. On each daemon start it writes a random local gateway credential to:
 
 ```
 ~/.bravo/claude-auth-balancer/runtime/claude-gateway-credential.json
@@ -414,6 +415,7 @@ its new deadline lands next to another slot's.
 
 ```bash
 claude-auth-balancer install-service            # systemd user unit, then start
+claude-auth-balancer install-compaction-hook    # rebalance after every compaction
 claude-auth-balancer install-service --port 9000 --allow-overage
 sudo loginctl enable-linger "$USER"             # once, to survive logout
 CLAUDE_AUTH_BALANCER_URL=http://127.0.0.1:9000 claude-auth-balancer claude
@@ -448,6 +450,26 @@ claude-auth-balancer claude [args...]           # launch client through gateway
 claude-auth-balancer install-service   [--port N] [--allow-overage]
 claude-auth-balancer uninstall-service
 ```
+
+## Compaction boundaries
+
+Run `claude-auth-balancer install-compaction-hook` once. It adds a synchronous
+`PostCompact` command to `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json`, preserving
+other settings and hooks. Claude Code reloads settings changes in running sessions.
+The command installed is the absolute path to this CLI followed by `post-compact`.
+
+The hook reads Claude's JSON on stdin (`hook_event_name: "PostCompact"` and
+`session_id`) and removes only that session's leases, across all models. It emits
+no context text and ignores the summary. Manual, automatic, and
+partial compactions all use this boundary. The summarization request retains its
+warm account; after the hook completes, the next request ranks eligible accounts
+normally. It may choose the same slot if that remains the best choice.
+
+The daemon reads leases from disk on each request, so installing this hook takes
+effect without a daemon restart. Before compaction, affinity still holds; weekly
+rollover alone does not move a warm session. Hook support must be enabled in Claude
+settings. With a custom balancer state root, the hook process must inherit the same
+`CLAUDE_AUTH_BALANCER_HOME` as the launcher and daemon.
 
 ## Transport timeouts
 
