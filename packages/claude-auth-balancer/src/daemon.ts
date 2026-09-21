@@ -128,17 +128,24 @@ Documentation=https://github.com/bravo/bravo-pi-mono
 # The proxy is useless without egress, and systemd starts user units early.
 After=network-online.target
 Wants=network-online.target
-# Loops fast enough to trip this are broken, not busy.
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# This is a small gateway for every live Claude session. Host memory pressure can
+# terminate it repeatedly; a start-limit latch would then strand every client
+# after pressure recovers. Keep retrying at the bounded cadence below.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=${exec}
-# A crash must not silently leave ANTHROPIC_BASE_URL pointing at a dead port:
-# every client would fail closed until someone noticed.
-Restart=on-failure
+# Any unplanned exit must not leave ANTHROPIC_BASE_URL pointing at a dead port.
+# The daemon handles SIGTERM for a clean shutdown, which produces exit status 0;
+# Restart=on-failure would therefore strand every client after an external kill.
+# systemctl stop still suppresses automatic restart, even with Restart=always.
+Restart=always
 RestartSec=5
+# Desktop user managers may raise application services to OOMScoreAdjust=200.
+# Lower this gateway to the manager's own score so earlyoom chooses disposable,
+# memory-heavy workers before the process every Claude session depends on.
+OOMScoreAdjust=100
 ${options.stateRoot ? `Environment=CLAUDE_AUTH_BALANCER_HOME=${options.stateRoot}\n` : ''}\
 # It only ever talks to the Anthropic API and its own state directory.
 NoNewPrivileges=true
