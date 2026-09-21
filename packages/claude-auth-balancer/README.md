@@ -70,7 +70,8 @@ session on one account until it genuinely cannot serve.
    The ceiling is dropped entirely when every serviceable account is above it:
    at that point moving buys no quota, so ranking decides and the sticky slot
    keeps its cache. A window that refills within the cache TTL never triggers
-   the ceiling either.
+   the ceiling either — and a **weekly** window that resets within **8 hours**
+   never triggers it at all. See (5a).
 4. **Fresh picks drain the earliest weekly reset, then spread on a 25%-wide
    projected `5h` bucket, then pace.** The weekly reset is floored to whole
    days: the account(s) resetting soonest take every fresh session, because
@@ -91,27 +92,62 @@ session on one account until it genuinely cannot serve.
    probed. Warm affinity and eligibility are unaffected.
 5. **Expiring weekly quota outranks everything, affinity included.** An
    account whose general `7d` window resets within 12 hours while it still has
-   at least 10% model-normalized headroom (and is below the ceiling) is
-   `EXPIRING` in `status`. Fresh picks for every model go there first, ahead of
-   the `5h` bucket; between two expiring accounts the earlier reset wins. Warm
-   sessions held elsewhere are moved onto it — the one planned case where a
-   serviceable hold is broken and a cache re-create is paid on purpose. Quota
+   headroom left and is below the ceiling (see (6) for when the ceiling stops
+   applying) is `EXPIRING` in `status`. Fresh picks for every model go there
+   first, ahead of the `5h` bucket; between two expiring accounts the earlier
+   reset wins. Moving a **warm** session onto it needs 10% model-normalized
+   headroom, not the 1% a fresh pick needs, because that move is the one
+   planned case where a serviceable hold is broken and a cache re-create is
+   paid on purpose. Quota
    unspent at the reset is lost for good; a re-create is one expensive request.
    A session already on an expiring account holds, and once that account
    resets it is no longer expiring, so the moved sessions stay where they are.
    `--expiring-horizon-hours 0` on `serve` disables the term.
-6. **Overage is never spent silently.** Accounts with `overage-status: allowed`
+6. **In the last 8 hours of a weekly window the ceiling is lifted and the
+   account burns down to zero.** The 95% ceiling exists to keep fresh sessions
+   off an account that is nearly spent, on the theory that they would exhaust
+   it and immediately pay a cache re-create elsewhere. At the end of a weekly
+   window that theory inverts: the remainder is destroyed at the reset, so one
+   re-create per session is cheap against it. So a `7d` or `7d_oi` claim at or
+   above 95% whose reset is inside `DEFAULT_WEEKLY_TERMINAL_HORIZON_MS` (8h)
+   does not raise the ceiling, the account stays `EXPIRING`, and every fresh
+   pick lands there until its headroom reaches zero — at which point it stops
+   being serviceable and the sessions move on by the ordinary rule. `status`
+   marks it `BURNDOWN`. The `5h` claim is deliberately excluded: it refills on
+   its own and never expires unspent, so it keeps the 1-hour cache-TTL horizon.
+   Warm sessions are *not* pulled into a burndown — the pull needs 10%
+   model-normalized headroom, a burndown has at most 5% — so the remainder is
+   spent by sessions that were going to start anyway, at no cache cost.
+
+   **Capping an account out of it.** Set `CLAUDE_AUTH_BALANCER_CAPPED_SLOTS`
+   to a comma- or space-separated list of slot ids to hold those accounts to
+   the flat 95% ceiling, keeping their final 5% in reserve:
+
+   ```ini
+   # ~/.config/systemd/user/claude-auth-balancer.service.d/capped-slots.conf
+   [Service]
+   Environment=CLAUDE_AUTH_BALANCER_CAPPED_SLOTS=2
+   ```
+
+   The statusline is a **different process** with a different environment, so
+   set it there too or its `EVACUATING` badge will disagree with the router:
+
+   ```jsonc
+   // ~/.claude/settings.json
+   { "env": { "CLAUDE_AUTH_BALANCER_CAPPED_SLOTS": "2" } }
+   ```
+7. **Overage is never spent silently.** Accounts with `overage-status: allowed`
    can bill real money past 100%; that path requires `--allow-overage`.
-7. **429 waits before it rotates.** With a short `Retry-After`, the proxy waits
+8. **429 waits before it rotates.** With a short `Retry-After`, the proxy waits
    on the warm account rather than paying a cache re-create to dodge a few
    seconds. Only a long or absent `Retry-After` rotates. Either way the client
    never sees the 429.
-8. **Generation retries are conservative.** No client-visible response is not
+9. **Generation retries are conservative.** No client-visible response is not
    proof that Anthropic did no work. A generation failure after application bytes
    may have been written is terminal by default, including header timeout and
    unknown socket phase. Only a proven pre-wire transport failure may be retried
    silently on the same slot.
-9. **Opening sessions are fenced.** The first request for one `(session, model)`
+10. **Opening sessions are fenced.** The first request for one `(session, model)`
    owns a keyed singleflight covering usage probes, selection, refresh, and lease
    publication. Concurrent openers wait and then re-read the published lease
    instead of selecting independently.
@@ -151,6 +187,16 @@ fast the requested model happens to burn it. It is evaluated only over the
 claims the requested model is gated on, so `7d_oi` moves Fable and is ignored
 for everything else. Non-Fable models never evacuate a warm session; the
 threshold only keeps fresh ones off the account.
+
+How near a reset has to be for a claim above the threshold to stop mattering
+is `evacuationHorizonMsFor(claim, capped)` — one function, used by the router
+and by the statusline badge so they cannot drift:
+
+| claim | horizon | why |
+|---|---|---|
+| `5h` | 1h (cache TTL) | a window that refills before the prefix expires is not worth a 20x move |
+| `7d`, `7d_oi` | 8h | the remainder is destroyed at the reset, so spend it |
+| any, on a capped slot | 1h | the operator is holding this account in reserve |
 
 ### Usage refresh and reset projection
 

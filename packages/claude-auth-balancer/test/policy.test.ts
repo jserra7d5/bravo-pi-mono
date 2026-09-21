@@ -752,8 +752,87 @@ const account = (slot: string, util7d: number, weeklyInH: number, util5h = 0.1):
 test('a weekly resetting within 12h with headroom left is flagged expiring', () => {
   assert.equal(computeHeadroom(account('4', 0.13, 8.5), 'claude-opus-5', NOW).weeklyExpiring, true);
   assert.equal(computeHeadroom(account('2', 0.05, 69), 'claude-opus-5', NOW).weeklyExpiring, false, 'days out');
-  assert.equal(computeHeadroom(account('4', 0.95, 8.5), 'claude-opus-5', NOW).weeklyExpiring, false, 'nothing left to spend');
+  // 8.5h is outside the 8h terminal horizon, so 95% still means the ceiling.
+  assert.equal(computeHeadroom(account('4', 0.95, 8.5), 'claude-opus-5', NOW).weeklyExpiring, false, 'above the ceiling on 7d');
   assert.equal(computeHeadroom(account('4', 0.13, 8.5, 0.96), 'claude-opus-5', NOW).weeklyExpiring, false, 'above the ceiling on 5h');
+});
+
+// --- terminal weekly burndown ----------------------------------------------
+//
+// Observed live 2026-09-21: slot 1 sat at 95.0% weekly with its reset 2.7h
+// away, so the ceiling excluded it from every fresh pick and 5% of a weekly
+// budget was going to reach 04:00 unspent. Inside the terminal horizon that
+// ceiling is backwards, so it is lifted for weekly claims only.
+
+test('a weekly at the ceiling but resetting inside the terminal horizon burns down instead', () => {
+  const h = computeHeadroom(account('1', 0.95, 2.7, 0), 'claude-opus-5', NOW);
+  assert.equal(h.evacuating, false, 'the ceiling is lifted, so fresh picks are allowed');
+  assert.equal(h.weeklyTerminal, true);
+  assert.equal(h.weeklyExpiring, true, 'and it leads fresh ranking');
+  assert.equal(Number(h.headroom.toFixed(3)), 0.05);
+});
+
+test('the terminal window takes every fresh pick and says the ceiling was lifted', () => {
+  const accounts = [account('2', 0.05, 69, 0.03), account('1', 0.95, 2.7, 0)];
+  for (const model of ['claude-opus-5', 'claude-fable-5']) {
+    const sel = selectAccount({ accounts, model, nowMs: NOW });
+    assert.equal(sel.slot, '1', model);
+    assert.equal(sel.decision, 'fresh');
+    assert.match(sel.reason, /expires in 2\.7h with \d+% headroom unspent, burning past the 95% ceiling; draining it first$/);
+  }
+});
+
+test('a terminal remainder is spent by fresh picks but never bought with a cache re-create', () => {
+  // 5% is worth taking for free; it is not worth a ~20x re-create per moved
+  // session, which is what DEFAULT_EXPIRING_PULL_MIN_HEADROOM guards.
+  const accounts = [account('2', 0.05, 69, 0.03), account('1', 0.95, 2.7, 0)];
+  const sel = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '2', nowMs: NOW });
+  assert.equal(sel.slot, '2');
+  assert.equal(sel.decision, 'affinity-hold');
+});
+
+test('a capped slot keeps the flat ceiling inside the terminal window', () => {
+  const capped = { ...account('1', 0.95, 2.7, 0), capAtCeiling: true };
+  const h = computeHeadroom(capped, 'claude-opus-5', NOW);
+  assert.equal(h.evacuating, true, 'still above the ceiling');
+  assert.equal(h.weeklyTerminal, false);
+  assert.equal(h.weeklyExpiring, false);
+  const sel = selectAccount({
+    accounts: [account('2', 0.05, 69, 0.03), capped],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(sel.slot, '2', 'its reserve is left alone');
+});
+
+test('the 5h claim never gets the terminal horizon — it refills, it does not expire', () => {
+  // 96% on 5h with the window resetting in 3h: well inside the 8h weekly
+  // horizon, and still an evacuation, because nothing is rescued by spending
+  // a window that refills on its own.
+  const h = computeHeadroom(account('4', 0.13, 2.7, 0.96), 'claude-opus-5', NOW);
+  assert.equal(h.evacuating, true);
+  assert.equal(h.weeklyTerminal, false);
+});
+
+test('a terminal horizon of 0 restores the flat ceiling for every account', () => {
+  const accounts = [account('2', 0.05, 69, 0.03), account('1', 0.95, 2.7, 0)];
+  const sel = selectAccount({ accounts, model: 'claude-opus-5', nowMs: NOW, weeklyTerminalHorizonMs: 0 });
+  assert.equal(sel.slot, '2');
+});
+
+test('an exhausted terminal account stops taking sessions and releases the warm ones', () => {
+  // The end state of the burndown: headroom is gone, so it is not serviceable
+  // and the sessions it collected move on.
+  const spent = account('1', 1.0, 2.7, 0);
+  assert.equal(computeHeadroom(spent, 'claude-opus-5', NOW).eligible, false);
+  const sel = selectAccount({
+    accounts: [account('2', 0.05, 69, 0.03), spent],
+    model: 'claude-opus-5',
+    affinitySlot: '1',
+    nowMs: NOW,
+  });
+  assert.equal(sel.slot, '2');
+  assert.equal(sel.decision, 'affinity-broken');
 });
 
 test('a fresh pick lands on the expiring account even from a hotter 5h bucket', () => {

@@ -5,7 +5,7 @@
 // rather than a hand-shaped result object. Only the host is redirected.
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -13,7 +13,7 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 
 import type { Account } from '../src/accounts.js';
-import { isRefreshable, loadAccountStates, readOAuth } from '../src/accounts.js';
+import { isRefreshable, loadAccountStates, readOAuth, resolveCappedSlots } from '../src/accounts.js';
 import { OAuthRefreshError, refreshClaudeToken } from '../src/oauth.js';
 import { REFRESH_SKEW_MS, TERMINAL_BACKOFF_MS, TokenRefresher, mergeCredentialFile } from '../src/refresh.js';
 import { readAuthWarnings } from '../src/health.js';
@@ -311,6 +311,42 @@ test('an expired-but-refreshable account stays selectable, or nothing would ever
 
   const oauth = readOAuth(account.credentialPath)!;
   assert.equal(isRefreshable(oauth, NOW), true);
+});
+
+test('the capped-slot env var reaches the AccountState the policy actually reads', () => {
+  // The env var is only useful if it survives the whole discovery path, so
+  // this goes through the real authswap layout and the real process env
+  // rather than handing `loadAccountStates` a pre-built set.
+  const authswapRoot = mkdtempSync(path.join(os.tmpdir(), 'cab-capped-'));
+  roots.push(authswapRoot);
+  const credDir = path.join(authswapRoot, 'providers', 'anthropic', 'credentials');
+  mkdirSync(credDir, { recursive: true });
+  for (const slot of ['1', '2']) {
+    writeFileSync(
+      path.join(credDir, `.credentials-${slot}-a${slot}@x.com.json`),
+      JSON.stringify({ claudeAiOauth: live(NOW + HOUR) }),
+    );
+  }
+
+  const prior = process.env['CLAUDE_AUTH_BALANCER_CAPPED_SLOTS'];
+  process.env['CLAUDE_AUTH_BALANCER_CAPPED_SLOTS'] = '2';
+  try {
+    const { states } = loadAccountStates({ stateRoot: authswapRoot, authswapRoot, nowMs: NOW });
+    assert.deepEqual(states.map(s => [s.slot, s.capAtCeiling === true]), [['1', false], ['2', true]]);
+  } finally {
+    if (prior === undefined) delete process.env['CLAUDE_AUTH_BALANCER_CAPPED_SLOTS'];
+    else process.env['CLAUDE_AUTH_BALANCER_CAPPED_SLOTS'] = prior;
+  }
+});
+
+test('CLAUDE_AUTH_BALANCER_CAPPED_SLOTS accepts commas, spaces, and nothing at all', () => {
+  const of = (v: string | undefined) => [...resolveCappedSlots({ CLAUDE_AUTH_BALANCER_CAPPED_SLOTS: v } as NodeJS.ProcessEnv)];
+  assert.deepEqual(of('2'), ['2']);
+  assert.deepEqual(of(' 2, 3 '), ['2', '3']);
+  assert.deepEqual(of('2 3'), ['2', '3']);
+  assert.deepEqual(of(''), []);
+  assert.deepEqual(of(undefined), []);
+  assert.deepEqual([...resolveCappedSlots({} as NodeJS.ProcessEnv)], []);
 });
 
 test('a dead refresh token is what actually means needs-reauth', () => {

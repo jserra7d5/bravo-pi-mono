@@ -49,6 +49,24 @@ export function resolveAuthswapRoot(env: NodeJS.ProcessEnv = process.env): strin
   return path.resolve(env.AUTHSWAP_DIR || path.join(os.homedir(), '.authswap'));
 }
 
+/**
+ * Slots held to the flat 95% ceiling, from
+ * `CLAUDE_AUTH_BALANCER_CAPPED_SLOTS` (comma- or space-separated slot ids).
+ *
+ * Everything else burns a weekly remainder to zero in the last hours before
+ * its reset. A capped slot keeps its final 5% instead, which is what you want
+ * for an account you are deliberately holding in reserve.
+ *
+ * This is read by the daemon AND by the statusline, which are different
+ * processes with different environments — set it in both (the systemd unit and
+ * `~/.claude/settings.json`'s `env` block) or the badge will disagree with the
+ * router.
+ */
+export function resolveCappedSlots(env: NodeJS.ProcessEnv = process.env): Set<string> {
+  const raw = env.CLAUDE_AUTH_BALANCER_CAPPED_SLOTS ?? '';
+  return new Set(raw.split(/[,\s]+/).map(s => s.trim()).filter(Boolean));
+}
+
 const CRED_RE = /^\.credentials-(\d+)-(.+)\.json$/;
 
 /**
@@ -155,8 +173,11 @@ export function loadAccountStates(options: {
   stateRoot: string;
   authswapRoot?: string;
   nowMs: number;
+  /** Defaults to `resolveCappedSlots()`; a test may supply its own. */
+  cappedSlots?: Set<string>;
 }): { states: AccountState[]; accounts: Map<string, Account> } {
   const accounts = discoverAccounts(options.authswapRoot ?? resolveAuthswapRoot());
+  const capped = options.cappedSlots ?? resolveCappedSlots();
   const bySlot = new Map<string, Account>();
   const states: AccountState[] = [];
 
@@ -175,6 +196,7 @@ export function loadAccountStates(options: {
       observedAt: prior?.observedAt,
       tokenExpiresAt: expiresAt,
       refreshTokenExpiresAt: oauth?.refreshTokenExpiresAt,
+      capAtCeiling: capped.has(account.slot),
     });
   }
 

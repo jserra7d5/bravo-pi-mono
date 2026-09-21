@@ -209,7 +209,7 @@ function cmdStatus(argv: string[]): void {
         (h.bindingClaim ?? '-').padEnd(8),
         s.health.padEnd(13),
         reloginCountdown(s.refreshTokenExpiresAt, now).padEnd(10),
-        (h.weeklyExpiring ? 'EXPIRING ' : '') + (h.evacuating ? 'EVACUATING ' : '') + (h.overageAvailable ? 'overage ' : ''),
+        (h.weeklyExpiring ? 'EXPIRING ' : '') + (h.evacuating ? 'EVACUATING ' : '') + (h.weeklyTerminal ? 'BURNDOWN ' : '') + (s.capAtCeiling ? 'CAPPED ' : '') + (h.overageAvailable ? 'overage ' : ''),
         `obs ${ago(s.observedAt, now)}`,
       ].join(''),
     );

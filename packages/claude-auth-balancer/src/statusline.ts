@@ -23,11 +23,17 @@ import {
   readOAuth,
   readSlotObservation,
   resolveAuthswapRoot,
+  resolveCappedSlots,
   resolveStateRoot,
 } from './accounts.js';
 import { claimHasReset } from './claims.js';
 import type { Claim } from './claims.js';
-import { DEFAULT_EVACUATE_UTILIZATION, DEFAULT_EVACUATION_HORIZON_MS, quotaForModel, computeHeadroom } from './policy.js';
+import {
+  DEFAULT_EVACUATE_UTILIZATION,
+  evacuationHorizonMsFor,
+  quotaForModel,
+  computeHeadroom,
+} from './policy.js';
 import { conciseWarnings, readActiveAuthWarnings } from './health.js';
 
 /**
@@ -149,17 +155,20 @@ function futureReset(claim: Claim | undefined, nowMs: number): number | undefine
  * The threshold marker, computed the way `computeHeadroom` computes it.
  *
  * It means "no fresh session starts here" for every model, and additionally
- * "a warm session leaves here" for Fable. Two divergences would otherwise make
- * the badge a liar in both directions: a claim that refills within the cache
- * horizon does NOT trigger a move (moving costs 20x and saves nothing), and
- * `7d_oi` — the Fable-only weekly — does trigger one for Fable, despite not
- * being one of the two bars on the line. It is ignored for other models,
- * whose quota it does not gate.
+ * "a warm session leaves here" for Fable. Three divergences would otherwise
+ * make the badge a liar: a claim that refills within its evacuation horizon
+ * does NOT trigger a move (moving costs 20x and saves nothing, and for a
+ * weekly claim the horizon is the long terminal one — hence the shared
+ * `evacuationHorizonMsFor`); `7d_oi` — the Fable-only weekly — does trigger one
+ * for Fable, despite not being one of the two bars on the line, and is ignored
+ * for other models whose quota it does not gate; and a capped slot keeps the
+ * flat ceiling the rest do not.
  */
 function isEvacuating(
   claims: Record<string, Claim> | undefined,
   nowMs: number,
   model: string | undefined,
+  capAtCeiling: boolean,
 ): boolean {
   if (!claims) return false;
   const quota = quotaForModel(model);
@@ -169,7 +178,8 @@ function isEvacuating(
     if (!claim || claim.utilization === undefined) continue;
     if (claimHasReset(claim, nowMs)) continue;
     const resetsSoon =
-      claim.reset !== undefined && claim.reset * 1000 - nowMs <= DEFAULT_EVACUATION_HORIZON_MS;
+      claim.reset !== undefined &&
+      claim.reset * 1000 - nowMs <= evacuationHorizonMsFor(id, capAtCeiling);
     if (claim.utilization >= DEFAULT_EVACUATE_UTILIZATION && !resetsSoon) return true;
   }
   return false;
@@ -265,6 +275,8 @@ export type GatherOptions = {
    * choice downstream can undo it.
    */
   ellipsis?: string;
+  /** Slots held to the flat ceiling. Defaults to `resolveCappedSlots()`. */
+  cappedSlots?: Set<string>;
 };
 
 /** Assemble everything the renderer needs. Never throws. */
@@ -278,6 +290,7 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
 
   try {
     const discovered = discoverAccounts(options.authswapRoot ?? resolveAuthswapRoot());
+    const capped = options.cappedSlots ?? resolveCappedSlots();
     let activeSlot: string | undefined;
     if (payload.session_id) {
       try {
@@ -321,9 +334,14 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
           observed !== undefined &&
           observed.observedAt !== undefined &&
           nowMs - observed.observedAt > OBSERVATION_STALE_MS,
-        evacuating: isEvacuating(byId, nowMs, payload.model?.id),
+        evacuating: isEvacuating(byId, nowMs, payload.model?.id, capped.has(account.slot)),
         expiring: computeHeadroom(
-          { slot: account.slot, health: 'ok', claims: observed?.claims },
+          {
+            slot: account.slot,
+            health: 'ok',
+            claims: observed?.claims,
+            capAtCeiling: capped.has(account.slot),
+          },
           payload.model?.id,
           nowMs,
         ).weeklyExpiring,

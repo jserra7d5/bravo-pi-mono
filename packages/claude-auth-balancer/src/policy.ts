@@ -54,6 +54,15 @@
 // elsewhere can ever recover it. A cache re-create is a one-time ~20x request;
 // a week of unspent quota is thousands of requests. See
 // DEFAULT_EXPIRING_WEEKLY_HORIZON_MS.
+//
+// Inside the last hours of a weekly window the 95% ceiling inverts: it was
+// built to keep fresh sessions off an account that is nearly spent, but an
+// account that is nearly spent AND about to reset is the one place whose
+// remainder is otherwise thrown away. So a weekly claim resetting within
+// DEFAULT_WEEKLY_TERMINAL_HORIZON_MS does not raise the ceiling at all, and
+// the account keeps taking fresh sessions down to zero. The 5h claim is
+// unaffected: it refills by itself and never expires unspent. An account named
+// in CLAUDE_AUTH_BALANCER_CAPPED_SLOTS opts out and keeps the flat 95% cap.
 
 import type { Claim, ClaimId, Claims } from './claims.js';
 import { claimHasReset, projectExpiredClaims } from './claims.js';
@@ -120,6 +129,13 @@ export type AccountState = {
   tokenExpiresAt?: number;
   /** Hard interactive-login session deadline (ms), when supplied by Claude. */
   refreshTokenExpiresAt?: number;
+  /**
+   * Opt this account out of the terminal-weekly burndown: it keeps the flat
+   * 95% ceiling even in the last hours before its weekly reset, so its final
+   * 5% is held in reserve rather than spent. Set from
+   * CLAUDE_AUTH_BALANCER_CAPPED_SLOTS; see `resolveCappedSlots`.
+   */
+  capAtCeiling?: boolean;
 };
 
 /**
@@ -178,11 +194,45 @@ export const DEFAULT_5H_PROJECTION_MIN_ELAPSED = 0.1;
 export const DEFAULT_EXPIRING_WEEKLY_HORIZON_MS = 12 * 60 * 60 * 1000;
 
 /**
- * Minimum model-normalized headroom for an expiring account to be worth a
- * move. Below this the unspent remainder is not clearly larger than the cache
- * re-creates it would trigger, and the 5h claim may be what is binding anyway.
+ * Minimum model-normalized headroom for an expiring account to lead FRESH
+ * ranking. A fresh session has no cache to lose, so placing it on an expiring
+ * account costs nothing and almost any remainder with a deadline is worth
+ * taking. The floor exists only to keep a numerically-zero remainder — or the
+ * rounding dust either side of it — from claiming the top of the ranking.
  */
-export const DEFAULT_EXPIRING_MIN_HEADROOM = 0.1;
+export const DEFAULT_EXPIRING_MIN_HEADROOM = 0.01;
+
+/**
+ * Minimum model-normalized headroom for an expiring account to PULL a warm
+ * session off another account. Higher than the fresh floor because this is the
+ * one move that deliberately pays a ~20x cache re-create: below this the
+ * unspent remainder is not clearly larger than the re-creates it would
+ * trigger, and the 5h claim may be what is binding anyway.
+ */
+export const DEFAULT_EXPIRING_PULL_MIN_HEADROOM = 0.1;
+
+/**
+ * Weekly claims. These are the budgets that can expire unspent, so they are
+ * the ones the terminal-window rule applies to. `5h` is deliberately absent:
+ * it refills on its own, so there is never anything to rescue from it.
+ */
+export const WEEKLY_CLAIMS: ClaimId[] = ['7d', '7d_oi'];
+
+/**
+ * How close a WEEKLY reset must be before the 95% ceiling stops applying to
+ * that claim.
+ *
+ * The ceiling keeps fresh sessions off an account that is nearly spent, on the
+ * theory that they would exhaust it and immediately pay a cache re-create
+ * somewhere else. That theory holds all week and inverts at the end of it: the
+ * remainder on a window that resets in a few hours is thrown away otherwise,
+ * so one re-create per session is cheap against it. Eight hours is long enough
+ * to actually burn a 5% remainder across the live session population and short
+ * enough that the ceiling means what it says for the rest of the week.
+ *
+ * `capAtCeiling` on an account disables this, keeping the flat 95% cap.
+ */
+export const DEFAULT_WEEKLY_TERMINAL_HORIZON_MS = 8 * 60 * 60 * 1000;
 
 export type HeadroomBreakdown = {
   slot: string;
@@ -249,10 +299,19 @@ export type HeadroomBreakdown = {
   /**
    * True when the general 7d window resets within the expiring horizon while
    * the account still has at least DEFAULT_EXPIRING_MIN_HEADROOM and is not
-   * evacuating. Leads fresh ranking ahead of the 5h bucket and is the only
-   * condition that moves a warm non-Fable session off a serviceable account.
+   * evacuating. Leads fresh ranking ahead of the 5h bucket. A warm session is
+   * moved onto it only above DEFAULT_EXPIRING_PULL_MIN_HEADROOM, which is the
+   * only condition that moves a warm non-Fable session off a serviceable
+   * account.
    */
   weeklyExpiring: boolean;
+  /**
+   * True when a weekly claim this model is gated on is at or above the
+   * evacuation threshold but resets inside the terminal horizon, so the
+   * ceiling was lifted and this account is burning its remainder down to zero.
+   * Reporting only — `evacuating` already carries the routing consequence.
+   */
+  weeklyTerminal: boolean;
   /** True when serving this request would require spending overage. */
   requiresOverage: boolean;
   /** True when the account can spend overage at all. */
@@ -311,19 +370,52 @@ function reservedSubBudgets(claims: Claims | undefined, nowMs: number): number {
  */
 export const DEFAULT_EVACUATION_HORIZON_MS = 60 * 60 * 1000;
 
+export type HeadroomOptions = {
+  evacuateThreshold?: number;
+  evacuationHorizonMs?: number;
+  fresh5hBucket?: number;
+  expiringHorizonMs?: number;
+  expiringMinHeadroom?: number;
+  weeklyTerminalHorizonMs?: number;
+};
+
+/**
+ * How near a reset must be for a claim at or above the threshold to stop
+ * raising the ceiling — the single place the two horizons are chosen between,
+ * so the statusline badge and the router cannot disagree about what the
+ * threshold means.
+ *
+ * A `5h` claim gets the cache TTL: the only question there is whether a move
+ * would buy anything before the prefix expired anyway. A weekly claim gets the
+ * much longer terminal horizon, because its remainder expires for good. An
+ * account with `capAtCeiling` is held to the cache TTL on every claim.
+ */
+export function evacuationHorizonMsFor(
+  claimId: string,
+  capAtCeiling: boolean | undefined,
+  options: Pick<HeadroomOptions, 'evacuationHorizonMs' | 'weeklyTerminalHorizonMs'> = {},
+): number {
+  const cacheHorizon = options.evacuationHorizonMs ?? DEFAULT_EVACUATION_HORIZON_MS;
+  if (capAtCeiling) return cacheHorizon;
+  if (!WEEKLY_CLAIMS.includes(claimId as ClaimId)) return cacheHorizon;
+  return Math.max(cacheHorizon, options.weeklyTerminalHorizonMs ?? DEFAULT_WEEKLY_TERMINAL_HORIZON_MS);
+}
+
 export function computeHeadroom(
   account: AccountState,
   model: string | undefined,
   nowMs: number,
-  evacuateThreshold: number = DEFAULT_EVACUATE_UTILIZATION,
-  evacuationHorizonMs: number = DEFAULT_EVACUATION_HORIZON_MS,
-  fresh5hBucket: number = DEFAULT_FRESH_5H_BUCKET,
-  expiringHorizonMs: number = DEFAULT_EXPIRING_WEEKLY_HORIZON_MS,
-  expiringMinHeadroom: number = DEFAULT_EXPIRING_MIN_HEADROOM,
+  options: HeadroomOptions = {},
 ): HeadroomBreakdown {
+  const evacuateThreshold = options.evacuateThreshold ?? DEFAULT_EVACUATE_UTILIZATION;
+  const evacuationHorizonMs = options.evacuationHorizonMs ?? DEFAULT_EVACUATION_HORIZON_MS;
+  const fresh5hBucket = options.fresh5hBucket ?? DEFAULT_FRESH_5H_BUCKET;
+  const expiringHorizonMs = options.expiringHorizonMs ?? DEFAULT_EXPIRING_WEEKLY_HORIZON_MS;
+  const expiringMinHeadroom = options.expiringMinHeadroom ?? DEFAULT_EXPIRING_MIN_HEADROOM;
   const quota = quotaForModel(model);
   const claims = projectExpiredClaims(account.claims, nowMs);
   let evacuationTriggered = false;
+  let weeklyTerminal = false;
   let fiveHourBucket = 0;
   let fiveHourProjected: number | undefined;
   const overage = claims?.byId['overage'];
@@ -344,6 +436,7 @@ export function computeHeadroom(
     reservedForFable: 0,
     fiveHourBucket: 0,
     weeklyExpiring: false,
+    weeklyTerminal: false,
     evacuating: false,
     requiresOverage: false,
     overageAvailable,
@@ -381,11 +474,20 @@ export function computeHeadroom(
       if (peak === undefined || observed > peak) peak = observed;
       // A window that refills before the prompt cache expires is not worth a
       // paid move: evacuating a 260k-token session to conserve a 5h bucket
-      // that resets in seven minutes costs 20x and saves nothing. Only claims
-      // whose reset is beyond the cache horizon can trigger an evacuation.
-      const resetsSoon =
-        claim.reset !== undefined && claim.reset * 1000 - nowMs <= evacuationHorizonMs;
+      // that resets in seven minutes costs 20x and saves nothing. A WEEKLY
+      // window gets a much longer horizon, because what is left on it when it
+      // rolls over is destroyed rather than carried — see
+      // `evacuationHorizonMsFor`. Only claims whose reset is beyond the
+      // applicable horizon can trigger an evacuation.
+      const horizon = evacuationHorizonMsFor(id, account.capAtCeiling, {
+        evacuationHorizonMs,
+        weeklyTerminalHorizonMs: options.weeklyTerminalHorizonMs,
+      });
+      const resetsSoon = claim.reset !== undefined && claim.reset * 1000 - nowMs <= horizon;
       if (observed >= evacuateThreshold && !resetsSoon) evacuationTriggered = true;
+      if (observed >= evacuateThreshold && resetsSoon && WEEKLY_CLAIMS.includes(id)) {
+        weeklyTerminal = true;
+      }
     }
 
     // Put every claim in the same unit: normalized requests-of-this-model as a
@@ -471,6 +573,7 @@ export function computeHeadroom(
     fiveHourProjected,
     fiveHourBucket,
     weeklyExpiring,
+    weeklyTerminal,
     evacuating,
     requiresOverage: headroom <= 0,
     eligible: headroom > 0 || overageAvailable,
@@ -512,6 +615,13 @@ export type SelectInput = {
    * disables the term.
    */
   expiringHorizonMs?: number;
+  /**
+   * How close a weekly reset must be before the evacuation ceiling stops
+   * applying to that claim, so the account burns its remainder to zero. `0`
+   * restores the flat ceiling for every account. See
+   * DEFAULT_WEEKLY_TERMINAL_HORIZON_MS.
+   */
+  weeklyTerminalHorizonMs?: number;
 };
 
 export type Selection = {
@@ -545,9 +655,12 @@ export function selectAccount(input: SelectInput): Selection {
   const expiringHorizon = input.expiringHorizonMs ?? DEFAULT_EXPIRING_WEEKLY_HORIZON_MS;
   const fable = quotaForModel(input.model).extraClaim !== undefined;
   const breakdown = input.accounts.map(a =>
-    computeHeadroom(
-      a, input.model, input.nowMs, threshold, DEFAULT_EVACUATION_HORIZON_MS, bucketWidth, expiringHorizon,
-    ),
+    computeHeadroom(a, input.model, input.nowMs, {
+      evacuateThreshold: threshold,
+      fresh5hBucket: bucketWidth,
+      expiringHorizonMs: expiringHorizon,
+      weeklyTerminalHorizonMs: input.weeklyTerminalHorizonMs,
+    }),
   );
   const bySlot = new Map(breakdown.map(b => [b.slot, b]));
 
@@ -612,8 +725,12 @@ export function selectAccount(input: SelectInput): Selection {
     [...pool].sort((a, b) => cmpExpiring(a, b) || cmpBucket(a, b) || cmpBase(a, b));
   const rank = (pool: HeadroomBreakdown[]) => [...pool].sort(cmpFresh);
   // Only accounts that can take a fresh session count: an expiring account
-  // above the ceiling is not somewhere a session should be moved.
-  const expiring = healthy.filter(b => b.weeklyExpiring);
+  // above the ceiling is not somewhere a session should be moved. A warm move
+  // also clears a higher headroom bar than a fresh placement does, because it
+  // is the one that pays a cache re-create for the privilege.
+  const expiring = healthy.filter(
+    b => b.weeklyExpiring && b.headroom >= DEFAULT_EXPIRING_PULL_MIN_HEADROOM,
+  );
 
   if (input.affinitySlot) {
     const held = bySlot.get(input.affinitySlot);
@@ -654,17 +771,22 @@ export function selectAccount(input: SelectInput): Selection {
   const unbucketed = rankBase(healthy)[0];
   const noResetDay = rankNoResetDay(healthy)[0];
   // The reset-day term is reported when it changed the outcome; the bucket
-  // note otherwise, so a reason names the one term that decided.
-  const bucketNote = pick && noResetDay && pick.slot !== noResetDay.slot
-    ? `; weekly on ${pick.slot} resets in ${days(pick)}, earliest, beat ${noResetDay.slot} (${days(noResetDay)})`
-    : pick && unbucketed && pick.slot !== unbucketed.slot
-      ? `; projected 5h bucket ${pick.fiveHourBucket} on ${pick.slot} beat bucket ${unbucketed.fiveHourBucket} on ${unbucketed.slot}`
-      : '';
+  // note otherwise, so a reason names the one term that decided. An expiring
+  // pick is neither: it outranks both, and `unbucketed` — which drops the
+  // expiring term along with the bucket — would otherwise credit the bucket
+  // for an outcome the deadline decided.
+  const bucketNote = pick?.weeklyExpiring
+    ? ''
+    : pick && noResetDay && pick.slot !== noResetDay.slot
+      ? `; weekly on ${pick.slot} resets in ${days(pick)}, earliest, beat ${noResetDay.slot} (${days(noResetDay)})`
+      : pick && unbucketed && pick.slot !== unbucketed.slot
+        ? `; projected 5h bucket ${pick.fiveHourBucket} on ${pick.slot} beat bucket ${unbucketed.fiveHourBucket} on ${unbucketed.slot}`
+        : '';
   if (pick) {
     const broke = Boolean(input.affinitySlot && input.affinitySlot !== pick.slot);
     const evacuated = fable && broke && bySlot.get(input.affinitySlot!)?.evacuating === true;
     const expiringNote = pick.weeklyExpiring
-      ? `weekly quota on ${pick.slot} expires in ${((pick.projectedWeeklyResetAt! - input.nowMs) / 3_600_000).toFixed(1)}h with ${(pick.headroom * 100).toFixed(0)}% headroom unspent`
+      ? `weekly quota on ${pick.slot} expires in ${((pick.projectedWeeklyResetAt! - input.nowMs) / 3_600_000).toFixed(1)}h with ${(pick.headroom * 100).toFixed(0)}% headroom unspent${pick.weeklyTerminal ? `, burning past the ${(threshold * 100).toFixed(0)}% ceiling` : ''}`
       : undefined;
     return {
       slot: pick.slot,

@@ -568,6 +568,32 @@ test('the evacuation marker follows the router and spares a window refilling wit
   );
 });
 
+test('the badge follows the router into the terminal weekly window, and honours a cap', () => {
+  // The router lifts the ceiling for a weekly resetting inside 8h, so the
+  // badge must stop claiming the account is being evacuated — and must put it
+  // back for a slot the operator capped.
+  const terminal = world([{ slot: '1', email: 'a@b.com', u5h: 0.0, u7d: 0.95, reset7d: 2.7 * 3600 }]);
+  const outside = world([{ slot: '1', email: 'a@b.com', u5h: 0.0, u7d: 0.95, reset7d: 9 * 3600 }]);
+  assert.equal(
+    gather({}, { ...terminal, nowMs: NOW }).accounts[0]!.evacuating,
+    false,
+    'inside the terminal horizon the remainder is spent, not conserved',
+  );
+  assert.equal(
+    gather({}, { ...terminal, nowMs: NOW }).accounts[0]!.expiring,
+    true,
+    'and it is where fresh sessions go',
+  );
+  assert.equal(
+    gather({}, { ...outside, nowMs: NOW }).accounts[0]!.evacuating,
+    true,
+    'outside it the flat ceiling still applies',
+  );
+  const capped = gather({}, { ...terminal, nowMs: NOW, cappedSlots: new Set(['1']) }).accounts[0]!;
+  assert.equal(capped.evacuating, true, 'a capped slot keeps the flat ceiling');
+  assert.equal(capped.expiring, false);
+});
+
 test('the evacuation marker fires on the Fable-only weekly, which has no bar of its own', () => {
   // 7d_oi drives routing but is not one of the two bars, so without this the
   // user watches two calm bars while every session is being moved off.
