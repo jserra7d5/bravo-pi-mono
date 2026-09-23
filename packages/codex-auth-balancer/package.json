@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Owned-state Codex auth balancer library and CLI.",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
   "exports": {
@@ -30,14 +32,16 @@
     "test": "npm run build && node --test dist/test/*.test.js"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-ai": "0.87.1",
     "@earendil-works/pi-coding-agent": "latest"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-ai": "0.87.1",
     "@earendil-works/pi-coding-agent": "latest",
     "@types/node": "latest",
     "typescript": "latest"
   },
-  "engines": { "node": ">=22.13" }
+  "engines": {
+    "node": ">=22.13"
+  }
 }

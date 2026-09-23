@@ -6,6 +6,7 @@ import type {
   Model,
   SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
+import { estimateContextTokens, estimateMessageTokens } from '@earendil-works/pi-ai/utils/estimate';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
@@ -43,65 +44,24 @@ const UPSTREAM_PROVIDER = 'openai-codex';
 const API = 'openai-codex-responses' as const;
 const DEFAULT_EXPECTED_RUNTIME_MS = 10 * 60_000;
 const DEFAULT_TTL_SAFETY_BUFFER_MS = 60_000;
-const ESTIMATED_IMAGE_CHARS = 4800;
 
 function safeJsonStringify(value: unknown): string {
   try { return JSON.stringify(value) ?? 'undefined'; }
   catch { return '[unserializable]'; }
 }
 
-function contentChars(content: Context['messages'][number]['content']): number {
-  if (typeof content === 'string') return content.length;
-  return content.reduce((chars, block) => chars + (block.type === 'text' ? block.text.length : ESTIMATED_IMAGE_CHARS), 0);
-}
-
-/** Mirror Pi 0.84.2's chars/4 estimate for messages after authoritative provider usage. */
+/** Use the installed Pi runtime's message estimate. */
 export function estimateBalancedMessageTokens(message: Context['messages'][number]): number {
-  if (message.role === 'user' || message.role === 'toolResult') return Math.ceil(contentChars(message.content) / 4);
-  let chars = 0;
-  for (const block of message.content) {
-    if (block.type === 'text') chars += block.text.length;
-    else if (block.type === 'thinking') chars += block.thinking.length;
-    else chars += block.name.length + safeJsonStringify(block.arguments).length;
-  }
-  return Math.ceil(chars / 4);
+  return estimateMessageTokens(message);
 }
 
-function assistantUsageTokens(message: AssistantMessage): number {
-  return message.usage.totalTokens || message.usage.input + message.usage.output + message.usage.cacheRead + message.usage.cacheWrite;
-}
-
-/** Estimate outgoing Context using Pi 0.84.2's latest-valid-usage plus trailing-content accounting. */
+/** Estimate outgoing Context using the installed Pi runtime's accounting. */
 export function estimateBalancedContextTokens(context: Context): number {
-  let latestPrefixTimestamp = Number.NEGATIVE_INFINITY;
-  let usageIndex: number | undefined;
-  let usageTokens = 0;
-  for (let index = 0; index < context.messages.length; index++) {
-    const message = context.messages[index];
-    if (message.role === 'assistant') {
-      const tokens = assistantUsageTokens(message);
-      if (message.timestamp >= latestPrefixTimestamp && message.stopReason !== 'aborted' && message.stopReason !== 'error' && tokens > 0) {
-        usageIndex = index;
-        usageTokens = tokens;
-      }
-    }
-    latestPrefixTimestamp = Math.max(latestPrefixTimestamp, message.timestamp);
-  }
-
-  if (usageIndex !== undefined) {
-    const trailingMessages = context.messages.slice(usageIndex + 1);
-    const trailingTokens = trailingMessages.reduce((sum, message) => sum + estimateBalancedMessageTokens(message), 0);
-    const addedNames = new Set(trailingMessages
-      .filter((message) => message.role === 'toolResult')
-      .flatMap((message) => message.addedToolNames ?? []));
-    const addedTools = context.tools?.filter((tool) => addedNames.has(tool.name)) ?? [];
-    return usageTokens + trailingTokens + (addedTools.length ? Math.ceil(safeJsonStringify(addedTools).length / 4) : 0);
-  }
-
-  const messageTokens = context.messages.reduce((sum, message) => sum + estimateBalancedMessageTokens(message), 0);
+  const estimate = estimateContextTokens(context.messages);
+  if (estimate.lastUsageIndex !== null) return estimate.tokens;
   const systemTokens = context.systemPrompt ? Math.ceil(context.systemPrompt.length / 4) : 0;
   const toolTokens = context.tools?.length ? Math.ceil(safeJsonStringify(context.tools).length / 4) : 0;
-  return messageTokens + systemTokens + toolTokens;
+  return estimate.tokens + systemTokens + toolTokens;
 }
 
 function balancedHardContextLimit(model: Model<typeof API>): number | undefined {

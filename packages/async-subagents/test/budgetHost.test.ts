@@ -67,8 +67,9 @@ test("real Pi loader/session command activates task tools, persists state, and i
     assert.equal(manager.getBranch().filter((entry: any) => entry.type === "custom" && entry.customType === "bravo-budget-auto-swarm-state").length, legacyEntryCount);
     let seen: Context | undefined; faux.setResponses([(context) => { seen = context; return fauxAssistantMessage("ok"); }]);
     await bounded(session.prompt("render policy"));
-    assert.match(seen?.systemPrompt ?? "", /## Budget Auto Swarm/);
-    assert.match(seen?.systemPrompt ?? "", /Budget auto swarm: enabled/);
+    const activePrompt = `${seen?.systemPrompt ?? ""}\n${JSON.stringify(seen?.messages.filter((message) => message.role === "system") ?? [])}`;
+    assert.match(activePrompt, /## Budget Auto Swarm/);
+    assert.match(activePrompt, /Budget auto swarm: enabled/);
     let rejectedContext: Context | undefined;
     const runStore = new RunStore({ cwd: root }), beforeRuns = runStore.readRunIndex().length;
     faux.setResponses([
@@ -142,7 +143,7 @@ test("real Pi loader/session command activates task tools, persists state, and i
     await bounded((session as any).extensionRunner.emit({ type: "session_tree" }));
     let failedTreeContext: Context | undefined; faux.setResponses([(context) => { failedTreeContext = context; return fauxAssistantMessage("tree failure observed"); }]);
     await bounded(session.prompt("tree failure policy"));
-    assert.doesNotMatch(failedTreeContext?.systemPrompt ?? "", /## Budget Auto Swarm/);
+    assert.doesNotMatch(`${failedTreeContext?.systemPrompt ?? ""}\n${JSON.stringify(failedTreeContext?.messages.filter((message) => message.role === "system") ?? [])}`, /## Budget Auto Swarm/);
     assert.match(notifications.at(-1) ?? "", /(?:restore|global sync) failed(?: closed)?:.*required task tools/i);
     assert.equal(statuses.at(-1)?.[1], undefined);
     const treeGuardOff: any = await bounded<any>(invokeStart({}));
@@ -156,7 +157,7 @@ test("real Pi loader/session command activates task tools, persists state, and i
     await bounded((session as any).extensionRunner.emit({ type: "session_start" })); await bounded(session.waitForIdle());
     let failedStartContext: Context | undefined; faux.setResponses([(context) => { failedStartContext = context; return fauxAssistantMessage("start failure observed"); }]);
     await bounded(session.prompt("start failure policy"));
-    assert.doesNotMatch(failedStartContext?.systemPrompt ?? "", /## Budget Auto Swarm/);
+    assert.doesNotMatch(`${failedStartContext?.systemPrompt ?? ""}\n${JSON.stringify(failedStartContext?.messages.filter((message) => message.role === "system") ?? [])}`, /## Budget Auto Swarm/);
     assert.equal(statuses.at(-1)?.[1], undefined);
     assert.match(notifications.at(-1) ?? "", /(?:restore|global sync) failed(?: closed)?:.*required task tools/i);
     const startGuardOff: any = await bounded<any>(invokeStart({}));
@@ -192,6 +193,6 @@ test("real Pi loader/session command activates task tools, persists state, and i
     (session as any).setActiveToolsByName = originalSet;
     let disabledContext: Context | undefined; faux.setResponses([(context) => { disabledContext = context; return fauxAssistantMessage("ok"); }]);
     await bounded(session.prompt("policy remains off"));
-    assert.doesNotMatch(disabledContext?.systemPrompt ?? "", /## Budget Auto Swarm/);
+    assert.doesNotMatch(`${disabledContext?.systemPrompt ?? ""}\n${JSON.stringify(disabledContext?.messages.filter((message) => message.role === "system") ?? [])}`, /## Budget Auto Swarm/);
   } finally { session?.dispose(); if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath; rmSync(root, { recursive: true, force: true }); }
 });
