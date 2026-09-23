@@ -138,7 +138,7 @@ function wakeupEnvelope(wakeup: WakeupMessage): string {
   if (wakeup.state === "waiting_for_input" || wakeup.event?.type === "question" || wakeup.state === "blocked" || wakeup.event?.type === "blocked") {
     lines.push(`Reply with subagent_message({ runId: "${wakeup.runId}", type: "answer", ... }) when you have the requested input. Do not call subagent_result for this non-terminal wakeup.`);
   } else if (wakeup.state === "paused") {
-    lines.push(`If this result is still needed, choose a bounded extension and call subagent_continue({ runId: "${wakeup.runId}", maxRunSeconds: 900 }) to continue. Adjust maxRunSeconds to the smallest reasonable budget for the remaining work, or call subagent_interrupt({ runId: "${wakeup.runId}", action: "cancel" }) if it is no longer needed.`);
+    lines.push(`If this result is still needed, choose a bounded extension and call subagent_continue({ runId: "${wakeup.runId}", additionalRunSeconds: 900 }) to resume. Adjust additionalRunSeconds to the smallest reasonable budget for the remaining work, or call subagent_interrupt({ runId: "${wakeup.runId}", action: "cancel" }) if it is no longer needed.`);
   } else if (livenessActionState) {
     const inspect = `Inspect current transport state with subagent_status({ runIds: ["${wakeup.runId}"], includeEvents: true, maxEvents: 10 })`;
     if (wakeup.state === "rate_limited") lines.push(`${inspect}; wait until the reported rate-limit window clears before continuing or messaging the child.`);

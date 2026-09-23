@@ -10,6 +10,10 @@ import { createRootSession } from "../src/rootSession.js";
 import { buildSubagentTools } from "../extensions/pi/tools.js";
 import { watchSubagents } from "../src/watch.js";
 import { spawnSync } from "node:child_process";
+import { createRunEvent } from "../src/events.js";
+import { acquireRootSessionLease } from "../src/leases.js";
+import { pollWakeups, writeDeliverySubscription } from "../extensions/pi/wakeups.js";
+import { SCHEMA_VERSION } from "../src/types.js";
 
 function setup() {
   const cwd = mkdtempSync(join(tmpdir(), "run-budget-"));
@@ -78,7 +82,7 @@ test("invalid overrides fail before allocation and legacy status/result remain r
 
 test("CLI rejects meaningless start timeout", () => {
   const cli = new URL("../src/cli.js", import.meta.url);
-  const outcome = spawnSync(process.execPath, [cli.pathname, "start", "--agent", "scout", "--task", "x", "--timeout-seconds", "2"], { encoding: "utf8", timeout: 5000, env: { ...process.env, ASYNC_SUBAGENTS_HOME: mkdtempSync(join(tmpdir(), "budget-cli-")) } });
+  const outcome = spawnSync(process.execPath, [cli.pathname, "start", "--agent", "scout", "--task", "x", "--timeout-seconds", "2"], { encoding: "utf8", timeout: 15000, env: { ...process.env, ASYNC_SUBAGENTS_HOME: mkdtempSync(join(tmpdir(), "budget-cli-")) } });
   assert.notEqual(outcome.status, 0);
   assert.match(outcome.stdout, /--timeout-seconds is only for blocking run/);
 });
@@ -102,4 +106,26 @@ test("parent-paused resume still applies additional seconds to live supervisor",
   assert.equal(resumed.isError, undefined);
   assert.equal((await waitSubagents(w.store, { runIds: [started.runId], timeoutMs: 10000, pollIntervalMs: 50 })).results[0]?.state, "expired");
   assert.equal(w.store.readStatus(started.runId).timeout?.additionalRunSeconds, 0.2);
+});
+
+test("paused wakeup next-action resumes a parent-paused run", { timeout: 15000 }, async () => {
+  const w = setup();
+  const started = await startSubagent({ agent: "scout", task: "Work", cwd: w.cwd, runRoot: w.store.runRoot, parentRunId: w.root.parentRunId, rootSessionId: w.root.rootSessionId, fake: { mode: "child", command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] } });
+  try {
+    assert.equal((await w.call("subagent_interrupt", { runId: started.runId, action: "pause" })).isError, undefined);
+    for (let i = 0; i < 100 && w.store.readStatus(started.runId).state !== "paused"; i++) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(w.store.readStatus(started.runId).state, "paused");
+    w.store.appendEvent(started.runId, createRunEvent({ sequence: w.store.readEvents(started.runId).records.length + 1, runId: started.runId, parentRunId: w.root.parentRunId, type: "liveness", data: { state: "paused" }, summary: "Parent paused", wake: true }));
+    writeDeliverySubscription(w.store, { schemaVersion: SCHEMA_VERSION, parentRunId: w.root.parentRunId, runId: started.runId, notifyOn: ["liveness"], createdAt: new Date().toISOString() });
+    acquireRootSessionLease({ cwd: w.cwd, rootSessionId: w.root.rootSessionId, ownerId: "budget-test", ttlMs: 10000 });
+    const wakeup = pollWakeups({ store: w.store, parentRunId: w.root.parentRunId, rootSessionId: w.root.rootSessionId, ownerId: "budget-test" }).find(delivery => delivery.message.state === "paused");
+    assert.ok(wakeup, "real paused wakeup delivered");
+    const next = wakeup.message.next?.find(action => action.tool === "subagent_continue");
+    assert.ok(next, "paused wakeup offers continue");
+    const response = await w.call(next.tool, next.args);
+    assert.equal(response.isError, undefined, JSON.stringify(response.details));
+    assert.equal(response.details.controlQueued, true);
+  } finally {
+    await w.call("subagent_interrupt", { runId: started.runId, action: "cancel" });
+  }
 });
