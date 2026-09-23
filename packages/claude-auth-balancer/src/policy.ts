@@ -46,23 +46,32 @@
 // accounts is the quota with the nearest deadline; the 5h window refills by
 // itself. Accounts resetting on the same day still spread on 5h pressure, so
 // the herd guard survives among the cohort that matters. Warm sessions are
-// untouched: only the 12h expiring pull moves them.
+// untouched: only the expiring pull moves them.
 //
-// One thing outranks all of that, affinity included: weekly quota that is
-// about to expire unspent. A weekly window resetting within the horizon still
-// holding meaningful headroom is value with a hard deadline; nothing routed
-// elsewhere can ever recover it. A cache re-create is a one-time ~20x request;
-// a week of unspent quota is thousands of requests. See
-// DEFAULT_EXPIRING_WEEKLY_HORIZON_MS.
+// Time is measured in expected DEMAND, not on the clock (see ./demand.ts and
+// docs/specs/claude-balancer-demand-rate). Thirty hours of Friday-into-Saturday
+// hold less of the operator's work than twelve hours of a Tuesday, so a clock
+// horizon cannot say whether quota will be spent before its reset. Two
+// demand terms replace the clock horizons:
 //
-// Inside the last hours of a weekly window the 95% ceiling inverts: it was
-// built to keep fresh sessions off an account that is nearly spent, but an
-// account that is nearly spent AND about to reset is the one place whose
-// remainder is otherwise thrown away. So a weekly claim resetting within
-// DEFAULT_WEEKLY_TERMINAL_HORIZON_MS does not raise the ceiling at all, and
-// the account keeps taking fresh sessions down to zero. The 5h claim is
-// unaffected: it refills by itself and never expires unspent. An account named
-// in CLAUDE_AUTH_BALANCER_CAPPED_SLOTS opts out and keeps the flat 95% cap.
+//   * pacing holds back quota in proportion to the demand still ahead of the
+//     reset, not the time;
+//   * `computeFleetTerms` gives each account a SURPLUS: its weekly remainder
+//     minus what it can absorb before its reset — its share of expected demand
+//     in deadline order, capped by what its 5h window can burn per hour.
+//
+// An account with surplus is EXPIRING: that quota will die at the reset unless
+// sessions are sent there, so it outranks every other term for fresh picks,
+// affinity included for a large enough surplus. The 95% ceiling is lifted on
+// a weekly claim when the account has surplus (demand cannot exhaust it, so a
+// session started there is not about to be forced off) or when its reset is
+// within eight hours of average demand (the remainder is destroyed at the
+// reset). The 5h claim is unaffected: it refills by itself and never expires
+// unspent. A slot with a weekly reserve (CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE)
+// has it removed before any of this runs; see `applyWeeklyReserve`. With no
+// demand model (under a week of history)
+// there is no surplus and nothing is expiring, and demand hours are clock
+// hours.
 //
 // Accounts need not be the same plan. Utilization is a fraction of that
 // account's OWN budget, and a Max 5x budget is a quarter of a 20x's on `5h` and
@@ -77,6 +86,8 @@
 
 import type { Claim, ClaimId, Claims } from './claims.js';
 import { claimHasReset, projectExpiredClaims } from './claims.js';
+import type { DemandModel } from './demand.js';
+import { expectedDemand, rateLimitedDemand } from './demand.js';
 
 /** General-quota claims every request burns, regardless of model. */
 export const GENERAL_CLAIMS: ClaimId[] = ['5h', '7d'];
@@ -167,12 +178,12 @@ export type AccountState = {
   /** Hard interactive-login session deadline (ms), when supplied by Claude. */
   refreshTokenExpiresAt?: number;
   /**
-   * Opt this account out of the terminal-weekly burndown: it keeps the flat
-   * 95% ceiling even in the last hours before its weekly reset, so its final
-   * 5% is held in reserve rather than spent. Set from
-   * CLAUDE_AUTH_BALANCER_CAPPED_SLOTS; see `resolveCappedSlots`.
+   * Fraction of each weekly budget (`7d`, `7d_oi`) the balancer never
+   * spends, held for the operator's own use outside it. Set from
+   * CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE; see `resolveWeeklyReserves` and
+   * `applyWeeklyReserve`.
    */
-  capAtCeiling?: boolean;
+  weeklyReserve?: number;
   /** Plan size. Absent means the reference (Max 20x) plan. */
   capacity?: PlanCapacity;
 };
@@ -210,6 +221,7 @@ export const DEFAULT_EVACUATE_UTILIZATION = 0.95;
  */
 export const DEFAULT_FRESH_5H_BUCKET = 0.25;
 
+
 /**
  * Fraction of the 5h window that must have elapsed before its average burn
  * rate is trusted to project utilization at the reset. Under this (30 minutes)
@@ -219,40 +231,37 @@ export const DEFAULT_FRESH_5H_BUCKET = 0.25;
 export const DEFAULT_5H_PROJECTION_MIN_ELAPSED = 0.1;
 
 /**
- * How close a general `7d` reset must be for an account's remaining weekly
- * quota to count as expiring. Inside this window the account outranks every
- * other term for fresh picks, and warm sessions held elsewhere are moved onto
- * it — the one case where routing deliberately pays a cache re-create for a
- * session that could have stayed put. Quota that reaches the reset unspent is
- * gone; a re-create is one expensive request.
- *
- * Twelve hours is long enough for moved sessions to burn a real share of the
- * remainder and short enough that an account spends most of its week under
- * the ordinary ranking.
- */
-export const DEFAULT_EXPIRING_WEEKLY_HORIZON_MS = 12 * 60 * 60 * 1000;
-
-/**
- * Minimum model-normalized headroom for an expiring account to lead FRESH
- * ranking. A fresh session has no cache to lose, so placing it on an expiring
- * account costs nothing and almost any remainder with a deadline is worth
- * taking. The floor exists only to keep a numerically-zero remainder — or the
- * rounding dust either side of it — from claiming the top of the ranking.
+ * Minimum surplus (W20) for an account to count as expiring and lead FRESH
+ * ranking, and minimum model-normalized headroom it must still have. A fresh
+ * session has no cache to lose, so almost any remainder the demand cannot
+ * reach is worth taking; the floor only keeps rounding dust from claiming
+ * the top of the ranking.
  */
 export const DEFAULT_EXPIRING_MIN_HEADROOM = 0.01;
 
 /**
- * Minimum model-normalized headroom for an expiring account to PULL a warm
- * session off another account. Higher than the fresh floor because this is the
- * one move that deliberately pays a ~20x cache re-create: below this the
- * unspent remainder is not clearly larger than the re-creates it would
- * trigger, and the 5h claim may be what is binding anyway.
- *
- * Like all headroom it is in Max 20x units, so a 5x account must hold 40% of
- * its own 5h window and 17% of its weekly to pull: a herd moved onto a quarter-
- * sized 5h window would exhaust it and pay a second re-create.
+ * Minimum surplus (W20), and minimum plan-scaled headroom, for an expiring
+ * account to PULL a warm session off another account. Higher than the fresh floor because this is the one move
+ * that deliberately pays a ~20x cache re-create: below it the unreachable
+ * remainder is not clearly larger than the re-creates it would trigger.
  */
 export const DEFAULT_EXPIRING_PULL_MIN_HEADROOM = 0.1;
+
+/**
+ * A session is pulled at most once per this long: its lease must have been
+ * on its current slot at least this long. `touch` resets `created_at` on a
+ * slot change, so no extra state is needed to stop a session ping-ponging
+ * between two accounts that take turns being expiring.
+ */
+export const DEFAULT_PULL_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * How long a session must fit in an account's remaining 5h window, at its
+ * measured burn rate, to be placed there by a re-pick or a pull: the cache
+ * TTL, which is how long a session placed there would stay without paying a
+ * re-create to leave.
+ */
+export const HEAVY_SESSION_HORIZON_MS = 60 * 60 * 1000;
 
 /**
  * Weekly claims. These are the budgets that can expire unspent, so they are
@@ -262,20 +271,120 @@ export const DEFAULT_EXPIRING_PULL_MIN_HEADROOM = 0.1;
 export const WEEKLY_CLAIMS: ClaimId[] = ['7d', '7d_oi'];
 
 /**
- * How close a WEEKLY reset must be before the 95% ceiling stops applying to
- * that claim.
- *
- * The ceiling keeps fresh sessions off an account that is nearly spent, on the
- * theory that they would exhaust it and immediately pay a cache re-create
- * somewhere else. That theory holds all week and inverts at the end of it: the
- * remainder on a window that resets in a few hours is thrown away otherwise,
- * so one re-create per session is cheap against it. Eight hours is long enough
- * to actually burn a 5% remainder across the live session population and short
- * enough that the ceiling means what it says for the rest of the week.
- *
- * `capAtCeiling` on an account disables this, keeping the flat 95% cap.
+ * How close a weekly reset must be, in hours of AVERAGE demand, before the 95%
+ * ceiling stops applying to that claim. The ceiling keeps fresh sessions off
+ * a nearly-spent account so they are not forced off it again; at the end of a
+ * week that inverts, because the remainder is destroyed at the reset. Eight
+ * average hours is enough to burn a 5% remainder. Measured in demand, a quiet
+ * Friday night reaches it well before eight clock hours out, and a Tuesday
+ * peak later; with no demand model the hours are clock hours.
  */
-export const DEFAULT_WEEKLY_TERMINAL_HORIZON_MS = 8 * 60 * 60 * 1000;
+export const DEFAULT_WEEKLY_TERMINAL_DEMAND_HOURS = 8;
+
+/**
+ * One account's position in the fleet's weekly deadline order, W20.
+ * See `computeFleetTerms`.
+ */
+export type FleetTerm = {
+  /** General `7d` remainder. */
+  weekly: number;
+  /** What the account can burn before its weekly reset. */
+  absorbable: number;
+  /** `weekly − absorbable`. Positive means quota the demand cannot reach. */
+  surplus: number;
+};
+
+/**
+ * The account as the router sees it once its weekly reserve is set aside: a
+ * smaller weekly budget, and weekly utilization measured against that
+ * budget. With a 10% reserve, 45% used reads as 50%, and 90% used reads as
+ * exhausted. Everything downstream (the ceiling, the burndown, pacing,
+ * surplus, headroom) then works unchanged and cannot reach the reserve. The
+ * `5h` claim is untouched: it refills on its own.
+ */
+export function applyWeeklyReserve(account: AccountState): AccountState {
+  const reserve = account.weeklyReserve;
+  if (!reserve || !(reserve > 0 && reserve < 1) || !account.claims) return account;
+  const usable = 1 - reserve;
+  const byId = { ...account.claims.byId };
+  for (const id of WEEKLY_CLAIMS) {
+    const claim = byId[id];
+    if (claim?.utilization === undefined) continue;
+    byId[id] = { ...claim, utilization: Math.max(0, claim.utilization) / usable };
+  }
+  // At the reserve the server still has weekly quota, so it would not bill
+  // overage: it would spend the reserve. Overage is off for the account there.
+  const reached = WEEKLY_CLAIMS.some(id => (byId[id]?.utilization ?? 0) >= 1);
+  if (reached && byId['overage']) byId['overage'] = { ...byId['overage'], status: 'rejected' };
+  const capacity = account.capacity ?? REFERENCE_CAPACITY;
+  return {
+    ...account,
+    weeklyReserve: undefined,
+    claims: { ...account.claims, byId },
+    capacity: { ...capacity, weekly: capacity.weekly * usable },
+  };
+}
+
+/**
+ * Each account's weekly surplus, from the demand forecast.
+ *
+ * Accounts are taken in weekly-reset order (earliest deadline first, which is
+ * the allocation that strands least). Each absorbs what is left of the
+ * expected fleet demand before its reset after earlier deadlines take theirs,
+ * capped by what its own 5h window can burn in that time — `min(demand,
+ * 5h cap / 5h)` summed per hour, so a 5x's quarter-size window limits it even
+ * when demand is plentiful. Quota refilled by an earlier reset does not come
+ * off a later account: it has a later deadline, so in deadline order it is
+ * spent after this account's.
+ *
+ * The remainder is the requested model's: for Fable, the lesser of the
+ * general `7d` and its own `7d_oi` sub-budget (`remaining × fallback`), so a
+ * Fable session is never pulled toward general quota it cannot spend.
+ *
+ * Only accounts with an observed, future general-weekly reset get a term. An
+ * unopened window has no deadline, and an unobserved one is unknown. Returns
+ * an empty map without a demand profile.
+ */
+export function computeFleetTerms(
+  accounts: AccountState[],
+  nowMs: number,
+  demand: DemandModel | undefined,
+  model?: string,
+): Map<string, FleetTerm> {
+  const quota = quotaForModel(model);
+  const out = new Map<string, FleetTerm>();
+  if (!demand?.hourly) return out;
+  const live = accounts
+    .map(applyWeeklyReserve)
+    .map(a => {
+      if (a.health === 'needs-reauth') return undefined;
+      if (a.tokenExpiresAt !== undefined && a.tokenExpiresAt <= nowMs) return undefined;
+      const claims = projectExpiredClaims(a.claims, nowMs);
+      const claim = claims?.byId['7d'];
+      if (!claim?.reset || claim.reset * 1000 <= nowMs) return undefined;
+      let remaining = claimHeadroom(claim, nowMs);
+      if (remaining === undefined) return undefined;
+      if (quota.extraClaim) {
+        const extra = claimHeadroom(claims?.byId[quota.extraClaim], nowMs);
+        const share = claims?.fallbackPercentage ?? quota.subBudgetFraction ?? 1;
+        if (extra !== undefined) remaining = Math.min(remaining, extra * share);
+      }
+      const capacity = a.capacity ?? REFERENCE_CAPACITY;
+      return { slot: a.slot, resetMs: claim.reset * 1000, weekly: remaining * capacity.weekly, capacity };
+    })
+    .filter((a): a is NonNullable<typeof a> => a !== undefined)
+    .sort((a, b) => a.resetMs - b.resetMs || a.slot.localeCompare(b.slot, undefined, { numeric: true }));
+
+  let absorbedBefore = 0;
+  for (const a of live) {
+    const share = Math.max(0, expectedDemand(demand, nowMs, a.resetMs) - absorbedBefore);
+    const rate = (a.capacity.fiveHour * demand.k) / 5;
+    const absorbable = Math.min(share, rateLimitedDemand(demand, nowMs, a.resetMs, rate));
+    absorbedBefore += Math.min(a.weekly, absorbable);
+    out.set(a.slot, { weekly: a.weekly, absorbable, surplus: a.weekly - absorbable });
+  }
+  return out;
+}
 
 export type HeadroomBreakdown = {
   slot: string;
@@ -337,26 +446,38 @@ export type HeadroomBreakdown = {
    */
   fiveHourProjected?: number;
   /**
-   * Coarse 5h-pressure bucket, `floor(fiveHourProjected / DEFAULT_FRESH_5H_BUCKET)`.
-   * 0 is coolest. Leads fresh-pick ranking after expiring quota; affinity and
-   * eligibility are never affected by it. A window refilling within the cache
-   * horizon, or one with no observed utilization, buckets as 0.
+   * Coarse 5h-pressure bucket for a FRESH pick: the projected level plus what
+   * a typical fresh session would add to THIS account's window (its median
+   * first-hour burn over the account's 5h window in W20, so the same session
+   * weighs 4x on a 5x), over DEFAULT_FRESH_5H_BUCKET. 0 is coolest. Leads
+   * fresh-pick ranking after expiring quota; affinity and eligibility are never
+   * affected by it. A window refilling within the cache horizon buckets as 0.
    */
   fiveHourBucket: number;
   /**
-   * True when the general 7d window resets within the expiring horizon while
-   * the account still has at least DEFAULT_EXPIRING_MIN_HEADROOM and is not
+   * What is left of this account's 5h window, in W20. Undefined without a
+   * demand model (no measured `k`). Used by the heavy-session guard.
+   */
+  fiveHourRemaining?: number;
+  /**
+   * The account's surplus (see `computeFleetTerms`), W20. Zero without a
+   * demand model.
+   */
+  surplus: number;
+  /**
+   * True when the account has at least DEFAULT_EXPIRING_MIN_HEADROOM of
+   * surplus, still has that much model-normalized headroom, and is not
    * evacuating. Leads fresh ranking ahead of the 5h bucket. A warm session is
-   * moved onto it only above DEFAULT_EXPIRING_PULL_MIN_HEADROOM, which is the
-   * only condition that moves a warm non-Fable session off a serviceable
-   * account.
+   * moved onto it only above DEFAULT_EXPIRING_PULL_MIN_HEADROOM of surplus,
+   * which is the only condition that moves a warm non-Fable session off a
+   * serviceable account.
    */
   weeklyExpiring: boolean;
   /**
    * True when a weekly claim this model is gated on is at or above the
-   * evacuation threshold but resets inside the terminal horizon, so the
-   * ceiling was lifted and this account is burning its remainder down to zero.
-   * Reporting only — `evacuating` already carries the routing consequence.
+   * evacuation threshold but the account has surplus, so the ceiling was
+   * lifted and this account is burning its remainder down to zero. Reporting
+   * only — `evacuating` already carries the routing consequence.
    */
   weeklyTerminal: boolean;
   /** True when serving this request would require spending overage. */
@@ -421,31 +542,55 @@ export type HeadroomOptions = {
   evacuateThreshold?: number;
   evacuationHorizonMs?: number;
   fresh5hBucket?: number;
-  expiringHorizonMs?: number;
   expiringMinHeadroom?: number;
-  weeklyTerminalHorizonMs?: number;
+  /** Demand forecast: paces the weekly and sizes the 5h bucket and window. */
+  demand?: DemandModel;
+  /** This account's fleet term, from `computeFleetTerms`. */
+  fleet?: FleetTerm;
 };
 
+/** Hours of average demand until `resetMs`; clock hours without a demand profile. */
+export function demandHoursUntil(demand: DemandModel | undefined, nowMs: number, resetMs: number): number {
+  const clock = Math.max(0, resetMs - nowMs) / 3_600_000;
+  if (!demand?.hourly) return clock;
+  const perHour = demand.hourly.reduce((a, v) => a + v, 0) / demand.hourly.length;
+  return perHour > 0 ? expectedDemand(demand, nowMs, resetMs) / perHour : clock;
+}
+
 /**
- * How near a reset must be for a claim at or above the threshold to stop
- * raising the ceiling — the single place the two horizons are chosen between,
- * so the statusline badge and the router cannot disagree about what the
- * threshold means.
+ * Whether a claim at or above the threshold should NOT raise the ceiling — the
+ * single place this is decided, so the statusline badge and the router cannot
+ * disagree about what the threshold means.
  *
- * A `5h` claim gets the cache TTL: the only question there is whether a move
- * would buy anything before the prefix expired anyway. A weekly claim gets the
- * much longer terminal horizon, because its remainder expires for good. An
- * account with `capAtCeiling` is held to the cache TTL on every claim.
+ * Any claim refilling within the cache TTL is exempt: a move would buy nothing
+ * before the prefix expired anyway. A weekly claim is also exempt within
+ * DEFAULT_WEEKLY_TERMINAL_DEMAND_HOURS of demand before its reset, and
+ * whenever the account has surplus (the demand cannot exhaust it before the
+ * reset, so a session started there is not about to be forced off). Either
+ * way its remainder is otherwise thrown away. On an account with a weekly
+ * reserve these are utilizations of the budget above the reserve, so a lift
+ * spends up to the reserve and never into it.
  */
-export function evacuationHorizonMsFor(
+export function ceilingExempt(
   claimId: string,
-  capAtCeiling: boolean | undefined,
-  options: Pick<HeadroomOptions, 'evacuationHorizonMs' | 'weeklyTerminalHorizonMs'> = {},
-): number {
+  claim: Claim,
+  nowMs: number,
+  options: { fleet?: FleetTerm; demand?: DemandModel; evacuationHorizonMs?: number } = {},
+): boolean {
   const cacheHorizon = options.evacuationHorizonMs ?? DEFAULT_EVACUATION_HORIZON_MS;
-  if (capAtCeiling) return cacheHorizon;
-  if (!WEEKLY_CLAIMS.includes(claimId as ClaimId)) return cacheHorizon;
-  return Math.max(cacheHorizon, options.weeklyTerminalHorizonMs ?? DEFAULT_WEEKLY_TERMINAL_HORIZON_MS);
+  if (claim.reset !== undefined && claim.reset * 1000 - nowMs <= cacheHorizon) return true;
+  if (!WEEKLY_CLAIMS.includes(claimId as ClaimId)) return false;
+  if ((options.fleet?.surplus ?? 0) > 0) return true;
+  return claim.reset !== undefined &&
+    demandHoursUntil(options.demand, nowMs, claim.reset * 1000) <= DEFAULT_WEEKLY_TERMINAL_DEMAND_HOURS;
+}
+
+/** Share of the week's expected demand that still lies before `resetMs`, 0..1. */
+function demandFractionAhead(demand: DemandModel, nowMs: number, resetMs: number): number | undefined {
+  const week = 7 * 24 * 60 * 60 * 1000;
+  const whole = expectedDemand(demand, resetMs - week, resetMs);
+  if (!(whole > 0)) return undefined;
+  return Math.max(0, Math.min(1, expectedDemand(demand, nowMs, resetMs) / whole));
 }
 
 export function computeHeadroom(
@@ -454,10 +599,12 @@ export function computeHeadroom(
   nowMs: number,
   options: HeadroomOptions = {},
 ): HeadroomBreakdown {
+  account = applyWeeklyReserve(account);
   const evacuateThreshold = options.evacuateThreshold ?? DEFAULT_EVACUATE_UTILIZATION;
   const evacuationHorizonMs = options.evacuationHorizonMs ?? DEFAULT_EVACUATION_HORIZON_MS;
   const fresh5hBucket = options.fresh5hBucket ?? DEFAULT_FRESH_5H_BUCKET;
-  const expiringHorizonMs = options.expiringHorizonMs ?? DEFAULT_EXPIRING_WEEKLY_HORIZON_MS;
+  const demand = options.demand;
+  const fleet = options.fleet;
   const expiringMinHeadroom = options.expiringMinHeadroom ?? DEFAULT_EXPIRING_MIN_HEADROOM;
   const quota = quotaForModel(model);
   const capacity = account.capacity ?? REFERENCE_CAPACITY;
@@ -483,6 +630,7 @@ export function computeHeadroom(
     weeklyWindowUnopened,
     reservedForFable: 0,
     fiveHourBucket: 0,
+    surplus: fleet?.surplus ?? 0,
     weeklyExpiring: false,
     weeklyTerminal: false,
     evacuating: false,
@@ -523,17 +671,16 @@ export function computeHeadroom(
       // A window that refills before the prompt cache expires is not worth a
       // paid move: evacuating a 260k-token session to conserve a 5h bucket
       // that resets in seven minutes costs 20x and saves nothing. A WEEKLY
-      // window gets a much longer horizon, because what is left on it when it
-      // rolls over is destroyed rather than carried — see
-      // `evacuationHorizonMsFor`. Only claims whose reset is beyond the
-      // applicable horizon can trigger an evacuation.
-      const horizon = evacuationHorizonMsFor(id, account.capAtCeiling, {
+      // claim is also exempt while the account has surplus, because what is
+      // left on it at the reset is destroyed rather than carried — see
+      // `ceilingExempt`.
+      const exempt = ceilingExempt(id, claim, nowMs, {
+        fleet,
+        demand,
         evacuationHorizonMs,
-        weeklyTerminalHorizonMs: options.weeklyTerminalHorizonMs,
       });
-      const resetsSoon = claim.reset !== undefined && claim.reset * 1000 - nowMs <= horizon;
-      if (observed >= evacuateThreshold && !resetsSoon) evacuationTriggered = true;
-      if (observed >= evacuateThreshold && resetsSoon && WEEKLY_CLAIMS.includes(id)) {
+      if (observed >= evacuateThreshold && !exempt) evacuationTriggered = true;
+      if (observed >= evacuateThreshold && exempt && WEEKLY_CLAIMS.includes(id)) {
         weeklyTerminal = true;
       }
     }
@@ -572,8 +719,10 @@ export function computeHeadroom(
           : observed;
         const resetsSoon =
           claim!.reset !== undefined && claim!.reset * 1000 - nowMs <= evacuationHorizonMs;
+        // A typical fresh session's first hour, as a share of THIS window.
+        const added = demand ? demand.freshBurn / (capacity.fiveHour * demand.k) : 0;
         if (!resetsSoon && fresh5hBucket > 0) {
-          fiveHourBucket = Math.floor(fiveHourProjected / fresh5hBucket);
+          fiveHourBucket = Math.floor((fiveHourProjected + added) / fresh5hBucket);
         }
       }
       continue;
@@ -585,13 +734,17 @@ export function computeHeadroom(
     // remainder alone burns the account whose reset is furthest away. The
     // general claim also gives up what Fable can still spend of it.
     const held = id === '7d' ? reservedForFable : 0;
-    // `timeRemaining` is the fraction of the window still ahead, and pacing
-    // holds back quota in proportion to it. A window the server has not opened
-    // has its ENTIRE period ahead, not none of it: treating the missing reset
-    // as 0 inverts the term and makes the one account with no deadline look
-    // like the most urgent place to spend.
+    // Pacing holds back quota in proportion to the share of the week's demand
+    // still ahead of the reset — on the clock only when there is no demand
+    // model. A window the server has not opened has its ENTIRE period ahead,
+    // not none of it: treating the missing reset as 0 inverts the term and
+    // makes the one account with no deadline look like the most urgent place
+    // to spend.
+    const demandRemaining = demand?.hourly && claim?.reset !== undefined
+      ? demandFractionAhead(demand, nowMs, claim.reset * 1000)
+      : undefined;
     const remainingFraction =
-      timeRemaining ?? (id === '7d' && weeklyWindowUnopened ? 1 : 0);
+      demandRemaining ?? timeRemaining ?? (id === '7d' && weeklyWindowUnopened ? 1 : 0);
     minSpendable = Math.min(minSpendable, (raw - remainingFraction - held) * scale);
   }
 
@@ -603,16 +756,17 @@ export function computeHeadroom(
   // model is gated on. What differs by model is the CONSEQUENCE — see
   // `selectAccount`, where a warm non-Fable session holds through it.
   const evacuating = evacuationTriggered;
-  // Only a genuinely observed weekly window can expire; a projected or unknown
-  // reset is not a deadline. The headroom gate is model-normalized so a Fable
-  // request does not chase an account whose 7d_oi is already spent.
-  const weeklyResetMs = base.projectedWeeklyResetAt;
+  // Only an account with a fleet term (an observed, future weekly reset) can
+  // expire. The headroom gate is model-normalized so a Fable request does not
+  // chase an account whose 7d_oi is already spent.
   const weeklyExpiring =
-    weeklyResetMs !== undefined &&
-    weeklyResetMs > nowMs &&
-    weeklyResetMs - nowMs <= expiringHorizonMs &&
+    fleet !== undefined &&
+    fleet.surplus >= expiringMinHeadroom &&
     headroom >= expiringMinHeadroom &&
     !evacuating;
+  const fiveHourClaim = claims?.byId['5h'];
+  const fiveHourLeft = fiveHourClaim === undefined ? 1 : (claimHeadroom(fiveHourClaim, nowMs) ?? 1);
+  const fiveHourRemaining = demand ? fiveHourLeft * capacity.fiveHour * demand.k : undefined;
   return {
     ...base,
     headroom,
@@ -622,6 +776,7 @@ export function computeHeadroom(
     reservedForFable,
     fiveHourProjected,
     fiveHourBucket,
+    fiveHourRemaining,
     weeklyExpiring,
     weeklyTerminal,
     evacuating,
@@ -660,18 +815,18 @@ export type SelectInput = {
    */
   fresh5hBucket?: number;
   /**
-   * Window before a general 7d reset inside which unspent weekly quota is
-   * treated as expiring. See DEFAULT_EXPIRING_WEEKLY_HORIZON_MS. A value of 0
-   * disables the term.
+   * Demand forecast (./demand.ts). Without it — under a week of history —
+   * pacing runs on the clock, and no account has surplus or is expiring.
    */
-  expiringHorizonMs?: number;
+  demand?: DemandModel;
   /**
-   * How close a weekly reset must be before the evacuation ceiling stops
-   * applying to that claim, so the account burns its remainder to zero. `0`
-   * restores the flat ceiling for every account. See
-   * DEFAULT_WEEKLY_TERMINAL_HORIZON_MS.
+   * Measured burn of this session over the last hour, W20/hour, when it has
+   * history. A re-pick or a pull only lands where the session fits in the
+   * remaining 5h window for HEAVY_SESSION_HORIZON_MS.
    */
-  weeklyTerminalHorizonMs?: number;
+  sessionRate?: number;
+  /** When the session's lease landed on `affinitySlot`; gates the pull cooldown. */
+  affinitySince?: number;
 };
 
 export type Selection = {
@@ -702,16 +857,23 @@ export function selectAccount(input: SelectInput): Selection {
   const allowOverage = input.allowOverage ?? false;
   const threshold = input.evacuateThreshold ?? DEFAULT_EVACUATE_UTILIZATION;
   const bucketWidth = input.fresh5hBucket ?? DEFAULT_FRESH_5H_BUCKET;
-  const expiringHorizon = input.expiringHorizonMs ?? DEFAULT_EXPIRING_WEEKLY_HORIZON_MS;
   const fable = quotaForModel(input.model).extraClaim !== undefined;
+  const fleet = computeFleetTerms(input.accounts, input.nowMs, input.demand, input.model);
   const breakdown = input.accounts.map(a =>
     computeHeadroom(a, input.model, input.nowMs, {
       evacuateThreshold: threshold,
       fresh5hBucket: bucketWidth,
-      expiringHorizonMs: expiringHorizon,
-      weeklyTerminalHorizonMs: input.weeklyTerminalHorizonMs,
+      demand: input.demand,
+      fleet: fleet.get(a.slot),
     }),
   );
+  // A session with measured burn only lands where it fits in the remaining 5h
+  // window for the cache TTL; otherwise it would exhaust the window and pay a
+  // re-create to leave. A session with no history is not held to this.
+  const fits = (b: HeadroomBreakdown) =>
+    input.sessionRate === undefined ||
+    b.fiveHourRemaining === undefined ||
+    input.sessionRate * (HEAVY_SESSION_HORIZON_MS / 3_600_000) <= b.fiveHourRemaining;
   const bySlot = new Map(breakdown.map(b => [b.slot, b]));
 
   const serviceable = breakdown.filter(b => b.headroom > (fable ? floor : 0) && !b.requiresOverage);
@@ -779,16 +941,23 @@ export function selectAccount(input: SelectInput): Selection {
   // also clears a higher headroom bar than a fresh placement does, because it
   // is the one that pays a cache re-create for the privilege.
   const expiring = healthy.filter(
-    b => b.weeklyExpiring && b.headroom >= DEFAULT_EXPIRING_PULL_MIN_HEADROOM,
+    b =>
+      b.weeklyExpiring &&
+      b.surplus >= DEFAULT_EXPIRING_PULL_MIN_HEADROOM &&
+      b.headroom >= DEFAULT_EXPIRING_PULL_MIN_HEADROOM &&
+      fits(b),
   );
+  const coolingDown =
+    input.affinitySince !== undefined && input.nowMs - input.affinitySince < DEFAULT_PULL_COOLDOWN_MS;
 
+  let pulled = false;
   if (input.affinitySlot) {
     const held = bySlot.get(input.affinitySlot);
     if (held && held.headroom > (fable ? floor : 0) && !held.requiresOverage) {
       // The one planned break of a serviceable hold: another account's weekly
       // quota is about to expire unspent. A session already on an expiring
       // account stays — moving it to an even earlier deadline gains nothing.
-      const pulled = !held.weeklyExpiring && expiring.length > 0;
+      pulled = !held.weeklyExpiring && expiring.length > 0 && !coolingDown;
       if (!pulled && (!fable || !held.evacuating)) {
         return {
           slot: held.slot,
@@ -817,9 +986,14 @@ export function selectAccount(input: SelectInput): Selection {
   // fresh sessions have no cache to lose, so steering them onto a cooler
   // account is free. `rankBase` is the same pool without the bucket term, so
   // the reason can say when the bucket actually changed the outcome.
-  const pick = rank(healthy)[0];
-  const unbucketed = rankBase(healthy)[0];
-  const noResetDay = rankNoResetDay(healthy)[0];
+  // A pull lands only on an account that justified it. Otherwise a session
+  // with measured burn prefers accounts it fits on, and takes the whole pool
+  // when it fits nowhere — being served beats being refused.
+  const fitting = healthy.filter(fits);
+  const pool = pulled ? expiring : fitting.length > 0 ? fitting : healthy;
+  const pick = rank(pool)[0];
+  const unbucketed = rankBase(pool)[0];
+  const noResetDay = rankNoResetDay(pool)[0];
   // The reset-day term is reported when it changed the outcome; the bucket
   // note otherwise, so a reason names the one term that decided. An expiring
   // pick is neither: it outranks both, and `unbucketed` — which drops the
@@ -836,7 +1010,7 @@ export function selectAccount(input: SelectInput): Selection {
     const broke = Boolean(input.affinitySlot && input.affinitySlot !== pick.slot);
     const evacuated = fable && broke && bySlot.get(input.affinitySlot!)?.evacuating === true;
     const expiringNote = pick.weeklyExpiring
-      ? `weekly quota on ${pick.slot} expires in ${((pick.projectedWeeklyResetAt! - input.nowMs) / 3_600_000).toFixed(1)}h with ${(pick.headroom * 100).toFixed(0)}% headroom unspent${pick.weeklyTerminal ? `, burning past the ${(threshold * 100).toFixed(0)}% ceiling` : ''}`
+      ? `weekly quota on ${pick.slot} expires in ${((pick.projectedWeeklyResetAt! - input.nowMs) / 3_600_000).toFixed(1)}h with ${pick.surplus.toFixed(3)} W20 more than forecast demand can reach${pick.weeklyTerminal ? `, burning past the ${(threshold * 100).toFixed(0)}% ceiling` : ''}`
       : undefined;
     return {
       slot: pick.slot,

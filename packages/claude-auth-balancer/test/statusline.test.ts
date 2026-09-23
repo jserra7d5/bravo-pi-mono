@@ -6,6 +6,7 @@ import { after, test } from 'node:test';
 
 import { AffinityStore } from '../src/affinity.js';
 import { contextUsage, gather, parsePayload, shortLabel } from '../src/statusline.js';
+import { writeDemandModel } from '../src/demand.js';
 import type { StatuslineModel, StatuslinePayload } from '../src/statusline.js';
 import {
   ASCII_GLYPHS,
@@ -20,6 +21,10 @@ import {
   render,
   visibleWidth,
 } from '../src/statusline-render.js';
+
+// The operator's own reserve (set in ~/.claude/settings.json) must not reach
+// the accounts these tests build.
+delete process.env['CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE'];
 
 const roots: string[] = [];
 function tmp(): string {
@@ -568,30 +573,27 @@ test('the evacuation marker follows the router and spares a window refilling wit
   );
 });
 
-test('the badge follows the router into the terminal weekly window, and honours a cap', () => {
-  // The router lifts the ceiling for a weekly resetting inside 8h, so the
-  // badge must stop claiming the account is being evacuated — and must put it
-  // back for a slot the operator capped.
+test('the badge follows the router into the terminal weekly window, and honours a reserve', () => {
+  // With no demand model the terminal window is 8 clock hours; inside it the
+  // router lifts the ceiling, so the badge must stop claiming evacuation.
   const terminal = world([{ slot: '1', email: 'a@b.com', u5h: 0.0, u7d: 0.95, reset7d: 2.7 * 3600 }]);
   const outside = world([{ slot: '1', email: 'a@b.com', u5h: 0.0, u7d: 0.95, reset7d: 9 * 3600 }]);
   assert.equal(
     gather({}, { ...terminal, nowMs: NOW }).accounts[0]!.evacuating,
     false,
-    'inside the terminal horizon the remainder is spent, not conserved',
-  );
-  assert.equal(
-    gather({}, { ...terminal, nowMs: NOW }).accounts[0]!.expiring,
-    true,
-    'and it is where fresh sessions go',
+    'inside the terminal window the remainder is spent, not conserved',
   );
   assert.equal(
     gather({}, { ...outside, nowMs: NOW }).accounts[0]!.evacuating,
     true,
     'outside it the flat ceiling still applies',
   );
-  const capped = gather({}, { ...terminal, nowMs: NOW, cappedSlots: new Set(['1']) }).accounts[0]!;
-  assert.equal(capped.evacuating, true, 'a capped slot keeps the flat ceiling');
-  assert.equal(capped.expiring, false);
+  // A 10% reserve moves the ceiling down with it: 88% is 98% of what the
+  // balancer may spend.
+  const reserved = world([{ slot: '1', email: 'a@b.com', u5h: 0.0, u7d: 0.88, reset7d: 30 * 3600 }]);
+  const reserves = new Map([['1', 0.1]]);
+  assert.equal(gather({}, { ...reserved, nowMs: NOW }).accounts[0]!.evacuating, false);
+  assert.equal(gather({}, { ...reserved, nowMs: NOW, weeklyReserves: reserves }).accounts[0]!.evacuating, true);
 });
 
 test('the evacuation marker fires on the Fable-only weekly, which has no bar of its own', () => {
@@ -805,6 +807,12 @@ test('every account row shows both resets in the same columns, and an expiring a
     // Weekly resets in 8h with 84% left: the router's expiring pull target.
     { slot: '2', email: 'joseph@gmail.com', u5h: 0.10, u7d: 0.16, reset5h: 3 * 3600, reset7d: 8 * 3600 },
   ]);
+  // The daemon's demand forecast: 0.05 W20/h, more than one 20x can burn, so
+  // eight hours reach at most 0.32 of slot 2's 0.84.
+  writeDemandModel(stateRoot, {
+    computedAt: NOW, w20PerUsd: { general: 1, fable: 1 }, k: 0.2, freshBurn: 0,
+    hourly: new Array(168).fill(0.05), overrides: [],
+  });
   const model = gather({ model: { id: 'claude-opus-5' } }, { stateRoot, authswapRoot, nowMs: NOW });
   assert.equal(model.accounts[0]!.expiring, false);
   assert.equal(model.accounts[1]!.expiring, true);

@@ -51,21 +51,25 @@ export function resolveAuthswapRoot(env: NodeJS.ProcessEnv = process.env): strin
 }
 
 /**
- * Slots held to the flat 95% ceiling, from
- * `CLAUDE_AUTH_BALANCER_CAPPED_SLOTS` (comma- or space-separated slot ids).
- *
- * Everything else burns a weekly remainder to zero in the last hours before
- * its reset. A capped slot keeps its final 5% instead, which is what you want
- * for an account you are deliberately holding in reserve.
+ * Per-slot weekly reserves, from `CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE`: a
+ * comma- or space-separated list of `slot=fraction`, e.g. `2=0.10`. The
+ * balancer never spends that fraction of the slot's weekly budgets, so it
+ * stays available to use outside the balancer. Malformed entries and
+ * fractions outside (0, 1) are ignored.
  *
  * This is read by the daemon AND by the statusline, which are different
  * processes with different environments — set it in both (the systemd unit and
  * `~/.claude/settings.json`'s `env` block) or the badge will disagree with the
  * router.
  */
-export function resolveCappedSlots(env: NodeJS.ProcessEnv = process.env): Set<string> {
-  const raw = env.CLAUDE_AUTH_BALANCER_CAPPED_SLOTS ?? '';
-  return new Set(raw.split(/[,\s]+/).map(s => s.trim()).filter(Boolean));
+export function resolveWeeklyReserves(env: NodeJS.ProcessEnv = process.env): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const entry of (env.CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE ?? '').split(/[,\s]+/)) {
+    const m = /^(\d+)=(\d*\.?\d+)$/.exec(entry.trim());
+    const fraction = m ? Number(m[2]) : NaN;
+    if (m && fraction > 0 && fraction < 1) out.set(m[1]!, fraction);
+  }
+  return out;
 }
 
 const CRED_RE = /^\.credentials-(\d+)-(.+)\.json$/;
@@ -207,11 +211,11 @@ export function loadAccountStates(options: {
   stateRoot: string;
   authswapRoot?: string;
   nowMs: number;
-  /** Defaults to `resolveCappedSlots()`; a test may supply its own. */
-  cappedSlots?: Set<string>;
+  /** Defaults to `resolveWeeklyReserves()`; a test may supply its own. */
+  weeklyReserves?: Map<string, number>;
 }): { states: AccountState[]; accounts: Map<string, Account> } {
   const accounts = discoverAccounts(options.authswapRoot ?? resolveAuthswapRoot());
-  const capped = options.cappedSlots ?? resolveCappedSlots();
+  const reserves = options.weeklyReserves ?? resolveWeeklyReserves();
   const bySlot = new Map<string, Account>();
   const states: AccountState[] = [];
 
@@ -230,7 +234,7 @@ export function loadAccountStates(options: {
       observedAt: prior?.observedAt,
       tokenExpiresAt: expiresAt,
       refreshTokenExpiresAt: oauth?.refreshTokenExpiresAt,
-      capAtCeiling: capped.has(account.slot),
+      weeklyReserve: reserves.get(account.slot),
       capacity: capacityForTier(readSlotPlan(options.stateRoot, account.slot)?.tier),
     });
   }

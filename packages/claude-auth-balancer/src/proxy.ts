@@ -26,9 +26,11 @@ import { DEFAULT_RAW_RETENTION_DAYS, MetricsStore } from './metrics.js';
 import { UsageCollector, usageFromJsonBody } from './usage.js';
 import type { Usage } from './usage.js';
 import { hasClaims, parseClaims } from './claims.js';
-import { discoverAccounts, loadAccountStates, readOAuth, readSlotObservation, recordObservation, resolveAuthswapRoot, resolveStateRoot, tokenFingerprint } from './accounts.js';
+import { discoverAccounts, loadAccountStates, readOAuth, readSlotObservation, readSlotPlan, recordObservation, resolveAuthswapRoot, resolveStateRoot, tokenFingerprint } from './accounts.js';
 import type { Account } from './accounts.js';
-import { selectAccount, DEFAULT_EXPIRING_WEEKLY_HORIZON_MS } from './policy.js';
+import { capacityForTier, selectAccount } from './policy.js';
+import type { DemandModel } from './demand.js';
+import { buildDemandModel, DEMAND_STALE_MS, readDemandOverrides, sessionRate, writeDemandModel } from './demand.js';
 import { REFRESH_SWEEP_INTERVAL_MS, TokenRefresher } from './refresh.js';
 import { UsageProbe } from './usage-probe.js';
 import { ClientCredentialStore, RUNTIME_CREDENTIAL_HEADER, ensureRuntimeCredential, timingSafeNonceEqual } from './admission.js';
@@ -177,8 +179,6 @@ export type ProxyOptions = {
   stateRoot?: string;
   authswapRoot?: string;
   allowOverage?: boolean;
-  /** Window before a 7d reset inside which unspent quota pulls sessions. 0 disables. */
-  expiringHorizonMs?: number;
   leaseTtlMs?: number;
   /** Retry a 429 once on a different account. Safe: 429 arrives before any body. */
   retryOnRateLimit?: boolean;
@@ -237,7 +237,6 @@ function resolveOptions(options: ProxyOptions): Resolved {
     stateRoot: options.stateRoot ?? resolveStateRoot(),
     authswapRoot: options.authswapRoot ?? resolveAuthswapRoot(),
     allowOverage: options.allowOverage ?? false,
-    expiringHorizonMs: options.expiringHorizonMs ?? DEFAULT_EXPIRING_WEEKLY_HORIZON_MS,
     leaseTtlMs: options.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
     retryOnRateLimit: options.retryOnRateLimit ?? true,
     metrics: options.metrics ?? true,
@@ -799,6 +798,8 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
   const attempts = opts.attempts ? new AttemptStore(opts.stateRoot) : undefined;
   const runPrune = () => {
     try {
+      // Roll up first: no raw row may be pruned before its hour is kept.
+      metrics?.rollupHours(opts.now());
       metrics?.prune(opts.now(), opts.metricsRetentionDays);
     } catch {
       /* pruning must never take the proxy down */
@@ -812,6 +813,43 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
     const timer = setInterval(runPrune, PRUNE_INTERVAL_MS);
     timer.unref();
     server_close_hooks.push(() => clearInterval(timer));
+  }
+
+  // The demand forecast (./demand.ts), rebuilt from the metrics store on the
+  // usage-sweep cadence and persisted for the statusline. Selection reads the
+  // in-memory copy; with no model yet (or no metrics), routing runs without
+  // demand terms rather than on invented ones.
+  let demandModel: DemandModel | undefined;
+  const refreshDemand = () => {
+    if (!metrics) return;
+    try {
+      const now = opts.now();
+      metrics.rollupHours(now);
+      const capacity = (slot: string) => capacityForTier(readSlotPlan(opts.stateRoot, slot)?.tier);
+      const built = buildDemandModel({
+        store: metrics,
+        nowMs: now,
+        weeklyBySlot: slot => capacity(slot).weekly,
+        referenceSlots: discoverAccounts(opts.authswapRoot)
+          .map(a => a.slot)
+          .filter(slot => capacity(slot).weekly === 1 && capacity(slot).fiveHour === 1),
+        overrides: readDemandOverrides(opts.stateRoot),
+      });
+      // Adopted only once persisted, so the statusline never shows a
+      // different forecast from the one routing on.
+      writeDemandModel(opts.stateRoot, built);
+      demandModel = built;
+    } catch (error) {
+      opts.log({ kind: 'error', method: 'SWEEP', path: 'demand', message: `demand: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  };
+  if (metrics) {
+    refreshDemand();
+    if (opts.usageSweepIntervalMs > 0) {
+      const timer = setInterval(refreshDemand, opts.usageSweepIntervalMs);
+      timer.unref();
+      server_close_hooks.push(() => clearInterval(timer));
+    }
   }
 
   const opening = new Map<string, Promise<void>>();
@@ -967,14 +1005,30 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
         nowMs: now,
       });
       let candidates = loaded.states.filter(s => !excluded.has(s.slot));
-      const affinitySlot = sessionId ? affinity.lookup(sessionId, model) : undefined;
+      const lease = sessionId ? affinity.lookupLease(sessionId, model) : undefined;
+      const affinitySlot = lease?.slot;
+      // Measured burn of this session, for the heavy-session guard. A session
+      // with no metrics history has none and is not held to the guard.
+      // Past DEMAND_STALE_MS without a successful rebuild the statusline has
+      // dropped the forecast; so does routing, so the two never disagree.
+      const liveDemand = demandModel && now - demandModel.computedAt <= DEMAND_STALE_MS ? demandModel : undefined;
+      let rate: number | undefined;
+      if (sessionId && metrics && liveDemand) {
+        try {
+          rate = sessionRate(metrics, AffinityStore.hashSession(sessionId, model), now, liveDemand);
+        } catch {
+          /* a metrics read must never block routing */
+        }
+      }
       const select = () => selectAccount({
         accounts: candidates,
         model,
         affinitySlot: affinitySlot && !excluded.has(affinitySlot) ? affinitySlot : undefined,
+        affinitySince: lease?.created_at,
         nowMs: opts.now(),
         allowOverage: opts.allowOverage,
-        expiringHorizonMs: opts.expiringHorizonMs,
+        demand: liveDemand,
+        sessionRate: rate,
       });
       let selection = select();
 

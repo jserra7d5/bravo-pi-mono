@@ -47,8 +47,8 @@ session on one account until it genuinely cannot serve.
    rebalancing point. Completed compaction also ends every model lease for that
    session: its next request ranks fresh and establishes a new lease. Fresh picks for every model **pace the weekly**: they go
    to the healthy, non-overage account furthest ahead of pace, where "ahead of
-   pace" is model-normalized weekly headroom minus the fraction of the window
-   still to run. On a 20x Max plan the `5h` window is 4x a 5x plan's but the
+   pace" is model-normalized weekly headroom minus the share of the window's
+   expected demand still ahead (clock time without a demand model). On a 20x Max plan the `5h` window is 4x a 5x plan's but the
    weekly is only 1.7x, so the weekly is the scarce budget; pacing brings every
    account to its reset near-empty together instead of draining the earliest
    reset to the floor while a later one leaves half a week unspent. Non-Fable
@@ -70,8 +70,8 @@ session on one account until it genuinely cannot serve.
    The ceiling is dropped entirely when every serviceable account is above it:
    at that point moving buys no quota, so ranking decides and the sticky slot
    keeps its cache. A window that refills within the cache TTL never triggers
-   the ceiling either — and a **weekly** window that resets within **8 hours**
-   never triggers it at all. See (5a).
+   the ceiling either, and neither does a **weekly** window in its terminal
+   stretch or with surplus. See (6).
 4. **Fresh picks drain the earliest weekly reset, then spread on a 25%-wide
    projected `5h` bucket, then pace.** The weekly reset is floored to whole
    days: the account(s) resetting soonest take every fresh session, because
@@ -86,55 +86,72 @@ session on one account until it genuinely cannot serve.
    average burn rate so far continues (`utilization / elapsed`, capped at
    100%): 60% with thirty minutes left is cooler than 30% with four hours left.
    Under 30 minutes into a window the raw level is used. Within a bucket
-   pacing decides. Neither term excludes: a later reset or a hotter bucket is
+   pacing decides. A hot `5h` window does not escape the reset-day order:
+   concentrating fresh sessions keeps other accounts' `5h` windows unopened
+   for the next peak. A hot-bucket escape was tried and reverted: replay
+   showed no benefit, on a meter that fails its fidelity gate. The cost: a 5x that resets first takes every fresh session
+   until its 95% ceiling. And several warm sessions can each pass the pull's
+   fit check against one expiring account before its claims update. Neither term excludes: a later reset or a hotter bucket is
    still selected when it is the only one. A `5h` window that refills within
    the cache TTL buckets as cool. An unobserved account sorts first so it gets
    probed. Warm affinity and eligibility are unaffected.
-5. **Expiring weekly quota outranks everything, affinity included.** An
-   account whose general `7d` window resets within 12 hours while it still has
-   headroom left and is below the ceiling (see (6) for when the ceiling stops
-   applying) is `EXPIRING` in `status`. Fresh picks for every model go there
-   first, ahead of the `5h` bucket; between two expiring accounts the earlier
-   reset wins. Moving a **warm** session onto it needs 10% model-normalized
-   headroom, not the 1% a fresh pick needs, because that move is the one
-   planned case where a serviceable hold is broken and a cache re-create is
-   paid on purpose. Quota
-   unspent at the reset is lost for good; a re-create is one expensive request.
-   A session already on an expiring account holds, and once that account
-   resets it is no longer expiring, so the moved sessions stay where they are.
-   `--expiring-horizon-hours 0` on `serve` disables the term.
-6. **In the last 8 hours of a weekly window the ceiling is lifted and the
-   account burns down to zero.** The 95% ceiling exists to keep fresh sessions
-   off an account that is nearly spent, on the theory that they would exhaust
-   it and immediately pay a cache re-create elsewhere. At the end of a weekly
-   window that theory inverts: the remainder is destroyed at the reset, so one
-   re-create per session is cheap against it. So a `7d` or `7d_oi` claim at or
-   above 95% whose reset is inside `DEFAULT_WEEKLY_TERMINAL_HORIZON_MS` (8h)
-   does not raise the ceiling, the account stays `EXPIRING`, and every fresh
-   pick lands there until its headroom reaches zero — at which point it stops
-   being serviceable and the sessions move on by the ordinary rule. `status`
-   marks it `BURNDOWN`. The `5h` claim is deliberately excluded: it refills on
-   its own and never expires unspent, so it keeps the 1-hour cache-TTL horizon.
-   Warm sessions are *not* pulled into a burndown — the pull needs 10%
-   model-normalized headroom, a burndown has at most 5% — so the remainder is
-   spent by sessions that were going to start anyway, at no cache cost.
+5. **Weekly quota the demand cannot reach outranks everything, affinity
+   included.** Each account's *surplus* is the part of its general weekly
+   remainder that the demand forecast (see [Demand model](#demand-model))
+   cannot burn before its reset. Accounts are taken in reset order, earliest
+   first; each absorbs the forecast demand left before its reset, capped per
+   hour by what its own `5h` window can burn (`5h` size × `k` / 5h), so a 5x's
+   quarter-size window limits it even when demand is plentiful. An account
+   with at least 0.01 W20 of surplus, headroom left, and below the ceiling is
+   `EXPIRING` in `status`. Fresh picks for every model go there first, ahead
+   of the `5h` bucket; between two, the earlier reset wins.
 
-   **Capping an account out of it.** Set `CLAUDE_AUTH_BALANCER_CAPPED_SLOTS`
-   to a comma- or space-separated list of slot ids to hold those accounts to
-   the flat 95% ceiling, keeping their final 5% in reserve:
+   Moving a **warm** session there is the one planned break of a serviceable
+   hold, so it needs more: 0.1 W20 of surplus, 0.1 of plan-scaled headroom (a
+   5x needs 40% of its own `5h` left), a session that fits (its measured burn
+   over the last hour must fit in the target's remaining `5h` window for the
+   next hour), and a lease at least 6 hours on its current slot. The cooldown
+   stops a session bouncing between accounts that take turns expiring. A
+   session already on an expiring account holds. Without a demand model
+   (under a week of history, or no metrics) nothing is expiring.
+6. **In a weekly window's terminal stretch the ceiling is lifted.** The 95%
+   ceiling keeps fresh sessions off an account that is nearly spent, because
+   they would exhaust it and pay a cache re-create elsewhere. At the end of a
+   weekly window that inverts: the remainder is destroyed at the reset, so one
+   re-create per session is cheap against it. A `7d` or `7d_oi` claim at or
+   above 95% does not raise the ceiling when the account has surplus, or when
+   its reset is within **8 hours of demand** (`DEFAULT_WEEKLY_TERMINAL_DEMAND_HOURS`:
+   expected demand to the reset over the average hourly demand, so a quiet
+   night counts for little; clock hours without a demand model). The account
+   takes fresh picks until its headroom reaches zero, then stops being
+   serviceable and sessions move on by the ordinary rule. `status` marks it
+   `BURNDOWN`. The `5h` claim is excluded: it refills on its own and keeps
+   the 1-hour cache-TTL horizon. Warm sessions are not pulled into a burndown
+   — the pull needs 10% headroom, a burndown has at most 5%.
+
+   **Weekly reserve.** `CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE` holds a fraction
+   of a slot's weekly budgets (`7d`, `7d_oi`) out of the balancer entirely,
+   for use outside it. The format is `slot=fraction` pairs, comma- or
+   space-separated. With `2=0.10`, slot 2's weekly is measured against 90%:
+   fresh picks stop at 85.5% (95% of 90%), warm sessions leave at 90%, and
+   the burndown and surplus stop there too. At the reserve the account is
+   also out of the overage fallback: the server would still have weekly quota
+   to serve from, so it would spend the reserve rather than bill overage. The
+   `5h` window is not reserved: warm sessions can still hold it to exhaustion,
+   which can lock out personal use for up to 5 hours.
 
    ```ini
-   # ~/.config/systemd/user/claude-auth-balancer.service.d/capped-slots.conf
+   # ~/.config/systemd/user/claude-auth-balancer.service.d/weekly-reserve.conf
    [Service]
-   Environment=CLAUDE_AUTH_BALANCER_CAPPED_SLOTS=2
+   Environment=CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE=2=0.10
    ```
 
    The statusline is a **different process** with a different environment, so
-   set it there too or its `EVACUATING` badge will disagree with the router:
+   set it there too or its badges will disagree with the router:
 
    ```jsonc
    // ~/.claude/settings.json
-   { "env": { "CLAUDE_AUTH_BALANCER_CAPPED_SLOTS": "2" } }
+   { "env": { "CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE": "2=0.10" } }
    ```
 7. **Overage is never spent silently.** Accounts with `overage-status: allowed`
    can bill real money past 100%; that path requires `--allow-overage`.
@@ -188,15 +205,13 @@ claims the requested model is gated on, so `7d_oi` moves Fable and is ignored
 for everything else. Non-Fable models never evacuate a warm session; the
 threshold only keeps fresh ones off the account.
 
-How near a reset has to be for a claim above the threshold to stop mattering
-is `evacuationHorizonMsFor(claim, capped)` — one function, used by the router
-and by the statusline badge so they cannot drift:
+When a claim above the threshold stops mattering is `ceilingExempt` — one
+function, used by the router and by the statusline badge so they cannot drift:
 
-| claim | horizon | why |
+| claim | exempt when | why |
 |---|---|---|
-| `5h` | 1h (cache TTL) | a window that refills before the prefix expires is not worth a 20x move |
-| `7d`, `7d_oi` | 8h | the remainder is destroyed at the reset, so spend it |
-| any, on a capped slot | 1h | the operator is holding this account in reserve |
+| any | reset within 1h (cache TTL) | a window that refills before the prefix expires is not worth a 20x move |
+| `7d`, `7d_oi` | surplus > 0, or reset within 8 demand-hours | the remainder is destroyed at the reset, so spend it |
 
 ### Plan sizes
 
@@ -217,10 +232,11 @@ unknown tier counts as 20x, and `status` prints `?` for it.
 Only `headroom` is scaled, into a fraction of a 20x budget. It answers questions
 about absolute work: which claim binds first, and whether an expiring remainder
 is big enough to pull a warm session (a 5x needs 40% of its own `5h` left to
-clear the 0.1 bar). Pacing, the 95% ceiling and the `5h` bucket stay on each
-account's own fractions. A session moves a 5x's fractions further than a 20x's,
-so greedy ranking on fractions already gives each account work in proportion
-to its size.
+clear the 0.1 bar). Pacing and the 95% ceiling stay on each account's own
+fractions. The `5h` bucket adds a typical fresh session's first-hour burn
+(`freshBurn`) as a share of *this* window, so the same session counts four
+times as much on a 5x. Surplus is in W20, so the fleet's supply adds up
+across plans.
 
 ### Usage refresh and reset projection
 
@@ -281,7 +297,7 @@ directions:
 | state | `7d` claim | weekly rank | why |
 |---|---|---|---|
 | unobserved | absent | **first** | a request costs nothing and observes it |
-| window not opened | present, `utilization` set, no `reset` | **last** | no deadline: the server anchors the 7-day window on first use, so this quota cannot expire unspent |
+| window not opened | present, `utilization` set, no `reset` | **last** | no deadline, so this quota cannot expire unspent. Rare for `7d`: observed weekly resets follow a fixed per-account cadence, landing on the hour, used or not |
 | observed | present with a `reset` | by reset day | earliest real deadline drains first |
 
 `HeadroomBreakdown.weeklyWindowUnopened` carries the distinction. Conflating
@@ -324,6 +340,50 @@ Two tables:
   utilizations observed on that response. Pruned after 30 days.
 - `usage_daily` — `(day, slot, model)` rollup. Small enough to keep forever, so
   long-range charts survive pruning.
+- `usage_hourly` — `(hour, slot, model_class)` rollup, `model_class` being
+  `fable` or `general`: requests, `sessions` (distinct in that hour only — not
+  summable), `exhaustions` (a 429 or a claim at 100%), cost, first and last
+  claim readings, and `reset_5h`/`reset_7d` (a reading fell by more than 0.3).
+  Kept forever; the demand model learns from it.
+- `fleet_hourly` — one row per closed hour, traffic or not: `censored` marks
+  hours when every account was at 95% on `5h` or `7d`, so low spend there is
+  missing quota, not missing work.
+
+The hourly tables are written by `rollupHours`, for closed hours only, from a
+watermark in `meta`; the first run backfills what `requests` still holds, and
+the prune runs it first so no raw row is deleted unrolled.
+
+### Demand model
+
+The daemon rebuilds a forecast of fleet demand on each usage sweep and writes
+it to `state/demand.json`, which the statusline reads too (dropped when over
+2 hours old). Everything is in **W20**: one Max 20x weekly budget.
+
+| field | what | learned from |
+|---|---|---|
+| `w20PerUsd` | weekly quota per list-price dollar, per model class | least squares of `7d` movement × plan size against cost, last 7 days (else 28) |
+| `k` | a 20x's `5h` window as a fraction of its weekly | ΣΔ`7d` / ΣΔ`5h` over consecutive responses on 20x slots |
+| `freshBurn` | median first-hour burn of a fresh session, W20 | `requests` |
+| `hourly[168]` | expected W20/hour per local (weekday, hour) | 28 days of `usage_hourly`, censored hours skipped, 3-hour smoothing, scaled to the last week's spend |
+| `overrides` | date-bounded multipliers | `~/.bravo/claude-auth-balancer/demand-profile.json` |
+
+Nothing about any particular day is coded in. Under a week of history there is
+no `hourly`, and routing runs without demand terms (clock-time pacing, no
+surplus). For a known one-off — vacation, a crunch — add an override; each
+entry is ignored once past its `to` date:
+
+```json
+{ "overrides": [{ "from": "2026-10-10", "to": "2026-10-12", "multiplier": 0.1 }] }
+```
+
+Pacing uses the share of the week's expected demand still ahead of the reset,
+not the share of clock time, so quiet hours ahead leave more spendable now.
+
+Nothing holds 20x headroom back for `5h` peaks. The demand terms avoid
+stranding and spread load; reserving 20x quota for peak hours is the
+conditional planner in the spec's step 6, built only if replay shows unserved
+peak demand.
+`status` prints the model's next-24h and weekly demand, `k`, and $/W20.
 
 Costs are **equivalent first-party API list prices**, not subscription billing.
 They are the honest unit for comparing accounts, models, and sessions, and for
@@ -516,6 +576,9 @@ claude-auth-balancer relogin <slot> [--if-needed]  # interactive login; resets t
 claude-auth-balancer metrics  [--days N] [--daily] [--json] [--sql "..."]
 claude-auth-balancer sweep                    # drop expired lease files
 claude-auth-balancer prune    [--days N]      # drop old raw metric rows
+claude-auth-balancer replay   --db SNAPSHOT [--old-policy compiled-policy.js]
+                                              # offline trace replay; exits 1
+                                              # while its meter fails fidelity
 claude-auth-balancer claude [args...]           # launch client through gateway
 claude-auth-balancer install-service   [--port N] [--allow-overage]
 claude-auth-balancer uninstall-service

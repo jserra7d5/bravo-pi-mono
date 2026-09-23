@@ -142,12 +142,17 @@ export class AffinityStore {
 
   /** The slot this session is pinned to, or undefined if unpinned/expired. */
   lookup(sessionId: string, model?: string): string | undefined {
+    return this.lookupLease(sessionId, model)?.slot;
+  }
+
+  /** The live lease itself; `created_at` is when it landed on its current slot. */
+  lookupLease(sessionId: string, model?: string): AffinityLease | undefined {
     this.maybeSweep();
     const hash = AffinityStore.hashSession(sessionId, model);
     const lease = this.read(hash);
     if (!lease) return undefined;
     if (lease.expires_at <= this.now()) return undefined;
-    return lease.slot;
+    return lease;
   }
 
   /**

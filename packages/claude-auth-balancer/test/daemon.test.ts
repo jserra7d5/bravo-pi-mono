@@ -6,6 +6,10 @@ import { after, test } from 'node:test';
 
 import { SingletonLockError, acquireSingletonLock, renderUnit, userUnitPath } from '../src/daemon.js';
 
+// The operator's own reserve (set in ~/.claude/settings.json) must not reach
+// the accounts these tests build.
+delete process.env['CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE'];
+
 const roots: string[] = [];
 function tmpRoot(): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cab-daemon-'));

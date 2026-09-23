@@ -24,7 +24,9 @@ import { checkClaude, reloginClaudeSlot } from './relogin.js';
 import { acquireSingletonLock, renderUnit, userUnitPath } from './daemon.js';
 import type { SingletonLock } from './daemon.js';
 import { MetricsStore } from './metrics.js';
-import { computeHeadroom } from './policy.js';
+import { runReplay } from './replay.js';
+import { computeFleetTerms, computeHeadroom, PLAN_CAPACITIES } from './policy.js';
+import { expectedDemand, readDemandModel } from './demand.js';
 import { DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_PORT, MAX_CONFIGURABLE_REQUEST_BODY_BYTES, startProxy } from './proxy.js';
 import type { ProxyLogEvent } from './proxy.js';
 import { launchClaude } from './client-launch.js';
@@ -88,8 +90,6 @@ function ago(ms: number | undefined, now: number): string {
 async function cmdServe(argv: string[]): Promise<void> {
   const port = Number(value(argv, 'port') ?? DEFAULT_PORT);
   const allowOverage = flag(argv, 'allow-overage');
-  const expiringHours = value(argv, 'expiring-horizon-hours');
-  const expiringHorizonMs = expiringHours === undefined ? undefined : Number(expiringHours) * 3_600_000;
   const maxRequestBodyBytes = parseMaxRequestBodyBytes(argv);
   const enforceBodyLimit = flag(argv, 'enforce-body-limit');
   const strictGenerationRetry = flag(argv, 'strict-generation-retry');
@@ -152,7 +152,6 @@ async function cmdServe(argv: string[]): Promise<void> {
   const started = await startProxy({
     port,
     allowOverage,
-    expiringHorizonMs,
     log,
     maxRequestBodyBytes,
     bodyLimitMode: enforceBodyLimit ? 'enforce' : 'report-only',
@@ -187,11 +186,23 @@ function cmdStatus(argv: string[]): void {
     return;
   }
 
+  const demand = readDemandModel(stateRoot, now);
+  const fleet = computeFleetTerms(states, now, demand, model);
+  if (demand?.hourly) {
+    console.log(
+      `demand     : next 24h ${expectedDemand(demand, now, now + 86_400_000).toFixed(2)} W20, ` +
+      `week ${demand.hourly.reduce((a, v) => a + v, 0).toFixed(2)} W20; ` +
+      `k=${demand.k.toFixed(3)}; $/W20 general ${(1 / demand.w20PerUsd.general).toFixed(0)}, fable ${(1 / demand.w20PerUsd.fable).toFixed(0)}`,
+    );
+  } else {
+    console.log('demand     : no model yet (needs a running daemon with a week of metrics); no account can be EXPIRING');
+  }
   console.log(`accounts (model=${model ?? 'any'})`);
-  console.log('headroom is in Max 20x units: 0.25 is a quarter of a 20x budget, whatever the plan');
-  console.log('slot  email                                  plan  5h      7d      7d_oi   7d-reset  headroom  binding  health       relogin');
+  console.log('headroom and surplus are in Max 20x units (W20): 0.25 is a quarter of a 20x budget, whatever the plan');
+  console.log('slot  email                                  plan  5h      7d      7d_oi   7d-reset  headroom  surplus  binding  health       relogin');
   for (const s of states) {
-    const h = computeHeadroom(s, model, now);
+    const term = fleet.get(s.slot);
+    const h = computeHeadroom(s, model, now, { demand, fleet: term });
     const c = s.claims?.byId;
     console.log(
       [
@@ -209,10 +220,13 @@ function cmdStatus(argv: string[]): void {
         ' ',
         h.headroom.toFixed(3).padStart(8),
         ' ',
+        // Negative surplus only says how much more demand could absorb; 0 reads truer.
+        (term ? Math.max(0, term.surplus).toFixed(3) : '-').padStart(8),
+        ' ',
         (h.bindingClaim ?? '-').padEnd(8),
         s.health.padEnd(13),
         reloginCountdown(s.refreshTokenExpiresAt, now).padEnd(10),
-        (h.weeklyExpiring ? 'EXPIRING ' : '') + (h.evacuating ? 'EVACUATING ' : '') + (h.weeklyTerminal ? 'BURNDOWN ' : '') + (s.capAtCeiling ? 'CAPPED ' : '') + (h.overageAvailable ? 'overage ' : ''),
+        (h.weeklyExpiring ? 'EXPIRING ' : '') + (h.evacuating ? 'EVACUATING ' : '') + (h.weeklyTerminal ? 'BURNDOWN ' : '') + (s.weeklyReserve ? `RESERVE ${Math.round(s.weeklyReserve * 100)}% ` : '') + (h.overageAvailable ? 'overage ' : ''),
         `obs ${ago(s.observedAt, now)}`,
       ].join(''),
     );
@@ -226,9 +240,10 @@ function cmdStatus(argv: string[]): void {
 }
 
 /** `default_claude_max_5x` -> `5x`; an unread plan is `?`, anything else passes through. */
+/** A tier routing does not recognize is sized as a 20x; show `?`, not a size it is not given. */
 function planLabel(tier: string | undefined): string {
-  if (!tier) return '?';
-  return /_(\d+x)$/.exec(tier)?.[1] ?? tier;
+  if (!tier || !PLAN_CAPACITIES[tier]) return '?';
+  return /_(\d+x)$/.exec(tier)?.[1] ?? '?';
 }
 
 function cmdAccounts(): void {
@@ -529,6 +544,14 @@ async function main(): Promise<void> {
     case 'prune':
       cmdPrune(argv);
       return;
+    case 'replay': {
+      const db = value(argv, 'db');
+      if (!db) throw new Error('usage: replay --db <snapshot.sqlite3> [--old-policy <compiled-policy.js>]');
+      const result = await runReplay(db, resolveStateRoot(), value(argv, 'old-policy'));
+      console.log(result.report);
+      if (!result.pass) process.exitCode = 1;
+      return;
+    }
     case 'refresh':
       await cmdRefresh();
       return;
@@ -570,6 +593,7 @@ async function main(): Promise<void> {
           '  install-statusline  point the Claude Code status bar at this package\n' +
           '  claude           [args...] launch Claude through the local gateway\n' +
           '  prune            [--days N]\n' +
+          '  replay           --db SNAPSHOT [--old-policy compiled-policy.js]\n' +
           '  install-service  [--port N] [--allow-overage]   systemd user unit\n' +
           '  uninstall-service',
       );

@@ -16,8 +16,14 @@ import { readSlotObservation, readSlotPlan, writeSlotObservation } from '../src/
 import { AffinityStore } from '../src/affinity.js';
 import { handlePostCompact } from '../src/compaction.js';
 import { MetricsStore } from '../src/metrics.js';
+import { parseClaims } from '../src/claims.js';
+import { readDemandModel } from '../src/demand.js';
 import { AttemptStore } from '../src/attempts.js';
 import { SESSION_HEADER, startProxy } from '../src/proxy.js';
+
+// The operator's own reserve (set in ~/.claude/settings.json) must not reach
+// the accounts these tests build.
+delete process.env['CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE'];
 
 const cleanups: (() => void)[] = [];
 after(() => {
@@ -833,4 +839,123 @@ test('a running proxy rebalances after PostCompact and then holds the new lease'
   assert.equal((await request()).status, 200, 'first compacted request ranks fresh');
   assert.equal((await request()).status, 200, 'later requests hold the new lease');
   assert.deepEqual(up.calls.map(call => call.authorization), ['Bearer tok-1', 'Bearer tok-2', 'Bearer tok-2']);
+});
+
+// --- demand model ------------------------------------------------------------
+
+/** Nine days of steady traffic on slot 1 (~0.05 W20/h), recorded the way the proxy records it. */
+function seedHistory(stateRoot: string, now: number): void {
+  const store = new MetricsStore(stateRoot);
+  let u5 = 0;
+  let u7 = 0.05;
+  for (let t = now - 9 * 86_400_000; t < now - 60_000; t += 15 * 60_000) {
+    u5 = (u5 + 0.05) % 1;
+    u7 = u7 >= 0.9 ? 0.05 : u7 + 0.013;
+    store.record({
+      ts: t, slot: '1', sessionHash: `s${Math.floor(t / 10_800_000)}`, model: 'claude-opus-5',
+      endpoint: '/v1/messages', status: 200, decision: 'fresh', durationMs: 100,
+      usage: { inputTokens: 0, outputTokens: 2_000_000 },
+      claims: parseClaims({
+        'anthropic-ratelimit-unified-5h-utilization': u5.toFixed(2),
+        'anthropic-ratelimit-unified-7d-utilization': u7.toFixed(2),
+      }),
+    });
+  }
+  store.close();
+}
+
+function observe(stateRoot: string, slot: string, weeklyInH: number, now: number): void {
+  writeSlotObservation(stateRoot, {
+    slot,
+    observedAt: now,
+    claims: parseClaims({
+      'anthropic-ratelimit-unified-5h-status': 'allowed',
+      'anthropic-ratelimit-unified-5h-utilization': '0.05',
+      'anthropic-ratelimit-unified-5h-reset': String(Math.floor((now + 4 * 3_600_000) / 1000)),
+      'anthropic-ratelimit-unified-7d-status': 'allowed',
+      'anthropic-ratelimit-unified-7d-utilization': '0.10',
+      'anthropic-ratelimit-unified-7d-reset': String(Math.floor((now + weeklyInH * 3_600_000) / 1000)),
+      'anthropic-ratelimit-unified-overage-status': 'rejected',
+    }),
+  });
+}
+
+test('the daemon learns demand from its own metrics and routes on it', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  const now = Date.now();
+  const stateRoot = tmpRoot('cab-demand-');
+  seedHistory(stateRoot, now);
+  // Control: without the history, the same warm session holds on slot 2.
+  const bare = tmpRoot('cab-demand-bare-');
+  observe(bare, '1', 3, now);
+  observe(bare, '2', 100, now);
+  new AffinityStore({ stateRoot: bare, now: () => now - 7 * 3_600_000 }).touch('warm-one', '2', 'claude-opus-5');
+  new AffinityStore({ stateRoot: bare }).touch('warm-one', '2', 'claude-opus-5');
+  const control = await upstream((_call, res) => res.writeHead(200, OK_HEADERS).end('{}'));
+  const held = await boot({ authswapRoot, upstreamUrl: control.url, stateRoot: bare, metrics: true, usageSweepIntervalMs: 0 });
+  assert.equal((await post(held.url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'warm-one' })).status, 200);
+  assert.equal(control.calls[0]!.authorization, 'Bearer tok-2', 'no history, no demand terms: it holds');
+
+  // Slot 1's weekly resets in 3h with 90% left: far more than one account's
+  // 5h window can burn by then. Slot 2 has days, and the demand to fill them.
+  observe(stateRoot, '1', 3, now);
+  observe(stateRoot, '2', 100, now);
+  const up = await upstream((_call, res) => res.writeHead(200, OK_HEADERS).end('{}'));
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, stateRoot, metrics: true, usageSweepIntervalMs: 0 });
+
+  const demand = readDemandModel(stateRoot, Date.now())!;
+  assert.ok(demand.hourly, 'nine days of history is a profile');
+
+  // A warm session on slot 2, settled there for seven hours. Only the demand
+  // terms can move it: slot 2 is serviceable, so a plain hold keeps it.
+  new AffinityStore({ stateRoot, now: () => now - 7 * 3_600_000 }).touch('warm-one', '2', 'claude-opus-5');
+  new AffinityStore({ stateRoot }).touch('warm-one', '2', 'claude-opus-5');
+  assert.equal((await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'warm-one' })).status, 200);
+  assert.equal(up.calls[0]!.authorization, 'Bearer tok-1', 'pulled onto the expiring account');
+  assert.equal(new AffinityStore({ stateRoot }).lookup('warm-one', 'claude-opus-5'), '1');
+});
+
+test('a forecast the daemon can no longer refresh stops steering once stale', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  // Boot three hours in the past, then move to now: the tokens stay live.
+  const start = Date.now() - 3 * 3_600_000;
+  let clock = start;
+  const stateRoot = tmpRoot('cab-demand-stale-');
+  seedHistory(stateRoot, start);
+  const up = await upstream((_call, res) => res.writeHead(200, OK_HEADERS).end('{}'));
+  const { server, url } = await startProxy({
+    port: 0, upstream: up.url, stateRoot, authswapRoot, metrics: true,
+    usageSweepIntervalMs: 0, requireGatewayAuth: false, now: () => clock,
+  });
+  cleanups.push(() => server.close());
+  assert.ok(readDemandModel(stateRoot, clock)?.hourly, 'built at startup');
+  // Three hours on, with no rebuild since (the sweep is off): the same pull
+  // setup as above must now hold.
+  clock = Date.now();
+  observe(stateRoot, '1', 3, clock);
+  observe(stateRoot, '2', 100, clock);
+  new AffinityStore({ stateRoot, now: () => clock - 7 * 3_600_000 }).touch('warm-one', '2', 'claude-opus-5');
+  new AffinityStore({ stateRoot, now: () => clock }).touch('warm-one', '2', 'claude-opus-5');
+  assert.equal((await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 'warm-one' })).status, 200);
+  assert.equal(up.calls[0]!.authorization, 'Bearer tok-2');
+});
+
+test('a demand model that cannot be persisted is not used, and routing carries on without it', async () => {
+  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
+  const now = Date.now();
+  const stateRoot = tmpRoot('cab-demand-fault-');
+  seedHistory(stateRoot, now);
+  observe(stateRoot, '1', 100, now);
+  // The target path is a directory: the atomic rename fails.
+  mkdirSync(path.join(stateRoot, 'state', 'demand.json'), { recursive: true });
+  const up = await upstream((_call, res) => res.writeHead(200, OK_HEADERS).end('{}'));
+  const { url } = await boot({ authswapRoot, upstreamUrl: up.url, stateRoot, metrics: true, usageSweepIntervalMs: 0 });
+  assert.equal((await post(url, { model: 'claude-opus-5' }, { [SESSION_HEADER]: 's' })).status, 200);
+  assert.equal(readDemandModel(stateRoot, Date.now()), undefined);
 });

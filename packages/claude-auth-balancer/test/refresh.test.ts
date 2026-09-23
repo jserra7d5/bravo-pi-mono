@@ -13,7 +13,7 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 
 import type { Account } from '../src/accounts.js';
-import { isRefreshable, loadAccountStates, readOAuth, resolveCappedSlots } from '../src/accounts.js';
+import { isRefreshable, loadAccountStates, readOAuth, resolveWeeklyReserves } from '../src/accounts.js';
 import { OAuthRefreshError, refreshClaudeToken } from '../src/oauth.js';
 import { REFRESH_SKEW_MS, TERMINAL_BACKOFF_MS, TokenRefresher, mergeCredentialFile } from '../src/refresh.js';
 import { readAuthWarnings } from '../src/health.js';
@@ -328,25 +328,25 @@ test('the capped-slot env var reaches the AccountState the policy actually reads
     );
   }
 
-  const prior = process.env['CLAUDE_AUTH_BALANCER_CAPPED_SLOTS'];
-  process.env['CLAUDE_AUTH_BALANCER_CAPPED_SLOTS'] = '2';
+  const prior = process.env['CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE'];
+  process.env['CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE'] = '2=0.1';
   try {
     const { states } = loadAccountStates({ stateRoot: authswapRoot, authswapRoot, nowMs: NOW });
-    assert.deepEqual(states.map(s => [s.slot, s.capAtCeiling === true]), [['1', false], ['2', true]]);
+    assert.deepEqual(states.map(s => [s.slot, s.weeklyReserve]), [['1', undefined], ['2', 0.1]]);
   } finally {
-    if (prior === undefined) delete process.env['CLAUDE_AUTH_BALANCER_CAPPED_SLOTS'];
-    else process.env['CLAUDE_AUTH_BALANCER_CAPPED_SLOTS'] = prior;
+    if (prior === undefined) delete process.env['CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE'];
+    else process.env['CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE'] = prior;
   }
 });
 
-test('CLAUDE_AUTH_BALANCER_CAPPED_SLOTS accepts commas, spaces, and nothing at all', () => {
-  const of = (v: string | undefined) => [...resolveCappedSlots({ CLAUDE_AUTH_BALANCER_CAPPED_SLOTS: v } as NodeJS.ProcessEnv)];
-  assert.deepEqual(of('2'), ['2']);
-  assert.deepEqual(of(' 2, 3 '), ['2', '3']);
-  assert.deepEqual(of('2 3'), ['2', '3']);
+test('CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE takes slot=fraction pairs and ignores the rest', () => {
+  const of = (v: string | undefined) => [...resolveWeeklyReserves({ CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE: v } as NodeJS.ProcessEnv)];
+  assert.deepEqual(of('2=0.10'), [['2', 0.1]]);
+  assert.deepEqual(of(' 2=0.1, 3=.05 '), [['2', 0.1], ['3', 0.05]]);
+  assert.deepEqual(of('2 3=0.2'), [['3', 0.2]], 'a bare slot has no fraction');
+  assert.deepEqual(of('2=0 3=1 4=1.5 5=x'), [], 'outside (0, 1) or not a number');
   assert.deepEqual(of(''), []);
   assert.deepEqual(of(undefined), []);
-  assert.deepEqual([...resolveCappedSlots({} as NodeJS.ProcessEnv)], []);
 });
 
 test('a dead refresh token is what actually means needs-reauth', () => {

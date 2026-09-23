@@ -1,8 +1,11 @@
 # Claude balancer: demand-aware routing
 
-Status: draft v3 (2026-09-23). Package: `packages/claude-auth-balancer`.
+Status: steps 2–4 built and live; step 5's harness built, its fidelity gate
+**failing**, so step 4 shipped ahead of its own gate (v4, 2026-09-23).
+Package: `packages/claude-auth-balancer`.
 History: v1 → "rethink" (Opus 5.5, GPT-6 Sol); v2 → "revise" (both); v3
-addresses the v2 closure reviews.
+addresses the v2 closure reviews; v4 records what was built where it
+differs from v3 (the "Built as" notes below).
 
 ## Problem
 
@@ -97,10 +100,17 @@ anomaly detection and replay, permanently. Table `usage_hourly`, keyed
 |---|---|
 | `cost_usd`, `uncached_usd`, `requests` | sums; safe to add across hours |
 | `sessions` | distinct session hashes **in this hour only**; not summable across hours |
-| `exhaustions` | responses with a gating claim `rejected` |
+| `exhaustions` | responses that were a 429 or carried a claim at ≥ 100% |
 | `util_5h/7d/7d_oi_first`, `_last` | first and last non-null reading in the hour, by `ts` |
-| `reset_in_hour` | a claim's reading dropped by more than 0.3 inside the hour |
-| `censored` | at the hour's end, every slot was ≥ 95% on a claim this `model_class` is gated on (`fable`: `5h`, `7d`, `7d_oi`; `general`: `5h`, `7d`) |
+| `reset_5h`, `reset_7d` | that claim's reading fell by more than 0.3 from the slot's previous reading (`7d` covers `7d_oi`) |
+
+**Built as:** `censored` lives in its own table, `fleet_hourly (hour,
+censored)`, with a row for every closed hour. A
+per-row flag could not mark an hour with no traffic, and an empty hour is
+exactly what a fully-censored fleet produces. The flag reads each slot's last
+known readings at the hour's end: every slot ≥ 95% on `5h` or `7d`. A Fable
+column was dropped because nothing read it; the profile is total demand. A single
+`reset_in_hour` also caught every `5h` rollover, so it was split.
 
 Rows are written once, for closed hours only, by the sweep. At about 260k rows
 a year the table is kept indefinitely, like `usage_daily`. It holds the same
@@ -120,6 +130,15 @@ Expected fleet demand `d(t)` in W20/hour, rebuilt on each sweep from
 - **excluding** windows with anomalous resets, and **flagging** censored hours
   (fleet near-exhausted), whose low demand may be missing quota, not missing work
 - **cold start:** a flat profile
+
+**Built as:** one total-demand profile, both classes' cost converted at their
+fitted rates and blended by cost share. Per-class demand terms are left for
+step 6. Censored hours are dropped from the shape (open question 3's first
+option). Anomalous resets are handled in the util-per-dollar fit, which
+re-anchors on any fall in a reading, flagged or not. **Cold start** is no
+profile at all, under a week of history. Routing then has no surplus term and
+paces on the clock, as before. A flat profile would have invented demand the
+router then acts on.
 - **operator override** `~/.bravo/claude-auth-balancer/demand-profile.json`:
   date-bounded multipliers only (vacation, crunch). Each entry expires at its
   end date. Nothing about specific days is hard-coded.
@@ -135,14 +154,15 @@ rank against the fleet. `selectAccount` computes the fleet terms once per call
 and passes them down. New `SelectInput` fields:
 
 ```ts
-demand?: DemandProfile;   // expected W20/hour for any future hour, per model class
-k?: number;               // rolling 5h-window / weekly ratio (20x)
-sessionRate?: number;     // W20/hour; measured burn of this session, if it has history
+demand?: DemandModel;     // src/demand.ts: w20PerUsd, k, freshBurn, hourly[168]?, overrides
+sessionRate?: number;     // W20/hour; measured burn of this session over the last hour
+affinitySince?: number;   // lease created_at: when the session landed on its slot
 ```
 
-With no `demand` supplied (cold start, or an unreadable rollup), the terms
-below use a flat profile. That is the same code path with a constant input,
-not a fallback to today's clock-time rules, which are deleted.
+**Built as:** with no `demand` (cold start, no metrics, or a `demand.json`
+over 2 hours old), there are no surplus terms, pacing is on the clock, and
+the terminal window is 8 clock hours. The 12h/8h horizons and
+`--expiring-horizon-hours` are deleted.
 
 **Units.** Everything below is in W20 of **weekly** quota, for the requested
 model's class: `7d` remainder for general models, and the lesser of `7d` and
@@ -153,18 +173,23 @@ often set by the `5h` window.
 |---|---|---|
 | pacing | `remainingFraction` = clock time left in the week | `D(now→reset_i) / D(week)`, where `D` is expected demand in that model class |
 | expiring | reset within 12h and ≥ 1% headroom | `weekly_i > absorbable_i` |
-| terminal ceiling lift | reset within 8h | reset is the next deadline in the fleet and `weekly_i > absorbable_i` |
+| terminal ceiling lift | reset within 8h | `surplus_i > 0`, or reset within 8 **demand-hours** |
 
 ```
 absorbable_i = min(
-  D(now→reset_i) − Σ weekly_j over accounts j resetting before i,   # demand left for i
-  5h_cap_i × k × demandHours(now→reset_i) / 5                        # what i's 5h window can burn
+  max(0, D(now→reset_i) − Σ min(weekly_j, absorbable_j) over j resetting before i),
+  Σ_h min(d(h), 5h_cap_i × k / 5)            # what i's 5h window can burn, hour by hour
 )
+surplus_i = weekly_i − absorbable_i
 ```
 
-`demandHours` counts hours whose expected demand exceeds the smallest `5h` rate
-in the fleet, not clock hours. Deadlines come from the fixed weekly cadence,
-so they are known for every account.
+Deadlines come from the fixed weekly cadence, so they are known for every
+account. **Built as:** the rate cap is integrated hour by hour
+(`Σ min(d, cap)`), which replaced v3's `demandHours` count. A demand-hour for
+the terminal lift is `D(now→reset) / mean hourly demand`, so eight quiet night
+hours count for little. Surplus alone made the lift circular: an account over
+the ceiling gets no fresh demand, so the surplus test had nothing to lift. The
+8-demand-hour rule breaks that. Expiring needs `surplus ≥ 0.01` W20.
 
 The terminal lift keeps its purpose. Spending quota that dies at the reset
 saves quota that does not, and the lift fires only when that quota cannot be
@@ -176,6 +201,27 @@ adding its expected burn: `projected_i + E[burn]/ (5h_cap_i × k)`, where
 `E[burn]` is the median first-hour burn of fresh sessions of that model class,
 from `usage_hourly`. On a 5x the same session is 4x more of the window, so
 large-model sessions stop landing on an empty 5x just because it reads 0%.
+**Built as:** one blended `freshBurn` from `requests`, not per class. The
+bucket still ranks after the reset day, so a 5x that resets first collects
+fresh sessions until its ceiling. An escape for hot buckets (≥ 75%) was built
+and reverted. Replay put it at 4092 fleet-wide `5h` refusals against 2106
+without it. The plausible mechanism is that spreading opens every `5h` window
+early and leaves none fresh for the peak. But that meter over-reads `5h`,
+and its refusal count proved unstable (step 5), so the numbers only remove
+the case for adding the term; they do not prove concentration better.
+
+**Known limitations**, to revisit once the meter passes:
+
+- A 5x that resets first takes every fresh session until its 95% ceiling.
+  Live cadence makes this Mon 04:00–16:00 (slot 6 alone earliest), a peak
+  day, not yet observed.
+- Several warm sessions can each pass the heavy-session guard against the
+  same expiring account before any response updates its claims. The 6h
+  cooldown stops one session bouncing, not many landing at once.
+
+Fable's fleet term uses the lesser of `7d` and
+`7d_oi × fallback`, as the Units paragraph says; the demand it is set against
+is total demand.
 
 **Heavy-session guard.** When `sessionRate` is known (a re-pick after
 compaction, or a warm-pull candidate), placement on account `i` requires
@@ -186,6 +232,18 @@ the plan table and the 20x `k`.
 **Warm pulls** stay rare: target `weekly_i > absorbable_i` by at least 0.1 W20,
 the session's `sessionRate` passes the heavy-session guard on the target, and
 at most one pull per session per 6h. Stranding alone never triggers a pull.
+**Built as:** the target also needs 0.1 plan-scaled headroom (a 5x: 40% of
+its own `5h`), which covers a session with no measured rate. The 6h cooldown
+reads the lease's `created_at`, which `touch` resets on a slot change. A
+re-pick with a measured rate prefers accounts it fits on, and takes the whole
+pool when it fits nowhere.
+
+**Weekly reserve** (operator, 2026-09-23). `CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE`
+(`slot=fraction`) replaces `CLAUDE_AUTH_BALANCER_CAPPED_SLOTS`. A reserved
+slot's weekly claims are measured against `1 − fraction` and its weekly
+capacity shrinks to match, before any other term runs. The ceiling, burndown,
+surplus and pacing then cannot reach the reserve. The old cap kept 5%, and
+only from fresh picks: warm sessions still ran it to 100%.
 
 ### 5. Replay harness
 
@@ -221,6 +279,41 @@ This is the gate for step 4 and for any step 6.
   20x).
 - **Tuning:** at most one parameter (the absorbability margin) until
   `usage_hourly` holds months of data. `tune` prints; it never writes config.
+
+**Built as:** `claude-auth-balancer replay --db SNAPSHOT [--old-policy
+compiled-policy.js]` (`src/replay.ts`), exiting 1 while the gate fails. The
+meter fits util per dollar cumulatively per slot, claim and class (adjacent
+response pairs under-read it by about half), takes weekly resets from the
+observed ones, and starts each slot from its recorded reading. Result on the
+2026-09-23 snapshot:
+
+| claim | p95 error, points | gate |
+|---|---|---|
+| `7d` | 12–30 | ≤ 2 |
+| `5h` | 50–85, reads high | ≤ 5 |
+
+`5h` is the open problem: only 11 of 34 observed `5h` resets are reproduced,
+so the window model itself is wrong, not just the rate. Scoring against HEAD
+on that meter, for the record and not as evidence:
+
+| policy | refused | 5h exhaustions | re-creates | pulls | stranded W20 |
+|---|---|---|---|---|---|
+| HEAD, slot 2 reserve 10% | 0 | 38 | 201 | 13 | 2.31 |
+| step 4, slot 2 reserve 10% | 2247 | 41 | 194 | 35 | 2.24 |
+| HEAD, no reserve | 2187 | 43 | 235 | 14 | 2.15 |
+| step 4, no reserve | 2106 | 40 | 206 | 38 | 2.20 |
+| step 4 + hot-bucket escape, no reserve | 4092 | 32 | 160 | 37 | 2.24 |
+
+(HEAD predates the reserve; the harness hands it reserve-applied claims.)
+Every refusal was `5h`-bound, and refusals are **not a stable metric** on
+this meter: HEAD swings from 2187 to 0 on the reserve alone. With a `5h`
+meter that reads 50–85 points high, refusals measure whether all six `5h`
+windows happen to run dry together, which small routing changes flip. The
+other columns move little between policies. So the escape's revert rests on
+there being no evidence for adding a ranking term, not on its refusal count
+(see the `5h` bucket note). The injected Saturday fault, with warm leases
+carried in, produced no pulls and no re-creates; fresh picks put 71% of its
+requests on slot 6, the earliest reset. `tune` is not built.
 
 ### 6. Conditional: a fleet planner
 
@@ -259,9 +352,11 @@ weekly exhausted before reset while 5x weekly remains. At current supply
 
 ## Open questions
 
-1. **Fable demand is not interchangeable.** Partly handled: the profile, the
-   units and `absorbable` are per model class. Still open: whether a Fable
-   session that falls back to Opus should count as Fable or general demand.
+1. **Fable demand is not interchangeable.** Partly handled: the units are per
+   model class (a Fable remainder is `min(7d, 7d_oi × fallback)`), but the
+   profile and `absorbable` use total demand. Still open: a per-class profile,
+   and whether a Fable session that falls back to Opus counts as Fable or
+   general demand.
 2. **Server-side anomalies.** How to detect a reset that lands off-cadence
    (the 09-01 case), so it is excluded from the profile, `k`, and the replay
    fidelity gate.

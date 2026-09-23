@@ -4,11 +4,15 @@ import { test } from 'node:test';
 import { parseClaims } from '../src/claims.js';
 import {
   capacityForTier,
+  computeFleetTerms,
   computeHeadroom,
+  DEFAULT_PULL_COOLDOWN_MS,
   quotaForModel,
   REFERENCE_CAPACITY,
   selectAccount,
 } from '../src/policy.js';
+import type { DemandModel } from '../src/demand.js';
+import { weekHour } from '../src/demand.js';
 import { pricingForModel } from '../src/usage.js';
 import type { AccountState } from '../src/policy.js';
 
@@ -500,7 +504,9 @@ const LATE_WEEKLY = {
 test('a fresh non-Fable session drains the earliest weekly reset even through a hot 5h', () => {
   // Slot 2 resets in 2d and is 78% into its 5h with 40% of the window gone —
   // projected past 100%, bucket 4 — against slot 1's 5%, bucket 0, resetting
-  // in 5d. The 5h window refills; the weekly deadline does not.
+  // in 5d. Concentrating on the early reset leaves slot 1's 5h window unopened
+  // for the next peak. A hot-bucket escape from this order was tried and
+  // reverted (spec step 5): replay showed no benefit.
   const s = selectAccount({
     accounts: [nad(fiveHour('0.05', 3 * 60 * 60 * 1000, LATE_WEEKLY)), joseph(fiveHour('0.78', 3 * 60 * 60 * 1000, EARLY_WEEKLY))],
     model: 'claude-opus-5',
@@ -725,10 +731,10 @@ test('a 5h window refilling within the cache horizon does not block a fresh non-
 
 // --- expiring weekly quota -------------------------------------------------
 //
-// An account whose general 7d window resets within the horizon, still holding
-// real headroom, is a hard deadline: whatever is unspent at the reset is gone.
-// It leads fresh ranking ahead of the 5h bucket and is the one planned reason
-// a serviceable warm hold is broken.
+// An account holding more weekly quota than the demand forecast can burn
+// before its reset has SURPLUS: whatever is unspent at the reset is gone. It
+// leads fresh ranking ahead of the 5h bucket and is the one planned reason a
+// serviceable warm hold is broken.
 
 const H = 3_600_000;
 /** Weekly resets in `weeklyInH` hours; 5h window resets in 3h. */
@@ -751,80 +757,174 @@ const account = (slot: string, util7d: number, weeklyInH: number, util5h = 0.1):
   }),
 });
 
-test('a weekly resetting within 12h with headroom left is flagged expiring', () => {
-  assert.equal(computeHeadroom(account('4', 0.13, 8.5), 'claude-opus-5', NOW).weeklyExpiring, true);
-  assert.equal(computeHeadroom(account('2', 0.05, 69), 'claude-opus-5', NOW).weeklyExpiring, false, 'days out');
-  // 8.5h is outside the 8h terminal horizon, so 95% still means the ceiling.
-  assert.equal(computeHeadroom(account('4', 0.95, 8.5), 'claude-opus-5', NOW).weeklyExpiring, false, 'above the ceiling on 7d');
-  assert.equal(computeHeadroom(account('4', 0.13, 8.5, 0.96), 'claude-opus-5', NOW).weeklyExpiring, false, 'above the ceiling on 5h');
+/**
+ * A demand model with `perHour` W20/h everywhere, or `at(hoursFromNow)` when
+ * given. k = 0.2, so a 20x's 5h window burns at most 0.04 W20/h.
+ */
+const demandOf = (perHour: number, at?: (hoursFromNow: number) => number, freshBurn = 0): DemandModel => {
+  const hourly = new Array<number>(168).fill(perHour);
+  if (at) for (let h = 0; h < 168; h += 1) hourly[weekHour(NOW + h * H)] = at(h);
+  return { computedAt: NOW, w20PerUsd: { general: 1, fable: 1 }, k: 0.2, freshBurn, hourly, overrides: [] };
+};
+/** More demand than a 20x can serve (0.05 > 0.04 W20/h): a small remainder is always reachable. */
+const HEAVY = demandOf(0.05);
+
+const verdict = (accounts: AccountState[], slot: string, demand: DemandModel | undefined, nowMs = NOW) => {
+  const fleet = computeFleetTerms(accounts, nowMs, demand);
+  return computeHeadroom(accounts.find(a => a.slot === slot)!, 'claude-opus-5', nowMs, { demand, fleet: fleet.get(slot) });
+};
+
+test('an account holding more than the forecast can reach is expiring', () => {
+  // 87% left, reset in 8.5h: the demand can burn at most 0.34 of it.
+  const fleet = [account('4', 0.13, 8.5), account('2', 0.05, 69)];
+  const soon = verdict(fleet, '4', HEAVY);
+  assert.equal(soon.weeklyExpiring, true);
+  assert.equal(Number(soon.surplus.toFixed(3)), 0.53);
+  assert.equal(verdict(fleet, '2', HEAVY).weeklyExpiring, false, 'days out: the demand reaches it');
+  // 8.5 demand hours is outside the terminal window, so 95% still means the ceiling.
+  assert.equal(verdict([account('4', 0.95, 8.5)], '4', HEAVY).weeklyExpiring, false, 'above the ceiling on 7d');
+  assert.equal(verdict([account('4', 0.13, 8.5, 0.96)], '4', HEAVY).weeklyExpiring, false, 'above the ceiling on 5h');
+});
+
+test('without a demand model nothing is expiring', () => {
+  assert.equal(verdict([account('4', 0.13, 8.5)], '4', undefined).weeklyExpiring, false);
+  assert.equal(computeFleetTerms([account('4', 0.13, 8.5)], NOW, undefined).size, 0);
+});
+
+test('the same clock distance expires on a quiet night and not at a peak', () => {
+  // Half a weekly left, resetting in 30h.
+  const half = [account('4', 0.5, 30)];
+  const quiet = demandOf(0.05, h => (h < 30 ? 0.001 : 0.05));
+  assert.equal(verdict(half, '4', quiet).weeklyExpiring, true, '30 quiet hours burn ~0.03');
+  assert.equal(verdict(half, '4', HEAVY).weeklyExpiring, false, '30 busy hours burn up to 1.2');
+});
+
+test('a 5x absorbs only what its quarter-size 5h window can burn', () => {
+  // 0.59 W20 of weekly, 70h to its reset, plenty of demand: at 0.01 W20/h the
+  // 5x window caps it at 0.7, so it is reachable; at a quarter of that
+  // demand's rate it is not.
+  const fiveX = { ...account('5', 0, 70), capacity: capacityForTier('default_claude_max_5x') };
+  const term = computeFleetTerms([fiveX], NOW, HEAVY).get('5')!;
+  assert.equal(Number(term.weekly.toFixed(3)), Number((1 / 1.7).toFixed(3)));
+  assert.equal(Number(term.absorbable.toFixed(3)), 0.7, '0.25 × 0.2 / 5 W20/h for 70h');
+  const slower = computeFleetTerms([{ ...fiveX, claims: account('5', 0, 20).claims }], NOW, HEAVY).get('5')!;
+  assert.ok(slower.surplus > 0, 'twenty hours at a 5x rate cannot spend its week');
+});
+
+test('a Fable surplus is measured on the Fable budget, not the general one', () => {
+  // 7d 25% used (0.75 left) but 7d_oi 50% used at fallback 0.5: 0.25 left for Fable.
+  const target = account('4', 0.25, 40);
+  target.claims = { ...target.claims!, byId: { ...target.claims!.byId, '7d_oi': { ...target.claims!.byId['7d_oi']!, utilization: 0.5 } } };
+  const quiet = demandOf(0.01);
+  assert.equal(Number(computeFleetTerms([target], NOW, quiet, 'claude-opus-5').get('4')!.surplus.toFixed(2)), 0.35);
+  assert.equal(Number(computeFleetTerms([target], NOW, quiet, 'claude-fable-5').get('4')!.surplus.toFixed(2)), -0.15);
+  const sel = selectAccount({
+    accounts: [account('2', 0.05, 69, 0.03), target],
+    model: 'claude-fable-5', affinitySlot: '2', nowMs: NOW, demand: quiet,
+  });
+  assert.equal(sel.decision, 'affinity-hold', 'no Fable quota would be stranded, so no re-create');
+});
+
+test('earlier deadlines take their share of the demand first', () => {
+  const fleet = [account('3', 0.2, 4), account('4', 0.13, 8.5)];
+  const terms = computeFleetTerms(fleet, NOW, HEAVY);
+  assert.equal(Number(terms.get('3')!.absorbable.toFixed(3)), 0.16, 'rate-capped: 0.04 × 4h');
+  assert.equal(Number(terms.get('4')!.absorbable.toFixed(3)), 0.265, '0.425 of demand, less the 0.16 slot 3 takes');
 });
 
 // --- terminal weekly burndown ----------------------------------------------
 //
 // Observed live 2026-09-21: slot 1 sat at 95.0% weekly with its reset 2.7h
 // away, so the ceiling excluded it from every fresh pick and 5% of a weekly
-// budget was going to reach 04:00 unspent. Inside the terminal horizon that
-// ceiling is backwards, so it is lifted for weekly claims only.
+// budget was going to reach 04:00 unspent. Within eight hours of demand of the
+// reset that ceiling is backwards, so it is lifted for weekly claims only.
 
-test('a weekly at the ceiling but resetting inside the terminal horizon burns down instead', () => {
-  const h = computeHeadroom(account('1', 0.95, 2.7, 0), 'claude-opus-5', NOW);
+test('a weekly at the ceiling near its reset burns down instead', () => {
+  const h = verdict([account('1', 0.95, 2.7, 0)], '1', HEAVY);
   assert.equal(h.evacuating, false, 'the ceiling is lifted, so fresh picks are allowed');
   assert.equal(h.weeklyTerminal, true);
-  assert.equal(h.weeklyExpiring, true, 'and it leads fresh ranking');
+  assert.equal(h.weeklyExpiring, false, 'busy hours reach a 5% remainder, so nothing is stranded');
   assert.equal(Number(h.headroom.toFixed(3)), 0.05);
 });
 
-test('the terminal window takes every fresh pick and says the ceiling was lifted', () => {
+test('terminal distance is measured in demand, not on the clock', () => {
+  // 20 clock hours out, but the next 20 hours are nearly idle.
+  const quiet = demandOf(0.05, h => (h < 20 ? 0.001 : 0.05));
+  assert.equal(verdict([account('1', 0.96, 20, 0)], '1', quiet).evacuating, false);
+  assert.equal(verdict([account('1', 0.96, 20, 0)], '1', HEAVY).evacuating, true, '20 busy hours are not terminal');
+  // With no demand model the hours are clock hours: today's 8h rule.
+  assert.equal(verdict([account('1', 0.96, 7.5, 0)], '1', undefined).evacuating, false);
+  assert.equal(verdict([account('1', 0.96, 8.5, 0)], '1', undefined).evacuating, true);
+});
+
+test('the terminal window takes fresh picks from a later deadline', () => {
   const accounts = [account('2', 0.05, 69, 0.03), account('1', 0.95, 2.7, 0)];
   for (const model of ['claude-opus-5', 'claude-fable-5']) {
-    const sel = selectAccount({ accounts, model, nowMs: NOW });
+    const sel = selectAccount({ accounts, model, nowMs: NOW, demand: HEAVY });
     assert.equal(sel.slot, '1', model);
     assert.equal(sel.decision, 'fresh');
-    assert.match(sel.reason, /expires in 2\.7h with \d+% headroom unspent, burning past the 95% ceiling; draining it first$/);
   }
 });
 
 test('a terminal remainder is spent by fresh picks but never bought with a cache re-create', () => {
-  // 5% is worth taking for free; it is not worth a ~20x re-create per moved
-  // session, which is what DEFAULT_EXPIRING_PULL_MIN_HEADROOM guards.
   const accounts = [account('2', 0.05, 69, 0.03), account('1', 0.95, 2.7, 0)];
-  const sel = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '2', nowMs: NOW });
+  const sel = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '2', nowMs: NOW, demand: HEAVY });
   assert.equal(sel.slot, '2');
   assert.equal(sel.decision, 'affinity-hold');
 });
 
-test('a capped slot keeps the flat ceiling inside the terminal window', () => {
-  const capped = { ...account('1', 0.95, 2.7, 0), capAtCeiling: true };
-  const h = computeHeadroom(capped, 'claude-opus-5', NOW);
-  assert.equal(h.evacuating, true, 'still above the ceiling');
-  assert.equal(h.weeklyTerminal, false);
-  assert.equal(h.weeklyExpiring, false);
+test('a weekly reserve is never spent, not even by the burndown', () => {
+  // Slot 2 holds 10% back. At 88% it is past its own 95% ceiling (88/90).
+  const reserved = { ...account('2', 0.88, 30, 0), weeklyReserve: 0.1 };
+  const h = computeHeadroom(reserved, 'claude-opus-5', NOW);
+  assert.equal(h.evacuating, true, 'fresh picks stop well short of the reserve');
+  assert.equal(Number(h.headroom.toFixed(3)), 0.02, 'what is left above the reserve, in W20');
+  // Inside the terminal window the lift spends up to the reserve, no further.
+  const terminal = verdict([{ ...account('2', 0.88, 2.7, 0), weeklyReserve: 0.1 }], '2', HEAVY);
+  assert.equal(terminal.evacuating, false);
+  assert.equal(terminal.weeklyTerminal, true);
+  // At the reserve the account is spent: a warm session leaves it.
+  const spent = { ...account('2', 0.9, 2.7, 0), weeklyReserve: 0.1 };
+  assert.equal(computeHeadroom(spent, 'claude-opus-5', NOW).eligible, false);
   const sel = selectAccount({
-    accounts: [account('2', 0.05, 69, 0.03), capped],
+    accounts: [account('1', 0.05, 69, 0.03), spent],
     model: 'claude-opus-5',
+    affinitySlot: '2',
     nowMs: NOW,
+    demand: HEAVY,
   });
-  assert.equal(sel.slot, '2', 'its reserve is left alone');
+  assert.equal(sel.slot, '1');
+  assert.equal(sel.decision, 'affinity-broken');
 });
 
-test('the 5h claim never gets the terminal horizon — it refills, it does not expire', () => {
-  // 96% on 5h with the window resetting in 3h: well inside the 8h weekly
-  // horizon, and still an evacuation, because nothing is rescued by spending
-  // a window that refills on its own.
-  const h = computeHeadroom(account('4', 0.13, 2.7, 0.96), 'claude-opus-5', NOW);
+test('overage never bills through a reserve: at the reserve the server would spend it', () => {
+  const withOverage = (u7: number) => {
+    const a = { ...account('2', u7, 30, 0), weeklyReserve: 0.1 };
+    a.claims = { ...a.claims!, byId: { ...a.claims!.byId, overage: { id: 'overage', status: 'allowed' } } };
+    return a;
+  };
+  const sel = selectAccount({ accounts: [withOverage(0.9)], model: 'claude-opus-5', nowMs: NOW, allowOverage: true });
+  assert.notEqual(sel.slot, '2');
+  assert.equal(computeHeadroom(withOverage(0.5), 'claude-opus-5', NOW).overageAvailable, true, 'below it, unchanged');
+});
+
+test('a reserve is not counted as supply the demand can absorb', () => {
+  const plain = computeFleetTerms([account('2', 0.5, 30)], NOW, HEAVY).get('2')!;
+  const reserved = computeFleetTerms([{ ...account('2', 0.5, 30), weeklyReserve: 0.1 }], NOW, HEAVY).get('2')!;
+  assert.equal(Number(plain.weekly.toFixed(3)), 0.5);
+  assert.equal(Number(reserved.weekly.toFixed(3)), 0.4);
+});
+
+test('the 5h claim is never terminal — it refills, it does not expire', () => {
+  // 96% on 5h with the window resetting in 3h: inside the weekly terminal
+  // window, and still an evacuation, because nothing is rescued by spending a
+  // window that refills on its own.
+  const h = verdict([account('4', 0.13, 2.7, 0.96)], '4', HEAVY);
   assert.equal(h.evacuating, true);
   assert.equal(h.weeklyTerminal, false);
 });
 
-test('a terminal horizon of 0 restores the flat ceiling for every account', () => {
-  const accounts = [account('2', 0.05, 69, 0.03), account('1', 0.95, 2.7, 0)];
-  const sel = selectAccount({ accounts, model: 'claude-opus-5', nowMs: NOW, weeklyTerminalHorizonMs: 0 });
-  assert.equal(sel.slot, '2');
-});
-
 test('an exhausted terminal account stops taking sessions and releases the warm ones', () => {
-  // The end state of the burndown: headroom is gone, so it is not serviceable
-  // and the sessions it collected move on.
   const spent = account('1', 1.0, 2.7, 0);
   assert.equal(computeHeadroom(spent, 'claude-opus-5', NOW).eligible, false);
   const sel = selectAccount({
@@ -832,36 +932,53 @@ test('an exhausted terminal account stops taking sessions and releases the warm 
     model: 'claude-opus-5',
     affinitySlot: '1',
     nowMs: NOW,
+    demand: HEAVY,
   });
   assert.equal(sel.slot, '2');
   assert.equal(sel.decision, 'affinity-broken');
 });
 
 test('a fresh pick lands on the expiring account even from a hotter 5h bucket', () => {
-  // slot 4: 5h at 60% (bucket 2), weekly 87% unspent and gone in 8.5h.
+  // slot 4: 5h at 60% (bucket 2), 0.53 W20 the forecast cannot reach in 8.5h.
   // slot 2: 5h at 3% (bucket 0), weekly resets in three days.
   const accounts = [account('2', 0.05, 69, 0.03), account('4', 0.13, 8.5, 0.6)];
-  for (const model of ['claude-opus-5', 'claude-fable-5']) {
-    const sel = selectAccount({ accounts, model, nowMs: NOW });
+  // Opus only: a Fable surplus is measured on 7d_oi (see the Fable test above).
+  for (const model of ['claude-opus-5']) {
+    const sel = selectAccount({ accounts, model, nowMs: NOW, demand: HEAVY });
     assert.equal(sel.slot, '4', model);
     assert.equal(sel.decision, 'fresh');
-    assert.match(sel.reason, /weekly quota on 4 expires in 8\.5h/);
+    assert.match(sel.reason, /weekly quota on 4 expires in 8\.5h with 0\.530 W20 more than forecast demand can reach; draining it first/);
   }
 });
 
 test('a warm session is moved onto an expiring account, paying one re-create', () => {
   const accounts = [account('2', 0.05, 69, 0.03), account('4', 0.13, 8.5)];
-  for (const model of ['claude-opus-5', 'claude-fable-5']) {
-    const sel = selectAccount({ accounts, model, affinitySlot: '2', nowMs: NOW });
+  // Opus only: a Fable surplus is measured on 7d_oi (see the Fable test above).
+  for (const model of ['claude-opus-5']) {
+    const sel = selectAccount({ accounts, model, affinitySlot: '2', nowMs: NOW, demand: HEAVY });
     assert.equal(sel.slot, '4', model);
     assert.equal(sel.decision, 'affinity-broken');
     assert.match(sel.reason, /moved sticky slot 2 there \(one cache re-create\)/);
   }
 });
 
+test('a session moved within the cooldown is not pulled again', () => {
+  const accounts = [account('2', 0.05, 69, 0.03), account('4', 0.13, 8.5)];
+  const recent = selectAccount({
+    accounts, model: 'claude-opus-5', affinitySlot: '2', nowMs: NOW, demand: HEAVY,
+    affinitySince: NOW - DEFAULT_PULL_COOLDOWN_MS + H,
+  });
+  assert.equal(recent.decision, 'affinity-hold');
+  const settled = selectAccount({
+    accounts, model: 'claude-opus-5', affinitySlot: '2', nowMs: NOW, demand: HEAVY,
+    affinitySince: NOW - DEFAULT_PULL_COOLDOWN_MS,
+  });
+  assert.equal(settled.slot, '4');
+});
+
 test('a warm session already on an expiring account holds, even if another expires sooner', () => {
   const accounts = [account('3', 0.2, 4), account('4', 0.13, 8.5)];
-  const sel = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '4', nowMs: NOW });
+  const sel = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '4', nowMs: NOW, demand: HEAVY });
   assert.equal(sel.slot, '4');
   assert.equal(sel.decision, 'affinity-hold');
 });
@@ -869,10 +986,10 @@ test('a warm session already on an expiring account holds, even if another expir
 test('once the expiring account resets the moved session stays put — no thrash', () => {
   const later = NOW + 9 * H; // slot 4 reset at +8.5h; its window is now projected a week out
   const accounts = [account('2', 0.05, 69, 0.03), account('4', 0.13, 8.5)];
-  const sel = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '4', nowMs: later });
+  const sel = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '4', nowMs: later, demand: HEAVY });
   assert.equal(sel.slot, '4');
   assert.equal(sel.decision, 'affinity-hold');
-  assert.equal(computeHeadroom(accounts[1]!, 'claude-opus-5', later).weeklyExpiring, false);
+  assert.equal(verdict(accounts, '4', HEAVY, later).weeklyExpiring, false);
 });
 
 test('an expiring account above the ceiling or with nothing left does not pull a warm session', () => {
@@ -882,17 +999,67 @@ test('an expiring account above the ceiling or with nothing left does not pull a
       model: 'claude-opus-5',
       affinitySlot: '2',
       nowMs: NOW,
+      demand: HEAVY,
     });
     assert.equal(sel.slot, '2');
     assert.equal(sel.decision, 'affinity-hold');
   }
 });
 
-test('a horizon of 0 disables the expiring term entirely', () => {
-  const accounts = [account('2', 0.05, 69, 0.03), account('4', 0.13, 8.5, 0.6)];
-  const sel = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '2', nowMs: NOW, expiringHorizonMs: 0 });
-  assert.equal(sel.slot, '2');
-  assert.equal(sel.decision, 'affinity-hold');
+test('a small surplus is taken by fresh picks but does not pull a warm session', () => {
+  // 0.05 W20 the forecast cannot reach: worth a free placement, not a re-create.
+  const small = demandOf(0.05, h => (h < 8.5 ? 0.005 : 0.05));
+  const accounts = [account('2', 0.05, 69, 0.03), account('4', 0.9, 8.5)];
+  assert.ok(verdict(accounts, '4', small).surplus < 0.1);
+  assert.equal(selectAccount({ accounts, model: 'claude-opus-5', nowMs: NOW, demand: small }).slot, '4');
+  const warm = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '2', nowMs: NOW, demand: small });
+  assert.equal(warm.decision, 'affinity-hold');
+});
+
+// --- heavy sessions and the 5h window ------------------------------------------
+
+test('a heavy session is not pulled onto a window it would exhaust within the cache TTL', () => {
+  // slot 4's 5h window has 0.9 × 0.2 = 0.18 W20 left.
+  const accounts = [account('2', 0.05, 69, 0.03), account('4', 0.13, 8.5)];
+  const heavy = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '2', nowMs: NOW, demand: HEAVY, sessionRate: 0.3 });
+  assert.equal(heavy.decision, 'affinity-hold');
+  const light = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '2', nowMs: NOW, demand: HEAVY, sessionRate: 0.1 });
+  assert.equal(light.slot, '4');
+});
+
+test('a re-picked session with measured burn prefers a window it fits in', () => {
+  // Same reset day and bucket; the 5x would win on slot order but its 5h
+  // window (0.9 × 0.25 × 0.2 = 0.045 W20) cannot hold 0.1 W20/h for an hour.
+  const fiveX = { ...account('1', 0.1, 50), capacity: capacityForTier('default_claude_max_5x') };
+  const accounts = [fiveX, account('2', 0.1, 50)];
+  assert.equal(selectAccount({ accounts, model: 'claude-opus-5', nowMs: NOW, demand: HEAVY }).slot, '1');
+  assert.equal(selectAccount({ accounts, model: 'claude-opus-5', nowMs: NOW, demand: HEAVY, sessionRate: 0.1 }).slot, '2');
+  // Fitting nowhere is not a refusal: being served beats being refused.
+  assert.equal(selectAccount({ accounts: [fiveX], model: 'claude-opus-5', nowMs: NOW, demand: HEAVY, sessionRate: 1 }).slot, '1');
+});
+
+test('a typical fresh session weighs four times as much on a 5x window', () => {
+  // freshBurn 0.02 W20: 10% of a 20x window (0.2), 40% of a 5x's (0.05).
+  const demand = demandOf(0.05, undefined, 0.02);
+  // Resets 100h out, so neither holds a surplus the demand cannot reach.
+  const fiveX = { ...account('1', 0.1, 100, 0), capacity: capacityForTier('default_claude_max_5x') };
+  const twentyX = account('2', 0.1, 100, 0);
+  assert.equal(computeHeadroom(fiveX, 'claude-opus-5', NOW, { demand }).fiveHourBucket, 1);
+  assert.equal(computeHeadroom(twentyX, 'claude-opus-5', NOW, { demand }).fiveHourBucket, 0);
+  assert.equal(selectAccount({ accounts: [fiveX, twentyX], model: 'claude-opus-5', nowMs: NOW, demand }).slot, '2');
+});
+
+test('pacing holds quota back in proportion to demand ahead, not time', () => {
+  // Reset in 30h, half the weekly left. Quiet hours ahead mean little of the
+  // week's demand remains, so more of the remainder is spendable now.
+  const quiet = demandOf(0.05, h => (h < 30 ? 0.001 : 0.05));
+  const a = account('4', 0.5, 30);
+  const byDemand = computeHeadroom(a, 'claude-opus-5', NOW, { demand: quiet }).spendableHeadroom;
+  const byClock = computeHeadroom(a, 'claude-opus-5', NOW).spendableHeadroom;
+  assert.ok(byDemand > byClock, `${byDemand} !> ${byClock}`);
+  // A flat profile paces exactly like the clock.
+  const flat = computeHeadroom(a, 'claude-opus-5', NOW, { demand: HEAVY }).spendableHeadroom;
+  assert.equal(Number(flat.toFixed(6)), Number(byClock.toFixed(6)));
 });
 
 // --- an observed account whose weekly window has not opened -----------------
@@ -1058,6 +1225,7 @@ test('an expiring 5x needs more of its own window to pull a warm session than a 
     model: 'claude-opus-5',
     affinitySlot: '2',
     nowMs: NOW,
+    demand: HEAVY,
   });
   assert.equal(pulledBy20x.slot, '4');
   assert.equal(pulledBy20x.decision, 'affinity-broken');
@@ -1067,6 +1235,7 @@ test('an expiring 5x needs more of its own window to pull a warm session than a 
     model: 'claude-opus-5',
     affinitySlot: '2',
     nowMs: NOW,
+    demand: HEAVY,
   });
   assert.equal(notPulled.slot, '2');
   assert.equal(notPulled.decision, 'affinity-hold');
@@ -1076,6 +1245,7 @@ test('an expiring 5x needs more of its own window to pull a warm session than a 
     accounts: [held, fiveX(account('4', 0.13, 8.5, 0.7))],
     model: 'claude-opus-5',
     nowMs: NOW,
+    demand: HEAVY,
   });
   assert.equal(fresh.slot, '4');
   assert.match(fresh.reason, /expires in 8\.5h/);

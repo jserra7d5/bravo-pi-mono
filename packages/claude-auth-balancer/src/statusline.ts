@@ -20,22 +20,20 @@ import { AffinityStore } from './affinity.js';
 import {
   discoverAccounts,
   isRefreshable,
+  loadAccountStates,
   readOAuth,
   readSlotObservation,
-  readSlotPlan,
   resolveAuthswapRoot,
-  resolveCappedSlots,
+  resolveWeeklyReserves,
   resolveStateRoot,
 } from './accounts.js';
 import { claimHasReset } from './claims.js';
 import type { Claim } from './claims.js';
 import {
-  DEFAULT_EVACUATE_UTILIZATION,
-  evacuationHorizonMsFor,
-  capacityForTier,
-  quotaForModel,
+  computeFleetTerms,
   computeHeadroom,
 } from './policy.js';
+import { readDemandModel } from './demand.js';
 import { conciseWarnings, readActiveAuthWarnings } from './health.js';
 
 /**
@@ -153,40 +151,6 @@ function futureReset(claim: Claim | undefined, nowMs: number): number | undefine
   return claim.reset * 1000 > nowMs ? claim.reset : undefined;
 }
 
-/**
- * The threshold marker, computed the way `computeHeadroom` computes it.
- *
- * It means "no fresh session starts here" for every model, and additionally
- * "a warm session leaves here" for Fable. Three divergences would otherwise
- * make the badge a liar: a claim that refills within its evacuation horizon
- * does NOT trigger a move (moving costs 20x and saves nothing, and for a
- * weekly claim the horizon is the long terminal one — hence the shared
- * `evacuationHorizonMsFor`); `7d_oi` — the Fable-only weekly — does trigger one
- * for Fable, despite not being one of the two bars on the line, and is ignored
- * for other models whose quota it does not gate; and a capped slot keeps the
- * flat ceiling the rest do not.
- */
-function isEvacuating(
-  claims: Record<string, Claim> | undefined,
-  nowMs: number,
-  model: string | undefined,
-  capAtCeiling: boolean,
-): boolean {
-  if (!claims) return false;
-  const quota = quotaForModel(model);
-  const ids = ['5h', '7d', ...(quota.extraClaim ? [quota.extraClaim] : [])];
-  for (const id of ids) {
-    const claim = claims[id];
-    if (!claim || claim.utilization === undefined) continue;
-    if (claimHasReset(claim, nowMs)) continue;
-    const resetsSoon =
-      claim.reset !== undefined &&
-      claim.reset * 1000 - nowMs <= evacuationHorizonMsFor(id, capAtCeiling);
-    if (claim.utilization >= DEFAULT_EVACUATE_UTILIZATION && !resetsSoon) return true;
-  }
-  return false;
-}
-
 export const MAX_LABEL = 12;
 
 /**
@@ -277,8 +241,8 @@ export type GatherOptions = {
    * choice downstream can undo it.
    */
   ellipsis?: string;
-  /** Slots held to the flat ceiling. Defaults to `resolveCappedSlots()`. */
-  cappedSlots?: Set<string>;
+  /** Per-slot weekly reserves. Defaults to `resolveWeeklyReserves()`. */
+  weeklyReserves?: Map<string, number>;
 };
 
 /** Assemble everything the renderer needs. Never throws. */
@@ -292,7 +256,7 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
 
   try {
     const discovered = discoverAccounts(options.authswapRoot ?? resolveAuthswapRoot());
-    const capped = options.cappedSlots ?? resolveCappedSlots();
+    const reserves = options.weeklyReserves ?? resolveWeeklyReserves();
     let activeSlot: string | undefined;
     if (payload.session_id) {
       try {
@@ -308,6 +272,26 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
         /* an unreadable lease directory must not cost us the whole line */
       }
     }
+
+    // The badges are the router's own verdicts, computed by the same policy
+    // functions from the same state: the demand model the daemon persists,
+    // the fleet's weekly deadline order, and each account's plan. A second
+    // implementation here would be a second opinion, and the badge would lie
+    // whenever the two drifted.
+    const demand = readDemandModel(stateRoot, nowMs);
+    // The router's own loader, so a dead or expired account drops out of the
+    // deadline order here exactly as it does there.
+    const { states: policyStates } = loadAccountStates({
+      stateRoot,
+      authswapRoot: options.authswapRoot,
+      nowMs,
+      weeklyReserves: reserves,
+    });
+    const fleet = computeFleetTerms(policyStates, nowMs, demand, payload.model?.id);
+    const verdicts = new Map(policyStates.map(state => [
+      state.slot,
+      computeHeadroom(state, payload.model?.id, nowMs, { demand, fleet: fleet.get(state.slot) }),
+    ]));
 
     accounts = discovered.map(account => {
       const observed = readSlotObservation(stateRoot, account.slot);
@@ -336,18 +320,8 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
           observed !== undefined &&
           observed.observedAt !== undefined &&
           nowMs - observed.observedAt > OBSERVATION_STALE_MS,
-        evacuating: isEvacuating(byId, nowMs, payload.model?.id, capped.has(account.slot)),
-        expiring: computeHeadroom(
-          {
-            slot: account.slot,
-            health: 'ok',
-            claims: observed?.claims,
-            capAtCeiling: capped.has(account.slot),
-            capacity: capacityForTier(readSlotPlan(stateRoot, account.slot)?.tier),
-          },
-          payload.model?.id,
-          nowMs,
-        ).weeklyExpiring,
+        evacuating: verdicts.get(account.slot)?.evacuating ?? false,
+        expiring: verdicts.get(account.slot)?.weeklyExpiring ?? false,
       };
     });
   } catch {

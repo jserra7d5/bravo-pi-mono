@@ -298,7 +298,7 @@ test('the plan probe reads the tier over the OAuth wire contract and sizes the a
   const dir = path.join(authswap, 'providers', 'anthropic', 'credentials');
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, '.credentials-1-a@example.com.json'), readFileSync(selected.credentialPath));
-  const { states } = loadAccountStates({ stateRoot: root, authswapRoot: authswap, nowMs: now, cappedSlots: new Set() });
+  const { states } = loadAccountStates({ stateRoot: root, authswapRoot: authswap, nowMs: now, weeklyReserves: new Map() });
   assert.deepEqual(states[0]?.capacity, { fiveHour: 0.25, weekly: 1 / 1.7 });
 });
 
