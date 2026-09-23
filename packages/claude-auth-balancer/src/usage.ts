@@ -145,10 +145,11 @@ export type ModelPricing = {
 };
 
 /**
- * First-party API list prices, USD per 1M tokens (as of 2026-06-24).
+ * First-party API list prices, USD per 1M tokens (checked 2026-09-22).
  * Matched by substring against the request's model id, longest key first.
  */
 export const MODEL_PRICING: Record<string, ModelPricing> = {
+  'opus-5-5': { input: 4, output: 20 },
   'fable-5': { input: 10, output: 50 },
   'mythos-5': { input: 10, output: 50 },
   'opus-5': { input: 5, output: 25 },

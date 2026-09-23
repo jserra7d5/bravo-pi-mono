@@ -73,6 +73,7 @@ test('non-streaming JSON bodies are parsed too', () => {
 });
 
 test('pricing resolves the longest matching model key', () => {
+  assert.deepEqual(pricingForModel('claude-opus-5-5'), { input: 4, output: 20 });
   assert.deepEqual(pricingForModel('claude-opus-5'), { input: 5, output: 25 });
   assert.deepEqual(pricingForModel('claude-fable-5'), { input: 10, output: 50 });
   assert.deepEqual(pricingForModel('claude-sonnet-5'), { input: 3, output: 15 });
