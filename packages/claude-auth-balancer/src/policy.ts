@@ -39,14 +39,18 @@
 // not the current level: 60% with thirty minutes left is cooler than 30% with
 // four hours left. See DEFAULT_FRESH_5H_BUCKET.
 //
-// Ahead of the 5h bucket, fresh picks drain the earliest weekly reset, floored
+// Behind the 5h bucket, fresh picks drain the earliest weekly reset, floored
 // to whole days. Observed 2026-09-02: slots 2 and 3 resetting in 2.3d and 2.5d
 // with real headroom, and a fresh Opus session sent to slot 1 (4.6d out,
-// behind pace) purely on a cooler 5h bucket. Quota on the earliest-resetting
-// accounts is the quota with the nearest deadline; the 5h window refills by
-// itself. Accounts resetting on the same day still spread on 5h pressure, so
-// the herd guard survives among the cohort that matters. Warm sessions are
-// untouched: only the expiring pull moves them.
+// behind pace) purely on a cooler 5h bucket. Among accounts under equal 5h
+// pressure, the earliest-resetting quota has the nearest deadline. The bucket
+// ranks first because a reset day that outranks it concentrates every fresh
+// session on one account's 5h window until the ceiling (observed 2026-09-23:
+// eight sessions on slot 3 with two 20x windows unopened), which caps
+// throughput at one window and sends the whole herd across together when it
+// runs dry. Quota actually at risk of expiring is the surplus term's job, and
+// it outranks both. Warm sessions are untouched: only the expiring pull moves
+// them.
 //
 // Time is measured in expected DEMAND, not on the clock (see ./demand.ts and
 // docs/specs/claude-balancer-demand-rate). Thirty hours of Friday-into-Saturday
@@ -857,8 +861,8 @@ const DEFAULT_AFFINITY_FLOOR = 0.001;
 /**
  * Choose the account to serve one request.
  *
- * Non-Fable fresh sessions drain the account with the earliest known projected
- * general-weekly reset, and affinity holds until hard exhaustion. Fable keeps
+ * Fresh sessions spread on projected 5h pressure, then drain the earliest
+ * general-weekly reset; non-Fable affinity holds until hard exhaustion. Fable keeps
  * spendable-headroom ranking and proactive evacuation. Overage remains last.
  */
 export function selectAccount(input: SelectInput): Selection {
@@ -940,7 +944,7 @@ export function selectAccount(input: SelectInput): Selection {
   };
   const cmpBucket = (a: HeadroomBreakdown, b: HeadroomBreakdown) => a.fiveHourBucket - b.fiveHourBucket;
   const cmpFresh = (a: HeadroomBreakdown, b: HeadroomBreakdown) =>
-    cmpExpiring(a, b) || cmpResetDay(a, b) || cmpBucket(a, b) || cmpBase(a, b);
+    cmpExpiring(a, b) || cmpBucket(a, b) || cmpResetDay(a, b) || cmpBase(a, b);
   const rankBase = (pool: HeadroomBreakdown[]) => [...pool].sort(cmpBase);
   const rankNoResetDay = (pool: HeadroomBreakdown[]) =>
     [...pool].sort((a, b) => cmpExpiring(a, b) || cmpBucket(a, b) || cmpBase(a, b));

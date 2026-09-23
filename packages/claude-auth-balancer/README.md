@@ -72,25 +72,22 @@ session on one account until it genuinely cannot serve.
    keeps its cache. A window that refills within the cache TTL never triggers
    the ceiling either, and neither does a **weekly** window in its terminal
    stretch or with surplus. See (6).
-4. **Fresh picks drain the earliest weekly reset, then spread on a 25%-wide
-   projected `5h` bucket, then pace.** The weekly reset is floored to whole
-   days: the account(s) resetting soonest take every fresh session, because
-   that quota has the nearest deadline while the `5h` window refills by itself.
-   Among accounts resetting the same day, warm sessions hold through the hard
-   ceiling, so with many concurrent sessions one target collects every fresh
-   session until 95%, and that whole herd later exhausts its `5h` window — and
-   migrates — together, each arrival paying a ~20x cache write on the next
-   account. A single threshold only moves that cliff. So within a reset day,
-   fresh picks (all models) sort on `floor(projected / 0.25)`, where
+4. **Fresh picks spread on a 25%-wide projected `5h` bucket, then drain the
+   earliest weekly reset, then pace.** Warm sessions hold through the hard
+   ceiling, so with many concurrent sessions one target would collect every
+   fresh session until 95%. That caps throughput at one `5h` window, and the
+   whole herd later exhausts it — and migrates — together, each arrival paying
+   a ~20x cache write on the next account. A single threshold only moves that
+   cliff. So fresh picks (all models) sort first on `floor(projected / 0.25)`, where
    `projected` is the utilization the window will reach at its reset if the
    average burn rate so far continues (`utilization / elapsed`, capped at
    100%): 60% with thirty minutes left is cooler than 30% with four hours left.
-   Under 30 minutes into a window the raw level is used. Within a bucket
-   pacing decides. A hot `5h` window does not escape the reset-day order:
-   concentrating fresh sessions keeps other accounts' `5h` windows unopened
-   for the next peak. A hot-bucket escape was tried and reverted: replay
-   showed no benefit, on a meter that fails its fidelity gate. The cost: a 5x that resets first takes every fresh session
-   until its 95% ceiling. And several warm sessions can each pass the pull's
+   Under 30 minutes into a window the raw level is used. Within a bucket the
+   weekly reset, floored to whole days, decides: that quota has the nearest
+   deadline. Within a reset day pacing decides. Weekly quota actually at risk
+   of expiring is the surplus term's job (5), which outranks the bucket. The
+   bucket ranked behind the reset day until 2026-09-23; that sent every fresh
+   session to one account's `5h` window at full load. Several warm sessions can each pass the pull's
    fit check against one expiring account before its claims update. Neither term excludes: a later reset or a hotter bucket is
    still selected when it is the only one. A `5h` window that refills within
    the cache TTL buckets as cool. An unobserved account sorts first so it gets

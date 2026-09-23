@@ -202,9 +202,11 @@ adding its expected burn: `projected_i + E[burn]/ (5h_cap_i × k)`, where
 from `usage_hourly`. On a 5x the same session is 4x more of the window, so
 large-model sessions stop landing on an empty 5x just because it reads 0%.
 **Built as:** one blended `freshBurn` from `requests`, not per class. The
-bucket still ranks after the reset day, so a 5x that resets first collects
-fresh sessions until its ceiling. An escape for hot buckets (≥ 75%) was built
-and reverted. Replay put it at 4092 fleet-wide `5h` refusals against 2106
+bucket shipped ranking after the reset day, so the earliest reset collected
+every fresh session until its ceiling. On 2026-09-23 that put eight sessions
+on slot 3's `5h` window with two empty 20x windows beside it, capping
+throughput at one window at full load; the bucket now ranks ahead of the reset
+day. Before that, an escape for hot buckets (≥ 75%) was built and reverted. Replay put it at 4092 fleet-wide `5h` refusals against 2106
 without it. The plausible mechanism is that spreading opens every `5h` window
 early and leaves none fresh for the peak. But that meter over-reads `5h`,
 and its refusal count proved unstable (step 5), so the numbers only remove
@@ -212,9 +214,6 @@ the case for adding the term; they do not prove concentration better.
 
 **Known limitations**, to revisit once the meter passes:
 
-- A 5x that resets first takes every fresh session until its 95% ceiling.
-  Live cadence makes this Mon 04:00–16:00 (slot 6 alone earliest), a peak
-  day, not yet observed.
 - Several warm sessions can each pass the heavy-session guard against the
   same expiring account before any response updates its claims. The 6h
   cooldown stops one session bouncing, not many landing at once.
