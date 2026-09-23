@@ -20,14 +20,14 @@ test("buildClaudeCommand constructs dangerous-auth non-bare Claude command", () 
     cwd: runDir,
     systemPath: join(runDir, "artifacts", "system.md"),
     displayName: "worker/claude",
-    model: "claude-opus-4-8",
+    model: "claude-opus-5-5",
     effort: "max",
   });
   assert.equal(command.command, "claude");
   assert.equal(command.executionMode, "dangerous-auth");
   assert.equal(command.memoryIsolation, "best-effort-non-bare");
   assert.equal(command.args.includes("--bare"), false);
-  for (const arg of ["--dangerously-skip-permissions", "--settings", "--setting-sources", "user", "--strict-mcp-config", "--mcp-config", "--disallowed-tools", "Task", "--model", "claude-opus-4-8", "--effort", "max", "--system-prompt-file"]) {
+  for (const arg of ["--dangerously-skip-permissions", "--settings", "--setting-sources", "user", "--strict-mcp-config", "--mcp-config", "--disallowed-tools", "Task", "--model", "claude-opus-5-5", "--effort", "max", "--system-prompt-file"]) {
     assert.equal(command.args.includes(arg), true, arg);
   }
   assert.equal(command.args.at(-1), CLAUDE_CONSTANT_PROMPT);
@@ -46,10 +46,10 @@ test("buildClaudeCommand normalizes Claude model aliases to canonical ids", () =
     model: "opus",
   });
   assert.equal(command.requestedModel, "opus");
-  assert.equal(command.resolvedModel, "claude-opus-4-8");
+  assert.equal(command.resolvedModel, "claude-opus-5-5");
   assert.deepEqual(resolveClaudeModel("sonnet"), { requestedModel: "sonnet", resolvedModel: "claude-sonnet-5" });
   assert.deepEqual(resolveClaudeModel("fable"), { requestedModel: "fable", resolvedModel: "claude-fable-5" });
-  assert.equal(command.args[command.args.indexOf("--model") + 1], "claude-opus-4-8");
+  assert.equal(command.args[command.args.indexOf("--model") + 1], "claude-opus-5-5");
   assert.throws(() => resolveClaudeModel("claude-opus-4-5"), /unsupported Claude model/);
 });
 

@@ -94,7 +94,7 @@ Required deterministic faults:
 - malformed global state and conflicting historical branch markers;
 - compaction with a ready task and no run rows, plus result-ready and blocked rows;
 - each installer destination contains a real user-authored path in turn; an injected later mutation fails after preflight;
-- Claude organization blocks `claude-opus-5` (documented invocation limitation, not installer behavior).
+- Claude organization blocks `claude-opus-5-5` (documented invocation limitation, not installer behavior).
 
 ## Commands
 

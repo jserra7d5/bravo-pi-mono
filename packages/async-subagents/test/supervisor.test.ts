@@ -87,7 +87,7 @@ test("manual pause suspends runtime budget and resume reinstalls timeout", async
 
 test("expiration error summary wins while harmless stderr remains the body", async () => {
   const { cwd, runRoot, parentRunId, runId, paths } = createQueuedRun();
-  const warning = 'Warning: No models match pattern "bravo-codex-balanced/gpt-5.6-luna"';
+  const warning = 'Warning: No models match pattern "bravo-codex-balanced/gpt-6-luna"';
 
   // What this asserts is that expiry keeps the child's stderr as the body. Racing a
   // short wall-clock budget against node's startup made that a coin flip under the

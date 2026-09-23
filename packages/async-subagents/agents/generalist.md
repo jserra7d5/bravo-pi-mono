@@ -1,6 +1,6 @@
 ---
 description: Open-ended workhorse for broad, ambiguous, exploratory, or mixed-mode assignments spanning research, analysis, planning, review, and implementation.
-model: bravo-codex-balanced/gpt-5.6-sol
+model: bravo-codex-balanced/gpt-6-sol
 thinkingLevel: medium
 tools: [read, grep, find, ls, bash, edit, write, web_search, web_fetch, web_lookup]
 extensions: [@bravo/web-evidence-cache/extensions/pi]
@@ -8,9 +8,9 @@ mode: oneshot
 maxSubagentDepth: 0
 variants:
   luna:
-    model: bravo-codex-balanced/gpt-5.6-luna
+    model: bravo-codex-balanced/gpt-6-luna
   sol:
-    model: bravo-codex-balanced/gpt-5.6-sol
+    model: bravo-codex-balanced/gpt-6-sol
   gemini:
     model: antigravity-code-assist/gemini-3.5-flash
     thinkingLevel: high

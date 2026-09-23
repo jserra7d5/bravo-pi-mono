@@ -31,7 +31,7 @@ During the mixed-resident rollout, new processes also mirror SQLite affinity int
 
 ## Balanced model capabilities
 
-The `bravo-codex-balanced/gpt-5.6-luna` model explicitly supports the `max` thinking level. Other balanced models preserve the thinking-level mappings advertised by the upstream Codex catalog.
+The `bravo-codex-balanced/gpt-6-luna` model explicitly supports the `max` thinking level. Other balanced models preserve the thinking-level mappings advertised by the upstream Codex catalog.
 
 ## Selection policy
 

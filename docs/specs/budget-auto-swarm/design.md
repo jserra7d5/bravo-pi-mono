@@ -108,8 +108,8 @@ agent = planner      variant = sol        thinkingLevel = medium
 
 Every applicable built-in role gets model-only variants:
 
-- `luna` → `bravo-codex-balanced/gpt-5.6-luna`
-- `sol` → `bravo-codex-balanced/gpt-5.6-sol`
+- `luna` → `bravo-codex-balanced/gpt-6-luna`
+- `sol` → `bravo-codex-balanced/gpt-6-sol`
 
 The base role prompts, tools, extensions, run mode, and depth limits do not change under these variants. Existing `gemini` variants remain available outside budget mode and are rejected by the budget-mode launch guard unless the user explicitly turns the mode off.
 
@@ -219,14 +219,14 @@ The Claude skill is both capability and command; no duplicate command file is ne
 Its frontmatter sets:
 
 - `disable-model-invocation: true` — only the user deliberately starts an autonomous swarm;
-- `model: claude-opus-5` — exact family/version instead of the moving `opus` alias;
+- `model: claude-opus-5-5` — exact family/version instead of the moving `opus` alias;
 - `effort: medium`;
 - `disallowed-tools: AskUserQuestion` — the invocation turn should progress autonomously and surface only real terminal blocks;
 - allowed Bash access narrowly matching the fixed async-subagents launcher where Claude permission syntax permits it.
 
 Claude Code model/effort overrides apply for the rest of the invocation turn only. Skill instructions remain in context across turns, but the session model resumes on the user’s next prompt. Therefore:
 
-- a single long autonomous turn remains on Opus 5 medium;
+- a single long autonomous turn remains on Opus 5.5 medium;
 - after user input, the operator reinvokes `/budget-auto-swarm ...` to restore the model/effort override;
 - the skill must state this explicitly instead of claiming a persistent model switch.
 
@@ -287,7 +287,7 @@ Implementation stops and returns to design if:
 
 - Pi cannot enforce budget launch policy through one `startSubagent` hook after resolution and before a run directory/process is created;
 - enabling task orchestration from budget mode creates two competing sticky-state owners;
-- Claude Code rejects the required skill frontmatter or cannot apply Opus 5 medium to the invocation turn;
+- Claude Code rejects the required skill frontmatter or cannot apply Opus 5.5 medium to the invocation turn;
 - model variants cannot remain pure frontmatter overlays and require role-prompt duplication;
 - Claude run lifecycle commands cannot address one canonical run store across worktrees, or combined watch/recovery loses child truth;
 - enforcing one-write-lane requires a new scheduler/lock subsystem rather than prompt policy;

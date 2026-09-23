@@ -267,7 +267,7 @@ function upstreamModelId(model: Model<typeof API>): string {
 
 function publicModel(model: Model<typeof API>): Model<typeof API> {
   const balanced = { ...model, id: publicModelId(model), provider: PROVIDER, api: API };
-  if (upstreamModelId(model) !== 'gpt-5.6-luna') return balanced;
+  if (upstreamModelId(model) !== 'gpt-6-luna') return balanced;
   return {
     ...balanced,
     thinkingLevelMap: { ...model.thinkingLevelMap, max: 'max' },

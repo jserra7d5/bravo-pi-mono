@@ -20,12 +20,12 @@ async function bounded<T>(promise: Promise<T>, ms = 8_000): Promise<T> { let tim
 test("real Pi loader/session command activates task tools, persists state, and injects prompt", async () => {
   const root = mkdtempSync(join(tmpdir(), "budget-host-")), oldHome = process.env.HOME, oldPath = process.env.PATH; process.env.HOME = root;
   const bin = join(root, "bin"), calls = join(root, "pi-calls.log"); mkdirSync(bin);
-  writeFileSync(join(bin, "pi"), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\ncase " $* " in\n  *" --list-models "*) printf 'provider model context max-out thinking images\\nbravo-codex-balanced gpt-5.6-luna 128k 32k yes no\\nbravo-codex-balanced gpt-5.6-sol 128k 32k yes no\\nantigravity-code-assist gemini-3.5-flash 128k 32k yes no\\n' ;;\n  *) printf 'real budget child completed\\n' ;;\nesac\n`); chmodSync(join(bin, "pi"), 0o755); process.env.PATH = `${bin}:${oldPath ?? ""}`;
+  writeFileSync(join(bin, "pi"), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\ncase " $* " in\n  *" --list-models "*) printf 'provider model context max-out thinking images\\nbravo-codex-balanced gpt-6-luna 128k 32k yes no\\nbravo-codex-balanced gpt-6-sol 128k 32k yes no\\nantigravity-code-assist gemini-3.5-flash 128k 32k yes no\\n' ;;\n  *) printf 'real budget child completed\\n' ;;\nesac\n`); chmodSync(join(bin, "pi"), 0o755); process.env.PATH = `${bin}:${oldPath ?? ""}`;
   mkdirSync(join(root, ".agents"));
   writeFileSync(join(root, ".agents", "terra.md"), `---\ndescription: terra route fixture\nmodel: custom/base\nvariants:\n  luna:\n    model: google/gemini-terra\n---\nfixture\n`);
   writeFileSync(join(root, ".agents", "custom.md"), `---\ndescription: custom route fixture\nmodel: custom/base\nvariants:\n  luna:\n    model: custom/private\n---\nfixture\n`);
-  writeFileSync(join(root, ".agents", "noncanonical.md"), `---\ndescription: noncanonical route fixture\nmodel: custom/base\nvariants:\n  luna:\n    model: bravo-codex-balanced/gpt-5.6-luna-preview\n---\nfixture\n`);
-  writeFileSync(join(root, ".agents", "claude-spoof.md"), `---\ndescription: claude route fixture\nharness: claude\nharnessNeutral: true\nmode: oneshot\nvariants:\n  luna:\n    harness: claude\n    model: bravo-codex-balanced/gpt-5.6-luna\n---\nfixture\n`);
+  writeFileSync(join(root, ".agents", "noncanonical.md"), `---\ndescription: noncanonical route fixture\nmodel: custom/base\nvariants:\n  luna:\n    model: bravo-codex-balanced/gpt-6-luna-preview\n---\nfixture\n`);
+  writeFileSync(join(root, ".agents", "claude-spoof.md"), `---\ndescription: claude route fixture\nharness: claude\nharnessNeutral: true\nmode: oneshot\nvariants:\n  luna:\n    harness: claude\n    model: bravo-codex-balanced/gpt-6-luna\n---\nfixture\n`);
   const faux = fauxProvider({ tokensPerSecond: 0 }); let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
   try {
     const agentDir = join(root, "agent"), settings = SettingsManager.create(root, agentDir);

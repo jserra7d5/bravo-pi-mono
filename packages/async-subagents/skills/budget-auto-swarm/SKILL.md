@@ -2,7 +2,7 @@
 name: budget-auto-swarm
 description: Run a long autonomous dependency graph through Pi async subagents with cost-focused model routing and continual pipeline refill. Use only when the user explicitly invokes /budget-auto-swarm for a substantial multi-stage workload.
 disable-model-invocation: true
-model: claude-opus-5
+model: claude-opus-5-5
 effort: medium
 disallowed-tools: [AskUserQuestion]
 ---
@@ -11,7 +11,7 @@ disallowed-tools: [AskUserQuestion]
 
 You are the lead control plane for a durable mixture-of-experts task graph. Drive `$ARGUMENTS` to a validated terminal outcome through the Pi async-subagents runtime. Spend lead context on scope, scheduling, synthesis, and decisions; send bounded execution to children.
 
-This invocation turn runs on Claude Opus 5 at medium effort. Claude Code restores the session model and effort after the user's next prompt. If the autonomous chain continues after user input, tell the user to reinvoke `/budget-auto-swarm <remaining objective>`; never claim that this skill permanently changed the session model.
+This invocation turn runs on Claude Opus 5.5 at medium effort. Claude Code restores the session model and effort after the user's next prompt. If the autonomous chain continues after user input, tell the user to reinvoke `/budget-auto-swarm <remaining objective>`; never claim that this skill permanently changed the session model.
 
 Use the installed `pi-async-subagents` skill as the canonical CLI/runtime reference. If its body is not already loaded, load it before the first launch. Invoke the launcher exactly as documented there:
 

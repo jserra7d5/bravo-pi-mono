@@ -103,9 +103,9 @@ Add these variants to `scout`, `planner`, `worker`, `reviewer`, and `generalist`
 ```yaml
 variants:
   luna:
-    model: bravo-codex-balanced/gpt-5.6-luna
+    model: bravo-codex-balanced/gpt-6-luna
   sol:
-    model: bravo-codex-balanced/gpt-5.6-sol
+    model: bravo-codex-balanced/gpt-6-sol
 ```
 
 Existing fields remain inherited, including tools, extensions, mode, context/session policy, budgets, and role body. Existing `gemini` variants remain unchanged.
@@ -298,7 +298,7 @@ Frontmatter:
 name: budget-auto-swarm
 description: Run a long autonomous dependency graph through Pi async subagents with cost-focused model routing and continual pipeline refill. Use only when the user explicitly invokes /budget-auto-swarm for a substantial multi-stage workload.
 disable-model-invocation: true
-model: claude-opus-5
+model: claude-opus-5-5
 effort: medium
 disallowed-tools: [AskUserQuestion]
 ---
@@ -316,7 +316,7 @@ Contract with current Claude Code:
 - they are not saved to settings;
 - the session model resumes on the next user prompt;
 - skill instructions stay in conversation context and survive compaction subject to Claude’s skill budgets;
-- user must reinvoke after a user-authored continuation to reapply Opus 5 medium.
+- user must reinvoke after a user-authored continuation to reapply Opus 5.5 medium.
 
 The skill must never claim a persistent model toggle.
 

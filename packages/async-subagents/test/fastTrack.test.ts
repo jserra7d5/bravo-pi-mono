@@ -24,7 +24,7 @@ test("fast-track policy fails closed when disabled, allows Codex scouts, and gat
     applied: false,
     reason: "disabled",
   });
-  assert.deepEqual(evaluateFastTrack({ requested: true, enabled: true, agentName: "scout", model: "bravo-codex-balanced/gpt-5.6-luna" }), {
+  assert.deepEqual(evaluateFastTrack({ requested: true, enabled: true, agentName: "scout", model: "bravo-codex-balanced/gpt-6-luna" }), {
     requested: true,
     enabled: true,
     applied: true,

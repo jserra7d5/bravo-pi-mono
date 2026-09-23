@@ -76,7 +76,7 @@ export interface ClaudeCommand {
 }
 
 export const DEFAULT_CLAUDE_SONNET_MODEL = "claude-sonnet-5";
-export const DEFAULT_CLAUDE_OPUS_MODEL = "claude-opus-4-8";
+export const DEFAULT_CLAUDE_OPUS_MODEL = "claude-opus-5-5";
 export const DEFAULT_CLAUDE_FABLE_MODEL = "claude-fable-5";
 export const CLAUDE_CANONICAL_MODELS = [DEFAULT_CLAUDE_SONNET_MODEL, DEFAULT_CLAUDE_OPUS_MODEL, DEFAULT_CLAUDE_FABLE_MODEL] as const;
 export type ClaudeCanonicalModel = typeof CLAUDE_CANONICAL_MODELS[number];

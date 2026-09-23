@@ -231,7 +231,7 @@ const DEFAULT_STALE_AFTER_MS = 5 * 60_000;
  * three live accounts: luna reports the weekly window with distinct per-account usage
  * (95% / 91% / 0%), matching the live rate-limit headers.
  */
-export const PROBE_MODEL = process.env.CODEX_AUTH_BALANCER_PROBE_MODEL || 'gpt-5.6-luna';
+export const PROBE_MODEL = process.env.CODEX_AUTH_BALANCER_PROBE_MODEL || 'gpt-6-luna';
 const PROBE_TIMEOUT_MS = Number(process.env.CODEX_AUTH_BALANCER_PROBE_TIMEOUT_MS || 60_000);
 const PROBE_PROMPT = 'Reply exactly: OK';
 const DB_SCHEMA_VERSION = 1;

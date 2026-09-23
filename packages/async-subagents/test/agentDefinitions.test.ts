@@ -88,7 +88,7 @@ test("a Claude variant on a built-in-shaped definition drops Pi-only execution f
   writeFileSync(path, `---
 description: Dual-harness template
 harnessNeutral: true
-model: bravo-codex-balanced/gpt-5.6-sol
+model: bravo-codex-balanced/gpt-6-sol
 tools: [read, grep, bash]
 thinkingLevel: high
 variants:

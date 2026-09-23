@@ -874,13 +874,13 @@ test("model preflight rejects native Luna when the balanced provider row is abse
   const w = workspace();
   const piBin = join(w.root, "fake-pi-native-luna.js");
   writeFileSync(piBin, `#!/usr/bin/env node
-if (!process.argv.includes("bravo-codex-balanced/gpt-5.6-luna")) process.exit(91);
+if (!process.argv.includes("bravo-codex-balanced/gpt-6-luna")) process.exit(91);
 console.log("provider               model           context  max-out  thinking  images");
-console.log("openai-codex            gpt-5.6-luna    372K     128K     yes       yes");
+console.log("openai-codex            gpt-6-luna    372K     128K     yes       yes");
 `, "utf8");
   chmodSync(piBin, 0o755);
 
-  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-5.6-luna", 5000);
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-6-luna", 5000);
   assert.equal(result.ok, false);
   assert.match(result.stdout ?? "", /openai-codex/);
 });
@@ -890,11 +890,11 @@ test("model preflight accepts an exact fully-qualified provider/model stdout row
   const piBin = join(w.root, "fake-pi-balanced-luna.js");
   writeFileSync(piBin, `#!/usr/bin/env node
 console.log("provider model context max-out thinking images");
-console.log("bravo-codex-balanced bravo-codex-balanced/gpt-5.6-luna 372K 128K yes yes");
+console.log("bravo-codex-balanced bravo-codex-balanced/gpt-6-luna 372K 128K yes yes");
 `, "utf8");
   chmodSync(piBin, 0o755);
 
-  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-5.6-luna", 5000);
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-6-luna", 5000);
   assert.equal(result.ok, true);
 });
 
@@ -903,11 +903,11 @@ test("model preflight accepts an exact structured row from older Pi stderr outpu
   const piBin = join(w.root, "fake-pi-balanced-stderr.js");
   writeFileSync(piBin, `#!/usr/bin/env node
 console.error("provider model context max-out thinking images");
-console.error("bravo-codex-balanced bravo-codex-balanced/gpt-5.6-luna 372K 128K yes yes");
+console.error("bravo-codex-balanced bravo-codex-balanced/gpt-6-luna 372K 128K yes yes");
 `, "utf8");
   chmodSync(piBin, 0o755);
 
-  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-5.6-luna", 5000);
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-6-luna", 5000);
   assert.equal(result.ok, true);
 });
 
@@ -1053,11 +1053,11 @@ test("model preflight does not authorize a stderr row with a stdout header", asy
   const piBin = join(w.root, "fake-pi-split-stream.js");
   writeFileSync(piBin, `#!/usr/bin/env node
 console.log("provider model context max-out thinking images");
-console.error("bravo-codex-balanced bravo-codex-balanced/gpt-5.6-luna 372K 128K yes yes");
+console.error("bravo-codex-balanced bravo-codex-balanced/gpt-6-luna 372K 128K yes yes");
 `, "utf8");
   chmodSync(piBin, 0o755);
 
-  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-5.6-luna", 5000);
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-6-luna", 5000);
   assert.equal(result.ok, false);
 });
 
@@ -1065,14 +1065,14 @@ test("model preflight ignores stderr warnings mentioning the requested model", a
   const w = workspace();
   const piBin = join(w.root, "fake-pi-warning.js");
   writeFileSync(piBin, `#!/usr/bin/env node
-console.error('Warning: No models match pattern "bravo-codex-balanced/gpt-5.6-luna"');
-console.log('No models matching "bravo-codex-balanced/gpt-5.6-luna"');
+console.error('Warning: No models match pattern "bravo-codex-balanced/gpt-6-luna"');
+console.log('No models matching "bravo-codex-balanced/gpt-6-luna"');
 `, "utf8");
   chmodSync(piBin, 0o755);
 
-  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-5.6-luna", 5000);
+  const result = await preflightPiModelAvailability({ command: piBin, args: [], cwd: w.root, env: {} }, "bravo-codex-balanced/gpt-6-luna", 5000);
   assert.equal(result.ok, false);
-  assert.match(result.stderr ?? "", /bravo-codex-balanced\/gpt-5\.6-luna/);
+  assert.match(result.stderr ?? "", /bravo-codex-balanced\/gpt-6-luna/);
 });
 
 test("model preflight uses the selected variant extension set", async () => {

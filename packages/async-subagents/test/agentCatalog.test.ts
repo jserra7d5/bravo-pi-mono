@@ -113,10 +113,10 @@ test("catalogEntry normalizes Claude aliases but advertises canonical model ids"
     },
   }));
   assert.equal(entry.variants.find((variant) => variant.name === "claude")?.requestedModel, "opus");
-  assert.equal(entry.variants.find((variant) => variant.name === "claude")?.resolvedModel, "claude-opus-4-8");
+  assert.equal(entry.variants.find((variant) => variant.name === "claude")?.resolvedModel, "claude-opus-5-5");
   assert.equal(entry.variants.find((variant) => variant.name === "future")?.resolvedModel, "claude-fable-5");
   const rendered = renderAgentCatalog([entry]);
-  assert.match(rendered, /model: claude-opus-4-8/);
+  assert.match(rendered, /model: claude-opus-5-5/);
   assert.match(rendered, /model: claude-fable-5/);
   assert.doesNotMatch(rendered, /requested: opus|requested: fable|model: opus[;)]/);
 });

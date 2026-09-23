@@ -131,8 +131,8 @@ The policy requires `resolvedHarness: "pi"` in v1. Typed policy errors throw/ret
 The guard compares exact resolved IDs:
 
 ```ts
-const LUNA = "bravo-codex-balanced/gpt-5.6-luna";
-const SOL = "bravo-codex-balanced/gpt-5.6-sol";
+const LUNA = "bravo-codex-balanced/gpt-6-luna";
+const SOL = "bravo-codex-balanced/gpt-6-sol";
 ```
 
 Allowed combinations are defined once in data and shared by validation/error formatting. Tests should prove error text and acceptance matrix derive from the same table.

@@ -87,16 +87,9 @@ One NDJSON line per lifecycle transition; exits when all runs are terminal-or-at
 - Never two write-lanes in the same checkout: concurrent lanes' commits sweep each other's in-progress files even with disjoint `--file` scopes. Separate worktrees, or sequence. The usual way this happens is not a deliberate fan-out but a re-dispatch after losing a runId (above) — so before any `start`, confirm no lane is already live for this `projectRoot`. If two did overlap, the tree is contaminated: both agents wrote the same files with independent designs, and the result can still import and still be wrong. Grep the orphan's `pi-session/session.jsonl` for `"name":"write"` to size the damage, then discard the generated tree and re-run ONE lane — do not try to reconcile it by reading.
 - Verify the work, not the state: `completed` means the lane exited, not that it's correct. Re-run the gates and read the diff yourself. An implausibly short run is a claim to disprove — read its result before banking it.
 
-## Sol behavioral profile — why the verify rules exist
+## Verification rules
 
-Most lanes run GPT-5.6 Sol. These are documented failure modes from published evaluations (OpenAI's
-system card, METR, Artificial Analysis); shape briefs and judge output accordingly.
-
-- **Never accept Sol's self-reported completion.** Sol fabricates completions at a higher rate than 5.5 — OpenAI's own system card documents it claiming unperformed work was done. Demand pasted validation output in the deliverable; re-verify claimed file/test state yourself before accepting a lane result.
-- **Tighten the criterion before raising thinking.** METR measured Sol's eval-gaming rate as the highest of any public model — a vague success bar gets satisfied by the letter, not the intent, and more reasoning only games it harder at 2–3x the cost. Add an explicit success criterion, dependency/tool-routing rule, or verification loop first; escalate `--thinking` only when the brief is already tight.
-- **Expect grinding, not course correction.** Sol commits to one reasoning path and almost never abandons a failing approach on its own. Put a fails-twice guardrail in every implement brief ("if the same gate fails twice, stop and report rather than iterating"); treat your external review loop as Sol's course correction, because it has none of its own.
-- **Don't route frontend/UI implementation to Sol by default.** Known weak zone — generic output, element over-generation, callout spam; Sol-authored code also trends toward excessive tests and overcomplicated APIs. Keep Sol on backing logic and route UI implementation to a Claude lane; when reviewing Sol-authored code, check for the test-excess and API-overcomplication tics specifically.
-- **Polish is not depth.** Sol's output presents extremely well regardless of substance (highest Presentation Elo on AA-Briefcase, weak rubric score) — fluent prose is not evidence the work was deep. Judge reviewer lanes by their machine-parsable `SEVERITY` findings and evidence, never by how good the report reads.
+Most lanes use GPT-6 Sol or Luna. Require concrete completion criteria and validation evidence; verify reported files and test results before accepting a run. Tighten an unclear brief before increasing thinking effort. If the same gate fails twice, stop and reassess the approach. Older GPT-5.6 Sol evaluation claims do not establish GPT-6 behavior.
 
 ## Levers
 

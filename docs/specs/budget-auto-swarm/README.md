@@ -9,7 +9,7 @@ Draft design for review. No implementation exists yet.
 Add one autonomous orchestration policy with two activation surfaces:
 
 - Pi: a sticky, user-global `/budget-auto-swarm on|off|status` mode inside `@bravo/async-subagents` that survives new sessions and Pi processes.
-- Claude Code: a user-invoked `/budget-auto-swarm` skill that runs its invocation turn on Claude Opus 5 at medium effort and coordinates the same async-subagents runtime.
+- Claude Code: a user-invoked `/budget-auto-swarm` skill that runs its invocation turn on Claude Opus 5.5 at medium effort and coordinates the same async-subagents runtime.
 
 The policy is for long-running task graphs with complex dependencies. It keeps every safe ready lane moving, uses Luna xhigh/max for substantive execution, routes intelligence-critical judgment and step-constrained critical paths to Sol medium, and never requests fast-track priority.
 
@@ -34,7 +34,7 @@ Each fact has one canonical home. Other files link rather than restate full cont
 - Budget routing applies to new child starts. It does not rewrite a live or recorded child’s model.
 - Pi mode changes orchestration policy, not the lead model.
 - Claude activation uses a skill, which is already a slash command. No duplicate `.claude/commands` file is added.
-- Claude skill model/effort overrides are turn-scoped by Claude Code. Reinvoke the skill after a user-authored continuation if the chain must continue under Opus 5 medium.
+- Claude skill model/effort overrides are turn-scoped by Claude Code. Reinvoke the skill after a user-authored continuation if the chain must continue under Opus 5.5 medium.
 - Normal service tier is mandatory. `fastTrack: true` is rejected while Pi mode is active and forbidden by the Claude skill.
 - The purple badge is UI-only. Model policy comes from prompt injection and launch enforcement.
 

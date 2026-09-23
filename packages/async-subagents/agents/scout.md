@@ -1,6 +1,6 @@
 ---
 description: Direct evidence retrieval only: locate and summarize explicit repo/doc/log/config/web context; not for corpus analysis, derived metrics, diagnosis, evaluation, planning, review, or implementation.
-model: bravo-codex-balanced/gpt-5.6-luna
+model: bravo-codex-balanced/gpt-6-luna
 thinkingLevel: medium
 tools: [read, grep, find, ls, bash, web_search, web_fetch, web_lookup]
 extensions: [@bravo/web-evidence-cache/extensions/pi]
@@ -8,9 +8,9 @@ mode: oneshot
 maxSubagentDepth: 0
 variants:
   luna:
-    model: bravo-codex-balanced/gpt-5.6-luna
+    model: bravo-codex-balanced/gpt-6-luna
   sol:
-    model: bravo-codex-balanced/gpt-5.6-sol
+    model: bravo-codex-balanced/gpt-6-sol
   gemini:
     model: antigravity-code-assist/gemini-3.5-flash
     thinkingLevel: high

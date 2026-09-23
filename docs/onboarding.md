@@ -81,7 +81,7 @@ ln -sf ~/.async-subagents/bin/async-subagents ~/.local/bin/async-subagents
 
 In Pi, `/budget-auto-swarm on` enables a sticky session/branch policy and task orchestration; `/budget-auto-swarm status` reports effective routing, and `/budget-auto-swarm off` removes the launch guard without disabling tasks. While enabled, starts require Luna high/xhigh/max or Sol low/medium variants and normal priority.
 
-In Claude Code, invoke `/budget-auto-swarm <substantial objective>`. The skill uses Opus 5 medium only for that invocation turn. Reinvoke it after a user-authored continuation if the autonomous chain should continue under the same override.
+In Claude Code, invoke `/budget-auto-swarm <substantial objective>`. The skill uses Opus 5.5 medium only for that invocation turn. Reinvoke it after a user-authored continuation if the autonomous chain should continue under the same override.
 
 For cross-worktree runs, keep storage canonical:
 
@@ -121,7 +121,7 @@ Claude reads unprompted — your global `~/.claude/CLAUDE.md`. Append this:
 ## Picking models for workflows and subagents
 
 Delegate implementation, planning, diagnosis, repository investigation, and code-level
-review to a GPT-5.6 Sol lane via the `/pi-async-subagents` skill — provided the task is
+review to a GPT-6 Sol lane via the `/pi-async-subagents` skill — provided the task is
 verifiable and well-briefed. Prefer its named `scout`/`planner`/`worker`/`reviewer`/
 `generalist` templates over a hand-authored raw Pi prompt; use the narrowest that fits.
 

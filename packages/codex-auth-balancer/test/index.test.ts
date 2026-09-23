@@ -678,7 +678,7 @@ test('repo-local Pi loads the extension and lists the GPT-5.6 family at the upst
   ], { timeout: 15_000 });
   const output = `${stdout}\n${stderr}`;
   assert.match(output, /bravo-codex-balanced\/gpt-5\.5\s/);
-  for (const id of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+  for (const id of ['gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-terra']) {
     assert.match(output, new RegExp(`bravo-codex-balanced/${id.replace(/\./g, '\\.')}\\s+272K\\s`), `${id} should list at the upstream 272k window`);
   }
   assert.doesNotMatch(output, /\s372K\s/);
@@ -699,7 +699,7 @@ test('balanced catalog transform re-badges native Codex models and passes contex
     { id: 'gpt-5.5', name: 'GPT-5.5', contextWindow: 272000, maxTokens: 128000, cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 } },
     { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', contextWindow: 272000, maxTokens: 128000, cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 } },
     { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', contextWindow: 272000, maxTokens: 128000, cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 } },
-    { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', contextWindow: 272000, maxTokens: 128000, cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 } },
+    { id: 'gpt-6-luna', name: 'GPT-6 Luna', contextWindow: 272000, maxTokens: 128000, cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 } },
     { id: 'gpt-5.6-experimental', name: 'GPT-5.6 Experimental', contextWindow: 272000, maxTokens: 64000, cost: { input: 3, output: 18, cacheRead: 0.3, cacheWrite: 0 } },
   ].map(model => ({
     ...model,
@@ -720,7 +720,7 @@ test('balanced catalog transform re-badges native Codex models and passes contex
       id: `bravo-codex-balanced/${upstream.id}`,
       provider: 'bravo-codex-balanced',
       api: 'openai-codex-responses',
-      ...(upstream.id === 'gpt-5.6-luna'
+      ...(upstream.id === 'gpt-6-luna'
         ? { thinkingLevelMap: { ...upstream.thinkingLevelMap, max: 'max' } }
         : {}),
     });
@@ -743,8 +743,8 @@ test('balanced catalog intentionally advertises max thinking only for Luna', () 
     cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 },
     input: ['text'],
   };
-  const lunaWithoutMax = { ...base, id: 'gpt-5.6-luna', thinkingLevelMap: { xhigh: 'xhigh' } };
-  const lunaWithMax = { ...base, id: 'gpt-5.6-luna', thinkingLevelMap: { xhigh: 'xhigh', max: 'max' } };
+  const lunaWithoutMax = { ...base, id: 'gpt-6-luna', thinkingLevelMap: { xhigh: 'xhigh' } };
+  const lunaWithMax = { ...base, id: 'gpt-6-luna', thinkingLevelMap: { xhigh: 'xhigh', max: 'max' } };
   const nonLuna = { ...base, id: 'gpt-5.6-terra', thinkingLevelMap: { xhigh: 'xhigh' } };
 
   for (const upstreamLuna of [lunaWithoutMax, lunaWithMax]) {
@@ -2461,7 +2461,7 @@ test('the default probe model names the pool the fleet runs on', async () => {
   // Not a vocabulary check: the model string selects WHICH QUOTA POOL is measured, and
   // a probe pointed at the wrong pool reports confident, wrong, near-identical numbers
   // for every account. Verified against all three live accounts before pinning.
-  assert.match(PROBE_MODEL, /^gpt-5\.6-/, `the probe must run a fleet-pool model, got ${PROBE_MODEL}`);
+  assert.match(PROBE_MODEL, /^gpt-6-/, `the probe must run a fleet-pool model, got ${PROBE_MODEL}`);
 });
 
 test('a probe does not overwrite a still-fresh live reading', async () => {
