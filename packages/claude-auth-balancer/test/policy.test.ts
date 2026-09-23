@@ -908,6 +908,18 @@ test('overage never bills through a reserve: at the reserve the server would spe
   assert.equal(computeHeadroom(withOverage(0.5), 'claude-opus-5', NOW).overageAvailable, true, 'below it, unchanged');
 });
 
+test('a reserve keeps 70% of its size on the 5h window', () => {
+  // 10% weekly reserve: 7% of the 5h window is held. 93% of 5h is spent.
+  const at = (u5: number) => ({ ...account('2', 0.3, 60, u5), weeklyReserve: 0.1 });
+  assert.equal(computeHeadroom(at(0.93), 'claude-opus-5', NOW).eligible, false);
+  assert.ok(computeHeadroom(at(0.92), 'claude-opus-5', NOW).eligible);
+  const sel = selectAccount({
+    accounts: [account('1', 0.05, 69, 0.03), at(0.93)],
+    model: 'claude-opus-5', affinitySlot: '2', nowMs: NOW,
+  });
+  assert.equal(sel.slot, '1', 'a warm session leaves before the 5h reserve');
+});
+
 test('a reserve is not counted as supply the demand can absorb', () => {
   const plain = computeFleetTerms([account('2', 0.5, 30)], NOW, HEAVY).get('2')!;
   const reserved = computeFleetTerms([{ ...account('2', 0.5, 30), weeklyReserve: 0.1 }], NOW, HEAVY).get('2')!;

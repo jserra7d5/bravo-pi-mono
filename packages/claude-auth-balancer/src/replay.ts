@@ -9,7 +9,7 @@ import { buildDemandModel } from './demand.js';
 import type { DemandModel } from './demand.js';
 import { HOUR_MS, MetricsStore, modelClass, RESET_DROP } from './metrics.js';
 import type { ModelClass } from './metrics.js';
-import { applyWeeklyReserve, capacityForTier, computeHeadroom, selectAccount } from './policy.js';
+import { applyReserve, capacityForTier, computeHeadroom, selectAccount } from './policy.js';
 import type { AccountState, SelectInput, Selection } from './policy.js';
 
 const DAY = 24 * HOUR_MS;
@@ -320,7 +320,7 @@ export async function runReplay(dbFile: string, stateRoot: string, oldPolicyPath
     const imported: Router = oldPolicyPath ? (await import(pathToFileURL(path.resolve(oldPolicyPath)).href) as { selectAccount: Router }).selectAccount : selectAccount;
     // HEAD predates weekly reserves; hand it the reserve-applied view so both
     // policies route under the same rule and only the policy differs.
-    const old: Router = input => imported({ ...input, accounts: input.accounts.map(applyWeeklyReserve) });
+    const old: Router = input => imported({ ...input, accounts: input.accounts.map(applyReserve) });
     const weekly = Object.fromEntries(Object.entries(capacity).map(([slot, plan]) => [slot, plan.weekly]));
     const oldScore = simulate(rows, new Meter(fit.rates, fit.cadences, weekly, fit.weeklyResets), old, () => undefined, capacity, { drops: fit.drops, reserves });
     const newScore = simulate(rows, new Meter(fit.rates, fit.cadences, weekly, fit.weeklyResets), selectAccount, demandAt, capacity, { drops: fit.drops, reserves });

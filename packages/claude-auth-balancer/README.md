@@ -134,11 +134,13 @@ session on one account until it genuinely cannot serve.
    for use outside it. The format is `slot=fraction` pairs, comma- or
    space-separated. With `2=0.10`, slot 2's weekly is measured against 90%:
    fresh picks stop at 85.5% (95% of 90%), warm sessions leave at 90%, and
-   the burndown and surplus stop there too. At the reserve the account is
-   also out of the overage fallback: the server would still have weekly quota
-   to serve from, so it would spend the reserve rather than bill overage. The
-   `5h` window is not reserved: warm sessions can still hold it to exhaustion,
-   which can lock out personal use for up to 5 hours.
+   the burndown and surplus stop there too. The `5h` window keeps 70% as
+   much (`FIVE_HOUR_RESERVE_SHARE`): with `2=0.10`, 7% of each `5h` window,
+   so warm sessions leave slot 2 at 93% of `5h` instead of holding it to
+   exhaustion and locking out personal use for hours. At the reserve the
+   account is also out of the overage fallback: the server would still have
+   quota to serve from, so it would spend the reserve rather than bill
+   overage.
 
    ```ini
    # ~/.config/systemd/user/claude-auth-balancer.service.d/weekly-reserve.conf

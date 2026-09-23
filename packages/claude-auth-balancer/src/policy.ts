@@ -68,7 +68,7 @@
 // within eight hours of average demand (the remainder is destroyed at the
 // reset). The 5h claim is unaffected: it refills by itself and never expires
 // unspent. A slot with a weekly reserve (CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE)
-// has it removed before any of this runs; see `applyWeeklyReserve`. With no
+// has it removed before any of this runs; see `applyReserve`. With no
 // demand model (under a week of history)
 // there is no surplus and nothing is expiring, and demand hours are clock
 // hours.
@@ -179,9 +179,10 @@ export type AccountState = {
   refreshTokenExpiresAt?: number;
   /**
    * Fraction of each weekly budget (`7d`, `7d_oi`) the balancer never
-   * spends, held for the operator's own use outside it. Set from
+   * spends, held for the operator's own use outside it; the `5h` window
+   * keeps FIVE_HOUR_RESERVE_SHARE of that fraction. Set from
    * CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE; see `resolveWeeklyReserves` and
-   * `applyWeeklyReserve`.
+   * `applyReserve`.
    */
   weeklyReserve?: number;
   /** Plan size. Absent means the reference (Max 20x) plan. */
@@ -295,33 +296,41 @@ export type FleetTerm = {
 };
 
 /**
- * The account as the router sees it once its weekly reserve is set aside: a
- * smaller weekly budget, and weekly utilization measured against that
- * budget. With a 10% reserve, 45% used reads as 50%, and 90% used reads as
- * exhausted. Everything downstream (the ceiling, the burndown, pacing,
- * surplus, headroom) then works unchanged and cannot reach the reserve. The
- * `5h` claim is untouched: it refills on its own.
+ * Share of the weekly reserve fraction also held back on the `5h` window
+ * (operator, 2026-09-23): a 10% weekly reserve keeps 7% of each `5h` window,
+ * so personal use outside the balancer is never locked out for hours at a
+ * time, at a smaller cost to peak absorption than a full-size 5h reserve.
  */
-export function applyWeeklyReserve(account: AccountState): AccountState {
+export const FIVE_HOUR_RESERVE_SHARE = 0.7;
+
+/**
+ * The account as the router sees it once its reserve is set aside: smaller
+ * budgets, and utilization measured against them. With a 10% weekly reserve,
+ * weekly 45% used reads as 50% and 90% reads as exhausted; the `5h` window
+ * keeps 7% the same way. Everything downstream (the ceiling, the burndown,
+ * pacing, surplus, the 5h bucket, headroom) then works unchanged and cannot
+ * reach the reserve.
+ */
+export function applyReserve(account: AccountState): AccountState {
   const reserve = account.weeklyReserve;
   if (!reserve || !(reserve > 0 && reserve < 1) || !account.claims) return account;
-  const usable = 1 - reserve;
+  const usable = { '5h': 1 - reserve * FIVE_HOUR_RESERVE_SHARE, '7d': 1 - reserve, '7d_oi': 1 - reserve };
   const byId = { ...account.claims.byId };
-  for (const id of WEEKLY_CLAIMS) {
+  for (const id of ['5h', '7d', '7d_oi'] as const) {
     const claim = byId[id];
     if (claim?.utilization === undefined) continue;
-    byId[id] = { ...claim, utilization: Math.max(0, claim.utilization) / usable };
+    byId[id] = { ...claim, utilization: Math.max(0, claim.utilization) / usable[id] };
   }
-  // At the reserve the server still has weekly quota, so it would not bill
-  // overage: it would spend the reserve. Overage is off for the account there.
-  const reached = WEEKLY_CLAIMS.some(id => (byId[id]?.utilization ?? 0) >= 1);
+  // At the reserve the server still has quota, so it would not bill overage:
+  // it would spend the reserve. Overage is off for the account there.
+  const reached = (['5h', '7d', '7d_oi'] as const).some(id => (byId[id]?.utilization ?? 0) >= 1);
   if (reached && byId['overage']) byId['overage'] = { ...byId['overage'], status: 'rejected' };
   const capacity = account.capacity ?? REFERENCE_CAPACITY;
   return {
     ...account,
     weeklyReserve: undefined,
     claims: { ...account.claims, byId },
-    capacity: { ...capacity, weekly: capacity.weekly * usable },
+    capacity: { fiveHour: capacity.fiveHour * usable['5h'], weekly: capacity.weekly * usable['7d'] },
   };
 }
 
@@ -355,7 +364,7 @@ export function computeFleetTerms(
   const out = new Map<string, FleetTerm>();
   if (!demand?.hourly) return out;
   const live = accounts
-    .map(applyWeeklyReserve)
+    .map(applyReserve)
     .map(a => {
       if (a.health === 'needs-reauth') return undefined;
       if (a.tokenExpiresAt !== undefined && a.tokenExpiresAt <= nowMs) return undefined;
@@ -599,7 +608,7 @@ export function computeHeadroom(
   nowMs: number,
   options: HeadroomOptions = {},
 ): HeadroomBreakdown {
-  account = applyWeeklyReserve(account);
+  account = applyReserve(account);
   const evacuateThreshold = options.evacuateThreshold ?? DEFAULT_EVACUATE_UTILIZATION;
   const evacuationHorizonMs = options.evacuationHorizonMs ?? DEFAULT_EVACUATION_HORIZON_MS;
   const fresh5hBucket = options.fresh5hBucket ?? DEFAULT_FRESH_5H_BUCKET;

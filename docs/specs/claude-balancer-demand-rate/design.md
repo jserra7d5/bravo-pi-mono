@@ -240,10 +240,11 @@ pool when it fits nowhere.
 
 **Weekly reserve** (operator, 2026-09-23). `CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE`
 (`slot=fraction`) replaces `CLAUDE_AUTH_BALANCER_CAPPED_SLOTS`. A reserved
-slot's weekly claims are measured against `1 − fraction` and its weekly
-capacity shrinks to match, before any other term runs. The ceiling, burndown,
-surplus and pacing then cannot reach the reserve. The old cap kept 5%, and
-only from fresh picks: warm sessions still ran it to 100%.
+slot's weekly claims are measured against `1 − fraction` and its `5h` claim
+against `1 − 0.7 × fraction`, and its capacities shrink to match, before any
+other term runs. The ceiling, burndown, surplus and pacing then cannot reach
+the reserve. The old cap kept 5% of the weekly, and only from fresh picks:
+warm sessions still ran it to 100%.
 
 ### 5. Replay harness
 
