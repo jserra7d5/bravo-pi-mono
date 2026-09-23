@@ -225,7 +225,7 @@ function eventDelivery(event: RunEvent, status?: { agentName?: string; displayNa
   const next = event.type === "question" || event.type === "blocked"
     ? [{ tool: "subagent_message", args: { runId: event.runId, type: "answer" } }]
     : state === "paused"
-      ? [{ tool: "subagent_continue", args: { runId: event.runId, additionalRunSeconds: 900 } }, { tool: "subagent_interrupt", args: { runId: event.runId, action: "cancel" } }]
+      ? [{ tool: "subagent_continue", args: { runId: event.runId, maxRunSeconds: 900 } }, { tool: "subagent_interrupt", args: { runId: event.runId, action: "cancel" } }]
       : livenessNextActions(event.runId, state);
   return {
     deliveryKey: eventDeliveryKey(event),

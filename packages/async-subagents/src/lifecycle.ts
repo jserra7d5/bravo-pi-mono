@@ -273,6 +273,7 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
     summary: input.summary,
     body: input.body,
     effectiveMaxRunMs: input.effectiveMaxRunMs ?? status.effectiveMaxRunMs,
+    maxRunSource: status.maxRunSource,
     timeout: input.timeout ?? status.timeout,
     metrics,
     error: input.error ?? null,

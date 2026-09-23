@@ -93,6 +93,8 @@ Most lanes use GPT-6 Sol or Luna. Require concrete completion criteria and valid
 
 ## Levers
 
+- `--max-run-seconds N` (`start`/`run`/terminal `continue`): positive integer per-run budget; overrides agent/variant and config default (1800), and a terminal continuation does not inherit the previous override.
+
 - `--thinking`: omit — templates encode sane defaults. Raise only when the bounded task is genuinely harder than the role's norm; tighten a gameable brief before adding reasoning.
 - `--fast-track` (`start`/`run`): priority service tier, faster output at higher cost. Only under user authorization — explicit ("fast-track this") or implicit urgency ("this is blocking me") — and scoped to the current effort. Spend it on the lane whose latency gates the plan: implementation, gating review, or a bottleneck scout read. Codex-model children only (others launch normally with `fastTrack.applied:false`); confirm `applied:true` in the start response.
 

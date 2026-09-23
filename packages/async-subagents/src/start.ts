@@ -70,6 +70,7 @@ export interface StartSubagentInput {
   fake?: StartFakeImmediateInput | StartFakeChildInput;
   taskAssignment?: { task: TaskRecord; dependencies?: TaskRecord[] };
   fastTrack?: boolean;
+  maxRunSeconds?: number;
   /** Internal continuation authorization: preserve priority for a run whose prior launch applied fast-track. */
   inheritedFastTrack?: boolean;
   /** Call-scoped launch policy, invoked after resolution and before any run allocation. */
@@ -653,6 +654,7 @@ function assertLaunchDirectory(dir: string, label: string): void {
 export async function startSubagent(input: StartSubagentInput): Promise<SubagentStartResult> {
   const allowedFiles = normalizeAllowedFilePaths(input.files);
   const protectedPaths = normalizeAllowedFilePaths(input.protect);
+  if (input.maxRunSeconds !== undefined && (!Number.isInteger(input.maxRunSeconds) || input.maxRunSeconds <= 0)) throw new SubagentError("INVALID_RUN_BUDGET", "maxRunSeconds must be a positive integer number");
   const cwd = resolve(input.cwd ?? process.cwd());
   const storageCwd = resolve(input.storageCwd ?? cwd);
   // Validate both roots BEFORE anything downstream touches them. An absent execution cwd
@@ -706,8 +708,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   const runtimeExtensionPaths = definition.harness === "claude" ? [] : [childControlExtensionPath];
   const launchLogPath = join(paths.logsDir, "launch.json");
   const asyncSubagentsConfig = loadAsyncSubagentsConfig({ cwd, env: { ...process.env, ...(input.env ?? {}) } });
-  const maxRunSeconds = definition.maxRunSeconds ?? asyncSubagentsConfig.defaultMaxRunSeconds;
-  if (!Number.isFinite(maxRunSeconds) || maxRunSeconds <= 0) throw new SubagentError("INVALID_AGENT_DEFINITION", "maxRunSeconds must be a positive finite number");
+  const maxRunSource = input.maxRunSeconds !== undefined ? "override" : definition.maxRunSeconds !== undefined ? "definition" : "config";
+  const maxRunSeconds = input.maxRunSeconds ?? definition.maxRunSeconds ?? asyncSubagentsConfig.defaultMaxRunSeconds;
   const effectiveMaxRunMs = Math.ceil(maxRunSeconds * 1000);
   const fastTrack = input.inheritedFastTrack === true
     ? { requested: true, enabled: true, applied: true, serviceTier: "priority" as const }
@@ -756,6 +758,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     allowedFiles,
     protectedPaths,
     effectiveMaxRunMs,
+    maxRunSource,
     cwd,
     state: "queued",
   });
@@ -1224,6 +1227,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     tools: definition.tools,
     maxRunSeconds,
     effectiveMaxRunMs,
+    maxRunSource,
     maxSubagentDepth: definition.maxSubagentDepth,
     fastTrack,
     task: input.taskAssignment ? { taskId: input.taskAssignment.task.id, title: input.taskAssignment.task.title } : undefined,

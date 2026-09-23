@@ -27,6 +27,7 @@ export const subagentStartSchema = Type.Object({
   session: Type.Optional(StringEnum(["record", "none"] as const, { default: "record" })),
   allowFreshFallback: Type.Optional(Type.Boolean({ default: false })),
   thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS, { description: "Override the agent definition default Pi thinking level for this child run." })),
+  maxRunSeconds: Type.Optional(Type.Number({ description: "Positive integer runtime budget in seconds for this run; overrides the agent/variant and config default." })),
   fastTrack: Type.Optional(Type.Boolean({ description: "Request priority service tier for any eligible Codex-model child whose latency gates the plan, including scouts when a scout read is the bottleneck. Includes bravo-codex-balanced/*; requires /fast-track on or launch fails closed." })),
 });
 
@@ -56,7 +57,8 @@ export const subagentContinueSchema = Type.Object({
   type: Type.Optional(StringEnum(PARENT_MESSAGE_TYPES, { default: "instruction" })),
   attachments: Type.Optional(Type.Array(Attachment)),
   requiresAck: Type.Optional(Type.Boolean()),
-  additionalRunSeconds: Type.Optional(Type.Number({ description: "Runtime budget seconds when resuming an explicitly paused live child or continuing a terminal run." })),
+  additionalRunSeconds: Type.Optional(Type.Number({ description: "Extra runtime seconds only when resuming a parent-paused live child; terminal continuations use maxRunSeconds." })),
+  maxRunSeconds: Type.Optional(Type.Number({ description: "Positive integer budget for a terminal continuation; otherwise agent/variant or config default applies." })),
   notifyOn: Type.Optional(Type.Array(StringEnum(EVENT_TYPES as readonly string[]), { description: "Which ATTENTION events wake you for this child: question, blocked, liveness, progress. Terminal results are always delivered and cannot be filtered out — a lane ending is not optional news. Defaults to everything; narrow it only to cut progress noise." })),
   thinkingLevel: Type.Optional(StringEnum(THINKING_LEVELS, { description: "Set the child's Pi thinking level while resuming, if the child-control extension is active." })),
 });

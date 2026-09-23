@@ -61,6 +61,7 @@ export function createInitialStatus(input: {
   allowedFiles?: string[];
   protectedPaths?: string[];
   effectiveMaxRunMs?: number;
+  maxRunSource?: RunStatus["maxRunSource"];
   cwd: string;
   state?: RunState;
 }): RunStatus {
@@ -124,6 +125,7 @@ export function createInitialStatus(input: {
     allowedFiles: input.allowedFiles,
     protectedPaths: input.protectedPaths,
     effectiveMaxRunMs: input.effectiveMaxRunMs,
+    maxRunSource: input.maxRunSource,
     timeout: null,
     state: input.state ?? "created",
     writerRole: "launcher",

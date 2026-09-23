@@ -64,6 +64,7 @@ export function createRunResult(input: {
   summary?: string;
   body?: string;
   effectiveMaxRunMs?: number;
+  maxRunSource?: RunResult["maxRunSource"];
   timeout?: RunResult["timeout"];
   artifacts?: ArtifactRef[];
   metrics?: RunMetrics;
@@ -134,6 +135,7 @@ export function createRunResult(input: {
     summary: input.summary,
     body: input.body,
     effectiveMaxRunMs: input.effectiveMaxRunMs,
+    maxRunSource: input.maxRunSource,
     timeout: input.timeout ?? null,
     artifacts: input.artifacts ?? [],
     metrics: input.metrics,

@@ -329,7 +329,7 @@ User config may provide a fallback:
 }
 ```
 
-Authored `maxRunMs` is rejected with a migration error. Internally the runtime records `effectiveMaxRunMs` for timers and diagnostics.
+Authored `maxRunMs` is rejected with a migration error. `start`/`run --max-run-seconds N` and `subagent_start.maxRunSeconds` override the agent/variant budget, which otherwise overrides `defaultMaxRunSeconds` (1800). Overrides must be positive integers. Internally the runtime records `effectiveMaxRunMs` and `maxRunSource` (`override`, `definition`, or `config`) in status and result; older run files without the source remain readable.
 
 The budget measures time the agent spent working, not wall clock. While a child's state is `blocked` or `waiting_for_input` the supervisor holds the clock and reinstalls the timers when it moves back — a run waiting on a human answer does not burn its budget and die at the deadline having done nothing since. An explicit parent `pause` still owns the clock outright; the hold never resumes a run the parent paused.
 
@@ -360,7 +360,7 @@ attempt that succeeded. Once the attempts are exhausted the run fails as `CHILD_
 A lineage whose accumulated transcript reliably trips the classifier will exhaust the retries rather
 than recover. That case is not a lane to continue — start a fresh lane with a summarized brief.
 
-Continue useful unfinished work from the recorded session by calling `subagent_continue` on the terminal run. This creates a new continuation run that replays the session state; use `additionalRunSeconds` to choose the smallest reasonable budget for the remaining work.
+Continue useful unfinished work from the recorded session by calling `subagent_continue` on the terminal run. This creates a new continuation run that replays the session state; use `maxRunSeconds` (CLI `--max-run-seconds`) to choose the smallest reasonable budget for the new run. Without it, the agent/variant or config default applies, not the previous run override. `additionalRunSeconds` (CLI `--additional-run-seconds`) applies only to parent-paused live resumes and is rejected for terminal continuations.
 
 ## Wakeup delivery
 
@@ -383,7 +383,7 @@ through the delivery key, which carries the result's `createdAt`.
 - `subagent_result`: canonical backup/recovery read of terminal `result.json`; use for truncated wakeups, artifacts, metadata, or reread, and to mark terminal delivery handled.
 - `subagent_message`: send normal parent input only (`instruction`, `answer`, `context`). Reports `delivery`: `acknowledged` (the child confirmed it inside the call's window), `queued` (durably in `inbox.jsonl`, pickup on the child's own cadence — the normal case, not an error), or `undeliverable` (the run is terminal; nothing will read that inbox again). Only `undeliverable` is a failure.
 - `subagent_interrupt`: pause or cancel an active child.
-- `subagent_continue`: resume an explicitly parent-paused child, optionally with `additionalRunSeconds`, or create a continuation from a terminal run's recorded session (including budget-expired runs). A terminal continuation inherits fast-track only when it was applied to the prior run; callers do not need or receive a `fastTrack` parameter. Its repeatable `files` input widens scope additively and never narrows or removes prior entries. Omitting `files` preserves the existing scope. Calling it on a run that is already running is not an error: the body is delivered as a message and the response carries `RUN_ALREADY_RUNNING` with the run's live state.
+- `subagent_continue`: resume an explicitly parent-paused child, optionally with `additionalRunSeconds`, or create a continuation with optional `maxRunSeconds` from a terminal run's recorded session (including budget-expired runs). A terminal continuation inherits fast-track only when it was applied to the prior run; callers do not need or receive a `fastTrack` parameter. Its repeatable `files` input widens scope additively and never narrows or removes prior entries. Omitting `files` preserves the existing scope. Calling it on a run that is already running is not an error: the body is delivered as a message and the response carries `RUN_ALREADY_RUNNING` with the run's live state.
 
 Allowed-file scope is a durable contract enforced through status, task prompts, and inbox amendments. Paths must be non-empty, single-line strings. This is not OS-level sandboxing or filesystem permission enforcement.
 

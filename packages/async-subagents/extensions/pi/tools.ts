@@ -560,6 +560,7 @@ async function startTerminalContinuation(input: {
   status: RunStatus;
   params: Record<string, unknown>;
 }): Promise<ToolResponse> {
+  if (input.params.additionalRunSeconds !== undefined) return response("Terminal continuations cannot use additionalRunSeconds; use maxRunSeconds (--max-run-seconds) instead", { code: "INVALID_RUN_BUDGET", runId: input.status.runId }, true);
   let additionalFiles: string[] | undefined;
   try {
     additionalFiles = filesFromParams(input.params);
@@ -660,6 +661,7 @@ async function startTerminalContinuation(input: {
       },
       thinkingLevel: isThinkingLevel(input.params.thinkingLevel) ? input.params.thinkingLevel : input.status.thinkingLevel,
       inheritedFastTrack: input.status.fastTrack?.applied === true,
+      maxRunSeconds: input.params.maxRunSeconds as number | undefined,
     });
     const notifyOn = Array.isArray(input.params.notifyOn) ? (input.params.notifyOn.filter((event): event is EventType => typeof event === "string") as EventType[]) : undefined;
     writeDeliverySubscription(input.store, {
@@ -809,7 +811,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     {
       name: "subagent_start",
       label: "Subagent Start",
-      description: "Start a durable async Pi child agent and return immediately; files sets an exhaustive prompt-enforced write scope, not an OS sandbox.",
+      description: "Start a durable async Pi child agent and return immediately; maxRunSeconds overrides the agent/variant runtime budget for this run; files sets an exhaustive prompt-enforced write scope, not an OS sandbox.",
       parameters: subagentStartSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const sessionCwd = ctxCwd(ctx);
@@ -867,6 +869,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           },
           thinkingLevel: isThinkingLevel(params.thinkingLevel) ? params.thinkingLevel : undefined,
           fastTrack: params.fastTrack === true,
+          maxRunSeconds: params.maxRunSeconds as number | undefined,
           launchPolicy: runtime.launchPolicy,
           taskAssignment,
         });
@@ -975,7 +978,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
     {
       name: "subagent_continue",
       label: "Subagent Continue",
-      description: "Resume a paused child or continue a terminal run; on an already-running child the input is delivered as a message instead. files adds prompt-enforced write approvals without narrowing prior scope and is not an OS sandbox.",
+      description: "Resume a paused child with additionalRunSeconds or continue a terminal run with maxRunSeconds; on an already-running child the input is delivered as a message instead. files adds prompt-enforced write approvals without narrowing prior scope and is not an OS sandbox.",
       parameters: subagentContinueSchema,
       async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
         const cwd = ctxCwd(ctx);
@@ -999,6 +1002,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
         const mutation = await withRunMutationLock(runDir, () => {
           const current = store.readStatus(runId);
           if (isTerminalRunState(current.state)) return { status: current };
+          if (current.state === "paused" && params.maxRunSeconds !== undefined) return { status: current, invalidBudget: true };
           const grant = scopeGrantFor(current, additionalFiles);
           if (grant.allowedFiles) store.writeStatus(updateRunStatus(current, { allowedFiles: grant.allowedFiles }));
           const body = grant.amendment ? `${parentBody}\n\n${grant.amendment}` : parentBody;
@@ -1006,6 +1010,7 @@ export function buildSubagentTools(runtime: ToolRuntime = {}) {
           return { status: current, allowedFiles: grant.allowedFiles, messageResult };
         });
         const currentStatus = mutation.value.status;
+        if ("invalidBudget" in mutation.value) return response("maxRunSeconds (--max-run-seconds) is only for terminal continuations; use additionalRunSeconds (--additional-run-seconds) for paused runs", { code: "INVALID_RUN_BUDGET", runId }, true);
         if (isTerminalRunState(currentStatus.state)) {
           // Raced to terminal under the lock, so nothing was appended. A terminal
           // run needs a continuation launch, not a resume.

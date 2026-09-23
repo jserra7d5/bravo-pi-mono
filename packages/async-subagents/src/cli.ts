@@ -57,10 +57,12 @@ Start/run options:
   --file PATH_OR_GLOB (repeatable write scope; prefer ownership-boundary roots)
   --protect PATH (repeatable; never-write paths inside the scope)
   --fast-track (priority service tier; only with operator authorization, critical-path lanes only)
-  --skill NAME (repeatable)  --root-session-id ID  --timeout-seconds N
+  --skill NAME (repeatable)  --root-session-id ID  --max-run-seconds N
+  --timeout-seconds N (run only)
 Continue options:
   --file PATH (repeatable; additively widens write scope)
-  --additional-run-seconds N  --thinking LEVEL  --timeout-seconds N
+  --max-run-seconds N (terminal continuation)  --additional-run-seconds N (paused resume only)
+  --thinking LEVEL  --timeout-seconds N (blocking continue only)
 
 run is start followed by a terminal wait. Output is JSON (watch: NDJSON).
 `;
@@ -251,6 +253,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     });
 
   if (command === "start" || command === "run") {
+    if (command === "start" && args.timeoutSeconds !== undefined) throw new Error("--timeout-seconds is only for blocking run/wait/continue, not start");
     const body = taskBody();
     if (typeof args.agent !== "string" || !body) throw new Error(`${command} requires --agent and --task or --task-file`);
     if (args.fastTrack === true) writeFastTrackState(store.runRoot, root.rootSessionId, true);
@@ -265,6 +268,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       skills: args.skill,
       thinkingLevel: args.thinking,
       fastTrack: args.fastTrack,
+      maxRunSeconds: numberOption(args.maxRunSeconds, "max-run-seconds"),
       context: "fresh",
       session: "record",
     });
@@ -297,6 +301,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       files: args.file,
       type: "instruction",
       additionalRunSeconds: numberOption(args.additionalRunSeconds, "additional-run-seconds"),
+      maxRunSeconds: numberOption(args.maxRunSeconds, "max-run-seconds"),
       thinkingLevel: args.thinking,
       notifyOn: ["question", "blocked", "liveness", "result", "completed", "failed", "cancelled", "expired"],
     });

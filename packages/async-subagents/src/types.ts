@@ -211,6 +211,7 @@ export interface RunStatus {
   pendingAckMessageIds?: string[];
   livenessReason?: string | null;
   effectiveMaxRunMs?: number;
+  maxRunSource?: "override" | "definition" | "config";
   timeout?: { softWarningAt?: string; hardTimeoutAt?: string; pausedAt?: string; additionalRunSeconds?: number; reason?: string } | null;
   cwd: string;
   createdAt: string;
@@ -315,6 +316,7 @@ export interface RunResult {
   createdAt: string;
   durationMs?: number;
   effectiveMaxRunMs?: number;
+  maxRunSource?: "override" | "definition" | "config";
   timeout?: { softWarningAt?: string; hardTimeoutAt?: string; pausedAt?: string; additionalRunSeconds?: number; reason?: string } | null;
   summary?: string;
   body?: string;
@@ -540,6 +542,7 @@ export interface SubagentStartResult {
   transcriptPath?: string;
   maxRunSeconds?: number;
   effectiveMaxRunMs?: number;
+  maxRunSource?: "override" | "definition" | "config";
   maxSubagentDepth?: number;
   fastTrack?: FastTrackLaunch;
   task?: { taskId: string; title: string };
