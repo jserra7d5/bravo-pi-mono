@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { AffinityStore } from './affinity.js';
 import { handlePostCompact, installCompactionHook } from './compaction.js';
 import { RED_MS, WARN_MS } from '@bravo/auth-balancer-contract';
-import { discoverAccounts, loadAccountStates, resolveAuthswapRoot, resolveStateRoot } from './accounts.js';
+import { discoverAccounts, loadAccountStates, readSlotPlan, resolveAuthswapRoot, resolveStateRoot } from './accounts.js';
 import { TokenRefresher } from './refresh.js';
 import { conciseWarnings, readActiveAuthWarnings } from './health.js';
 import { checkClaude, reloginClaudeSlot } from './relogin.js';
@@ -188,7 +188,8 @@ function cmdStatus(argv: string[]): void {
   }
 
   console.log(`accounts (model=${model ?? 'any'})`);
-  console.log('slot  email                                  5h      7d      7d_oi   7d-reset  headroom  binding  health       relogin');
+  console.log('headroom is in Max 20x units: 0.25 is a quarter of a 20x budget, whatever the plan');
+  console.log('slot  email                                  plan  5h      7d      7d_oi   7d-reset  headroom  binding  health       relogin');
   for (const s of states) {
     const h = computeHeadroom(s, model, now);
     const c = s.claims?.byId;
@@ -196,6 +197,8 @@ function cmdStatus(argv: string[]): void {
       [
         s.slot.padEnd(5),
         (s.email ?? '').padEnd(38).slice(0, 38),
+        ' ',
+        planLabel(readSlotPlan(stateRoot, s.slot)?.tier).padEnd(5),
         pct(c?.['5h']?.utilization),
         ' ',
         pct(c?.['7d']?.utilization),
@@ -220,6 +223,12 @@ function cmdStatus(argv: string[]): void {
   for (const l of leases.slice(0, 20)) {
     console.log(`  ${l.session_id_hash.slice(0, 12)}  slot=${l.slot}  seen ${ago(l.last_seen_at, now)}`);
   }
+}
+
+/** `default_claude_max_5x` -> `5x`; an unread plan is `?`, anything else passes through. */
+function planLabel(tier: string | undefined): string {
+  if (!tier) return '?';
+  return /_(\d+x)$/.exec(tier)?.[1] ?? tier;
 }
 
 function cmdAccounts(): void {

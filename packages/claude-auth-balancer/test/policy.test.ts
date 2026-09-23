@@ -3,8 +3,10 @@ import { test } from 'node:test';
 
 import { parseClaims } from '../src/claims.js';
 import {
+  capacityForTier,
   computeHeadroom,
   quotaForModel,
+  REFERENCE_CAPACITY,
   selectAccount,
 } from '../src/policy.js';
 import { pricingForModel } from '../src/usage.js';
@@ -1006,4 +1008,75 @@ test('an unopened weekly does not yank a warm session to drain a window that is 
     nowMs: NOW,
   });
   assert.equal(selection.slot, '1', 'a warm, serviceable affinity is held');
+});
+
+// --- mixed plan sizes --------------------------------------------------------
+//
+// Utilization is a fraction of the account's own budget. A Max 5x budget is a
+// quarter of a 20x's on 5h and 1/1.7 of it on 7d.
+
+const FIVE_X = capacityForTier('default_claude_max_5x');
+const fiveX = (a: AccountState): AccountState => ({ ...a, capacity: FIVE_X });
+
+test('plan tiers map to capacities; an unread or unknown tier is the 20x reference', () => {
+  assert.deepEqual(FIVE_X, { fiveHour: 0.25, weekly: 1 / 1.7 });
+  assert.equal(capacityForTier('default_claude_max_20x'), REFERENCE_CAPACITY);
+  assert.equal(capacityForTier(undefined), REFERENCE_CAPACITY);
+  assert.equal(capacityForTier('default_claude_max_40x'), REFERENCE_CAPACITY);
+});
+
+test("a 5x account's headroom is in 20x units, a quarter of the 20x's on the same 5h meter", () => {
+  // 60% of 5h and 30% of 7d used: the 20x binds on 5h at 0.4.
+  const big = computeHeadroom(account('2', 0.3, 69, 0.6), 'claude-opus-5', NOW);
+  assert.equal(big.bindingClaim, '5h');
+  assert.equal(Number(big.headroom.toFixed(4)), 0.4);
+  const small = computeHeadroom(fiveX(account('5', 0.3, 69, 0.6)), 'claude-opus-5', NOW);
+  // 5h: 0.4 * 0.25 = 0.1; 7d: 0.7 / 1.7 = 0.41
+  assert.equal(small.bindingClaim, '5h');
+  assert.equal(Number(small.headroom.toFixed(4)), 0.1);
+  const weeklyBound = computeHeadroom(fiveX(account('5', 0.9, 69, 0)), 'claude-opus-5', NOW);
+  assert.equal(weeklyBound.bindingClaim, '7d');
+  assert.equal(Number(weeklyBound.headroom.toFixed(4)), Number((0.1 / 1.7).toFixed(4)));
+});
+
+test('pacing stays in each account\'s own fractions, whatever the plan', () => {
+  // Greedy ranking on fractions already gives a 5x fewer sessions: each one
+  // moves its fractions 1.7x further. Scaling pacing would make a behind-pace
+  // 5x read as less behind than a 20x at the same fraction.
+  const big = computeHeadroom(account('2', 0.3, 69, 0.1), 'claude-opus-5', NOW);
+  const small = computeHeadroom(fiveX(account('5', 0.3, 69, 0.1)), 'claude-opus-5', NOW);
+  assert.equal(small.spendableHeadroom, big.spendableHeadroom);
+  assert.equal(small.fiveHourBucket, big.fiveHourBucket);
+});
+
+test('an expiring 5x needs more of its own window to pull a warm session than a 20x does', () => {
+  // Same meters on both: 30% of 5h left. On a 20x that is 0.3 of a 20x window;
+  // on a 5x it is 0.075, too little to be worth moving a herd onto.
+  const held = account('2', 0.05, 69, 0.03);
+  const pulledBy20x = selectAccount({
+    accounts: [held, account('4', 0.13, 8.5, 0.7)],
+    model: 'claude-opus-5',
+    affinitySlot: '2',
+    nowMs: NOW,
+  });
+  assert.equal(pulledBy20x.slot, '4');
+  assert.equal(pulledBy20x.decision, 'affinity-broken');
+
+  const notPulled = selectAccount({
+    accounts: [held, fiveX(account('4', 0.13, 8.5, 0.7))],
+    model: 'claude-opus-5',
+    affinitySlot: '2',
+    nowMs: NOW,
+  });
+  assert.equal(notPulled.slot, '2');
+  assert.equal(notPulled.decision, 'affinity-hold');
+
+  // A fresh session has no cache to lose, so the 5x still drains first.
+  const fresh = selectAccount({
+    accounts: [held, fiveX(account('4', 0.13, 8.5, 0.7))],
+    model: 'claude-opus-5',
+    nowMs: NOW,
+  });
+  assert.equal(fresh.slot, '4');
+  assert.match(fresh.reason, /expires in 8\.5h/);
 });

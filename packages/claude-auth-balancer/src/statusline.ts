@@ -22,6 +22,7 @@ import {
   isRefreshable,
   readOAuth,
   readSlotObservation,
+  readSlotPlan,
   resolveAuthswapRoot,
   resolveCappedSlots,
   resolveStateRoot,
@@ -31,6 +32,7 @@ import type { Claim } from './claims.js';
 import {
   DEFAULT_EVACUATE_UTILIZATION,
   evacuationHorizonMsFor,
+  capacityForTier,
   quotaForModel,
   computeHeadroom,
 } from './policy.js';
@@ -341,6 +343,7 @@ export function gather(payload: StatuslinePayload, options: GatherOptions = {}):
             health: 'ok',
             claims: observed?.claims,
             capAtCeiling: capped.has(account.slot),
+            capacity: capacityForTier(readSlotPlan(stateRoot, account.slot)?.tier),
           },
           payload.model?.id,
           nowMs,

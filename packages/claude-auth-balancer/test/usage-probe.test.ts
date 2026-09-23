@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 
-import { readSlotObservation, recordObservation } from '../src/accounts.js';
+import { loadAccountStates, readSlotObservation, readSlotPlan, recordObservation, writeSlotPlan } from '../src/accounts.js';
 import { computeHeadroom } from '../src/policy.js';
-import { claimsFromUsageBody, UsageProbe } from '../src/usage-probe.js';
+import { claimsFromUsageBody, PLAN_PROBE_STALE_MS, UsageProbe } from '../src/usage-probe.js';
 
 const cleanups: (() => void)[] = [];
 after(() => cleanups.reverse().forEach(fn => fn()));
@@ -264,4 +264,60 @@ test('429 retry-after is persisted and suppresses a later probe instance', async
   assert.equal(calls, 1);
   const state = JSON.parse(readFileSync(path.join(root, 'state', 'usage-probe', '1.json'), 'utf8')) as { retryAt: number };
   assert.equal(state.retryAt, now + 30_000);
+});
+
+// Shape captured 2026-09-22 from a live Max account's /api/oauth/profile.
+const profileBody = (tier: string) => JSON.stringify({
+  account: { has_claude_max: true, has_claude_pro: false },
+  organization: { organization_type: 'claude_max', rate_limit_tier: tier, subscription_status: 'active' },
+});
+
+test('the plan probe reads the tier over the OAuth wire contract and sizes the account', async () => {
+  const root = temp();
+  const url = await serve((req, res) => {
+    assert.equal(req.method, 'GET');
+    assert.equal(req.url, '/api/oauth/profile');
+    assert.equal(req.headers.authorization, 'Bearer canonical-token');
+    assert.equal(req.headers['anthropic-beta'], 'oauth-2025-04-20');
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(profileBody('default_claude_max_5x'));
+  });
+  let now = 1_000_000;
+  const probe = new UsageProbe({ upstream: url, stateRoot: root, now: () => now });
+  const selected = account(root);
+
+  assert.equal(probe.isPlanDue('1'), true, 'an unread plan is due');
+  assert.equal(await probe.probePlan(selected), 'updated');
+  assert.deepEqual(readSlotPlan(root, '1'), { tier: 'default_claude_max_5x', observedAt: now });
+  assert.equal(probe.isPlanDue('1'), false);
+  now += PLAN_PROBE_STALE_MS;
+  assert.equal(probe.isPlanDue('1'), true, 'a day-old plan is re-read');
+
+  // The policy input the router builds carries the plan read off the wire.
+  const authswap = path.join(root, 'authswap');
+  const dir = path.join(authswap, 'providers', 'anthropic', 'credentials');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, '.credentials-1-a@example.com.json'), readFileSync(selected.credentialPath));
+  const { states } = loadAccountStates({ stateRoot: root, authswapRoot: authswap, nowMs: now, cappedSlots: new Set() });
+  assert.deepEqual(states[0]?.capacity, { fiveHour: 0.25, weekly: 1 / 1.7 });
+});
+
+test('a failed or malformed plan read keeps the prior plan', async () => {
+  const root = temp();
+  const replies: [number, string][] = [
+    [500, '{}'],
+    [200, '{"organization":{}}'],
+    [200, 'not json'],
+  ];
+  const url = await serve((_req, res) => {
+    const [status, body] = replies.shift()!;
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(body);
+  });
+  writeSlotPlan(root, '1', { tier: 'default_claude_max_5x', observedAt: 1 });
+  const probe = new UsageProbe({ upstream: url, stateRoot: root, now: Date.now });
+  for (let i = 0; i < 3; i += 1) {
+    assert.equal(await probe.probePlan(account(root)), 'failed');
+    assert.deepEqual(readSlotPlan(root, '1'), { tier: 'default_claude_max_5x', observedAt: 1 });
+  }
 });

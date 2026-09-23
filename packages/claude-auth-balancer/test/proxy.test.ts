@@ -12,7 +12,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { after, test } from 'node:test';
 
-import { readSlotObservation, writeSlotObservation } from '../src/accounts.js';
+import { readSlotObservation, readSlotPlan, writeSlotObservation } from '../src/accounts.js';
 import { AffinityStore } from '../src/affinity.js';
 import { handlePostCompact } from '../src/compaction.js';
 import { MetricsStore } from '../src/metrics.js';
@@ -73,9 +73,10 @@ function sseBody(model: string, cacheRead: number, output: number): string {
 async function upstream(
   handler: (call: UpstreamCall, res: http.ServerResponse) => void,
   usageHandler?: (call: UpstreamCall, res: http.ServerResponse) => void,
-): Promise<{ url: string; calls: UpstreamCall[]; probes: UpstreamCall[] }> {
+): Promise<{ url: string; calls: UpstreamCall[]; probes: UpstreamCall[]; profiles: UpstreamCall[] }> {
   const calls: UpstreamCall[] = [];
   const probes: UpstreamCall[] = [];
+  const profiles: UpstreamCall[] = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', c => chunks.push(c as Buffer));
@@ -85,6 +86,14 @@ async function upstream(
         path: req.url ?? '/',
         body: Buffer.concat(chunks).toString('utf8'),
       };
+      if (call.path === '/api/oauth/profile') {
+        profiles.push(call);
+        // tok-5x-* tokens belong to a Max 5x account; everything else is 20x.
+        const tier = call.authorization?.startsWith('Bearer tok-5x-') ? 'default_claude_max_5x' : 'default_claude_max_20x';
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ organization: { rate_limit_tier: tier } }));
+        return;
+      }
       if (call.path === '/api/oauth/usage') {
         probes.push(call);
         if (usageHandler) {
@@ -105,7 +114,7 @@ async function upstream(
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
   cleanups.push(() => server.close());
   const port = (server.address() as { port: number }).port;
-  return { url: `http://127.0.0.1:${port}`, calls, probes };
+  return { url: `http://127.0.0.1:${port}`, calls, probes, profiles };
 }
 
 async function boot(options: {
@@ -351,6 +360,23 @@ test('an idle account is re-read by the background sweep with no client traffic 
     assert.equal(claim?.utilization, 0);
     assert.equal(claim?.reset, undefined, 'an unopened window has no reset to report');
   }
+});
+
+test('the sweep reads each account\'s plan tier without spending inference', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-20x-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-5x-2' },
+  ]);
+  const up = await upstream((_call, res) => { res.writeHead(200, OK_HEADERS).end('{}'); });
+  const { stateRoot } = await boot({ authswapRoot, upstreamUrl: up.url });
+
+  const deadline = Date.now() + 4000;
+  while (Date.now() < deadline && !(readSlotPlan(stateRoot, '1') && readSlotPlan(stateRoot, '2'))) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(readSlotPlan(stateRoot, '1')?.tier, 'default_claude_max_20x');
+  assert.equal(readSlotPlan(stateRoot, '2')?.tier, 'default_claude_max_5x');
+  assert.equal(up.calls.length, 0, 'reading the plan must not spend inference');
 });
 
 test('the sweep repeats on its interval rather than running once at startup', async () => {

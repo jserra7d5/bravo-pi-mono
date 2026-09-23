@@ -63,6 +63,17 @@
 // the account keeps taking fresh sessions down to zero. The 5h claim is
 // unaffected: it refills by itself and never expires unspent. An account named
 // in CLAUDE_AUTH_BALANCER_CAPPED_SLOTS opts out and keeps the flat 95% cap.
+//
+// Accounts need not be the same plan. Utilization is a fraction of that
+// account's OWN budget, and a Max 5x budget is a quarter of a 20x's on `5h` and
+// 1/1.7 of it on `7d`. `headroom` is scaled by the account's `PlanCapacity`
+// into one unit — a fraction of a Max 20x budget — because the questions it
+// answers are about absolute work: is the expiring remainder worth a pull, and
+// which claim binds first. Pacing, the 95% ceiling and the 5h bucket stay on
+// the account's own fractions. A fresh session moves a 5x's fractions further
+// than a 20x's, so greedy ranking on fractions already hands each account work
+// in proportion to its size; scaling them would make a behind-pace 5x look less
+// behind than a 20x at the same fraction.
 
 import type { Claim, ClaimId, Claims } from './claims.js';
 import { claimHasReset, projectExpiredClaims } from './claims.js';
@@ -115,6 +126,32 @@ export function quotaForModel(model: string | undefined): ModelQuota {
   return key ? MODEL_QUOTAS[key]! : DEFAULT_QUOTA;
 }
 
+/**
+ * An account's budget per claim, relative to a Max 20x account = 1.
+ *
+ * Provenance: operator-supplied (2026-09-22). A 5x plan's `5h` window is a
+ * quarter of a 20x's; its weekly is 1/1.7 of it. `7d_oi` is a fraction of the
+ * weekly, so it scales with `weekly`.
+ */
+export type PlanCapacity = { fiveHour: number; weekly: number };
+
+export const REFERENCE_CAPACITY: PlanCapacity = { fiveHour: 1, weekly: 1 };
+
+/** Keyed by the profile endpoint's `organization.rate_limit_tier`. */
+export const PLAN_CAPACITIES: Record<string, PlanCapacity> = {
+  default_claude_max_20x: REFERENCE_CAPACITY,
+  default_claude_max_5x: { fiveHour: 1 / 4, weekly: 1 / 1.7 },
+};
+
+/**
+ * Capacity for a tier. An unread or unrecognized tier is treated as the
+ * reference plan, which is what every account was before plans were read;
+ * `status` prints the tier so an unknown one is visible.
+ */
+export function capacityForTier(tier: string | undefined): PlanCapacity {
+  return (tier && PLAN_CAPACITIES[tier]) || REFERENCE_CAPACITY;
+}
+
 export type AccountHealth = 'ok' | 'needs-reauth' | 'unknown';
 
 export type AccountState = {
@@ -136,6 +173,8 @@ export type AccountState = {
    * CLAUDE_AUTH_BALANCER_CAPPED_SLOTS; see `resolveCappedSlots`.
    */
   capAtCeiling?: boolean;
+  /** Plan size. Absent means the reference (Max 20x) plan. */
+  capacity?: PlanCapacity;
 };
 
 /**
@@ -208,6 +247,10 @@ export const DEFAULT_EXPIRING_MIN_HEADROOM = 0.01;
  * one move that deliberately pays a ~20x cache re-create: below this the
  * unspent remainder is not clearly larger than the re-creates it would
  * trigger, and the 5h claim may be what is binding anyway.
+ *
+ * Like all headroom it is in Max 20x units, so a 5x account must hold 40% of
+ * its own 5h window and 17% of its weekly to pull: a herd moved onto a quarter-
+ * sized 5h window would exhaust it and pay a second re-create.
  */
 export const DEFAULT_EXPIRING_PULL_MIN_HEADROOM = 0.1;
 
@@ -236,11 +279,15 @@ export const DEFAULT_WEEKLY_TERMINAL_HORIZON_MS = 8 * 60 * 60 * 1000;
 
 export type HeadroomBreakdown = {
   slot: string;
-  /** Normalized request-units of this model that still fit. 0 = exhausted. */
+  /**
+   * Normalized request-units of this model that still fit, as a fraction of a
+   * Max 20x budget (see `PlanCapacity`). 0 = exhausted.
+   */
   headroom: number;
   /**
    * Headroom beyond what staying on pace until the weekly reset would keep, in
-   * the same normalized units as `headroom`. Negative means behind pace. Fresh
+   * model-normalized units of THIS account's weekly — not plan-scaled like
+   * `headroom`, see the file header. Negative means behind pace. Fresh
    * ranking for every model leads on this (after expiring quota and the 5h
    * bucket); raw headroom still governs eligibility and affinity because a
    * warm session can consume its reserve. Only the weekly claims pace: the 5h
@@ -413,6 +460,7 @@ export function computeHeadroom(
   const expiringHorizonMs = options.expiringHorizonMs ?? DEFAULT_EXPIRING_WEEKLY_HORIZON_MS;
   const expiringMinHeadroom = options.expiringMinHeadroom ?? DEFAULT_EXPIRING_MIN_HEADROOM;
   const quota = quotaForModel(model);
+  const capacity = account.capacity ?? REFERENCE_CAPACITY;
   const claims = projectExpiredClaims(account.claims, nowMs);
   let evacuationTriggered = false;
   let weeklyTerminal = false;
@@ -496,11 +544,13 @@ export function computeHeadroom(
     //   extra claim   : r  buys r*subBudget*B/(mult*c) -> r * subBudget / mult
     // Without the subBudget factor a half-sized Fable budget reads as if it
     // were full-sized, and cross-account ranking compares incommensurate
-    // numbers whenever one account binds on 7d_oi and another on 7d.
+    // numbers whenever one account binds on 7d_oi and another on 7d. The plan
+    // factor does the same job across accounts of different sizes, for
+    // `headroom` only — pacing below stays in this account's own fractions.
     const scale = id === quota.extraClaim
       ? subBudget / quota.costMultiplier
       : 1 / quota.costMultiplier;
-    const scaled = raw * scale;
+    const scaled = raw * scale * (id === '5h' ? capacity.fiveHour : capacity.weekly);
     if (scaled < min) {
       min = scaled;
       binding = id;
@@ -545,7 +595,7 @@ export function computeHeadroom(
     minSpendable = Math.min(minSpendable, (raw - remainingFraction - held) * scale);
   }
 
-  const headroom = sawAny ? min : UNKNOWN_HEADROOM;
+  const headroom = sawAny ? min : UNKNOWN_HEADROOM * Math.min(capacity.fiveHour, capacity.weekly);
   const spendableHeadroom = sawAny && minSpendable !== Number.POSITIVE_INFINITY
     ? minSpendable
     : UNKNOWN_HEADROOM - reservedForFable;

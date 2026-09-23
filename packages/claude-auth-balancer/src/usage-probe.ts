@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import type { Account, PersistedAccount } from './accounts.js';
-import { readOAuth, readSlotObservation, recordObservation } from './accounts.js';
+import { readOAuth, readSlotObservation, readSlotPlan, recordObservation, writeSlotPlan } from './accounts.js';
 import type { Claim, Claims } from './claims.js';
 
 export const USAGE_PROBE_PATH = '/api/oauth/usage';
@@ -12,6 +12,9 @@ export const USAGE_PROBE_BETA = 'oauth-2025-04-20';
 export const USAGE_PROBE_STALE_MS = 2 * 60 * 1000;
 export const USAGE_PROBE_TIMEOUT_MS = 750;
 export const USAGE_PROBE_BODY_LIMIT = 64 * 1024;
+export const PROFILE_PROBE_PATH = '/api/oauth/profile';
+/** A plan changes only on an upgrade or downgrade, so a daily read is plenty. */
+export const PLAN_PROBE_STALE_MS = 24 * 60 * 60 * 1000;
 const FAILURE_BACKOFF_MS = 15 * 1000;
 const RATE_LIMIT_BACKOFF_MS = 60 * 1000;
 
@@ -96,6 +99,13 @@ export function claimsFromUsageBody(body: unknown): Claims | undefined {
   return { byId };
 }
 
+/** `organization.rate_limit_tier` from a profile response, e.g. `default_claude_max_5x`. */
+export function tierFromProfileBody(body: unknown): string | undefined {
+  const org = (body as { organization?: { rate_limit_tier?: unknown } } | null)?.organization;
+  const tier = org?.rate_limit_tier;
+  return typeof tier === 'string' && tier.length > 0 ? tier : undefined;
+}
+
 function retryAfter(headers: http.IncomingHttpHeaders, nowMs: number): number | undefined {
   const raw = headers['retry-after'];
   const value = Array.isArray(raw) ? raw[0] : raw;
@@ -163,19 +173,81 @@ export class UsageProbe {
     const startedAt = this.options.now();
     const initialObservation = JSON.stringify(readSlotObservation(this.options.stateRoot, account.slot));
     if (this.readBackoff(account.slot) > startedAt) return 'backoff';
+    const token = await this.prepareToken(account);
+    if (token === 'prepare-failed') this.writeBackoff(account.slot, this.options.now() + FAILURE_BACKOFF_MS);
+    if (typeof token !== 'object') return 'failed';
+    const res = await this.get(USAGE_PROBE_PATH, token.accessToken);
+    if (res === undefined || res.status !== 200 && res.status !== 429) {
+      this.writeBackoff(account.slot, this.options.now() + FAILURE_BACKOFF_MS);
+      return 'failed';
+    }
+    if (res.status === 429) {
+      this.writeBackoff(account.slot, this.options.now() + (retryAfter(res.headers, this.options.now()) ?? RATE_LIMIT_BACKOFF_MS));
+      return 'backoff';
+    }
     try {
-      await this.options.prepare?.(account);
+      const claims = claimsFromUsageBody(JSON.parse(res.body));
+      if (!claims) return 'empty';
+      // Inference headers that landed while this slower read was in
+      // flight are authoritative, even when an injected clock gives both
+      // observations the same timestamp.
+      if (JSON.stringify(readSlotObservation(this.options.stateRoot, account.slot)) === initialObservation) {
+        recordObservation(this.options.stateRoot, account.slot, claims, startedAt, account.email);
+      }
+      return 'updated';
     } catch {
       this.writeBackoff(account.slot, this.options.now() + FAILURE_BACKOFF_MS);
       return 'failed';
     }
+  }
+
+  /** True when the slot's plan has never been read, or was read over a day ago. */
+  isPlanDue(slot: string): boolean {
+    const plan = readSlotPlan(this.options.stateRoot, slot);
+    return plan === undefined || this.options.now() - plan.observedAt >= PLAN_PROBE_STALE_MS;
+  }
+
+  /**
+   * Read the account's plan tier. Sweep-only: nothing on the request path
+   * waits for it, and a failure keeps the prior plan until the next sweep.
+   */
+  async probePlan(account: Account): Promise<'updated' | 'failed'> {
+    const token = await this.prepareToken(account);
+    if (typeof token !== 'object') return 'failed';
+    const res = await this.get(PROFILE_PROBE_PATH, token.accessToken);
+    if (res?.status !== 200) return 'failed';
+    let tier: string | undefined;
+    try { tier = tierFromProfileBody(JSON.parse(res.body)); } catch { /* invalid below */ }
+    if (tier === undefined) return 'failed';
+    writeSlotPlan(this.options.stateRoot, account.slot, { tier, observedAt: this.options.now() });
+    return 'updated';
+  }
+
+  /** The slot's canonical token after `prepare`. */
+  private async prepareToken(account: Account): Promise<{ accessToken: string } | 'prepare-failed' | 'unusable'> {
+    try {
+      await this.options.prepare?.(account);
+    } catch {
+      return 'prepare-failed';
+    }
     // Preparation may rotate the access token, so never retain a credential
     // read from before it completed.
     const oauth = readOAuth(account.credentialPath);
-    if (!oauth || (oauth.expiresAt !== undefined && oauth.expiresAt <= this.options.now())) return 'failed';
+    if (!oauth || (oauth.expiresAt !== undefined && oauth.expiresAt <= this.options.now())) return 'unusable';
+    return { accessToken: oauth.accessToken };
+  }
+
+  /**
+   * One OAuth GET under an absolute wall-clock deadline covering headers and
+   * the whole body, with a body-size limit. Undefined on any transport failure.
+   */
+  private get(
+    requestPath: string,
+    token: string,
+  ): Promise<{ status?: number; headers: http.IncomingHttpHeaders; body: string } | undefined> {
     const base = new URL(this.options.upstream);
-    const target = new URL(USAGE_PROBE_PATH, base);
-    if (target.origin !== base.origin) return 'failed';
+    const target = new URL(requestPath, base);
+    if (target.origin !== base.origin) return Promise.resolve(undefined);
     const agent = target.protocol === 'http:' ? http : https;
 
     return new Promise(resolve => {
@@ -183,12 +255,11 @@ export class UsageProbe {
       let response: http.IncomingMessage | undefined;
       let req: http.ClientRequest;
       const deadline = setTimeout(() => {
-        this.writeBackoff(account.slot, this.options.now() + FAILURE_BACKOFF_MS);
-        finish('failed');
+        finish(undefined);
         response?.destroy();
         req.destroy(new Error('usage probe wall-clock deadline exceeded'));
       }, this.options.timeoutMs ?? USAGE_PROBE_TIMEOUT_MS);
-      const finish = (result: UsageProbeResult) => {
+      const finish = (result: { status?: number; headers: http.IncomingHttpHeaders; body: string } | undefined) => {
         if (settled) return;
         settled = true;
         clearTimeout(deadline);
@@ -198,10 +269,10 @@ export class UsageProbe {
         protocol: target.protocol,
         hostname: target.hostname,
         port: target.port || undefined,
-        path: USAGE_PROBE_PATH,
+        path: requestPath,
         method: 'GET',
         headers: {
-          authorization: `Bearer ${oauth.accessToken}`,
+          authorization: `Bearer ${token}`,
           'anthropic-beta': USAGE_PROBE_BETA,
           accept: 'application/json',
         },
@@ -215,41 +286,14 @@ export class UsageProbe {
             chunks.push(chunk);
             return;
           }
-          this.writeBackoff(account.slot, this.options.now() + FAILURE_BACKOFF_MS);
-          finish('failed');
+          finish(undefined);
           res.destroy();
         });
         res.on('end', () => {
-          if (res.statusCode === 429) {
-            this.writeBackoff(account.slot, this.options.now() + (retryAfter(res.headers, this.options.now()) ?? RATE_LIMIT_BACKOFF_MS));
-            finish('backoff');
-            return;
-          }
-          if (res.statusCode !== 200) {
-            this.writeBackoff(account.slot, this.options.now() + FAILURE_BACKOFF_MS);
-            finish('failed');
-            return;
-          }
-          try {
-            const claims = claimsFromUsageBody(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-            if (!claims) { finish('empty'); return; }
-            // Inference headers that landed while this slower read was in
-            // flight are authoritative, even when an injected clock gives both
-            // observations the same timestamp.
-            if (JSON.stringify(readSlotObservation(this.options.stateRoot, account.slot)) === initialObservation) {
-              recordObservation(this.options.stateRoot, account.slot, claims, startedAt, account.email);
-            }
-            finish('updated');
-          } catch {
-            this.writeBackoff(account.slot, this.options.now() + FAILURE_BACKOFF_MS);
-            finish('failed');
-          }
+          finish({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') });
         });
       });
-      req.on('error', () => {
-        this.writeBackoff(account.slot, this.options.now() + FAILURE_BACKOFF_MS);
-        finish('failed');
-      });
+      req.on('error', () => finish(undefined));
       req.end();
     });
   }

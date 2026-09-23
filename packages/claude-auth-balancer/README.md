@@ -198,6 +198,30 @@ and by the statusline badge so they cannot drift:
 | `7d`, `7d_oi` | 8h | the remainder is destroyed at the reset, so spend it |
 | any, on a capped slot | 1h | the operator is holding this account in reserve |
 
+### Plan sizes
+
+Accounts can be on different Max plans. Utilization is a fraction of the
+account's own budget, and plans differ per claim:
+
+| tier (`rate_limit_tier`) | `5h` | `7d` / `7d_oi` |
+|---|---|---|
+| `default_claude_max_20x` | 1 | 1 |
+| `default_claude_max_5x` | 1/4 | 1/1.7 |
+
+The tier comes from `GET /api/oauth/profile` (`organization.rate_limit_tier`),
+read by the background sweep once a day per slot and stored in
+`state/plans/<slot>.json`. The credential file's own `rateLimitTier` is not
+used: files written outside Claude Code's login flow lack it. An unread or
+unknown tier counts as 20x, and `status` prints `?` for it.
+
+Only `headroom` is scaled, into a fraction of a 20x budget. It answers questions
+about absolute work: which claim binds first, and whether an expiring remainder
+is big enough to pull a warm session (a 5x needs 40% of its own `5h` left to
+clear the 0.1 bar). Pacing, the 95% ceiling and the `5h` bucket stay on each
+account's own fractions. A session moves a 5x's fractions further than a 20x's,
+so greedy ranking on fractions already gives each account work in proportion
+to its size.
+
 ### Usage refresh and reset projection
 
 Inference response headers are authoritative quota observations. Before a fresh

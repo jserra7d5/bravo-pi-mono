@@ -20,6 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { AccountState } from './policy.js';
+import { capacityForTier } from './policy.js';
 import { projectExpiredClaims } from './claims.js';
 import type { Claims } from './claims.js';
 
@@ -151,6 +152,39 @@ export function writeSlotObservation(stateRoot: string, account: PersistedAccoun
 }
 
 /**
+ * An account's plan, as `/api/oauth/profile` reports it. Its own file rather
+ * than a field on the observation, so the sweep writing it can never race a
+ * response recording claims.
+ */
+export type PersistedPlan = {
+  /** `organization.rate_limit_tier`, e.g. `default_claude_max_5x`. */
+  tier: string;
+  observedAt: number;
+};
+
+function planPath(stateRoot: string, slot: string): string {
+  return path.join(stateRoot, 'state', 'plans', `${encodeURIComponent(slot)}.json`);
+}
+
+export function readSlotPlan(stateRoot: string, slot: string): PersistedPlan | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(planPath(stateRoot, slot), 'utf8')) as PersistedPlan;
+    if (parsed && typeof parsed.tier === 'string' && typeof parsed.observedAt === 'number') return parsed;
+  } catch {
+    /* absent or unreadable */
+  }
+  return undefined;
+}
+
+export function writeSlotPlan(stateRoot: string, slot: string, plan: PersistedPlan): void {
+  const target = planPath(stateRoot, slot);
+  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  const tmp = `${target}.tmp.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(plan), { mode: 0o600 });
+  renameSync(tmp, target);
+}
+
+/**
  * True when a credential can be revived without a human.
  *
  * An expired access token is only fatal if the refresh token is missing or
@@ -197,6 +231,7 @@ export function loadAccountStates(options: {
       tokenExpiresAt: expiresAt,
       refreshTokenExpiresAt: oauth?.refreshTokenExpiresAt,
       capAtCeiling: capped.has(account.slot),
+      capacity: capacityForTier(readSlotPlan(options.stateRoot, account.slot)?.tier),
     });
   }
 

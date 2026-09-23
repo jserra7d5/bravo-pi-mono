@@ -774,13 +774,19 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
   // slot whose reading goes stale. Sweeping on a timer keeps every account's
   // observation current whether or not it serves traffic, so a window rollover
   // is picked up without waiting for a request to happen to land there.
+  // The same sweep reads each account's plan tier, which sizes its headroom
+  // (see `PlanCapacity`). Nothing on the request path waits for it.
   const runUsageSweep = () => {
     if (!opts.usageProbe || opts.usageSweepIntervalMs <= 0) return;
-    void Promise.all(
-      discoverAccounts(opts.authswapRoot)
+    const accounts = discoverAccounts(opts.authswapRoot);
+    void Promise.all([
+      ...accounts
         .filter(account => usageProbe.isDue(readSlotObservation(opts.stateRoot, account.slot)))
         .map(account => usageProbe.probe(account)),
-    ).catch(() => {}); // a sweep failure must never take the proxy down
+      ...accounts
+        .filter(account => usageProbe.isPlanDue(account.slot))
+        .map(account => usageProbe.probePlan(account)),
+    ]).catch(() => {}); // a sweep failure must never take the proxy down
   };
   runUsageSweep();
   if (opts.usageSweepIntervalMs > 0) {
