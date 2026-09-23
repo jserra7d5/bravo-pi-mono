@@ -7,7 +7,7 @@ import { after, test } from 'node:test';
 
 import { loadAccountStates, readSlotObservation, readSlotPlan, recordObservation, writeSlotPlan } from '../src/accounts.js';
 import { computeHeadroom } from '../src/policy.js';
-import { claimsFromUsageBody, PLAN_PROBE_STALE_MS, UsageProbe } from '../src/usage-probe.js';
+import { claimsFromUsageBody, PLAN_PROBE_STALE_MS, UsageProbe, WARM_MODEL } from '../src/usage-probe.js';
 
 const cleanups: (() => void)[] = [];
 after(() => cleanups.reverse().forEach(fn => fn()));
@@ -320,4 +320,47 @@ test('a failed or malformed plan read keeps the prior plan', async () => {
     assert.equal(await probe.probePlan(account(root)), 'failed');
     assert.deepEqual(readSlotPlan(root, '1'), { tier: 'default_claude_max_5x', observedAt: 1 });
   }
+});
+
+test('warm opens the 5h window with one minimal inference request and records its reset', async () => {
+  const root = temp();
+  const reset = 1_790_217_000;
+  const seen: { method?: string; url?: string; auth?: string; body: string }[] = [];
+  const url = await serve((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', c => chunks.push(c as Buffer));
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body: Buffer.concat(chunks).toString('utf8') });
+      // Headers as captured live from a warm request on 2026-09-23.
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'anthropic-ratelimit-unified-5h-reset': String(reset),
+        'anthropic-ratelimit-unified-5h-status': 'allowed',
+        'anthropic-ratelimit-unified-5h-utilization': '0.0',
+        'anthropic-ratelimit-unified-representative-claim': 'five_hour',
+      });
+      res.end('{}');
+    });
+  });
+  const probe = new UsageProbe({ upstream: url, stateRoot: root, now: () => (reset - 5 * 3600) * 1000 });
+  assert.equal(UsageProbe.fiveHourOpen(readSlotObservation(root, '1'), (reset - 5 * 3600) * 1000), false);
+  assert.equal(await probe.warm(account(root)), 'updated');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]!.method, 'POST');
+  assert.equal(seen[0]!.url, '/v1/messages');
+  assert.equal(seen[0]!.auth, 'Bearer canonical-token');
+  const body = JSON.parse(seen[0]!.body) as { model: string; max_tokens: number };
+  assert.equal(body.model, WARM_MODEL);
+  assert.equal(body.max_tokens, 1);
+  assert.equal(readSlotObservation(root, '1')?.claims?.byId['5h']?.reset, reset);
+  assert.equal(UsageProbe.fiveHourOpen(readSlotObservation(root, '1'), (reset - 5 * 3600) * 1000), true);
+});
+
+test('a failed warm records nothing', async () => {
+  const root = temp();
+  recordObservation(root, '1', { byId: { '5h': { id: '5h', utilization: 0, status: 'allowed' } } }, 1);
+  const url = await serve((_req, res) => { res.writeHead(500).end('overloaded'); });
+  const probe = new UsageProbe({ upstream: url, stateRoot: root, now: () => 1000 });
+  assert.equal(await probe.warm(account(root)), 'failed');
+  assert.equal(readSlotObservation(root, '1')?.claims?.byId['5h']?.reset, undefined);
 });

@@ -288,6 +288,23 @@ Because `isDue` treats a reading older than two minutes as due, a 15-minute
 sweep reads every account on every tick in practice; the filter's real work is
 skipping accounts that live request traffic just refreshed.
 
+### Warming the next 5h window
+
+A 5h window opens on its first request and resets five hours later. The
+usage and profile reads do not open one. So the account fresh picks spill to
+next, once the current target leaves its 5h bucket, would start its clock only
+when the spill arrives, and would come back that much later.
+
+After each sweep settles, `slotToWarm` names that account: the fresh pick with
+the current target excluded. If the current target's window is open (work is
+running) and the next one's is not, `UsageProbe.warm` sends one
+`claude-haiku-4-5` request with `max_tokens: 1` on it and records the claims
+from its response headers. An open window reads from the persisted
+observation, not projected claims, which would invent a reset for a window
+that has not opened. One warm runs at a time; a failure is retried on the next
+sweep. It opens at most one window per account per five hours and is not
+recorded in metrics.
+
 ### Three weekly states, not two
 
 An undefined weekly reset is ambiguous, and the two meanings rank in opposite

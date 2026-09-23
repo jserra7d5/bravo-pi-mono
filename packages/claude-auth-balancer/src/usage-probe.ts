@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { Account, PersistedAccount } from './accounts.js';
 import { readOAuth, readSlotObservation, readSlotPlan, recordObservation, writeSlotPlan } from './accounts.js';
 import type { Claim, Claims } from './claims.js';
+import { hasClaims, parseClaims } from './claims.js';
 
 export const USAGE_PROBE_PATH = '/api/oauth/usage';
 export const USAGE_PROBE_BETA = 'oauth-2025-04-20';
@@ -13,6 +14,15 @@ export const USAGE_PROBE_STALE_MS = 2 * 60 * 1000;
 export const USAGE_PROBE_TIMEOUT_MS = 750;
 export const USAGE_PROBE_BODY_LIMIT = 64 * 1024;
 export const PROFILE_PROBE_PATH = '/api/oauth/profile';
+/**
+ * Opening a 5h window takes an inference request; the usage and profile reads
+ * do not open one. Haiku with one output token is the cheapest request the
+ * server counts. Verified live 2026-09-23: a 200 whose headers carry the new
+ * `5h` reset.
+ */
+export const WARM_PATH = '/v1/messages';
+export const WARM_MODEL = 'claude-haiku-4-5-20251001';
+export const WARM_TIMEOUT_MS = 15 * 1000;
 /** A plan changes only on an upgrade or downgrade, so a daily read is plenty. */
 export const PLAN_PROBE_STALE_MS = 24 * 60 * 60 * 1000;
 const FAILURE_BACKOFF_MS = 15 * 1000;
@@ -142,6 +152,35 @@ export class UsageProbe {
     });
   }
 
+  /**
+   * Open the account's 5h window with one minimal inference request, and record
+   * the claims its response headers carry. See `slotToWarm` for when.
+   */
+  async warm(account: Account): Promise<'updated' | 'failed'> {
+    const token = await this.prepareToken(account);
+    if (typeof token !== 'object') return 'failed';
+    const startedAt = this.options.now();
+    const res = await this.send('POST', WARM_PATH, token.accessToken, {
+      timeoutMs: WARM_TIMEOUT_MS,
+      headers: { 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: WARM_MODEL, max_tokens: 1, messages: [{ role: 'user', content: '.' }] }),
+    });
+    const claims = res && parseClaims(res.headers as Record<string, string | string[] | undefined>);
+    if (!claims || !hasClaims(claims)) return 'failed';
+    recordObservation(this.options.stateRoot, account.slot, claims, startedAt, account.email);
+    return 'updated';
+  }
+
+  /**
+   * True while the account's 5h window is running. Reads the persisted
+   * observation: the policy's projected claims advance a rolled-over window to
+   * an invented next reset, but a 5h window only opens on a request.
+   */
+  static fiveHourOpen(observation: PersistedAccount | undefined, nowMs: number): boolean {
+    const reset = observation?.claims?.byId['5h']?.reset;
+    return reset !== undefined && reset * 1000 > nowMs;
+  }
+
   probe(account: Account): Promise<UsageProbeResult> {
     const existing = this.inflight.get(account.slot);
     if (existing) return existing;
@@ -176,7 +215,7 @@ export class UsageProbe {
     const token = await this.prepareToken(account);
     if (token === 'prepare-failed') this.writeBackoff(account.slot, this.options.now() + FAILURE_BACKOFF_MS);
     if (typeof token !== 'object') return 'failed';
-    const res = await this.get(USAGE_PROBE_PATH, token.accessToken);
+    const res = await this.send('GET', USAGE_PROBE_PATH, token.accessToken);
     if (res === undefined || res.status !== 200 && res.status !== 429) {
       this.writeBackoff(account.slot, this.options.now() + FAILURE_BACKOFF_MS);
       return 'failed';
@@ -214,7 +253,7 @@ export class UsageProbe {
   async probePlan(account: Account): Promise<'updated' | 'failed'> {
     const token = await this.prepareToken(account);
     if (typeof token !== 'object') return 'failed';
-    const res = await this.get(PROFILE_PROBE_PATH, token.accessToken);
+    const res = await this.send('GET', PROFILE_PROBE_PATH, token.accessToken);
     if (res?.status !== 200) return 'failed';
     let tier: string | undefined;
     try { tier = tierFromProfileBody(JSON.parse(res.body)); } catch { /* invalid below */ }
@@ -238,12 +277,15 @@ export class UsageProbe {
   }
 
   /**
-   * One OAuth GET under an absolute wall-clock deadline covering headers and
-   * the whole body, with a body-size limit. Undefined on any transport failure.
+   * One OAuth request under an absolute wall-clock deadline covering headers
+   * and the whole body, with a body-size limit. Undefined on any transport
+   * failure.
    */
-  private get(
+  private send(
+    method: 'GET' | 'POST',
     requestPath: string,
     token: string,
+    extra: { timeoutMs?: number; headers?: Record<string, string>; body?: string } = {},
   ): Promise<{ status?: number; headers: http.IncomingHttpHeaders; body: string } | undefined> {
     const base = new URL(this.options.upstream);
     const target = new URL(requestPath, base);
@@ -258,7 +300,7 @@ export class UsageProbe {
         finish(undefined);
         response?.destroy();
         req.destroy(new Error('usage probe wall-clock deadline exceeded'));
-      }, this.options.timeoutMs ?? USAGE_PROBE_TIMEOUT_MS);
+      }, extra.timeoutMs ?? this.options.timeoutMs ?? USAGE_PROBE_TIMEOUT_MS);
       const finish = (result: { status?: number; headers: http.IncomingHttpHeaders; body: string } | undefined) => {
         if (settled) return;
         settled = true;
@@ -270,11 +312,12 @@ export class UsageProbe {
         hostname: target.hostname,
         port: target.port || undefined,
         path: requestPath,
-        method: 'GET',
+        method,
         headers: {
           authorization: `Bearer ${token}`,
           'anthropic-beta': USAGE_PROBE_BETA,
           accept: 'application/json',
+          ...extra.headers,
         },
       }, res => {
         response = res;
@@ -294,7 +337,7 @@ export class UsageProbe {
         });
       });
       req.on('error', () => finish(undefined));
-      req.end();
+      req.end(extra.body);
     });
   }
 }

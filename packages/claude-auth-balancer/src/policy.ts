@@ -1081,3 +1081,29 @@ export function selectAccount(input: SelectInput): Selection {
     breakdown,
   };
 }
+
+/**
+ * The slot whose 5h window should be opened ahead of use: where fresh picks go
+ * once the current fresh target leaves its 5h bucket, i.e. the fresh pick with
+ * that target excluded.
+ *
+ * A 5h window opens on its first request and resets five hours later. A spill
+ * target whose window is already rolling resets sooner than one the spill
+ * opens, so the second account under load comes back sooner. Nothing is warmed
+ * while the current target has no window open: with no work running there is
+ * nothing to spill. `fiveHourOpen` must read unprojected observations; see
+ * `UsageProbe.fiveHourOpen`.
+ */
+export function slotToWarm(input: {
+  accounts: AccountState[];
+  nowMs: number;
+  demand?: DemandModel;
+  fiveHourOpen: (slot: string) => boolean;
+}): string | undefined {
+  const pick = (accounts: AccountState[]) =>
+    selectAccount({ accounts, nowMs: input.nowMs, demand: input.demand });
+  const current = pick(input.accounts);
+  if (current.decision !== 'fresh' || !input.fiveHourOpen(current.slot!)) return undefined;
+  const next = pick(input.accounts.filter(a => a.slot !== current.slot));
+  return next.decision === 'fresh' && !input.fiveHourOpen(next.slot!) ? next.slot : undefined;
+}

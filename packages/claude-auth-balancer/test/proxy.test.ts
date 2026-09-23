@@ -407,6 +407,48 @@ test('the sweep repeats on its interval rather than running once at startup', as
   assert.ok(up.probes.length >= 3, `sweep did not recur: ${up.probes.length} probe(s)`);
 });
 
+test('the sweep opens the 5h window on the next spill target, once', async () => {
+  const authswapRoot = fakeAuthswap([
+    { slot: '1', email: 'a@x.com', token: 'tok-1' },
+    { slot: '2', email: 'b@x.com', token: 'tok-2' },
+  ]);
+  const stateRoot = tmpRoot('cab-sweep-warm-');
+  const hour = 60 * 60 * 1000;
+  const inSeconds = (ms: number) => (Date.now() + ms) / 1000;
+  // Slot 1 is working (window open, cool) and resets first, so it takes fresh
+  // picks; slot 2 is idle with no 5h window. Both were read seconds ago, so the
+  // sweep probes neither.
+  writeSlotObservation(stateRoot, {
+    slot: '1',
+    observedAt: Date.now(),
+    claims: { byId: {
+      '5h': { id: '5h', utilization: 0.01, reset: inSeconds(4 * hour) },
+      '7d': { id: '7d', utilization: 0.3, reset: inSeconds(48 * hour) },
+    } },
+  });
+  writeSlotObservation(stateRoot, {
+    slot: '2',
+    observedAt: Date.now(),
+    claims: { byId: {
+      '5h': { id: '5h', utilization: 0, status: 'allowed' },
+      '7d': { id: '7d', utilization: 0, reset: inSeconds(120 * hour) },
+    } },
+  });
+  const reset = Math.floor(inSeconds(5 * hour));
+  const up = await upstream((_call, res) => {
+    res.writeHead(200, { ...OK_HEADERS, 'anthropic-ratelimit-unified-5h-utilization': '0.0', 'anthropic-ratelimit-unified-5h-reset': String(reset) }).end('{}');
+  });
+  await boot({ authswapRoot, upstreamUrl: up.url, stateRoot, usageSweepIntervalMs: 30 });
+  const deadline = Date.now() + 2000;
+  while (readSlotObservation(stateRoot, '2')?.claims?.byId['5h']?.reset === undefined && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(readSlotObservation(stateRoot, '2')?.claims?.byId['5h']?.reset, reset);
+  // Several more sweeps: an open window is not warmed again.
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.deepEqual(up.calls.map(c => `${c.authorization} ${c.path}`), ['Bearer tok-2 /v1/messages']);
+});
+
 test('the sweep skips an account a recent request already observed', async () => {
   const authswapRoot = fakeAuthswap([
     { slot: '1', email: 'a@x.com', token: 'tok-1' },

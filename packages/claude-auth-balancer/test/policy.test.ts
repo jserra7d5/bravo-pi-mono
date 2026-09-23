@@ -10,6 +10,7 @@ import {
   quotaForModel,
   REFERENCE_CAPACITY,
   selectAccount,
+  slotToWarm,
 } from '../src/policy.js';
 import type { DemandModel } from '../src/demand.js';
 import { weekHour } from '../src/demand.js';
@@ -1261,4 +1262,30 @@ test('an expiring 5x needs more of its own window to pull a warm session than a 
   });
   assert.equal(fresh.slot, '4');
   assert.match(fresh.reason, /expires in 8\.5h/);
+});
+
+test('the warm target is where fresh picks spill once the current target leaves its 5h bucket', () => {
+  // Slot 3 resets first and is 1% into a window with an hour gone: bucket 0,
+  // so it takes fresh picks. Slot 1 resets later with no 5h window open.
+  const HOUR = 60 * 60 * 1000;
+  const at = (slot: string, headers: Record<string, string>): AccountState => ({ slot, health: 'ok', claims: parseClaims(headers), observedAt: NOW });
+  const idle = at('1', LATE_WEEKLY);
+  const open = new Set(['3']);
+  const fiveHourOpen = (slot: string) => open.has(slot);
+
+  const cool = [at('3', fiveHour('0.01', 4 * HOUR, EARLY_WEEKLY)), idle];
+  assert.equal(selectAccount({ accounts: cool, nowMs: NOW }).slot, '3');
+  assert.equal(slotToWarm({ accounts: cool, nowMs: NOW, fiveHourOpen }), '1');
+
+  // The same fleet once slot 3 is hot: fresh picks land on the slot warmed above.
+  const hot = [at('3', fiveHour('0.20', 4 * HOUR, EARLY_WEEKLY)), idle];
+  assert.equal(selectAccount({ accounts: hot, nowMs: NOW }).slot, '1');
+
+  open.add('1');
+  assert.equal(slotToWarm({ accounts: cool, nowMs: NOW, fiveHourOpen }), undefined, 'already rolling');
+  assert.equal(
+    slotToWarm({ accounts: cool, nowMs: NOW, fiveHourOpen: () => false }),
+    undefined,
+    'nothing running on the current target, so nothing to spill',
+  );
 });

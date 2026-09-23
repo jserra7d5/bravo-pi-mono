@@ -28,7 +28,7 @@ import type { Usage } from './usage.js';
 import { hasClaims, parseClaims } from './claims.js';
 import { discoverAccounts, loadAccountStates, readOAuth, readSlotObservation, readSlotPlan, recordObservation, resolveAuthswapRoot, resolveStateRoot, tokenFingerprint } from './accounts.js';
 import type { Account } from './accounts.js';
-import { capacityForTier, selectAccount } from './policy.js';
+import { capacityForTier, selectAccount, slotToWarm } from './policy.js';
 import type { DemandModel } from './demand.js';
 import { buildDemandModel, DEMAND_STALE_MS, readDemandOverrides, sessionRate, writeDemandModel } from './demand.js';
 import { REFRESH_SWEEP_INTERVAL_MS, TokenRefresher } from './refresh.js';
@@ -775,6 +775,8 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
   // is picked up without waiting for a request to happen to land there.
   // The same sweep reads each account's plan tier, which sizes its headroom
   // (see `PlanCapacity`). Nothing on the request path waits for it.
+  // Bound after the demand model below exists; runs once each sweep settles.
+  let afterUsageSweep = () => {};
   const runUsageSweep = () => {
     if (!opts.usageProbe || opts.usageSweepIntervalMs <= 0) return;
     const accounts = discoverAccounts(opts.authswapRoot);
@@ -785,7 +787,9 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
       ...accounts
         .filter(account => usageProbe.isPlanDue(account.slot))
         .map(account => usageProbe.probePlan(account)),
-    ]).catch(() => {}); // a sweep failure must never take the proxy down
+    ])
+      .catch(() => {}) // a sweep failure must never take the proxy down
+      .finally(() => afterUsageSweep());
   };
   runUsageSweep();
   if (opts.usageSweepIntervalMs > 0) {
@@ -851,6 +855,33 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
       server_close_hooks.push(() => clearInterval(timer));
     }
   }
+
+  // Keep the next spill target's 5h window rolling, on fresh readings (see
+  // `slotToWarm`). One warm at a time; a failure is retried next sweep.
+  let warming = false;
+  afterUsageSweep = () => {
+    if (warming) return;
+    try {
+      const now = opts.now();
+      const { states, accounts } = loadAccountStates({ stateRoot: opts.stateRoot, authswapRoot: opts.authswapRoot, nowMs: now });
+      const slot = slotToWarm({
+        accounts: states,
+        nowMs: now,
+        demand: demandModel && now - demandModel.computedAt <= DEMAND_STALE_MS ? demandModel : undefined,
+        fiveHourOpen: s => UsageProbe.fiveHourOpen(readSlotObservation(opts.stateRoot, s), now),
+      });
+      const account = slot ? accounts.get(slot) : undefined;
+      if (!account) return;
+      warming = true;
+      void usageProbe
+        .warm(account)
+        .then(result => opts.log({ kind: 'route', method: 'SWEEP', path: 'warm', slot: account.slot, decision: 'warm', reason: `opened 5h window ahead of the spill: ${result}` }))
+        .catch(() => {})
+        .finally(() => { warming = false; });
+    } catch {
+      /* warming must never take the proxy down */
+    }
+  };
 
   const opening = new Map<string, Promise<void>>();
 
