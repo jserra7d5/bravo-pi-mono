@@ -10,6 +10,9 @@ variants:
     model: bravo-codex-balanced/gpt-6-luna
   sol:
     model: bravo-codex-balanced/gpt-6-sol
+  astra:
+    model: bravo-codex-balanced/gpt-6-astra
+    thinkingLevel: xhigh
   gemini:
     model: antigravity-code-assist/gemini-3.5-flash
     thinkingLevel: high
