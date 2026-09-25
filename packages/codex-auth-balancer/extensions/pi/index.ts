@@ -396,11 +396,20 @@ function errorTextOfEvent(event: AssistantMessageEvent | undefined): string | un
   return event?.type === 'error' ? (event.error.errorMessage ?? undefined) : undefined;
 }
 
-// Narrow matcher: ONLY the upstream accountId-extraction failure (a leased token
-// the upstream couldn't extract a chatgpt_account_id from). Deliberately does NOT
-// match generic errors. Rate-limits are already classified earlier via classifyRateLimit.
+// Narrow matcher: the leased token was rejected as unusable by the upstream
+// account itself — not a rate limit, not a caller-side bug. Two known shapes:
+//   1. "Failed to extract accountId from token" — our own extension lost its
+//      provider-api override and a placeholder/foreign token reached upstream.
+//   2. "Incorrect API key provided: sk-...` — chatgpt.com's backend rejected a
+//      genuine ChatGPT OAuth Bearer token by citing an unrelated, revoked
+//      classic-API service-account key it has on file for that account. This
+//      is an OpenAI-side account fault, but it is the SAME "this slot's
+//      credential is broken" condition: quarantine the slot and rotate rather
+//      than surfacing it as a generic, non-rotatable error.
+// Deliberately does NOT match generic errors. Rate-limits are already
+// classified earlier via classifyRateLimit.
 function isAuthRejection(text: string | undefined): boolean {
-  return !!text && /failed to extract accountid/i.test(text);
+  return !!text && (/failed to extract accountid/i.test(text) || /incorrect api key provided/i.test(text));
 }
 
 // ── Dependency seam (real I/O injected here; tests pass fakes) ───────────────
