@@ -9,6 +9,7 @@ import { balancedModelId, startSubagent } from "../src/start.js";
 import { codexBalancerSyncBackAndCleanup } from "../src/supervisor.js";
 import { summarizeStartResult } from "../extensions/pi/renderers.js";
 import { ingestLiveUsage } from "@bravo/codex-auth-balancer";
+import { serveLeaseService } from "@bravo/codex-auth-balancer/lease-service";
 
 // Resolve the codex-auth-balancer provider extension the same robust way start.ts
 // does, so reachability assertions compare against the real on-disk module path.
@@ -135,6 +136,32 @@ test("openai-codex subagent launches via the balanced lease path (no copied cred
   // The balancer lease ledger is untouched: no sqlite/leases written under stateDir.
   assert.equal(existsSync(join(w.stateDir, "balancer.sqlite3")), false);
   assert.equal(existsSync(join(w.stateDir, "leases")), false);
+});
+
+test("balanced Pi-harness URL launch needs no local accounts and passes tunnel credentials", { timeout: 15000 }, async () => {
+  const w = authWorkspace("success");
+  const hub = mkdtempSync(join(tmpdir(), "async-hub-"));
+  const server = await serveLeaseService(hub, 0);
+  const addr = server.address();
+  assert.ok(addr && typeof addr !== "string");
+  const url = `http://127.0.0.1:${addr.port}`;
+  const oldUrl = process.env.CODEX_AUTH_BALANCER_URL;
+  const oldKey = process.env.CODEX_AUTH_BALANCER_KEY_COMMAND;
+  process.env.CODEX_AUTH_BALANCER_URL = url;
+  process.env.CODEX_AUTH_BALANCER_KEY_COMMAND = "printf test-key";
+  try {
+    const started = await startSubagent({ agent: "codex", task: "ok", cwd: w.root, runRoot: w.runRoot, parentRunId: "root_auth", env: { ASYNC_SUBAGENTS_HOME: w.root }, fake: { mode: "immediate" } });
+    assert.equal(started.state, "completed");
+    const input = JSON.parse(readFileSync(join(started.runDir, "logs", "supervisor-input.json"), "utf8"));
+    assert.equal(input.command.env.CODEX_AUTH_BALANCER_URL, url);
+    assert.equal(input.command.env.CODEX_AUTH_BALANCER_KEY_COMMAND, "printf test-key");
+    assert.equal(input.command.env.CODEX_AUTH_BALANCER_HOME, undefined);
+    assert.equal(existsSync(join(w.stateDir, "balancer.sqlite3")), false);
+  } finally {
+    if (oldUrl === undefined) delete process.env.CODEX_AUTH_BALANCER_URL; else process.env.CODEX_AUTH_BALANCER_URL = oldUrl;
+    if (oldKey === undefined) delete process.env.CODEX_AUTH_BALANCER_KEY_COMMAND; else process.env.CODEX_AUTH_BALANCER_KEY_COMMAND = oldKey;
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });
 
 // (Test 9) Extension reachability: the codex-auth-balancer provider extension is

@@ -5,6 +5,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import pkg from '../package.json' with { type: 'json' };
+import { serveLeaseService } from './lease-service.js';
 
 function arg(name: string) { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : undefined; }
 function has(name: string) { return process.argv.includes(name); }
@@ -22,6 +23,7 @@ async function main() {
   if (has('--version')) { needJson(); out({ schema_version: 1, name: '@bravo/codex-auth-balancer', version: pkg.version, capabilities: { codex_usage_json: 1, codex_refresh_usage_json: 1, codex_prepare_launch_json: 1, codex_sync_back_json: 1, codex_db_status_json: 1, codex_reservations_json: 1, codex_policy_json: 1, codex_token_lease: 1, codex_prune_json: 1, codex_relogin_json: 1 } }); return; }
   const cmd = process.argv[2]; const stateRoot = resolveStateRoot();
   switch (cmd) {
+    case 'serve': await serveLeaseService(stateRoot, arg('--port') === undefined ? 8790 : Number(arg('--port'))); break;
     case 'usage': needJson(); out({ schema_version: 1, ...(await getUsage({ stateRoot })) }); break;
     case 'list': needJson(); out({ schema_version: 1, stateRoot, accounts: (await loadAccounts(stateRoot)).map(a => ({ slot: a.slot, idHash: a.idHash, hasPiAuth: !!a.piAuthPath, usage: a.usage })) }); break;
     case 'refresh-usage': needJson(); out({ schema_version: 1, ...(await refreshUsage({ stateRoot, all: has('--all'), slot: arg('--slot'), force: has('--force') })) }); break;

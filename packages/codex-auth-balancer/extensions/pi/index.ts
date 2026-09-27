@@ -38,6 +38,7 @@ import {
   type SlotInfo,
 } from './rotation-policy.js';
 import { redactSecretsInText } from '../../src/oauth-error.js';
+import { leaseServiceCall } from '../../src/lease-service.js';
 
 const PROVIDER = 'bravo-codex-balanced';
 const UPSTREAM_PROVIDER = 'openai-codex';
@@ -444,6 +445,17 @@ function realSleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 function defaultRunnerDeps(): BalancedRunnerDeps {
+  if (process.env.CODEX_AUTH_BALANCER_URL) return {
+    startLease: input => leaseServiceCall('startLease', input),
+    finishLease: input => leaseServiceCall('finishLease', input),
+    listSlots: () => leaseServiceCall('listSlots'),
+    createUpstream: (model, context, options) => hostingPiAiRuntime.streamSimpleOpenAICodexResponses(model, context, options),
+    ingestUsage: input => leaseServiceCall('ingestUsage', input),
+    markBroken: (slot, code, message) => { void leaseServiceCall('markBroken', { slot, code, message }).catch(error => process.stderr.write(`[codex-balanced-provider] broken snapshot failed: ${redactedErrorMessage(error)}\n`)); },
+    publishCooldown: input => leaseServiceCall('publishCooldown', input),
+    recordAttempt: (input => { void leaseServiceCall('recordAttempt', input).catch(error => process.stderr.write(`[codex-balanced-provider] attempt telemetry failed: ${redactedErrorMessage(error)}\n`)); return undefined as never; }) as typeof recordCodexAttempt,
+    cooldown: sharedCooldown, config: DEFAULT_ROTATION_CONFIG, sleep: realSleep, rand: Math.random, now: Date.now,
+  };
   return {
     startLease: startTokenLease,
     finishLease: finishTokenLease,
@@ -497,12 +509,8 @@ async function runBalanced(
       process.stderr.write(`[codex-balanced-provider] attempt telemetry failed: ${redactedErrorMessage(error)}\n`);
     }
   };
-  const publishCooldown = (input: { slot: string; sourceAttemptId?: string; reason?: string; expiresAt: number }) => {
-    try {
-      deps.publishCooldown(input);
-    } catch (error) {
-      process.stderr.write(`[codex-balanced-provider] cooldown publication failed: ${redactedErrorMessage(error)}\n`);
-    }
+  const publishCooldown = async (input: { slot: string; sourceAttemptId?: string; reason?: string; expiresAt: number }) => {
+    await deps.publishCooldown(input);
   };
   const requestedTransport = options?.transport;
   const degradedToSse = requestedTransport === 'auto' || requestedTransport === 'websocket' || requestedTransport === 'websocket-cached';
@@ -595,6 +603,8 @@ async function runBalanced(
         ttl_safety_buffer_ms: Number((options as Record<string, unknown> | undefined)?.ttlSafetyBufferMs ?? DEFAULT_TTL_SAFETY_BUFFER_MS),
         session_affinity_key: affinityFromOptions(options),
         preferred_slot: forcedSlot,
+        run_id: process.env.ASYNC_SUBAGENTS_RUN_ID ?? process.env.ASYNC_SUBAGENT_RUN_ID,
+        root_run_id: process.env.ASYNC_SUBAGENTS_PARENT_RUN_ID ?? process.env.ASYNC_SUBAGENTS_ROOT_SESSION_ID,
         abort_signal: signal,
       });
     } catch (leaseError) {
@@ -654,6 +664,7 @@ async function runBalanced(
         try {
           await deps.finishLease({ lease_id: lease.lease_id, reservation_id: lease.reservation_id, launch_id: lease.launch_id, status });
         } catch (finishError) {
+          if (process.env.CODEX_AUTH_BALANCER_URL) throw finishError;
           process.stderr.write(`[codex-balanced-provider] lease finish failed: ${redactedErrorMessage(finishError)}\n`);
         }
       })();
@@ -810,7 +821,7 @@ async function runBalanced(
 
     if (rateLimited && !contentPushed) {
       const cooldownUntil = deps.now() + deps.config.cooldownMs;
-      publishCooldown({ slot: lease.slot, sourceAttemptId: attemptId, reason: 'rate_limited_pre_content', expiresAt: cooldownUntil });
+      await publishCooldown({ slot: lease.slot, sourceAttemptId: attemptId, reason: 'rate_limited_pre_content', expiresAt: cooldownUntil });
       recordAttempt({
         stateRoot: deps.stateRoot,
         attempt_id: attemptId,
@@ -1036,6 +1047,7 @@ export function registerBalancedProvider(pi: ExtensionAPI): void {
  */
 async function topUpTokens(): Promise<void> {
   try {
+    if (process.env.CODEX_AUTH_BALANCER_URL) return;
     const outcomes = await ensureFreshTokens();
     for (const outcome of outcomes) {
       if (outcome.action === 'failed') {

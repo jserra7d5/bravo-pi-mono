@@ -64,6 +64,26 @@ A pre-content upstream 429 observed at the response boundary records an attempt,
 
 Normalized `UsageWindow` values expose percentages as **remaining quota**, optional reset fields, and optional `windowMinutes`. Live response metadata, probes, legacy cache entries, and recognized header fields accept `window_minutes`/`windowMinutes`; unrelated input validation remains strict. The footer derives labels from `windowMinutes` rather than assuming primary means 5 hours and secondary means one week.
 
+## Lease service (multi-node)
+
+Run `codex-auth-balancer serve [--port 8790]` on the account-owning hub. The listener binds **only** to `127.0.0.1`; connect remote nodes through an authenticated SSH tunnel. The persistent bearer nonce is stored at `<stateRoot>/runtime/lease-service-credential.json` (0600), reused on restart. Never expose the listener or the nonce publicly.
+
+All endpoints use `POST`, `Authorization: Bearer <nonce>`, and `Content-Type: application/json`. Requests and responses are JSON; omitted `stateRoot` is always replaced by the hub's root. Missing/incorrect bearer returns 401 without executing the operation. Errors return `{ "error": "..." }` and a non-2xx status.
+
+| Path | Request JSON | Response JSON |
+| --- | --- | --- |
+| `/startLease` | `StartTokenLeaseInput` | `TokenLease` (short-lived `access_token`, never refresh token) |
+| `/finishLease` | `FinishTokenLeaseInput` | `FinishTokenLeaseResult` |
+| `/ingestUsage` | `LiveUsageIngestInput` | `LiveUsageIngestResult` |
+| `/publishCooldown` | `{slot, sourceAttemptId?, reason?, expiresAt}` | `CodexRateLimitCooldown` |
+| `/recordAttempt` | `CodexAttemptRecord` input | recorded attempt |
+| `/listSlots` | `{}` | `[{slot, primaryRemaining?, cooldownUntil?}]` |
+| `/markBroken` | `{slot, code, message}` | `null` |
+| `/getConservationQuota` | `{staleAfterMs?}` | `ConservationQuota[]` |
+| `/getUsage` | `{staleAfterMs?}` | `CodexUsage` |
+
+On clients, set `CODEX_AUTH_BALANCER_URL` to the tunneled loopback URL and `CODEX_AUTH_BALANCER_KEY_COMMAND` to a command printing the nonce on stdout. The key is cached in memory; HTTP 401 re-runs the command once and retries once. URL mode fails closed: no local SQLite or auth files are consulted, and a disconnected hub errors with the URL. The client streams directly from chatgpt.com using the leased access token. The hub's own Pi processes can continue using the in-process SQLite path without these env vars. Async-subagents Pi children inherit both variables; the copied-credential Codex CLI harness is unsupported in URL mode and fails closed.
+
 ## Validation
 
 ```bash

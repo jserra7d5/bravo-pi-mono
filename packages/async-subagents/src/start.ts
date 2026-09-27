@@ -19,6 +19,7 @@ import { createInitialStatus, updateRunStatus } from "./status.js";
 import { codexBalancerSyncBackAndCleanup, runSupervisor, type SupervisorFakeInput, type SupervisorInput } from "./supervisor.js";
 import type { ContextPolicy, SessionPolicy, SharedQuotaSnapshot, SubagentStartResult, ThinkingLevel, TaskRecord } from "./types.js";
 import { getConservationQuota, prepareLaunch, type ConservationQuota } from "@bravo/codex-auth-balancer";
+import { leaseServiceCall } from "@bravo/codex-auth-balancer/lease-service";
 import { archiveRuns } from "./archive.js";
 import type { ResolvedBudgetLaunch } from "./budgetLaunchPolicy.js";
 
@@ -584,6 +585,7 @@ async function prepareCodexBalancer(config: CodexAuthBalancerConfig, model: stri
   // `bravo-codex-balanced/*` model and short-circuits below. The belt-and-
   // suspenders guard ensures the copy branch is never taken for any odd codex
   // provider string unless the operator explicitly opts back in.
+  if (process.env.CODEX_AUTH_BALANCER_URL && config.copiedCredentialsLegacy === true && config.enabled && isCodexModel(model, config.onlyForProviders)) throw new Error('Codex CLI copied-credential harness is unavailable with CODEX_AUTH_BALANCER_URL');
   if (config.copiedCredentialsLegacy !== true) return undefined;
   if (!config.enabled || isCodexBalancedProviderModel(model) || !isCodexModel(model, config.onlyForProviders)) return undefined;
   const isolatedDir = join(runDir, "auth", "codex-balancer");
@@ -602,7 +604,7 @@ async function prepareCodexBalancer(config: CodexAuthBalancerConfig, model: stri
  */
 function readSharedQuota(config: CodexAuthBalancerConfig, model: string | undefined): Promise<SharedQuotaSnapshot | undefined> {
   if (!config.enabled && !(model && isCodexBalancedProviderModel(model))) return Promise.resolve(undefined);
-  return getConservationQuota({ stateRoot: config.stateDir })
+  return (process.env.CODEX_AUTH_BALANCER_URL ? leaseServiceCall<ConservationQuota[]>('getConservationQuota') : getConservationQuota({ stateRoot: config.stateDir }))
     .then((slots: ConservationQuota[]) => {
       const best = slots[0];
       if (!best) return undefined;
@@ -1068,7 +1070,7 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     codexAuthBalancer = await prepareCodexBalancer(asyncSubagentsConfig.codexAuthBalancer, effectiveModel, paths.runDir, runId, root.rootRunId, effectiveMaxRunMs);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (asyncSubagentsConfig.codexAuthBalancer.failClosed) return failBeforeLaunch("CODEX_AUTH_BALANCER_FAILED", message);
+    if (process.env.CODEX_AUTH_BALANCER_URL || asyncSubagentsConfig.codexAuthBalancer.failClosed) return failBeforeLaunch("CODEX_AUTH_BALANCER_FAILED", message);
   }
   const taskEnv: Record<string, string> = {
     ASYNC_SUBAGENTS_RUN_ID: runId,
@@ -1076,8 +1078,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     ASYNC_SUBAGENTS_ROOT_SESSION_ID: root.rootSessionId,
 
   };
-  const balancedProviderEnv: Record<string, string> = !codexAuthBalancer && isCodexBalancedProviderModel(effectiveModel) && asyncSubagentsConfig.codexAuthBalancer.stateDir
-    ? { CODEX_AUTH_BALANCER_HOME: asyncSubagentsConfig.codexAuthBalancer.stateDir }
+  const balancedProviderEnv: Record<string, string> = !codexAuthBalancer && isCodexBalancedProviderModel(effectiveModel)
+    ? { ...(asyncSubagentsConfig.codexAuthBalancer.stateDir && !process.env.CODEX_AUTH_BALANCER_URL ? { CODEX_AUTH_BALANCER_HOME: asyncSubagentsConfig.codexAuthBalancer.stateDir } : {}), ...(process.env.CODEX_AUTH_BALANCER_URL ? { CODEX_AUTH_BALANCER_URL: process.env.CODEX_AUTH_BALANCER_URL, CODEX_AUTH_BALANCER_KEY_COMMAND: process.env.CODEX_AUTH_BALANCER_KEY_COMMAND ?? '' } : {}) }
     : {};
   const effectiveExtraEnv = codexAuthBalancer ? { ...(input.env ?? {}), ...taskEnv, ...codexAuthBalancer.env } : { ...(input.env ?? {}), ...taskEnv, ...balancedProviderEnv };
   const inheritedExtensionPaths = inheritedExtensionPathsFromEnv({ ...process.env, ...effectiveExtraEnv });
