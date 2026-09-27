@@ -446,7 +446,8 @@ function realSleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 function defaultRunnerDeps(): BalancedRunnerDeps {
   if (process.env.CODEX_AUTH_BALANCER_URL) return {
-    startLease: input => leaseServiceCall('startLease', input),
+    // The AbortSignal cannot cross the wire (JSON makes it {}); it aborts the HTTP call instead.
+    startLease: ({ abort_signal, ...input }) => leaseServiceCall('startLease', input, abort_signal),
     finishLease: input => leaseServiceCall('finishLease', input),
     listSlots: () => leaseServiceCall('listSlots'),
     createUpstream: (model, context, options) => hostingPiAiRuntime.streamSimpleOpenAICodexResponses(model, context, options),
@@ -510,7 +511,11 @@ async function runBalanced(
     }
   };
   const publishCooldown = async (input: { slot: string; sourceAttemptId?: string; reason?: string; expiresAt: number }) => {
-    await deps.publishCooldown(input);
+    try {
+      await deps.publishCooldown(input);
+    } catch (error) {
+      process.stderr.write(`[codex-balanced-provider] cooldown publication failed: ${redactedErrorMessage(error)}\n`);
+    }
   };
   const requestedTransport = options?.transport;
   const degradedToSse = requestedTransport === 'auto' || requestedTransport === 'websocket' || requestedTransport === 'websocket-cached';
@@ -664,7 +669,6 @@ async function runBalanced(
         try {
           await deps.finishLease({ lease_id: lease.lease_id, reservation_id: lease.reservation_id, launch_id: lease.launch_id, status });
         } catch (finishError) {
-          if (process.env.CODEX_AUTH_BALANCER_URL) throw finishError;
           process.stderr.write(`[codex-balanced-provider] lease finish failed: ${redactedErrorMessage(finishError)}\n`);
         }
       })();

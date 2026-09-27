@@ -88,3 +88,49 @@ test('real loopback lease service drives runner, rotates and fails closed withou
     await fs.rm(root, { recursive: true, force: true }); await fs.rm(local, { recursive: true, force: true });
   }
 });
+
+test('a lease that must refresh the token works through the service (the client signal never crosses the wire)', { timeout: 30000 }, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-hub-'));
+  const local = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-client-'));
+  const prior = { url: process.env.CODEX_AUTH_BALANCER_URL, key: process.env.CODEX_AUTH_BALANCER_KEY_COMMAND, home: process.env.HOME, state: process.env.CODEX_AUTH_BALANCER_HOME };
+  const realFetch = globalThis.fetch;
+  let refreshes = 0;
+  let server: Awaited<ReturnType<typeof serveLeaseService>> | undefined;
+  try {
+    // Expires in 1 minute: too short for a lease, so the hub must refresh it.
+    const dir = path.join(root, 'accounts', 'r');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'auth.json'), JSON.stringify({ access_token: jwt('r'), refresh_token: 'r0', expiry_date: Date.now() + 60_000 }));
+    // The token endpoint is the external boundary. `new Request` applies fetch's own
+    // validation, so a non-AbortSignal `signal` fails here exactly as it does in real fetch.
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      if (!String(url).includes('/oauth/token')) return realFetch(url, init);
+      new Request(url, init);
+      refreshes += 1;
+      return new Response(JSON.stringify({ access_token: jwt('r'), refresh_token: 'r1', expires_in: 86400 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    server = await serveLeaseService(root, 0);
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    process.env.CODEX_AUTH_BALANCER_URL = `http://127.0.0.1:${address.port}`;
+    process.env.CODEX_AUTH_BALANCER_KEY_COMMAND = `node -p "JSON.parse(require('fs').readFileSync('${path.join(root, 'runtime', 'lease-service-credential.json')}')).nonce"`;
+    process.env.HOME = local;
+    process.env.CODEX_AUTH_BALANCER_HOME = local;
+    const runner = createBalancedStreamRunner({ createUpstream: ((_m: any, _c: any, options: any) => (async function* () {
+      await options.onResponse?.({ status: 200, headers: {} }, _m);
+      yield { type: 'done', reason: 'stop', message: msg() };
+    })()) as any, sleep: async () => {} });
+    const events = await collect(runner(model, { messages: [] } as any, { sessionId: 'refresh', signal: new AbortController().signal } as any));
+    assert.ok(events.some(e => e.type === 'done'), JSON.stringify(events));
+    assert.equal(refreshes, 1, 'the hub refreshed the token exactly once');
+    assert.equal(JSON.parse(await fs.readFile(path.join(dir, 'auth.json'), 'utf8')).refresh_token, 'r1', 'the rotated refresh token stays on the hub');
+    assert.deepEqual(await fs.readdir(local), []);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
+    for (const [key, value] of Object.entries({ CODEX_AUTH_BALANCER_URL: prior.url, CODEX_AUTH_BALANCER_KEY_COMMAND: prior.key, HOME: prior.home, CODEX_AUTH_BALANCER_HOME: prior.state })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await fs.rm(root, { recursive: true, force: true }); await fs.rm(local, { recursive: true, force: true });
+  }
+});

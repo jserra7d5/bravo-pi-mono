@@ -44,7 +44,9 @@ export async function serveLeaseService(stateRoot = resolveStateRoot(), port = 8
     try {
       let raw = '';
       for await (const chunk of req) { raw += chunk; if (raw.length > 1024 * 1024) throw new Error('request too large'); }
-      send(200, await handlers[operation](JSON.parse(raw)));
+      const input = JSON.parse(raw);
+      if (input && typeof input === 'object') delete input.abort_signal;   // a wire value is {} — never a signal
+      send(200, await handlers[operation](input));
     } catch (error) { send(400, { error: error instanceof Error ? error.message : 'request failed' }); }
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
@@ -60,7 +62,7 @@ function readKey(): Promise<string> {
     else resolve(stdout.trim());
   }));
 }
-export async function leaseServiceCall<T>(operation: string, input: unknown = {}): Promise<T> {
+export async function leaseServiceCall<T>(operation: string, input: unknown = {}, signal?: AbortSignal): Promise<T> {
   const url = process.env.CODEX_AUTH_BALANCER_URL;
   if (!url) throw new Error('CODEX_AUTH_BALANCER_URL required');
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -69,7 +71,7 @@ export async function leaseServiceCall<T>(operation: string, input: unknown = {}
     try {
       response = await fetch(new URL(operation, url.endsWith('/') ? url : `${url}/`), {
         method: 'POST', headers: { authorization: `Bearer ${cachedKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify(input), signal: AbortSignal.timeout(15000),
+        body: JSON.stringify(input), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
       });
     } catch (error) { throw new Error(`Codex lease service unreachable at ${url}: ${error instanceof Error ? error.message : String(error)}`); }
     if (response.status === 401 && attempt === 0) continue;
