@@ -14,11 +14,44 @@ target repo or pass `--cwd`). All commands emit JSON; `watch` emits NDJSON. Flag
 
 **Always invoke it by that path — never as a bare `async-subagents`.** The CLI is not on PATH. The
 launcher is a symlink that `install` creates pointing into whichever checkout pi manages; if it is
-missing, the install step was skipped — see `packages/async-subagents/README.md`. Do not substitute a
+missing, the install step was skipped — see `packages/async-subagents/README.md` (on Joe's fleet nodes,
+`~/fleet/roles/pi-stack.sh install`). Do not substitute a
 shell variable for the path: each command runs in a fresh shell, so a binding made in one call is
 gone by the next.
 
 **Roles — pick the narrowest.** `scout` retrieval/source summaries (pinned to Luna deliberately: retrieval is not a judgment task, so a large read surface is never a reason to escalate); `planner` designs/specs/sequencing; `worker` bounded implementation; `reviewer` merge-risk review against an accepted contract; `generalist` only when nothing narrower fits. A child is never another orchestrator. `~/.async-subagents/bin/async-subagents agents --cwd "$PWD"` lists the live catalog.
+
+**`reviewer --variant astra`** runs GPT-6 Astra at `xhigh`. It is expensive: use it only when Joe or the developer explicitly asks for an Astra pass. It is never a default and never an escalation you choose yourself.
+
+## Which machine can run a role
+
+On Joe's fleet, every role runs on every machine that runs agents (the desktop, the thinkpad, the Mac).
+
+- **What leases:** every built-in role and variant except `gemini` is a Codex model
+  (`bravo-codex-balanced/*`). It leases its access token from the one machine that holds the
+  accounts: the `codex-hub` in `~/fleet/nodes.txt`.
+- **How it reaches the hub:** off the hub, the shell exports two variables, and the child inherits both:
+  - `CODEX_AUTH_BALANCER_URL`, the hub's lease service through `fleet-auth-tunnel` (127.0.0.1:8790);
+  - `CODEX_AUTH_BALANCER_KEY_COMMAND`.
+- **Where the child runs:** on this machine, and it sees this machine's files. Only the token comes from the hub.
+
+When a Codex role fails straight away:
+
+- **`Codex lease service unreachable at http://127.0.0.1:8790`:** the tunnel or the hub's service
+  is down. Check `systemctl --user status fleet-auth-tunnel` here (launchd
+  `com.joeserra.fleet-auth-tunnel` on the Mac), and `systemctl status codex-auth-balancer-lease` on the hub.
+- **`no accounts found`:** this environment lacks `CODEX_AUTH_BALANCER_URL`. Start from a fresh shell.
+
+Never copy account files between machines: refresh tokens rotate, and two machines refreshing one
+account revoke each other.
+
+**Claude-harness roles.** The runtime runs `harness: claude` templates from the project (`.agents/`) or user layer.
+- Set `claude.authHome: operator-home`, so the child uses this machine's own Claude login, which on
+  fleet nodes goes through the auth hub.
+- Avoid the default, `seeded-run-home`. It copies `~/.claude/.credentials.json` into the run: where
+  that file is absent, `start` fails with `CLAUDE_AUTH_CREDENTIALS_MISSING`, and where it exists,
+  the child gets a copy of a rotating OAuth credential.
+- With `mode: oneshot`, the result body is the raw stream-json transcript, and the answer is in its `"type":"result"` event.
 
 ## Brief and write scope
 
@@ -65,7 +98,7 @@ Redirect stderr with `2>/dev/null`, **not `2>&1`**: node prepends an `Experiment
 ~/.async-subagents/bin/async-subagents status --store-cwd /lead/checkout --limit 10 2>/dev/null
 ```
 
-Runs started from different execution worktrees remain visible together when every command shares the same canonical `--store-cwd`. Add `--all` only to sweep storage projects created with other store roots. Then `status --run-id` every candidate and `cancel` any `running` lane you did not intend — do this BEFORE re-dispatching, not after. Don't go hunting in `~/.async-subagents/runs/`: that tree exists but holds unrelated tooling runs (`cwd: /tmp/async-subagents-tools-*`) and will convince you your lane never started. Real runs live under `~/.async-subagents/projects/<hash>/runs/` — the listing gives the exact path as `runDir`.
+Runs started from different execution worktrees remain visible together when every command shares the same canonical `--store-cwd`. Add `--all` only to sweep storage projects created with other store roots. Then `status --run-id` every candidate and `cancel` any `running` lane you did not intend — do this BEFORE re-dispatching, not after. Don't go hunting in `~/.async-subagents/runs/`: where that tree exists it holds unrelated tooling runs, not lanes, and will convince you your lane never started. Real runs live under `~/.async-subagents/projects/<hash>/runs/` — the listing gives the exact path as `runDir`.
 
 Pass one `--root-session-id` across sibling lanes. There is no push channel under a CLI parent (start returns `delivery.mode:"none"`) — the completion signal is `watch`, wrapped in ONE Monitor covering every lane:
 
