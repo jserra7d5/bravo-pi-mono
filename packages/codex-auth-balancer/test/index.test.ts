@@ -15,6 +15,13 @@ import { PROVIDER_ONLY_SCENARIOS, assertAuthBalancerAttemptV1 } from '@bravo/aut
 
 const exec = promisify(execFile);
 
+// This suite exercises the in-process SQLite path. A fleet client shell exports
+// CODEX_AUTH_BALANCER_URL (and its key command), which switches the provider to
+// URL mode and sends every lease op to the hub, so clear both for the whole file.
+// lease-service.test.ts covers URL mode with its own values.
+delete process.env.CODEX_AUTH_BALANCER_URL;
+delete process.env.CODEX_AUTH_BALANCER_KEY_COMMAND;
+
 // ── refresh seam ───────────────────────────────────────────────────────────
 // The balancer owns the token exchange, so its true boundary is the wire.
 // Stubbing fetch runs the REAL refreshCodexToken — endpoint URL, form body,
