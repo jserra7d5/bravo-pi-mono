@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { hostname } from "node:os";
-import { finalizeTerminalRun, mutateNonterminalRun, mutateNonterminalStatus, reconcileDeadProcessUnderLock, reconcileUnderLock, SUPERVISOR_LAUNCH_GRACE_MS, TERMINAL_DRAIN_GRACE_MS } from "../src/lifecycle.js";
+import { finalizeTerminalRun, mutateNonterminalRun, mutateNonterminalStatus, reconcileDeadProcessUnderLock, reconcileUnderLock, SUPERVISOR_LAUNCH_GRACE_MS } from "../src/lifecycle.js";
 import { withRunMutationLock } from "../src/runLock.js";
 import { RunStore } from "../src/runStore.js";
 import { createInitialStatus } from "../src/status.js";
@@ -310,45 +310,6 @@ test("dead child with live supervisor delegates terminal publication so completi
   });
   assert.equal(store.readResult(runId)?.state, "completed");
   assert.deepEqual(store.readEvents(runId).records.map((event) => event.type), ["result", "completed"]);
-});
-
-test("dead Claude MCP orphan waits for drain grace then writes canonical failure artifacts", async () => {
-  const w = workspace();
-  const store = new RunStore({ cwd: w.root, runRoot: w.runRoot });
-  const { runId } = store.createRunDirectory({ cwd: w.root, parentRunId: "root_test" });
-  const drainStartedAt = "2026-01-01T00:00:00.000Z";
-  const status = createInitialStatus({ runId, parentRunId: "root_test", agentName: "claude-scout", agentSource: "builtin", definitionPath: "/builtin/claude-scout.md", mode: "oneshot", harness: "claude", cwd: w.root, state: "running" });
-  store.writeStatus({
-    ...status,
-    claudeTransport: "mcp",
-    pid: 4242,
-    supervisorPid: 5252,
-    supervisorHost: hostname(),
-    supervisorStartedAtToken: "linux-proc-start:supervisor",
-    updatedAt: drainStartedAt,
-    lastTerminalOutputAt: drainStartedAt,
-  });
-  const options = {
-    probe: () => "dead" as const,
-    supervisorProbe: () => ({ alive: false, identity: "linux-proc-start:supervisor" }),
-  };
-
-  const draining = await reconcileDeadProcessUnderLock(store, runId, {
-    ...options,
-    nowMs: Date.parse(drainStartedAt) + TERMINAL_DRAIN_GRACE_MS,
-  });
-  assert.equal(draining.promoted, false);
-  assert.equal(store.readResult(runId), undefined);
-
-  const orphaned = await reconcileDeadProcessUnderLock(store, runId, {
-    ...options,
-    nowMs: Date.parse(drainStartedAt) + TERMINAL_DRAIN_GRACE_MS + 1,
-  });
-  assert.equal(orphaned.promoted, true);
-  assert.equal(orphaned.status.state, "failed");
-  assert.equal(orphaned.status.resultReady, true);
-  assert.equal(store.readResult(runId)?.error?.code, "PARENT_PROCESS_EXITED_WITHOUT_TERMINAL_STATUS");
-  assert.deepEqual(store.readEvents(runId).records.map((event) => event.type), ["result", "failed"]);
 });
 
 test("dead-process reconciliation writes coherent terminal result, events, and status", async () => {

@@ -11,7 +11,6 @@ export const BUDGET_ALLOWED = {
 export interface ResolvedBudgetLaunch {
   modeEnabled: boolean;
   variant?: string;
-  resolvedHarness: "pi" | "claude";
   resolvedProvider: string;
   resolvedModel: string;
   effectiveThinkingLevel?: string;
@@ -20,7 +19,6 @@ export interface ResolvedBudgetLaunch {
 
 export type BudgetLaunchPolicyCode =
   | "BUDGET_SWARM_VARIANT_REQUIRED"
-  | "BUDGET_SWARM_HARNESS_NOT_ALLOWED"
   | "BUDGET_SWARM_MODEL_NOT_ALLOWED"
   | "BUDGET_SWARM_THINKING_NOT_ALLOWED"
   | "BUDGET_SWARM_FAST_TRACK_FORBIDDEN";
@@ -33,9 +31,6 @@ export function validateBudgetLaunchPolicy(input: ResolvedBudgetLaunch): void {
   if (!input.modeEnabled) return;
   if (input.variant !== "luna" && input.variant !== "sol") {
     reject("BUDGET_SWARM_VARIANT_REQUIRED", 'Budget auto swarm requires variant "luna" or "sol".');
-  }
-  if (input.resolvedHarness !== "pi") {
-    reject("BUDGET_SWARM_HARNESS_NOT_ALLOWED", "Budget auto swarm supports Pi-harness children only.");
   }
   const expected = input.variant === "luna" ? BUDGET_LUNA_MODEL : BUDGET_SOL_MODEL;
   if (`${input.resolvedProvider}/${input.resolvedModel}` !== expected) {

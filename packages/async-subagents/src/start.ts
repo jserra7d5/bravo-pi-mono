@@ -5,7 +5,6 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyAgentVariant, resolveAgentDefinition } from "./agentDefinitions.js";
 import { loadAsyncSubagentsConfig, type CodexAuthBalancerConfig } from "./config.js";
-import { buildClaudeCommand, prepareClaudeHome, type ClaudeSkillInstallRequest } from "./claudeHarness.js";
 import { buildPiCommand, childControlEventTool, childControlExtensionPath, inheritedExtensionPathsFromEnv, writeLaunchLogWithMetadata, type PiCommand } from "./piHarness.js";
 import { assemblePrompt } from "./promptAssembly.js";
 import { SubagentError } from "./errors.js";
@@ -502,34 +501,6 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function launchHarnessFor(harness: "pi" | "claude" | undefined, mode: "oneshot" | "interactive"): "pi" | "claude-tmux-interactive" | "claude-stdio-oneshot" {
-  if (harness === "claude") return mode === "interactive" ? "claude-tmux-interactive" : "claude-stdio-oneshot";
-  return "pi";
-}
-
-function resultParserFor(harness: "pi" | "claude" | undefined, mode: "oneshot" | "interactive"): "mcp-terminal" | "stdio-exit" {
-  return harness === "claude" && mode === "interactive" ? "mcp-terminal" : "stdio-exit";
-}
-
-function resolveClaudeSkillInstallRequests(skillNames: string[], cwd: string): ClaudeSkillInstallRequest[] {
-  const roots = [
-    resolve(homedir(), ".async-subagents", "skills"),
-    resolve(findPackageRoot(here), "skills"),
-    resolve(cwd, ".agents", "skills"),
-    resolve(cwd, ".pi", "skills"),
-    resolve(homedir(), ".agents", "skills"),
-    resolve(homedir(), ".pi", "skills"),
-  ];
-  return [...new Set(skillNames)].map((name) => {
-    const candidates = roots.flatMap((root) => [join(root, name, "claude"), join(root, name)]);
-    const sourceDir = candidates.find((candidate) => existsSync(join(candidate, "SKILL.md")));
-    if (!sourceDir) {
-      throw new SubagentError("CLAUDE_SKILL_NOT_FOUND", `Claude skill not found or missing SKILL.md: ${name}`, { name, searchedRoots: roots });
-    }
-    return { name, sourceDir, approvedRoots: roots.filter((root) => existsSync(root)) };
-  });
-}
-
 interface CodexBalancerLaunch {
   enabled: true;
   isolatedDir: string;
@@ -672,7 +643,6 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   input.launchPolicy?.({
     modeEnabled: true,
     variant: input.variant,
-    resolvedHarness: definition.harness ?? "pi",
     resolvedProvider: modelParts.length > 1 ? modelParts.shift()! : "",
     resolvedModel: modelParts.join("/"),
     effectiveThinkingLevel: selectedThinkingLevel,
@@ -706,8 +676,8 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
   let forkSourceLeafId: string | undefined;
   let forkFallback: { allowed: boolean; used: boolean; reason?: string } | null = null;
 
-  const runtimeBuiltinTools = definition.harness === "claude" ? [] : [childControlEventTool];
-  const runtimeExtensionPaths = definition.harness === "claude" ? [] : [childControlExtensionPath];
+  const runtimeBuiltinTools = [childControlEventTool];
+  const runtimeExtensionPaths = [childControlExtensionPath];
   const launchLogPath = join(paths.logsDir, "launch.json");
   const asyncSubagentsConfig = loadAsyncSubagentsConfig({ cwd, env: { ...process.env, ...(input.env ?? {}) } });
   const maxRunSource = input.maxRunSeconds !== undefined ? "override" : definition.maxRunSeconds !== undefined ? "definition" : "config";
@@ -732,12 +702,10 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     mode: definition.mode,
     variant: input.variant,
     harness: definition.harness,
-    launchHarness: launchHarnessFor(definition.harness, definition.mode),
-    resultParser: resultParserFor(definition.harness, definition.mode),
+    launchHarness: "pi",
+    resultParser: "stdio-exit",
     model: definition.model,
-    thinkingLevel: definition.harness === "claude" ? undefined : selectedThinkingLevel,
-    effort: definition.harness === "claude" ? definition.effort ?? "high" : undefined,
-    executionMode: definition.harness === "claude" ? "dangerous-auth" : undefined,
+    thinkingLevel: selectedThinkingLevel,
     contextPolicy,
     sessionPolicy,
     piSessionPath,
@@ -752,9 +720,6 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     runtimeBuiltinTools,
     runtimeExtensionPaths,
     resolvedSkills: definition.skills,
-    notInheritedAcrossHarness: definition.notInheritedAcrossHarness,
-    excludedAcrossHarness: definition.excludedAcrossHarness,
-    inheritedAcrossHarness: definition.inheritedAcrossHarness,
     launchLogPath,
     inboxPath: paths.inboxPath,
     allowedFiles,
@@ -814,10 +779,6 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
 
   if (requestedContextPolicy === "fork" && sessionPolicy !== "record") {
     return failBeforeLaunch("INVALID_SESSION_POLICY", "context: fork requires session: record", { context: requestedContextPolicy, session: sessionPolicy });
-  }
-
-  if (definition.harness === "claude" && input.thinkingLevel) {
-    return failBeforeLaunch("CLAUDE_THINKING_LEVEL_UNSUPPORTED", "thinkingLevel is Pi-only and cannot be passed to a Claude harness run", { thinkingLevel: input.thinkingLevel });
   }
 
   if (requestedContextPolicy === "fork") {
@@ -881,179 +842,6 @@ export async function startSubagent(input: StartSubagentInput): Promise<Subagent
     skills: input.skills,
     taskAssignment: input.taskAssignment ? { task: input.taskAssignment.task, dependencies: input.taskAssignment.dependencies } : undefined,
   });
-
-  if (definition.harness === "claude") {
-    const mode = definition.mode === "oneshot" ? "oneshot" : "interactive";
-    const launchHarness = launchHarnessFor("claude", mode);
-    const resultParser = resultParserFor("claude", mode);
-    const cliPath = join(findPackageRoot(here), "dist", "src", "cli.js");
-    const claudeSkills = resolveClaudeSkillInstallRequests(prompt.skills, cwd);
-    const home = prepareClaudeHome({
-      runDir: paths.runDir,
-      mode,
-      cwd,
-      mcpServerCommand: mode === "interactive" ? process.execPath : undefined,
-      mcpServerArgs: mode === "interactive" ? [cliPath, "claude-child-mcp", "--run-dir", paths.runDir] : undefined,
-      authHome: definition.claude?.authHome,
-      skills: claudeSkills,
-    });
-    const command = buildClaudeCommand({
-      runDir: paths.runDir,
-      cwd,
-      systemPath: prompt.systemPath,
-      displayName: display.displayName,
-      mode,
-      model: prompt.model,
-      effort: definition.effort ?? "high",
-      settingsPath: home.settingsPath,
-      mcpConfigPath: home.mcpConfigPath,
-      homeDir: home.homeDir,
-      shellHomeDir: home.shellHomeDir,
-      shellWrapperPath: home.shellWrapperPath,
-      extraEnv: { ...(input.env ?? {}), ASYNC_SUBAGENTS_RUN_ID: runId, ASYNC_SUBAGENTS_PARENT_RUN_ID: root.parentRunId, ASYNC_SUBAGENTS_ROOT_SESSION_ID: root.rootSessionId },
-    });
-    writeLaunchLogWithMetadata(paths.runDir, command, {
-      harness: "claude",
-      launchHarness,
-      resultParser,
-      model: prompt.model,
-      requestedModel: command.requestedModel,
-      resolvedModel: command.resolvedModel,
-      effort: definition.effort ?? "high",
-      executionMode: command.executionMode,
-      authHome: home.authHome,
-      memoryIsolation: home.memoryIsolation,
-      claudeHomeDir: home.homeDir,
-      claudeSettingsPath: home.settingsPath,
-      claudeMcpConfigPath: home.mcpConfigPath,
-      claudeShellHomeDir: home.shellHomeDir,
-      claudeShellWrapperPath: home.shellWrapperPath,
-      claudeTransport: mode === "interactive" ? "mcp" : "none",
-      claudeInstalledSkills: home.installedSkills,
-      skills: prompt.skills,
-      resolvedSkills: definition.skills,
-      notInheritedAcrossHarness: definition.notInheritedAcrossHarness,
-      excludedAcrossHarness: definition.excludedAcrossHarness,
-      inheritedAcrossHarness: definition.inheritedAcrossHarness,
-      contextPolicy,
-      sessionPolicy,
-      rootSessionId: root.rootSessionId,
-      parentRunId: root.parentRunId,
-    });
-    store.writeStatus(updateRunStatus(store.readStatus(runId), {
-      harness: "claude",
-      launchHarness,
-      resultParser,
-      model: prompt.model,
-      requestedModel: command.requestedModel,
-      resolvedModel: command.resolvedModel,
-      effort: definition.effort ?? "high",
-      executionMode: command.executionMode,
-      thinkingLevel: undefined,
-      resolvedSkills: definition.skills,
-      notInheritedAcrossHarness: definition.notInheritedAcrossHarness,
-      excludedAcrossHarness: definition.excludedAcrossHarness,
-      inheritedAcrossHarness: definition.inheritedAcrossHarness,
-      userBuiltinTools: [],
-      runtimeBuiltinTools: [],
-      runtimeExtensionPaths: [],
-      claudeHomeDir: home.homeDir,
-      claudeSettingsPath: home.settingsPath,
-      claudeMcpConfigPath: home.mcpConfigPath,
-      claudeAuthHome: home.authHome,
-      claudeMemoryIsolation: home.memoryIsolation,
-      claudeShellHomeDir: home.shellHomeDir,
-      claudeShellWrapperPath: home.shellWrapperPath,
-      claudeTransport: mode === "interactive" ? "mcp" : "none",
-      claudeInstalledSkills: home.installedSkills,
-    }));
-    const supervisorInput: SupervisorInput = {
-      runId,
-      runRoot: store.runRoot,
-      cwd,
-      parentRunId: root.parentRunId,
-      agentName: definition.name,
-      command,
-      transport: mode === "interactive" ? "mcp" : "stdio",
-      supervisorAdapter: mode === "interactive" ? "tmux" : "stdio",
-      effectiveMaxRunMs,
-    };
-    const supervisorInputPath = writeSupervisorInput(paths.runDir, supervisorInput);
-    let started: boolean;
-    if (input.fake?.mode === "immediate") {
-      await runSupervisor({ ...supervisorInput, supervisorAdapter: "stdio", fake: input.fake });
-      started = true;
-    } else {
-      const spawnError = await spawnDetachedSupervisor(supervisorInputPath);
-      if (spawnError && !store.readResult(runId)) writeLauncherFailure(store, supervisorInput, spawnError);
-      const launchResult = store.readResult(runId);
-      started = !spawnError || (!!launchResult && launchResult.error?.code !== "SUPERVISOR_LAUNCH_FAILED");
-      for (let i = 0; i < 20 && store.readStatus(runId).state === "queued" && !store.readResult(runId); i++) await delay(50);
-    }
-    const status = store.readStatus(runId);
-    scheduleAutoArchive(store, paths.logsDir, { ...process.env, ...(input.env ?? {}) });
-    return {
-      runId,
-      runDir: paths.runDir,
-      agentName: definition.name,
-      displayName: display.displayName,
-      namePack: display.namePack,
-      harness: status.harness,
-      launchHarness: status.launchHarness,
-      resultParser: status.resultParser,
-      variant: status.variant,
-      state: status.state,
-      model: status.model,
-      requestedModel: status.requestedModel,
-      resolvedModel: status.resolvedModel,
-      thinkingLevel: status.thinkingLevel,
-      effort: status.effort,
-      executionMode: status.executionMode,
-      claudeHomeDir: status.claudeHomeDir,
-      claudeSettingsPath: status.claudeSettingsPath,
-      claudeMcpConfigPath: status.claudeMcpConfigPath,
-      claudeAuthHome: status.claudeAuthHome,
-      claudeMemoryIsolation: status.claudeMemoryIsolation,
-      claudeShellHomeDir: status.claudeShellHomeDir,
-      claudeShellWrapperPath: status.claudeShellWrapperPath,
-      claudeTransport: status.claudeTransport,
-      claudeInstalledSkills: status.claudeInstalledSkills,
-      livenessState: status.livenessState,
-      lastTerminalOutputAt: status.lastTerminalOutputAt,
-      terminalOutputBytes: status.terminalOutputBytes,
-      lastMcpCallAt: status.lastMcpCallAt,
-      lastNudgeAt: status.lastNudgeAt,
-      pendingAckMessageIds: status.pendingAckMessageIds,
-      livenessReason: status.livenessReason,
-      supervisorPid: status.supervisorPid,
-      childPid: status.childPid,
-      panePid: status.panePid,
-      processGroupId: status.processGroupId,
-      tmuxSocket: status.tmuxSocket,
-      tmuxSession: status.tmuxSession,
-      tmuxPane: status.tmuxPane,
-      transcriptPath: status.transcriptPath,
-      started,
-      waited: false,
-      contextPolicy: status.contextPolicy,
-      sessionPolicy: status.sessionPolicy,
-      piSessionPath: status.piSessionPath,
-      requestedPiSessionPath: status.requestedPiSessionPath,
-      continuedFromRunId: status.continuedFromRunId,
-      continuationRootRunId: status.continuationRootRunId,
-      continuationSequence: status.continuationSequence,
-      continuationOfPiSessionPath: status.continuationOfPiSessionPath,
-      skills: prompt.skills,
-      resolvedSkills: status.resolvedSkills,
-      tools: [],
-      maxRunSeconds,
-      effectiveMaxRunMs,
-      maxSubagentDepth: definition.maxSubagentDepth,
-      fastTrack,
-      task: input.taskAssignment ? { taskId: input.taskAssignment.task.id, title: input.taskAssignment.task.title } : undefined,
-      next: [],
-    };
-  }
 
   // The originally-requested model (prompt.model) is preserved for user-facing
   // status/metadata; effectiveModel is the model the child actually launches/execs.

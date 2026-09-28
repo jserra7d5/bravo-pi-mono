@@ -25,7 +25,6 @@ test("real Pi loader/session command activates task tools, persists state, and i
   writeFileSync(join(root, ".agents", "terra.md"), `---\ndescription: terra route fixture\nmodel: custom/base\nvariants:\n  luna:\n    model: google/gemini-terra\n---\nfixture\n`);
   writeFileSync(join(root, ".agents", "custom.md"), `---\ndescription: custom route fixture\nmodel: custom/base\nvariants:\n  luna:\n    model: custom/private\n---\nfixture\n`);
   writeFileSync(join(root, ".agents", "noncanonical.md"), `---\ndescription: noncanonical route fixture\nmodel: custom/base\nvariants:\n  luna:\n    model: bravo-codex-balanced/gpt-6-luna-preview\n---\nfixture\n`);
-  writeFileSync(join(root, ".agents", "claude-spoof.md"), `---\ndescription: claude route fixture\nharness: claude\nharnessNeutral: true\nmode: oneshot\nvariants:\n  luna:\n    harness: claude\n    model: bravo-codex-balanced/gpt-6-luna\n---\nfixture\n`);
   const faux = fauxProvider({ tokensPerSecond: 0 }); let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
   try {
     const agentDir = join(root, "agent"), settings = SettingsManager.create(root, agentDir);
@@ -117,7 +116,6 @@ test("real Pi loader/session command activates task tools, persists state, and i
       ["terra", { agent: "terra", variant: "luna", thinkingLevel: "high" }, "BUDGET_SWARM_MODEL_NOT_ALLOWED"],
       ["noncanonical", { agent: "noncanonical", variant: "luna", thinkingLevel: "high" }, "BUDGET_SWARM_MODEL_NOT_ALLOWED"],
       ["custom", { agent: "custom", variant: "luna", thinkingLevel: "high" }, "BUDGET_SWARM_MODEL_NOT_ALLOWED"],
-      ["claude spoof", { agent: "claude-spoof", variant: "luna", thinkingLevel: "high" }, "BUDGET_SWARM_HARNESS_NOT_ALLOWED"],
       ["fast track", { variant: "luna", thinkingLevel: "high", fastTrack: true }, "BUDGET_SWARM_FAST_TRACK_FORBIDDEN"],
     ] as const;
     for (const [label, route, code] of rejectedRoutes) {

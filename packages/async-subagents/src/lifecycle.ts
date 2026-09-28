@@ -9,10 +9,6 @@ import { updateRunStatus } from "./status.js";
 import type { EventType, RunEvent, RunMetrics, RunResult, RunStatus, TerminalRunState, WriterRole } from "./types.js";
 
 export const SUPERVISOR_LAUNCH_GRACE_MS = 5 * 60 * 1000;
-// The supervisor's configured Claude MCP drain is capped at five seconds. A
-// presentation-triggered orphan repair must not outrun that canonical drain.
-export const TERMINAL_DRAIN_GRACE_MS = 5_000;
-
 export type SupervisorAlive = "alive" | "dead" | "unknown";
 
 export interface ReconcileResult {
@@ -34,7 +30,6 @@ export type ProcessHealth = "alive" | "dead" | "unknown";
 export interface DeadProcessReconcileOptions {
   nowMs?: number;
   cancellationGraceMs?: number;
-  terminalDrainGraceMs?: number;
   localHost?: string;
   probe?: (pid: number) => ProcessHealth;
   supervisorProbe?: (pid: number) => ProcessIdentitySnapshot;
@@ -226,8 +221,6 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
     requestedModel: status.requestedModel,
     resolvedModel: status.resolvedModel,
     thinkingLevel: status.thinkingLevel,
-    effort: status.effort,
-    executionMode: status.executionMode,
     contextPolicy: status.contextPolicy,
     sessionPolicy: status.sessionPolicy,
     piSessionPath: status.piSessionPath,
@@ -241,33 +234,9 @@ export function finalizeTerminalRun(store: RunStore, input: FinalizeTerminalRunI
     forkFallback: status.forkFallback,
     fastTrack: status.fastTrack,
     resolvedSkills: status.resolvedSkills,
-    notInheritedAcrossHarness: status.notInheritedAcrossHarness,
-    excludedAcrossHarness: status.excludedAcrossHarness,
-    inheritedAcrossHarness: status.inheritedAcrossHarness,
-    claudeHomeDir: status.claudeHomeDir,
-    claudeSettingsPath: status.claudeSettingsPath,
-    claudeMcpConfigPath: status.claudeMcpConfigPath,
-    claudeAuthHome: status.claudeAuthHome,
-    claudeMemoryIsolation: status.claudeMemoryIsolation,
-    claudeShellHomeDir: status.claudeShellHomeDir,
-    claudeShellWrapperPath: status.claudeShellWrapperPath,
-    claudeTransport: status.claudeTransport,
-    claudeInstalledSkills: status.claudeInstalledSkills,
-    livenessState: status.livenessState,
-    lastTerminalOutputAt: status.lastTerminalOutputAt,
-    terminalOutputBytes: status.terminalOutputBytes,
-    lastMcpCallAt: status.lastMcpCallAt,
-    lastNudgeAt: status.lastNudgeAt,
-    pendingAckMessageIds: status.pendingAckMessageIds,
-    livenessReason: status.livenessReason,
     supervisorPid: status.supervisorPid,
     childPid: status.childPid,
-    panePid: status.panePid,
     processGroupId: status.processGroupId,
-    tmuxSocket: status.tmuxSocket,
-    tmuxSession: status.tmuxSession,
-    tmuxPane: status.tmuxPane,
-    transcriptPath: status.transcriptPath,
     state: input.state,
     startedAt: input.startedAt ?? status.startedAt,
     summary: input.summary,
@@ -372,21 +341,6 @@ export async function reconcileDeadProcessUnderLock(
         options.supervisorProbe ?? probeProcessIdentity,
       );
       if (supervisorAlive !== "dead") return { status, processHealth, promoted: false };
-    }
-
-    // Claude MCP completion can arrive shortly after its pane exits. The
-    // supervisor uses this interval to drain a terminal result, so orphan repair
-    // waits out the same maximum window even when supervisor ownership has just
-    // disappeared.
-    if (status.harness === "claude" && status.claudeTransport === "mcp") {
-      const activityTimes = [status.updatedAt, status.lastTerminalOutputAt, status.lastMcpCallAt]
-        .map((value) => value ? Date.parse(value) : Number.NaN)
-        .filter(Number.isFinite);
-      const drainStartedAt = activityTimes.length ? Math.max(...activityTimes) : Number.NaN;
-      const drainGraceMs = options.terminalDrainGraceMs ?? TERMINAL_DRAIN_GRACE_MS;
-      if (!Number.isFinite(drainStartedAt) || (options.nowMs ?? Date.now()) - drainStartedAt <= drainGraceMs) {
-        return { status, processHealth, promoted: false };
-      }
     }
 
     // Re-read the durable summary projection while holding the lock. In

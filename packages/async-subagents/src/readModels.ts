@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { bucketForState, isInterestingEvent, type RunStateBucket } from "./schemas.js";
-import type { AgentHarness, ClaudeEffort, ClaudeExecutionMode, ClaudeInstalledSkill, ClaudeLivenessState, LaunchHarness, ResultParser, RunEvent, RunIndexRecord, RunMetrics, RunResult, RunState, RunStatus } from "./types.js";
+import type { AgentHarness, LaunchHarness, ResultParser, RunEvent, RunIndexRecord, RunMetrics, RunResult, RunState, RunStatus } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 export interface RunSummaryReadModel {
@@ -24,27 +24,11 @@ export interface RunSummaryReadModel {
   model?: string;
   requestedModel?: string;
   resolvedModel?: string;
-  effort?: ClaudeEffort;
-  executionMode?: ClaudeExecutionMode;
-  claudeTransport?: "mcp" | "none";
-  claudeInstalledSkills?: ClaudeInstalledSkill[];
-  livenessState?: ClaudeLivenessState;
-  lastTerminalOutputAt?: string;
-  terminalOutputBytes?: number;
-  lastMcpCallAt?: string;
-  lastNudgeAt?: string;
-  pendingAckMessageIds?: string[];
-  livenessReason?: string | null;
-  tmuxSocket?: string;
-  tmuxSession?: string;
-  tmuxPane?: string;
-  panePid?: number;
   supervisorPid?: number;
   supervisorHost?: string;
   supervisorStartedAtToken?: string;
   childPid?: number;
   processGroupId?: number;
-  transcriptPath?: string;
   resolvedSkills?: string[];
   state: RunState;
   bucket: RunStateBucket;
@@ -96,27 +80,11 @@ export function summaryFromStatus(status: RunStatus, runDir: string, previous?: 
     model: status.model,
     requestedModel: status.requestedModel,
     resolvedModel: status.resolvedModel,
-    effort: status.effort,
-    executionMode: status.executionMode,
-    claudeTransport: status.claudeTransport,
-    claudeInstalledSkills: status.claudeInstalledSkills,
-    livenessState: status.livenessState,
-    lastTerminalOutputAt: status.lastTerminalOutputAt,
-    terminalOutputBytes: status.terminalOutputBytes,
-    lastMcpCallAt: status.lastMcpCallAt,
-    lastNudgeAt: status.lastNudgeAt,
-    pendingAckMessageIds: status.pendingAckMessageIds,
-    livenessReason: status.livenessReason,
-    tmuxSocket: status.tmuxSocket,
-    tmuxSession: status.tmuxSession,
-    tmuxPane: status.tmuxPane,
-    panePid: status.panePid,
     supervisorPid: status.supervisorPid,
     supervisorHost: status.supervisorHost,
     supervisorStartedAtToken: status.supervisorStartedAtToken,
     childPid: status.childPid,
     processGroupId: status.processGroupId,
-    transcriptPath: status.transcriptPath,
     resolvedSkills: status.resolvedSkills,
     state: status.state,
     bucket: bucketForState(status.state),
@@ -182,14 +150,6 @@ export function applyResultToSummary(summary: RunSummaryReadModel, result: RunRe
     resultAgentName: result.agentName,
     metrics: result.metrics ?? summary.metrics,
     resultParser: result.resultParser ?? summary.resultParser,
-    claudeInstalledSkills: result.claudeInstalledSkills ?? summary.claudeInstalledSkills,
-    livenessState: result.livenessState ?? summary.livenessState,
-    livenessReason: result.livenessReason ?? summary.livenessReason,
-    lastTerminalOutputAt: result.lastTerminalOutputAt ?? summary.lastTerminalOutputAt,
-    terminalOutputBytes: result.terminalOutputBytes ?? summary.terminalOutputBytes,
-    lastMcpCallAt: result.lastMcpCallAt ?? summary.lastMcpCallAt,
-    lastNudgeAt: result.lastNudgeAt ?? summary.lastNudgeAt,
-    pendingAckMessageIds: result.pendingAckMessageIds ?? summary.pendingAckMessageIds,
   };
 }
 

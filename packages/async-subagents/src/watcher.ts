@@ -1,7 +1,7 @@
 import { isTerminalRunState } from "./schemas.js";
 import { RunStore } from "./runStore.js";
 import type { RunSummaryReadModel } from "./readModels.js";
-import type { AgentHarness, ClaudeEffort, ClaudeExecutionMode, ClaudeInstalledSkill, ClaudeLivenessState, EventType, LaunchHarness, ResultParser, RunEvent, RunIndexRecord, RunMetrics, RunResult, RunState } from "./types.js";
+import type { AgentHarness, EventType, LaunchHarness, ResultParser, RunEvent, RunIndexRecord, RunMetrics, RunResult, RunState } from "./types.js";
 
 export interface RunSummaryRow {
   runId: string;
@@ -16,25 +16,9 @@ export interface RunSummaryRow {
   model?: string;
   requestedModel?: string;
   resolvedModel?: string;
-  effort?: ClaudeEffort;
-  executionMode?: ClaudeExecutionMode;
-  claudeTransport?: "mcp" | "none";
-  claudeInstalledSkills?: ClaudeInstalledSkill[];
-  livenessState?: ClaudeLivenessState;
-  lastTerminalOutputAt?: string;
-  terminalOutputBytes?: number;
-  lastMcpCallAt?: string;
-  lastNudgeAt?: string;
-  pendingAckMessageIds?: string[];
-  livenessReason?: string | null;
-  tmuxSocket?: string;
-  tmuxSession?: string;
-  tmuxPane?: string;
-  panePid?: number;
   supervisorPid?: number;
   childPid?: number;
   processGroupId?: number;
-  transcriptPath?: string;
   resolvedSkills?: string[];
   state: RunState;
   summary?: string;
@@ -95,25 +79,9 @@ export function readWatcherSnapshot(store: RunStore, input: ReadWatcherSnapshotI
         model: summary.model,
         requestedModel: summary.requestedModel,
         resolvedModel: summary.resolvedModel,
-        effort: summary.effort,
-        executionMode: summary.executionMode,
-        claudeTransport: summary.claudeTransport,
-        claudeInstalledSkills: summary.claudeInstalledSkills,
-        livenessState: summary.livenessState,
-        lastTerminalOutputAt: summary.lastTerminalOutputAt,
-        terminalOutputBytes: summary.terminalOutputBytes,
-        lastMcpCallAt: summary.lastMcpCallAt,
-        lastNudgeAt: summary.lastNudgeAt,
-        pendingAckMessageIds: summary.pendingAckMessageIds,
-        livenessReason: summary.livenessReason,
-        tmuxSocket: summary.tmuxSocket,
-        tmuxSession: summary.tmuxSession,
-        tmuxPane: summary.tmuxPane,
-        panePid: summary.panePid,
         supervisorPid: summary.supervisorPid,
         childPid: summary.childPid,
         processGroupId: summary.processGroupId,
-        transcriptPath: summary.transcriptPath,
         resolvedSkills: summary.resolvedSkills,
         state: summary.state,
         summary: summary.summary,

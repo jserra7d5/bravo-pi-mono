@@ -82,34 +82,6 @@ test("built-in templates are discoverable and declare a Pi harness with a model"
   }
 });
 
-test("a Claude variant on a built-in-shaped definition drops Pi-only execution fields", () => {
-  const w = workspace();
-  const path = join(w.userHome, "agents", "dual.md");
-  writeFileSync(path, `---
-description: Dual-harness template
-harnessNeutral: true
-model: bravo-codex-balanced/gpt-6-sol
-tools: [read, grep, bash]
-thinkingLevel: high
-variants:
-  claude:
-    harness: claude
-    model: claude-sonnet-5
-    effort: low
-    mode: interactive
----
-
-Dual body.
-`);
-  const claude = applyAgentVariant(parseAgentDefinitionFile(path, "user"), "claude");
-  assert.equal(claude.harness, "claude");
-  assert.equal(claude.mode, "interactive");
-  assert.equal(claude.model, "claude-sonnet-5");
-  assert.deepEqual(claude.tools, []);
-  assert.deepEqual(claude.extensions, []);
-  assert.equal(claude.thinkingLevel, undefined);
-});
-
 test("agent parser accepts nested variants", () => {
   const w = workspace();
   const path = join(w.userHome, "agents", "scout.md");
@@ -194,71 +166,25 @@ Worker body.
   assert.equal(parseAgentDefinitionFile(path, "project", { allowProjectPathCapabilities: true }).skills[0], "./local-skill");
 });
 
-test("Claude variant does not inherit Pi-only execution fields across harness boundary", async () => {
-  const { applyAgentVariant } = await import("../src/agentDefinitions.js");
+test("agent parser rejects non-Pi harness values in definitions and variants", () => {
   const w = workspace();
-  const path = join(w.userHome, "agents", "worker.md");
+  const path = join(w.userHome, "agents", "unsupported.md");
   writeFileSync(path, `---
-description: Worker
-harnessNeutral: true
-tools: [read, bash]
-extensions: [pi-ext]
-thinkingLevel: high
-includes: [pi-runtime]
-variants:
-  claude:
-    harness: claude
-    model: claude-sonnet-5
-    effort: high
-    mode: interactive
+description: Unsupported harness
+harness: claude
 ---
-
-Worker body.
+Body.
 `);
-  const base = parseAgentDefinitionFile(path, "user");
-  const claude = applyAgentVariant(base, "claude");
-  assert.equal(claude.harness, "claude");
-  assert.deepEqual(claude.tools, []);
-  assert.deepEqual(claude.extensions, []);
-  assert.equal(claude.thinkingLevel, undefined);
-  assert.deepEqual(claude.includes, []);
-  assert.equal(claude.mode, "interactive");
-  assert.match(JSON.stringify(claude.notInheritedAcrossHarness), /thinkingLevel/);
-  assert.match(JSON.stringify(claude.excludedAcrossHarness), /includes/);
-  assert.match(JSON.stringify(claude.inheritedAcrossHarness), /body/);
-});
-
-test("Claude variant fails closed when crossing from non-neutral Pi base body", async () => {
-  const { applyAgentVariant } = await import("../src/agentDefinitions.js");
-  const w = workspace();
-  const path = join(w.userHome, "agents", "worker.md");
+  assert.throws(() => parseAgentDefinitionFile(path, "user"), /harness must be one of pi/);
   writeFileSync(path, `---
-description: Worker
+description: Unsupported variant harness
 variants:
-  claude:
+  alternate:
     harness: claude
 ---
-
-Pi-only body.
+Body.
 `);
-  const base = parseAgentDefinitionFile(path, "user");
-  assert.throws(() => applyAgentVariant(base, "claude"), /harnessNeutral/);
-});
-
-test("Claude variant rejects explicit Pi-only fields", () => {
-  const w = workspace();
-  const path = join(w.userHome, "agents", "bad-claude.md");
-  writeFileSync(path, `---
-description: Bad
-variants:
-  claude:
-    harness: claude
-    tools: []
----
-
-Bad body.
-`);
-  assert.throws(() => parseAgentDefinitionFile(path, "user"), /tools is Pi-only/);
+  assert.throws(() => parseAgentDefinitionFile(path, "user"), /unknown variant field harness/);
 });
 
 test("agent parser rejects unknown top-level fields", () => {
@@ -286,29 +212,7 @@ Bad body.
 `);
   assert.throws(() => parseAgentDefinitionFile(top, "user"), (err: unknown) => err instanceof Error && (err as { code?: unknown }).code === "EXTRA_MCP_UNSUPPORTED");
 
-  const variant = join(w.userHome, "agents", "bad-mcp-variant.md");
-  writeFileSync(variant, `---
-description: Bad
-variants:
-  claude:
-    harness: claude
-    mcpServers: [local]
----
 
-Bad body.
-`);
-  assert.throws(() => parseAgentDefinitionFile(variant, "user"), (err: unknown) => err instanceof Error && (err as { code?: unknown }).code === "EXTRA_MCP_UNSUPPORTED");
-
-  const nested = join(w.userHome, "agents", "bad-mcp-claude.md");
-  writeFileSync(nested, `---
-description: Bad
-claude:
-  mcpConfig: [local]
----
-
-Bad body.
-`);
-  assert.throws(() => parseAgentDefinitionFile(nested, "user"), (err: unknown) => err instanceof Error && (err as { code?: unknown }).code === "EXTRA_MCP_UNSUPPORTED");
 });
 
 test("agent parser resolves package-specifier Pi extensions to loadable absolute paths", () => {

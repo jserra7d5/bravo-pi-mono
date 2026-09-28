@@ -105,19 +105,16 @@ function refreshHerdrPresentation(_pi: ExtensionAPI, ctx: ExtensionContext): voi
 }
 
 function wakeupEnvelope(wakeup: WakeupMessage): string {
-  const attentionStates = new Set(["paused", "blocked", "waiting_for_input", "failed", "ack_pending", "rate_limited", "comatose", "stale_transport", "orphaned_process"]);
+  const attentionStates = new Set(["paused", "blocked", "waiting_for_input", "failed"]);
   const attention = attentionStates.has(String(wakeup.state ?? ""));
   const lines = [attention ? "[ASYNC SUBAGENT ATTENTION — NOT USER INPUT]" : "[ASYNC SUBAGENT RESULT READY — NOT USER INPUT]", "", `Run ID: ${wakeup.runId}`];
   const harness = wakeup.result?.harness ?? wakeup.status?.harness;
   const agentName = wakeup.result?.agentName ?? wakeup.status?.agentName;
   const displayName = wakeup.result?.displayName ?? wakeup.status?.displayName;
-  if (displayName) lines.push(`Subagent: @${displayName}${agentName ? ` (${harness === "claude" ? `${agentName}/claude` : agentName})` : ""}`);
-  else if (agentName) lines.push(`Subagent: ${harness === "claude" ? `${agentName}/claude` : agentName}`);
+  if (displayName) lines.push(`Subagent: @${displayName}${agentName ? ` (${agentName})` : ""}`);
+  else if (agentName) lines.push(`Subagent: ${agentName}`);
   if (harness) lines.push(`Harness: ${harness}`);
-  const liveness = wakeup.result?.livenessState ?? wakeup.status?.livenessState;
-  if (wakeup.state) lines.push(`State: ${wakeup.state}${liveness && liveness !== wakeup.state ? ` (${liveness})` : ""}`);
-  const reason = wakeup.result?.livenessReason ?? wakeup.status?.livenessReason;
-  if (reason) lines.push(`Liveness: ${reason}`);
+  if (wakeup.state) lines.push(`State: ${wakeup.state}`);
   if (wakeup.summary) lines.push(`Summary: ${wakeup.summary}`);
   const terminalResultWakeup = Boolean(wakeup.result);
   if (wakeup.body !== undefined) {
@@ -134,16 +131,10 @@ function wakeupEnvelope(wakeup: WakeupMessage): string {
   } else {
     lines.push("", wakeup.bodyAvailable ? "The child body is available in the wakeup details but was not rendered inline." : "Full child output is not included in this wakeup.");
   }
-  const livenessActionState = ["ack_pending", "rate_limited", "comatose", "stale_transport", "orphaned_process"].includes(String(wakeup.state ?? ""));
   if (wakeup.state === "waiting_for_input" || wakeup.event?.type === "question" || wakeup.state === "blocked" || wakeup.event?.type === "blocked") {
     lines.push(`Reply with subagent_message({ runId: "${wakeup.runId}", type: "answer", ... }) when you have the requested input. Do not call subagent_result for this non-terminal wakeup.`);
   } else if (wakeup.state === "paused") {
     lines.push(`If this result is still needed, choose a bounded extension and call subagent_continue({ runId: "${wakeup.runId}", additionalRunSeconds: 900 }) to resume. Adjust additionalRunSeconds to the smallest reasonable budget for the remaining work, or call subagent_interrupt({ runId: "${wakeup.runId}", action: "cancel" }) if it is no longer needed.`);
-  } else if (livenessActionState) {
-    const inspect = `Inspect current transport state with subagent_status({ runIds: ["${wakeup.runId}"], includeEvents: true, maxEvents: 10 })`;
-    if (wakeup.state === "rate_limited") lines.push(`${inspect}; wait until the reported rate-limit window clears before continuing or messaging the child.`);
-    else if (wakeup.state === "ack_pending") lines.push(`${inspect}; avoid duplicate instructions until the pending message acknowledgement is understood.`);
-    else lines.push(`${inspect}; if the Claude transport is unrecoverable, cancel it with subagent_interrupt({ runId: "${wakeup.runId}", action: "cancel" }).`);
   } else if (wakeup.bodyTruncation?.truncated === true && terminalResultWakeup) {
     lines.push(`Call subagent_result({ runId: "${wakeup.runId}" }) if you need the overflow/full canonical result before continuing.`);
   } else if (terminalResultWakeup) {

@@ -13,13 +13,13 @@ import { createBudgetAutoSwarmController, parseBudgetAutoSwarmCommand, renderBud
 function route(variant: "luna" | "sol", thinking: string) {
   const full = variant === "luna" ? BUDGET_LUNA_MODEL : BUDGET_SOL_MODEL;
   const [provider, ...model] = full.split("/");
-  return { modeEnabled: true, variant, resolvedHarness: "pi" as const, resolvedProvider: provider!, resolvedModel: model.join("/"), effectiveThinkingLevel: thinking, fastTrackRequested: false };
+  return { modeEnabled: true, variant, resolvedProvider: provider!, resolvedModel: model.join("/"), effectiveThinkingLevel: thinking, fastTrackRequested: false };
 }
 
 test("budget launch matrix accepts only canonical routes", () => {
   for (const level of ["high", "xhigh", "max"]) assert.doesNotThrow(() => validateBudgetLaunchPolicy(route("luna", level)));
   for (const level of ["low", "medium"]) assert.doesNotThrow(() => validateBudgetLaunchPolicy(route("sol", level)));
-  for (const input of [route("luna", "low"), route("sol", "high"), { ...route("luna", "high"), fastTrackRequested: true }, { ...route("sol", "medium"), resolvedHarness: "claude" as const }, { ...route("luna", "high"), resolvedModel: "spoof" }]) assert.throws(() => validateBudgetLaunchPolicy(input), /Budget auto swarm|thinkingLevel|normal service|resolve exactly/);
+  for (const input of [route("luna", "low"), route("sol", "high"), { ...route("luna", "high"), fastTrackRequested: true }, { ...route("luna", "high"), resolvedModel: "spoof" }]) assert.throws(() => validateBudgetLaunchPolicy(input), /Budget auto swarm|thinkingLevel|normal service|resolve exactly/);
 });
 
 test("budget prompt is exact, idempotent, removable, and before live state", () => {

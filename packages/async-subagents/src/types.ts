@@ -17,19 +17,6 @@ export type RunState =
   | "expired";
 
 export type TerminalRunState = "completed" | "failed" | "cancelled" | "expired";
-export type ClaudeLivenessState =
-  | "starting"
-  | "running"
-  | "idle"
-  | "waiting_for_input"
-  | "ack_pending"
-  | "rate_limited"
-  | "comatose"
-  | "stale_transport"
-  | "orphaned_process"
-  | "paused"
-  | TerminalRunState;
-
 export type EventType =
   | "started"
   | "progress"
@@ -52,30 +39,9 @@ export type InboxMessageType = "instruction" | "answer" | "cancel" | "pause" | "
 export type ParentMessageType = "instruction" | "answer" | "context";
 
 export type AgentMode = "oneshot" | "interactive";
-export type AgentHarness = "pi" | "claude";
-export type LaunchHarness = AgentHarness | "claude-tmux-interactive" | "claude-stdio-oneshot";
-export type ResultParser = "mcp-terminal" | "stdio-exit";
-export type ClaudeMode = AgentMode;
-export type ClaudeExecutionMode = "dangerous-auth";
-export type ClaudeAuthHome = "seeded-run-home" | "operator-home";
-export type ClaudeMemoryIsolation = "best-effort-non-bare";
-export interface ClaudeInstalledSkill {
-  name: string;
-  sourcePath: string;
-  targetPath: string;
-  compatibility: "claude-native" | "pi-style";
-}
-export interface ClaudeDefinitionOptions {
-  executionMode?: ClaudeExecutionMode;
-  authHome?: ClaudeAuthHome;
-  mode?: ClaudeMode;
-}
-export interface HarnessBoundaryProvenance {
-  field: string;
-  source: "base" | "variant" | "defaultConfig" | "environment";
-  reason: "pi-only" | "harness-boundary" | "neutral-compatible";
-}
-export type ClaudeEffort = "low" | "medium" | "high" | "xhigh" | "max" | string;
+export type AgentHarness = "pi";
+export type LaunchHarness = AgentHarness;
+export type ResultParser = "stdio-exit";
 export type ContextPolicy = "fresh" | "fork";
 export type SessionPolicy = "record" | "none";
 export type AgentDefinitionSource = "project" | "user" | "builtin";
@@ -146,8 +112,6 @@ export interface RunStatus {
   requestedModel?: string;
   resolvedModel?: string;
   thinkingLevel?: ThinkingLevel;
-  effort?: ClaudeEffort;
-  executionMode?: ClaudeExecutionMode;
   resultParser?: ResultParser;
   contextPolicy: ContextPolicy;
   sessionPolicy: SessionPolicy;
@@ -165,18 +129,6 @@ export interface RunStatus {
   runtimeBuiltinTools: string[];
   runtimeExtensionPaths: string[];
   resolvedSkills?: string[];
-  notInheritedAcrossHarness?: HarnessBoundaryProvenance[];
-  excludedAcrossHarness?: HarnessBoundaryProvenance[];
-  inheritedAcrossHarness?: HarnessBoundaryProvenance[];
-  claudeHomeDir?: string;
-  claudeSettingsPath?: string;
-  claudeMcpConfigPath?: string;
-  claudeAuthHome?: ClaudeAuthHome;
-  claudeMemoryIsolation?: ClaudeMemoryIsolation;
-  claudeShellHomeDir?: string;
-  claudeShellWrapperPath?: string;
-  claudeTransport?: "mcp" | "none";
-  claudeInstalledSkills?: ClaudeInstalledSkill[];
   launchLogPath?: string;
   inboxPath?: string;
   /** Authoritative prompt-enforced write scope when specified; not an OS sandbox. */
@@ -189,27 +141,15 @@ export interface RunStatus {
   supervisorHost?: string;
   supervisorStartedAtToken?: string;
   childPid?: number;
-  panePid?: number;
   processGroupId?: number;
-  tmuxSocket?: string;
-  tmuxSession?: string;
-  tmuxPane?: string;
-  transcriptPath?: string;
   stdoutPath?: string;
   stderrPath?: string;
   processHealth?: "unknown" | "alive" | "dead";
   /** Children relaunched after a transient upstream refusal; absent when none. */
   transientRetries?: number;
-  livenessState?: ClaudeLivenessState;
-  lastTerminalOutputAt?: string;
-  terminalOutputBytes?: number;
-  lastMcpCallAt?: string;
-  lastNudgeAt?: string;
   lastProbeAt?: string;
   outputBytesSinceNudge?: number;
   rateLimitResumeAt?: string | null;
-  pendingAckMessageIds?: string[];
-  livenessReason?: string | null;
   effectiveMaxRunMs?: number;
   maxRunSource?: "override" | "definition" | "config";
   timeout?: { softWarningAt?: string; hardTimeoutAt?: string; pausedAt?: string; additionalRunSeconds?: number; reason?: string } | null;
@@ -268,8 +208,6 @@ export interface RunResult {
   requestedModel?: string;
   resolvedModel?: string;
   thinkingLevel?: ThinkingLevel;
-  effort?: ClaudeEffort;
-  executionMode?: ClaudeExecutionMode;
   resultParser?: ResultParser;
   contextPolicy: ContextPolicy;
   sessionPolicy: SessionPolicy;
@@ -284,33 +222,9 @@ export interface RunResult {
   forkFallback?: { allowed: boolean; used: boolean; reason?: string } | null;
   fastTrack?: FastTrackLaunch;
   resolvedSkills?: string[];
-  notInheritedAcrossHarness?: HarnessBoundaryProvenance[];
-  excludedAcrossHarness?: HarnessBoundaryProvenance[];
-  inheritedAcrossHarness?: HarnessBoundaryProvenance[];
-  claudeHomeDir?: string;
-  claudeSettingsPath?: string;
-  claudeMcpConfigPath?: string;
-  claudeAuthHome?: ClaudeAuthHome;
-  claudeMemoryIsolation?: ClaudeMemoryIsolation;
-  claudeShellHomeDir?: string;
-  claudeShellWrapperPath?: string;
-  claudeTransport?: "mcp" | "none";
-  claudeInstalledSkills?: ClaudeInstalledSkill[];
-  livenessState?: ClaudeLivenessState;
-  lastTerminalOutputAt?: string;
-  terminalOutputBytes?: number;
-  lastMcpCallAt?: string;
-  lastNudgeAt?: string;
-  pendingAckMessageIds?: string[];
-  livenessReason?: string | null;
   supervisorPid?: number;
   childPid?: number;
-  panePid?: number;
   processGroupId?: number;
-  tmuxSocket?: string;
-  tmuxSession?: string;
-  tmuxPane?: string;
-  transcriptPath?: string;
   state: TerminalRunState;
   success: boolean;
   createdAt: string;
@@ -493,8 +407,6 @@ export interface SubagentStartResult {
   requestedModel?: string;
   resolvedModel?: string;
   thinkingLevel?: ThinkingLevel;
-  effort?: ClaudeEffort;
-  executionMode?: ClaudeExecutionMode;
   resultParser?: ResultParser;
   state: RunState;
   started: boolean;
@@ -513,33 +425,9 @@ export interface SubagentStartResult {
   skills?: string[];
   resolvedSkills?: string[];
   tools?: string[];
-  notInheritedAcrossHarness?: HarnessBoundaryProvenance[];
-  excludedAcrossHarness?: HarnessBoundaryProvenance[];
-  inheritedAcrossHarness?: HarnessBoundaryProvenance[];
-  claudeHomeDir?: string;
-  claudeSettingsPath?: string;
-  claudeMcpConfigPath?: string;
-  claudeAuthHome?: ClaudeAuthHome;
-  claudeMemoryIsolation?: ClaudeMemoryIsolation;
-  claudeShellHomeDir?: string;
-  claudeShellWrapperPath?: string;
-  claudeTransport?: "mcp" | "none";
-  claudeInstalledSkills?: ClaudeInstalledSkill[];
-  livenessState?: ClaudeLivenessState;
-  lastTerminalOutputAt?: string;
-  terminalOutputBytes?: number;
-  lastMcpCallAt?: string;
-  lastNudgeAt?: string;
-  pendingAckMessageIds?: string[];
-  livenessReason?: string | null;
   supervisorPid?: number;
   childPid?: number;
-  panePid?: number;
   processGroupId?: number;
-  tmuxSocket?: string;
-  tmuxSession?: string;
-  tmuxPane?: string;
-  transcriptPath?: string;
   maxRunSeconds?: number;
   effectiveMaxRunMs?: number;
   maxRunSource?: "override" | "definition" | "config";

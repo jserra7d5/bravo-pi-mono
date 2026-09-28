@@ -90,7 +90,7 @@ Pi exposes a sticky, user-global mode that survives new sessions and Pi processe
 
 Its authoritative value is stored atomically at `${ASYNC_SUBAGENTS_HOME:-~/.async-subagents}/budget-auto-swarm.json`. Enabling it also enables task orchestration, displays the lavender `SWARM:auto` status, injects the durable ready-set scheduling policy, and guards every new Pi child start before allocation. New starts must use `variant: "luna"` with `thinkingLevel: high|xhigh|max` or `variant: "sol"` with `thinkingLevel: low|medium`; `fastTrack` is forbidden. Existing continuations retain their recorded launch identity. Turning the mode off leaves tasks enabled.
 
-Claude Code users explicitly invoke `/budget-auto-swarm <objective>`. Its Opus 5.5 medium override lasts only for that invocation turn; reinvoke after user-authored continuation. Claude Code native Tasks are the sole Claude dependency graph and progress ledger; the CLI owns child-run lifecycle only. Installation links both Claude skills.
+The Claude Code parent may explicitly invoke `/budget-auto-swarm <objective>` via the installed skill; this does not change the Pi-only child runtime.
 
 Pass one canonical `--store-cwd` to every run lifecycle command; `start --cwd` remains the separate child execution/discovery checkout.
 
@@ -425,7 +425,7 @@ async-subagents --help
 
 One binary carries the whole surface: the operator subcommands (`agents`, `start`, `run`, `watch`,
 `status`, `wait`, `result`, `continue`, `message`, `pause`, `cancel`, `archive`, `install`) and the
-internal entrypoints async child runs use (`supervisor`, `claude-child-mcp`).
+internal supervisor entrypoint async child runs use (`supervisor`).
 
 All commands emit JSON on stdout; `watch` emits NDJSON. Errors are also JSON on stdout with a
 non-zero exit, so a caller reading stdout can never mistake a failed `start` for a silent success.

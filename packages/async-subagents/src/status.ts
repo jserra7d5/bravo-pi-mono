@@ -3,7 +3,7 @@ import { nowIso } from "./time.js";
 import { RunStore } from "./runStore.js";
 import { currentProcessIdentityToken } from "./runLock.js";
 import { isTerminalRunState } from "./schemas.js";
-import type { AgentDefinitionSource, AgentHarness, AgentMode, ClaudeAuthHome, ClaudeEffort, ClaudeExecutionMode, ClaudeInstalledSkill, ClaudeMemoryIsolation, ContextPolicy, HarnessBoundaryProvenance, LaunchHarness, ResultParser, RunState, RunStatus, SessionPolicy, ThinkingLevel } from "./types.js";
+import type { AgentDefinitionSource, AgentHarness, AgentMode, ContextPolicy, LaunchHarness, ResultParser, RunState, RunStatus, SessionPolicy, ThinkingLevel } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
 export function createInitialStatus(input: {
@@ -26,8 +26,6 @@ export function createInitialStatus(input: {
   requestedModel?: string;
   resolvedModel?: string;
   thinkingLevel?: ThinkingLevel;
-  effort?: ClaudeEffort;
-  executionMode?: ClaudeExecutionMode;
   contextPolicy?: ContextPolicy;
   sessionPolicy?: SessionPolicy;
   piSessionPath?: string;
@@ -44,18 +42,6 @@ export function createInitialStatus(input: {
   runtimeBuiltinTools?: string[];
   runtimeExtensionPaths?: string[];
   resolvedSkills?: string[];
-  notInheritedAcrossHarness?: HarnessBoundaryProvenance[];
-  excludedAcrossHarness?: HarnessBoundaryProvenance[];
-  inheritedAcrossHarness?: HarnessBoundaryProvenance[];
-  claudeHomeDir?: string;
-  claudeSettingsPath?: string;
-  claudeMcpConfigPath?: string;
-  claudeAuthHome?: ClaudeAuthHome;
-  claudeMemoryIsolation?: ClaudeMemoryIsolation;
-  claudeShellHomeDir?: string;
-  claudeShellWrapperPath?: string;
-  claudeTransport?: "mcp" | "none";
-  claudeInstalledSkills?: ClaudeInstalledSkill[];
   launchLogPath?: string;
   inboxPath?: string;
   allowedFiles?: string[];
@@ -90,8 +76,6 @@ export function createInitialStatus(input: {
     requestedModel: input.requestedModel,
     resolvedModel: input.resolvedModel,
     thinkingLevel: input.thinkingLevel,
-    effort: input.effort,
-    executionMode: input.executionMode,
     contextPolicy: input.contextPolicy ?? "fresh",
     sessionPolicy: input.sessionPolicy ?? "record",
     piSessionPath: input.piSessionPath,
@@ -108,18 +92,6 @@ export function createInitialStatus(input: {
     runtimeBuiltinTools: input.runtimeBuiltinTools ?? [],
     runtimeExtensionPaths: input.runtimeExtensionPaths ?? [],
     resolvedSkills: input.resolvedSkills,
-    notInheritedAcrossHarness: input.notInheritedAcrossHarness,
-    excludedAcrossHarness: input.excludedAcrossHarness,
-    inheritedAcrossHarness: input.inheritedAcrossHarness,
-    claudeHomeDir: input.claudeHomeDir,
-    claudeSettingsPath: input.claudeSettingsPath,
-    claudeMcpConfigPath: input.claudeMcpConfigPath,
-    claudeAuthHome: input.claudeAuthHome,
-    claudeMemoryIsolation: input.claudeMemoryIsolation,
-    claudeShellHomeDir: input.claudeShellHomeDir,
-    claudeShellWrapperPath: input.claudeShellWrapperPath,
-    claudeTransport: input.claudeTransport,
-    claudeInstalledSkills: input.claudeInstalledSkills,
     launchLogPath: input.launchLogPath,
     inboxPath: input.inboxPath,
     allowedFiles: input.allowedFiles,

@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { newMessageId } from "./ids.js";
 import { isTerminalRunState } from "./schemas.js";
 import { nowIso } from "./time.js";
@@ -37,7 +36,7 @@ export interface SendSubagentMessageInput {
   attachments?: AttachmentRef[];
   requiresAck?: boolean;
   thinkingLevel?: ThinkingLevel;
-  liveTransport?: "child-control" | "tmux";
+  liveTransport?: "child-control";
 }
 
 export interface WaitForMessageAckInput {
@@ -49,25 +48,6 @@ export interface WaitForMessageAckInput {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function tmuxBin(): string {
-  return process.env.ASYNC_SUBAGENTS_TMUX_BIN || "tmux";
-}
-
-function execTmux(args: string[], input?: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = execFile(tmuxBin(), args, { timeout: 2_000 }, (error) => error ? reject(error) : resolve());
-    if (input !== undefined) child.stdin?.end(input);
-  });
-}
-
-async function sendTmuxNudge(status: { tmuxSocket: string; tmuxPane: string }, message: string): Promise<void> {
-  const buffer = `async-subagents-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const base = ["-S", status.tmuxSocket];
-  await execTmux([...base, "load-buffer", "-b", buffer, "-"], message);
-  await execTmux([...base, "paste-buffer", "-d", "-b", buffer, "-t", status.tmuxPane]);
-  await execTmux([...base, "send-keys", "-t", status.tmuxPane, "Enter"]);
 }
 
 export function findMessageAck(store: RunStore, input: Pick<WaitForMessageAckInput, "runId" | "messageId">): { eventId: string } | undefined {
@@ -103,21 +83,15 @@ export function sendSubagentMessage(store: RunStore, input: SendSubagentMessageI
   const status = store.readStatus(input.runId);
   const live = !isTerminalRunState(status.state);
   const cancel = message.type === "cancel";
-  const tmuxAvailable = Boolean(status.harness === "claude" && status.claudeTransport === "mcp" && status.tmuxSocket && status.tmuxSession && status.tmuxPane && status.transcriptPath);
-  const supportedLiveTransport = input.liveTransport === "child-control" || input.liveTransport === "tmux" || tmuxAvailable;
+  const supportedLiveTransport = input.liveTransport === "child-control";
   if (live && !cancel) {
-    let liveDelivered = false;
-    if (tmuxAvailable) {
-      void sendTmuxNudge({ tmuxSocket: status.tmuxSocket!, tmuxPane: status.tmuxPane! }, `Parent message ${message.messageId} is available in your durable MCP inbox. Directly invoke mcp__async_subagents__subagent_read_inbox now; do not ToolSearch. After handling it, directly invoke mcp__async_subagents__subagent_ack_inbox.\n`).catch(() => undefined);
-      liveDelivered = true;
-    }
     return {
       messageId: message.messageId,
       runId: input.runId,
       appended: true,
-      // Durably queued either way; the nudge only shortens the pickup latency.
+      // Durably queued for child-control inbox delivery.
       delivery: "queued",
-      liveDelivered,
+      liveDelivered: false,
       unsupported: supportedLiveTransport
         ? undefined
         : {

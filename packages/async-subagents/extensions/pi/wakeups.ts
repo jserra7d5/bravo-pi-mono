@@ -185,9 +185,7 @@ function capEventBodyForWakeup(runId: string, body: string | undefined, maxChars
 
 function resultDelivery(runId: string, result: RunResult): WakeupDelivery {
   const summary = result.summary ?? result.error?.message ?? `Run ${result.state}`;
-  const transcriptBackedErrorCodes = new Set(["CLAUDE_EXITED_WITHOUT_RESULT", "MAX_RUN_SECONDS_EXPIRED"]);
-  const suppressInlineBody = result.harness === "claude" && Boolean(result.transcriptPath) && transcriptBackedErrorCodes.has(String(result.error?.code ?? ""));
-  const body = capResultBodyForWakeup(runId, suppressInlineBody ? undefined : result.body);
+  const body = capResultBodyForWakeup(runId, result.body);
   return {
     deliveryKey: resultDeliveryKey(runId, result),
     runId,
@@ -199,18 +197,11 @@ function resultDelivery(runId: string, result: RunResult): WakeupDelivery {
       summary,
       body: body.body,
       bodyAvailable: result.body !== undefined,
-      bodyTruncation: { included: result.body !== undefined && !suppressInlineBody, truncated: body.truncated, originalChars: body.originalChars, returnedChars: body.returnedChars, maxChars: body.maxChars, suppressed: suppressInlineBody || undefined },
+      bodyTruncation: { included: result.body !== undefined, truncated: body.truncated, originalChars: body.originalChars, returnedChars: body.returnedChars, maxChars: body.maxChars },
       result: redactedResult(result),
       next: body.truncated ? [{ tool: "subagent_result", args: { runId } }] : [],
     },
   };
-}
-
-function livenessNextActions(runId: string, state: string | undefined): Array<{ tool: string; args: Record<string, unknown> }> {
-  if (!state || !["ack_pending", "rate_limited", "comatose", "stale_transport", "orphaned_process"].includes(state)) return [];
-  const inspect = { tool: "subagent_status", args: { runIds: [runId], includeEvents: true, maxEvents: 10 } };
-  if (state === "comatose" || state === "stale_transport" || state === "orphaned_process") return [inspect, { tool: "subagent_interrupt", args: { runId, action: "cancel" } }];
-  return [inspect];
 }
 
 function eventDelivery(event: RunEvent, status?: { agentName?: string; displayName?: string } & Record<string, unknown>): WakeupDelivery {
@@ -226,7 +217,7 @@ function eventDelivery(event: RunEvent, status?: { agentName?: string; displayNa
     ? [{ tool: "subagent_message", args: { runId: event.runId, type: "answer" } }]
     : state === "paused"
       ? [{ tool: "subagent_continue", args: { runId: event.runId, additionalRunSeconds: 900 } }, { tool: "subagent_interrupt", args: { runId: event.runId, action: "cancel" } }]
-      : livenessNextActions(event.runId, state);
+      : [];
   return {
     deliveryKey: eventDeliveryKey(event),
     runId: event.runId,

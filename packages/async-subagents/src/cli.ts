@@ -6,7 +6,6 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { archiveRuns } from "./archive.js";
-import { claudeChildMcpMain } from "./claudeChildMcp.js";
 import { writeFastTrackState } from "./fastTrack.js";
 import { listRuns } from "./list.js";
 import { createRootSession, readRootSession } from "./rootSession.js";
@@ -47,7 +46,6 @@ Usage:
     links the skill into ~/.claude/skills and the CLI to ~/.async-subagents/bin/async-subagents
 
   async-subagents supervisor --input PATH          (internal: child lifecycle entrypoint)
-  async-subagents claude-child-mcp --run-dir DIR   (internal)
 
 watch emits one NDJSON line per lifecycle transition (buckets: terminal|attention|busy),
 reconciles dead runs, inlines each result once, and exits when all runs are terminal-or-attention.
@@ -137,7 +135,6 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (command === "supervisor") return supervisorMain(argv.slice(1));
-  if (command === "claude-child-mcp") return claudeChildMcpMain(argv.slice(1));
 
   const args = parseArgs(argv.slice(1));
   if (args.help === true) {
