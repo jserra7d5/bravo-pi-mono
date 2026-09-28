@@ -41,8 +41,22 @@ export const SESSION_HEADER = 'x-claude-code-session-id';
 export const DEFAULT_UPSTREAM = 'https://api.anthropic.com';
 export const DEFAULT_PORT = 8789;
 
-/** Bounds connect/TLS/wait-for-headers; response streams are deliberately unbounded. */
+/** Bounds connect/TLS/wait-for-headers. A response stream's total length is never bounded. */
 export const DEFAULT_UPSTREAM_HEADER_TIMEOUT_MS = 90 * 1000;
+
+/**
+ * Longest silence tolerated on a response stream once headers arrive.
+ *
+ * Without it a stalled stream holds the client until Claude Code's own 180 s
+ * byte watchdog fires. Claude Code treats our cut the same as its watchdog: it
+ * retries when only thinking has streamed, and otherwise ends the turn on the
+ * partial response. Cutting earlier makes either outcome arrive sooner and
+ * records the stall here with its byte count. It must stay well above normal
+ * gaps, because a false cut after text has streamed ends a healthy turn.
+ * Claude Code counts gaps over 30 s as stalls; the longest seen on a real
+ * stream was 7.7 s.
+ */
+export const DEFAULT_UPSTREAM_STREAM_IDLE_TIMEOUT_MS = 120 * 1000;
 
 /**
  * A 429 whose `retry-after` is at or below this is cheaper to wait out than to
@@ -63,9 +77,8 @@ export const RETRY_AFTER_WAIT_CEILING_MS = 15_000;
  * plausibly still working on that inference, and re-sending would bill a second
  * one.
  *
- * Measured provenance: 34 transport failures over two days on this deployment,
- * 33 of them `ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC` and one `ECONNRESET`, every
- * one at `pre-header`. Each surfaced to Claude Code as a hard 502.
+ * `ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC` is listed here for the pre-wire case;
+ * after wire it is handled by `PEER_REJECTED_REQUEST_CODES`.
  */
 export const RETRYABLE_TRANSPORT_CODES = new Set([
   'ECONNRESET',
@@ -78,7 +91,23 @@ export const RETRYABLE_TRANSPORT_CODES = new Set([
   'ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC',
 ]);
 
-/** Attempts added after the first, on a retryable pre-wire transport failure. */
+/**
+ * Failures that prove upstream never received the whole request, even though
+ * request bytes were written, and are therefore safe to re-send after wire.
+ *
+ * A bad_record_mac alert *from the peer* means upstream's TLS layer refused one
+ * of our records. That record is never delivered, so the HTTP request upstream
+ * holds is incomplete and cannot run. The locally detected variant
+ * (`ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC`) means OUR side refused an
+ * upstream record, i.e. upstream was already answering, so it does not qualify.
+ *
+ * Measured provenance: 14,030 of these between 2026-08-24 and 2026-09-27, about
+ * 3% of generation requests, all after wire and none retried; each reached
+ * Claude Code as a 502. Cause: a gateway corrupting traffic on its Wi-Fi path.
+ */
+export const PEER_REJECTED_REQUEST_CODES = new Set(['ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC']);
+
+/** Attempts added after the first, on a retryable transport failure. */
 export const TRANSPORT_RETRY_LIMIT = 2;
 
 /** Backoff before each transport retry. Short: the connection died instantly. */
@@ -96,12 +125,14 @@ export const TLS_POLICY_VERSION = 'claude-tls-policy-v1';
 /**
  * A pre-wire transport failure re-sends only when the connection itself
  * broke. Anything else — a header timeout above all — is terminal, because the
- * request may already be running upstream.
+ * request may already be running upstream. After wire, only a failure that
+ * proves upstream never held the whole request re-sends.
  */
 export function isRetryableTransportError(error: {
   phase?: string;
   code?: string;
 }): boolean {
+  if (error.phase === 'after-wire') return error.code !== undefined && PEER_REJECTED_REQUEST_CODES.has(error.code);
   if (error.phase !== 'pre-wire' && error.phase !== 'pre-header') return false;
   if (error.code === 'UPSTREAM_HEADERS_TIMEOUT') return false;
   return error.code !== undefined && RETRYABLE_TRANSPORT_CODES.has(error.code);
@@ -186,8 +217,10 @@ export type ProxyOptions = {
   metrics?: boolean;
   /** Raw-row retention window; the daily rollup is kept forever. */
   metricsRetentionDays?: number;
-  /** Maximum connect/TLS/header wait. Streaming after headers is not limited. */
+  /** Maximum connect/TLS/header wait. */
   upstreamHeaderTimeoutMs?: number;
+  /** Longest silence on a response stream after headers. `0` disables. */
+  upstreamStreamIdleTimeoutMs?: number;
   /** Runtime local nonce check. Defaults on; tests may disable explicitly. */
   requireGatewayAuth?: boolean;
   /** Request body cap for report-only or enforcement. */
@@ -242,6 +275,7 @@ function resolveOptions(options: ProxyOptions): Resolved {
     metrics: options.metrics ?? true,
     metricsRetentionDays: options.metricsRetentionDays ?? DEFAULT_RAW_RETENTION_DAYS,
     upstreamHeaderTimeoutMs: options.upstreamHeaderTimeoutMs ?? DEFAULT_UPSTREAM_HEADER_TIMEOUT_MS,
+    upstreamStreamIdleTimeoutMs: options.upstreamStreamIdleTimeoutMs ?? DEFAULT_UPSTREAM_STREAM_IDLE_TIMEOUT_MS,
     requireGatewayAuth: options.requireGatewayAuth ?? true,
     maxRequestBodyBytes: validateMaxRequestBodyBytes(options.maxRequestBodyBytes),
     bodyLimitMode: options.bodyLimitMode ?? 'report-only',
@@ -472,6 +506,9 @@ function decompressorFor(encoding: string | undefined): zlib.Gunzip | zlib.Brotl
   }
 }
 
+/** What the relay saw of the upstream body, read when an attempt ends. */
+type RelayStats = { responseBytes: number; idleMs: number };
+
 /** Cap on the plaintext copy kept for the non-streaming JSON fallback. */
 const JSON_FALLBACK_LIMIT = 1_000_000;
 
@@ -485,10 +522,11 @@ const JSON_FALLBACK_LIMIT = 1_000_000;
 function relayAndObserve(
   res: http.ServerResponse,
   result: UpstreamResult,
-  onComplete: (observation: { usage?: Usage; model?: string; observationFailed: boolean }) => void,
+  idleTimeoutMs: number,
+  onComplete: (observation: { usage?: Usage; model?: string; observationFailed: boolean; stats: RelayStats }) => void,
   onContentStart?: () => void,
-  onStreamError?: (error: Error, contentStarted: boolean) => void,
-  onAbort?: (contentStarted: boolean) => void,
+  onStreamError?: (error: Error, contentStarted: boolean, stats: RelayStats) => void,
+  onAbort?: (contentStarted: boolean, stats: RelayStats) => void,
 ): void {
   const out: Record<string, string | string[]> = {};
   for (const [key, value] of Object.entries(result.headers)) {
@@ -517,6 +555,30 @@ function relayAndObserve(
   let observationFailed = false;
   let upstreamEnded = false;
   let observedUsage: { usage: Usage; model: string | undefined } | undefined;
+  let responseBytes = 0;
+  let lastByteAt = Date.now();
+  const stats = (): RelayStats => ({ responseBytes, idleMs: Date.now() - lastByteAt });
+
+  // Destroying the upstream with an error runs the same path as an upstream
+  // that dropped its socket: `abortDownstream` below cuts the client.
+  let idleTimer: NodeJS.Timeout | undefined;
+  const armIdleTimer = () => {
+    if (idleTimeoutMs <= 0) return;
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      const error = new Error(`upstream stream idle for ${idleTimeoutMs}ms`) as NodeJS.ErrnoException;
+      error.code = 'UPSTREAM_STREAM_IDLE';
+      result.stream.destroy(error);
+      result.request.destroy();
+    }, idleTimeoutMs);
+  };
+  result.stream.on('data', (chunk: Buffer) => {
+    responseBytes += chunk.length;
+    lastByteAt = Date.now();
+    armIdleTimer();
+  });
+  result.stream.on('close', () => clearTimeout(idleTimer));
+  armIdleTimer();
 
   const collectUsage = (): { usage: Usage; model: string | undefined } => {
     if (observedUsage) return observedUsage;
@@ -552,6 +614,7 @@ function relayAndObserve(
       usage: observed?.usage,
       model: observed?.model,
       observationFailed,
+      stats: stats(),
     });
   };
 
@@ -573,7 +636,7 @@ function relayAndObserve(
       if (!observationFailed) collectUsage();
       if (!terminalSettled) {
         terminalSettled = true;
-        onAbort?.(contentStarted);
+        onAbort?.(contentStarted, stats());
       }
       result.request.destroy();
       result.stream.destroy();
@@ -588,7 +651,7 @@ function relayAndObserve(
     if (!observationFailed) collectUsage();
     if (!terminalSettled) {
       terminalSettled = true;
-      onStreamError?.(error, contentStarted);
+      onStreamError?.(error, contentStarted, stats());
     }
     if (!res.writableEnded) res.destroy(error);
   };
@@ -1253,9 +1316,10 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
         } catch (error) {
           const detail = error as ForwardError;
           const wireStarted = detail.evidence?.wireStarted === true;
+          const peerRejected = wireStarted && PEER_REJECTED_REQUEST_CODES.has(detail.code ?? '');
           const retryableByWire =
             isRetryableTransportError(detail) &&
-            (!isGenerationEndpoint(className) || !wireStarted) &&
+            (!isGenerationEndpoint(className) || !wireStarted || peerRejected) &&
             !(opts.strictGenerationRetry && isGenerationEndpoint(className));
           const willRetry =
             transportAttempt < TRANSPORT_RETRY_LIMIT && retryableByWire;
@@ -1280,6 +1344,7 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
             evidence_codes: [
               wireStarted ? 'request_bytes_written' : 'no_application_bytes_written',
               wireStarted ? 'transport_failure_after_wire' : 'transport_failure_pre_wire',
+              ...(peerRejected ? ['peer_rejected_request_record' as const] : []),
               'transport_policy_recorded',
               'socket_reuse_recorded',
               'tls_session_reuse_recorded',
@@ -1315,11 +1380,13 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
               session_hash: sessionHash,
               slot_id: selection.slot,
               account_hash: scopedAttemptHash(opts.stateRoot, 'account', account.email ?? account.slot),
-              reason_code: 'pre_wire_transport_retry',
+              reason_code: peerRejected ? 'peer_rejected_request_retry' : 'pre_wire_transport_retry',
               transport_mode: opts.tlsPolicy,
               transport_policy_version: TLS_POLICY_VERSION,
-              evidence_codes: ['same_slot_retry_recorded', 'no_application_bytes_written', 'attempt_record_durable'],
-              wire_started: false,
+              evidence_codes: peerRejected
+                ? ['same_slot_retry_recorded', 'request_bytes_written', 'peer_rejected_request_record', 'attempt_record_durable']
+                : ['same_slot_retry_recorded', 'no_application_bytes_written', 'attempt_record_durable'],
+              wire_started: wireStarted,
               content_started: false,
               retry_eligible: false,
               rotation_eligible: false,
@@ -1456,7 +1523,7 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
       }
 
       let contentStartRecorded = false;
-      relayAndObserve(res, result, ({ usage, model: streamedModel, observationFailed }) => {
+      relayAndObserve(res, result, opts.upstreamStreamIdleTimeoutMs, ({ usage, model: streamedModel, observationFailed, stats }) => {
         recordAttempt({
           attempt_id: finalAttemptId,
           phase: 'terminal',
@@ -1474,6 +1541,8 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
           handshake_duration_ms: result.evidence.handshakeDurationMs,
           request_bytes_written: result.evidence.requestBytesWritten,
           response_headers_received: true,
+          response_bytes_received: stats.responseBytes,
+          response_idle_ms: stats.idleMs,
           upstream_status: result.status,
           evidence_codes: [
             'selected_slot_credential_used',
@@ -1533,7 +1602,16 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
           retry_eligible: false,
           rotation_eligible: false,
         });
-      }, error => {
+      }, (error, _contentStarted, stats) => {
+        const code = (error as NodeJS.ErrnoException).code;
+        const idle = code === 'UPSTREAM_STREAM_IDLE';
+        opts.log({
+          kind: 'error',
+          method,
+          path: reqPath,
+          slot: selection.slot,
+          message: `stream ${idle ? 'idle timeout' : 'error'} after headers: ${error.message} bytes=${stats.responseBytes} idle=${stats.idleMs}ms`,
+        });
         recordAttempt({
           phase: 'terminal',
           outcome: 'terminal_failure',
@@ -1542,12 +1620,15 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
           session_hash: sessionHash,
           slot_id: selection.slot,
           account_hash: scopedAttemptHash(opts.stateRoot, 'account', account.email ?? account.slot),
-          reason_code: 'stream_error_after_headers',
+          reason_code: idle ? 'upstream_stream_idle' : 'stream_error_after_headers',
           transport_mode: opts.tlsPolicy,
           transport_policy_version: TLS_POLICY_VERSION,
-          error_code: (error as NodeJS.ErrnoException).code,
+          error_code: code,
+          response_bytes_received: stats.responseBytes,
+          response_idle_ms: stats.idleMs,
           evidence_codes: [
             contentStartRecorded ? 'content_started_observed' : 'content_not_started',
+            ...(idle ? ['stream_idle_timeout' as const] : []),
             'terminal_outcome_recorded',
             'attempt_record_durable',
           ],
@@ -1556,7 +1637,14 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
           retry_eligible: false,
           rotation_eligible: false,
         });
-      }, contentStarted => {
+      }, (contentStarted, stats) => {
+        opts.log({
+          kind: 'error',
+          method,
+          path: reqPath,
+          slot: selection.slot,
+          message: `client closed the stream: bytes=${stats.responseBytes} idle=${stats.idleMs}ms`,
+        });
         recordAttempt({
           phase: 'terminal',
           outcome: 'aborted',
@@ -1568,6 +1656,8 @@ export function createProxy(options: ProxyOptions = {}): http.Server {
           reason_code: 'client_aborted',
           transport_mode: opts.tlsPolicy,
           transport_policy_version: TLS_POLICY_VERSION,
+          response_bytes_received: stats.responseBytes,
+          response_idle_ms: stats.idleMs,
           evidence_codes: [
             contentStarted ? 'content_started_observed' : 'content_not_started',
             'terminal_outcome_recorded',

@@ -127,6 +127,8 @@ export const EVIDENCE_CODES = [
   "redaction_applied",
   "body_size_observed",
   "body_limit_enforced",
+  "stream_idle_timeout",
+  "peer_rejected_request_record",
 ] as const;
 export type EvidenceCode = (typeof EVIDENCE_CODES)[number];
 
@@ -153,6 +155,10 @@ export interface AuthBalancerAttemptV1 {
   request_bytes_written?: number;
   response_headers_received?: boolean;
   handshake_duration_ms?: number;
+  /** Response body bytes received from upstream before the attempt ended. */
+  response_bytes_received?: number;
+  /** Milliseconds between the last upstream byte (or headers, if none) and the attempt's end. */
+  response_idle_ms?: number;
   error_code?: string;
   evidence_codes: EvidenceCode[];
   upstream_status?: number;
@@ -272,6 +278,8 @@ export function validateAuthBalancerAttemptV1(value: unknown): AttemptValidation
   pushOptionalNonNegativeInteger(errors, value, "request_bytes_written");
   pushOptionalBoolean(errors, value, "response_headers_received");
   pushOptionalNonNegativeNumber(errors, value, "handshake_duration_ms");
+  pushOptionalNonNegativeInteger(errors, value, "response_bytes_received");
+  pushOptionalNonNegativeInteger(errors, value, "response_idle_ms");
   pushOptionalString(errors, value, "error_code");
   pushOptionalNonNegativeInteger(errors, value, "upstream_status");
   pushRequiredBoolean(errors, value, "wire_started");

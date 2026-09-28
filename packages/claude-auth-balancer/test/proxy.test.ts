@@ -129,6 +129,7 @@ async function boot(options: {
   allowOverage?: boolean;
   metrics?: boolean;
   upstreamHeaderTimeoutMs?: number;
+  upstreamStreamIdleTimeoutMs?: number;
   stateRoot?: string;
   usageSweepIntervalMs?: number;
 }): Promise<{ url: string; stateRoot: string }> {
@@ -141,6 +142,7 @@ async function boot(options: {
     allowOverage: options.allowOverage,
     metrics: options.metrics ?? false,
     upstreamHeaderTimeoutMs: options.upstreamHeaderTimeoutMs,
+    upstreamStreamIdleTimeoutMs: options.upstreamStreamIdleTimeoutMs,
     usageSweepIntervalMs: options.usageSweepIntervalMs,
     requireGatewayAuth: false,
   });
@@ -188,6 +190,94 @@ test('a body stream stays alive beyond the short header timeout once headers arr
   const out = await post(url, { model: 'claude-opus-5', stream: true });
   assert.equal(out.status, 200);
   assert.match(out.text, /data: two/, 'body remained connected after header deadline elapsed');
+});
+
+/** The terminal attempt row for the only request a test made. */
+function terminalAttempt(stateRoot: string): Record<string, string | number | null> {
+  const attempts = new AttemptStore(stateRoot);
+  try {
+    const rows = attempts.query(
+      "SELECT outcome, reason_code, error_code, response_bytes_received, response_idle_ms, evidence_codes_json FROM auth_balancer_attempts WHERE phase = 'terminal' ORDER BY id",
+    ) as Record<string, string | number | null>[];
+    assert.equal(rows.length, 1, `one terminal attempt, got ${JSON.stringify(rows)}`);
+    return rows[0]!;
+  } finally {
+    attempts.close();
+  }
+}
+
+test('a stream that goes silent after headers is cut at the idle limit and recorded', async () => {
+  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
+  const first = 'event: message_start\ndata: {"type":"message_start","message":{"id":"m","model":"claude-opus-5","usage":{}}}\n\n';
+  const up = await upstream((_call, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream', ...OK_HEADERS });
+    res.write(first); // then silence, with the socket held open
+  });
+  const { url, stateRoot } = await boot({ authswapRoot, upstreamUrl: up.url, upstreamStreamIdleTimeoutMs: 200 });
+
+  const started = Date.now();
+  const res = await fetch(`${url}/v1/messages`, { method: 'POST', body: JSON.stringify({ model: 'claude-opus-5', stream: true }) });
+  assert.equal(res.status, 200);
+  await assert.rejects(res.text(), 'the client sees the stream cut, not a clean end');
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 200 && elapsed < 2000, `cut near the idle limit, took ${elapsed}ms`);
+  await new Promise(r => setTimeout(r, 50));
+
+  const row = terminalAttempt(stateRoot);
+  assert.equal(row['outcome'], 'terminal_failure');
+  assert.equal(row['reason_code'], 'upstream_stream_idle');
+  assert.equal(row['error_code'], 'UPSTREAM_STREAM_IDLE');
+  assert.equal(row['response_bytes_received'], Buffer.byteLength(first));
+  assert.ok(Number(row['response_idle_ms']) >= 200, 'idle time covers the silence');
+  assert.match(String(row['evidence_codes_json']), /stream_idle_timeout/);
+});
+
+test('a slow stream that keeps sending stays up past the idle limit', async () => {
+  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
+  const body = sseBody('claude-opus-5', 1000, 10);
+  const up = await upstream((_call, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream', ...OK_HEADERS });
+    let pings = 0;
+    const timer = setInterval(() => {
+      if (++pings <= 6) { res.write('event: ping\ndata: {"type":"ping"}\n\n'); return; }
+      clearInterval(timer);
+      res.end(body);
+    }, 80);
+  });
+  const { url, stateRoot } = await boot({ authswapRoot, upstreamUrl: up.url, upstreamStreamIdleTimeoutMs: 200 });
+
+  const out = await post(url, { model: 'claude-opus-5', stream: true });
+  assert.equal(out.status, 200);
+  assert.match(out.text, /message_stop/, '560 ms of pings under a 200 ms idle limit completes');
+  await new Promise(r => setTimeout(r, 50));
+
+  const row = terminalAttempt(stateRoot);
+  assert.equal(row['outcome'], 'completed');
+  assert.equal(row['response_bytes_received'], Buffer.byteLength(out.text));
+  assert.ok(Number(row['response_idle_ms']) < 200);
+});
+
+test('a client that hangs up mid-stream is recorded with what it had received', async () => {
+  const authswapRoot = fakeAuthswap([{ slot: '1', email: 'a@x.com', token: 'tok-1' }]);
+  const first = 'event: message_start\ndata: {"type":"message_start","message":{"id":"m","usage":{}}}\n\n';
+  const up = await upstream((_call, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream', ...OK_HEADERS });
+    res.write(first);
+  });
+  const { url, stateRoot } = await boot({ authswapRoot, upstreamUrl: up.url, upstreamStreamIdleTimeoutMs: 0 });
+
+  const controller = new AbortController();
+  const res = await fetch(`${url}/v1/messages`, { method: 'POST', body: '{"model":"claude-opus-5"}', signal: controller.signal });
+  const reader = res.body!.getReader();
+  await reader.read();
+  await new Promise(r => setTimeout(r, 150));
+  controller.abort();
+  await new Promise(r => setTimeout(r, 100));
+
+  const row = terminalAttempt(stateRoot);
+  assert.equal(row['reason_code'], 'client_aborted');
+  assert.equal(row['response_bytes_received'], Buffer.byteLength(first));
+  assert.ok(Number(row['response_idle_ms']) >= 150, 'the silence before the hang-up is visible');
 });
 
 test('the client-supplied Authorization is replaced with the selected account token', async () => {
@@ -772,10 +862,9 @@ test('429 rotation attempts are durable without double-counting final usage rows
 // --- generation transport failure ------------------------------------------
 //
 // Faithful seam: the upstream is a real socket that really dies mid-request,
-// so the proxy's own error path, retry, and relay all run for real. Provenance
-// for this behaviour is 34 transport failures over two days on the live
-// deployment — 33 `bad record mac`, one ECONNRESET, every one at `pre-header`
-// — each of which reached Claude Code as a hard 502.
+// so the proxy's own error path, retry, and relay all run for real. The
+// after-wire bad_record_mac retry is proven over real TLS in
+// tls-transport.test.ts.
 
 /** An upstream that kills the connection for the first `n` calls. */
 async function flakyUpstream(n: number, onServe?: (res: http.ServerResponse) => void) {

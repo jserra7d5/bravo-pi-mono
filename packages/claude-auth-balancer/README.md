@@ -161,8 +161,10 @@ session on one account until it genuinely cannot serve.
 9. **Generation retries are conservative.** No client-visible response is not
    proof that Anthropic did no work. A generation failure after application bytes
    may have been written is terminal by default, including header timeout and
-   unknown socket phase. Only a proven pre-wire transport failure may be retried
-   silently on the same slot.
+   unknown socket phase. Only a proven pre-wire transport failure, or a
+   bad_record_mac alert from upstream (its TLS refused one of our request
+   records, so it never held the whole request), may be retried silently on the
+   same slot.
 10. **Opening sessions are fenced.** The first request for one `(session, model)`
    owns a keyed singleflight covering usage probes, selection, refresh, and lease
    publication. Concurrent openers wait and then re-read the published lease
@@ -624,22 +626,30 @@ settings. With a custom balancer state root, the hook process must inherit the s
 
 Connecting, TLS negotiation, and waiting for upstream response headers are
 bounded to 90 seconds by default (`upstreamHeaderTimeoutMs` in the programmatic
-API). Once headers arrive, streaming responses are not subject to that deadline,
-so long generations remain safe. The default inference policy is
+API). Once headers arrive, a stream's total length is unbounded, but silence is
+not: a stream that sends no bytes for 120 seconds (`upstreamStreamIdleTimeoutMs`)
+is cut and recorded as `upstream_stream_idle`. Claude Code's own watchdog would
+otherwise cut it at 180 seconds. On either cut, Claude Code retries when only
+thinking has streamed, and ends the turn on the partial response once text or a
+tool call has streamed. The default inference policy is
 `fresh_tls_quarantine`: one proxy-owned HTTPS agent with connection keep-alive
 disabled and TLS session caching disabled, yielding a fresh TCP connection and
 full TLS handshake for every inference attempt. Two opt-in experiment policies
 exist behind `--tls-policy`: `keepalive_no_tls_cache` and
 `keepalive_with_tls_cache`. Attempt rows record policy, socket reuse,
 TLS-session reuse when visible, connection phase, error code, and request bytes
-written. Usage probes and OAuth refresh keep their own provider-appropriate
+written, plus response bytes received and the silence before the attempt ended
+(`response_bytes_received`, `response_idle_ms`). Usage probes and OAuth refresh keep their own provider-appropriate
 transports; the inference quarantine is not a global network claim.
 
-Observed on this deployment at ~0.16% of requests, on both accounts, at every
-hour, and on freshly started processes as well as long-lived ones — 74 of 76
-failing within 400ms of connect, i.e. on the first records read after the
-handshake. It did not reproduce outside the balancer: 3,400 requests and 0.6 GB
-of TLS reads over the same host and path produced zero MAC failures.
+`bad_record_mac` failures ran at about 3% of generation requests from
+2026-08-24 to 2026-09-27, while the hub reached the internet over Wi-Fi. The
+rate rose with request size (0.4% under 100 KB, 7% over 2 MB). Plain `curl`
+uploads reproduced it at the same rate over Wi-Fi from two different hosts,
+and saw zero failures over wired Ethernet through the same gateway: the
+gateway's Wi-Fi path corrupts bytes, and upstream's TLS rejects the damaged
+record. Keep the hub on a wired link. The after-wire retry above covers the
+residue.
 
 ## Request and attempt evidence
 

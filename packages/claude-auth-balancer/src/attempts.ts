@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS auth_balancer_attempts (
   request_bytes_written INTEGER,
   response_headers_received INTEGER,
   handshake_duration_ms REAL,
+  response_bytes_received INTEGER,
+  response_idle_ms INTEGER,
   error_code TEXT,
   evidence_codes_json TEXT NOT NULL,
   upstream_status INTEGER,
@@ -53,6 +55,9 @@ CREATE INDEX IF NOT EXISTS idx_auth_attempts_session ON auth_balancer_attempts(s
 CREATE INDEX IF NOT EXISTS idx_auth_attempts_slot ON auth_balancer_attempts(slot_id, id);
 CREATE INDEX IF NOT EXISTS idx_auth_attempts_created ON auth_balancer_attempts(created_at);
 `;
+
+/** Columns added after the table first shipped; existing databases gain them in place. */
+const ADDED_COLUMNS = ['response_bytes_received INTEGER', 'response_idle_ms INTEGER'];
 
 export type AttemptInput = Partial<AuthBalancerAttemptV1> & {
   request_id: string;
@@ -120,6 +125,12 @@ export class AttemptStore {
     this.db.exec('PRAGMA synchronous = NORMAL');
     this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec(SCHEMA);
+    const present = new Set(
+      (this.db.prepare('PRAGMA table_info(auth_balancer_attempts)').all() as { name: string }[]).map(c => c.name),
+    );
+    for (const column of ADDED_COLUMNS) {
+      if (!present.has(column.split(' ')[0]!)) this.db.exec(`ALTER TABLE auth_balancer_attempts ADD COLUMN ${column}`);
+    }
   }
 
   close(): void {
@@ -150,14 +161,14 @@ export class AttemptStore {
          public_model_id, endpoint_class, slot_id, account_hash, affinity_generation, phase,
          outcome, reason_code, transport_mode, transport_policy_version, connection_phase,
          socket_reused, tls_session_reused, request_bytes_written, response_headers_received,
-         handshake_duration_ms, error_code, evidence_codes_json, upstream_status, wire_started,
+         handshake_duration_ms, response_bytes_received, response_idle_ms, error_code, evidence_codes_json, upstream_status, wire_started,
          content_started, retry_eligible, rotation_eligible, wait_ms, duration_ms, created_at
        ) VALUES (
          :schemaVersion, :attemptId, :requestId, :parentAttemptId, :provider, :sessionHash,
          :publicModelId, :endpointClass, :slotId, :accountHash, :affinityGeneration, :phase,
          :outcome, :reasonCode, :transportMode, :transportPolicyVersion, :connectionPhase,
          :socketReused, :tlsSessionReused, :requestBytesWritten, :responseHeadersReceived,
-         :handshakeDurationMs, :errorCode, :evidenceCodesJson, :upstreamStatus, :wireStarted,
+         :handshakeDurationMs, :responseBytesReceived, :responseIdleMs, :errorCode, :evidenceCodesJson, :upstreamStatus, :wireStarted,
          :contentStarted, :retryEligible, :rotationEligible, :waitMs, :durationMs, :createdAt
        )`,
     ).run({
@@ -183,6 +194,8 @@ export class AttemptStore {
       requestBytesWritten: attempt.request_bytes_written ?? null,
       responseHeadersReceived: bool(attempt.response_headers_received),
       handshakeDurationMs: attempt.handshake_duration_ms ?? null,
+      responseBytesReceived: attempt.response_bytes_received ?? null,
+      responseIdleMs: attempt.response_idle_ms ?? null,
       errorCode: attempt.error_code ?? null,
       evidenceCodesJson: JSON.stringify(attempt.evidence_codes),
       upstreamStatus: attempt.upstream_status ?? null,

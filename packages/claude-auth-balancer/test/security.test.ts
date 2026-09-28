@@ -1189,7 +1189,7 @@ test('retry-after parses both delta-seconds and an HTTP date', () => {
 
 // --- transport retry eligibility ------------------------------------------
 
-test('only a broken pre-wire connection is eligible for hidden retry', () => {
+test('only a broken pre-wire connection, or a request upstream refused, is eligible for hidden retry', () => {
   assert.equal(isRetryableTransportError({ phase: 'pre-wire', code: 'ECONNRESET' }), true);
   assert.equal(isRetryableTransportError({ phase: 'pre-header', code: 'ECONNRESET' }), true);
   assert.equal(
@@ -1206,6 +1206,21 @@ test('only a broken pre-wire connection is eligible for hidden retry', () => {
     isRetryableTransportError({ phase: 'pre-header', code: undefined }),
     false,
     'an unclassified failure is terminal, not retried on a guess',
+  );
+  assert.equal(
+    isRetryableTransportError({ phase: 'after-wire', code: 'ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC' }),
+    true,
+    'upstream refused a request record, so it never held the whole request',
+  );
+  assert.equal(
+    isRetryableTransportError({ phase: 'after-wire', code: 'ECONNRESET' }),
+    false,
+    'a reset after wire may follow a complete request',
+  );
+  assert.equal(
+    isRetryableTransportError({ phase: 'after-wire', code: 'ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC' }),
+    false,
+    'we refused an upstream record: upstream was already answering',
   );
   assert.equal(
     isRetryableTransportError({ phase: 'streaming', code: 'ECONNRESET' }),
