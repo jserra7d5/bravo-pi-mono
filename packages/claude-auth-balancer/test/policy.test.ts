@@ -993,13 +993,32 @@ test('a warm session already on an expiring account holds, even if another expir
   assert.equal(sel.decision, 'affinity-hold');
 });
 
-test('once the expiring account resets the moved session stays put — no thrash', () => {
+test('once the expiring account resets, the moved session is re-picked once', () => {
   const later = NOW + 9 * H; // slot 4 reset at +8.5h; its window is now projected a week out
   const accounts = [account('2', 0.05, 69, 0.03), account('4', 0.13, 8.5)];
-  const sel = selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '4', nowMs: later, demand: HEAVY });
+  const at = (nowMs: number, affinitySince?: number) =>
+    selectAccount({ accounts, model: 'claude-opus-5', affinitySlot: '4', affinitySince, nowMs, demand: HEAVY });
+  assert.equal(verdict(accounts, '4', HEAVY, later).weeklyExpiring, false);
+  // Landed 2h before the reset — inside the pull cooldown, which does not apply.
+  const moved = at(later, NOW + 6.5 * H);
+  assert.equal(moved.slot, '2');
+  assert.equal(moved.decision, 'affinity-broken');
+  assert.match(moved.reason, /weekly on sticky slot 4 reset since the session landed; re-picked to 2/);
+  // Landed after the reset: a normal hold.
+  assert.equal(at(later, NOW + 8.75 * H).decision, 'affinity-hold');
+  // More than one cache TTL past the reset: the re-pick chance is gone, no thrash later in the week.
+  assert.equal(at(NOW + 10 * H, NOW + 6.5 * H).slot, '4');
+});
+
+test('a rolled-over account that still ranks first keeps its session', () => {
+  const later = NOW + 9 * H;
+  const accounts = [account('2', 0.96, 150, 0.03), account('4', 0.13, 8.5)];
+  const sel = selectAccount({
+    accounts, model: 'claude-opus-5', affinitySlot: '4', affinitySince: NOW, nowMs: later, demand: HEAVY,
+  });
   assert.equal(sel.slot, '4');
   assert.equal(sel.decision, 'affinity-hold');
-  assert.equal(verdict(accounts, '4', HEAVY, later).weeklyExpiring, false);
+  assert.match(sel.reason, /re-picked and it still ranks first/);
 });
 
 test('an expiring account above the ceiling or with nothing left does not pull a warm session', () => {

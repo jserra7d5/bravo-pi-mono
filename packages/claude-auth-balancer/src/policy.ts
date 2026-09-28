@@ -50,7 +50,7 @@
 // throughput at one window and sends the whole herd across together when it
 // runs dry. Quota actually at risk of expiring is the surplus term's job, and
 // it outranks both. Warm sessions are untouched: only the expiring pull moves
-// them.
+// them, and a weekly rollover on the held account re-picks them once.
 //
 // Time is measured in expected DEMAND, not on the clock (see ./demand.ts and
 // docs/specs/claude-balancer-demand-rate). Thirty hours of Friday-into-Saturday
@@ -964,6 +964,7 @@ export function selectAccount(input: SelectInput): Selection {
     input.affinitySince !== undefined && input.nowMs - input.affinitySince < DEFAULT_PULL_COOLDOWN_MS;
 
   let pulled = false;
+  let rolledOver = false;
   if (input.affinitySlot) {
     const held = bySlot.get(input.affinitySlot);
     if (held && held.headroom > (fable ? floor : 0) && !held.requiresOverage) {
@@ -971,7 +972,23 @@ export function selectAccount(input: SelectInput): Selection {
       // quota is about to expire unspent. A session already on an expiring
       // account stays — moving it to an even earlier deadline gains nothing.
       pulled = !held.weeklyExpiring && expiring.length > 0 && !coolingDown;
-      if (!pulled && (!fable || !held.evacuating)) {
+      // The held account's weekly reset since the session landed: the week it
+      // was placed into is gone, and the new one has the latest deadline in the
+      // fleet. The expiring pull makes this routine, handing an account a herd
+      // just before its reset (observed 2026-09-28: one heavy session held on 5x
+      // slot 7 all day into its new week while two 20x accounts sat idle). The
+      // session is re-picked once, within one cache TTL of the reset, and the
+      // cooldown does not apply: a rollover happens once a week.
+      const weekStart = held.projectedWeeklyResetAt === undefined
+        ? undefined
+        : held.projectedWeeklyResetAt - 7 * 86_400_000;
+      rolledOver =
+        !pulled &&
+        input.affinitySince !== undefined &&
+        weekStart !== undefined &&
+        input.affinitySince < weekStart &&
+        input.nowMs - weekStart < DEFAULT_EVACUATION_HORIZON_MS;
+      if (!pulled && !rolledOver && (!fable || !held.evacuating)) {
         return {
           slot: held.slot,
           decision: 'affinity-hold',
@@ -1019,6 +1036,14 @@ export function selectAccount(input: SelectInput): Selection {
       : pick && unbucketed && pick.slot !== unbucketed.slot
         ? `; projected 5h bucket ${pick.fiveHourBucket} on ${pick.slot} beat bucket ${unbucketed.fiveHourBucket} on ${unbucketed.slot}`
         : '';
+  if (pick && rolledOver && pick.slot === input.affinitySlot) {
+    return {
+      slot: pick.slot,
+      decision: 'affinity-hold',
+      reason: `weekly on ${pick.slot} reset since the session landed; re-picked and it still ranks first`,
+      breakdown,
+    };
+  }
   if (pick) {
     const broke = Boolean(input.affinitySlot && input.affinitySlot !== pick.slot);
     const evacuated = fable && broke && bySlot.get(input.affinitySlot!)?.evacuating === true;
@@ -1031,6 +1056,8 @@ export function selectAccount(input: SelectInput): Selection {
       reason: (broke
         ? expiringNote
           ? `${expiringNote}; moved sticky slot ${input.affinitySlot} there (one cache re-create)`
+          : rolledOver
+            ? `weekly on sticky slot ${input.affinitySlot} reset since the session landed; re-picked to ${pick.slot} (one cache re-create)`
           : evacuated
             ? `sticky Fable slot ${input.affinitySlot} at ${((bySlot.get(input.affinitySlot!)?.peakUtilization ?? 0) * 100).toFixed(1)}%; evacuated to ${pick.slot}`
             : `sticky slot ${input.affinitySlot} could not serve; moved to ${pick.slot} (one cache re-create)`

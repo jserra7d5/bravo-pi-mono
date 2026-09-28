@@ -109,7 +109,14 @@ session on one account until it genuinely cannot serve.
    over the last hour must fit in the target's remaining `5h` window for the
    next hour), and a lease at least 6 hours on its current slot. The cooldown
    stops a session bouncing between accounts that take turns expiring. A
-   session already on an expiring account holds. Without a demand model
+   session already on an expiring account holds.
+
+   The pull lands sessions on an account just before its weekly reset, and
+   the new week there has the latest deadline in the fleet. So when the held
+   account's weekly window rolls over after the lease landed, the session's
+   first request within one hour (the cache TTL) of the reset is ranked like a
+   fresh pick. It moves when another account ranks first and otherwise holds;
+   the pull cooldown does not apply. Without a demand model
    (under a week of history, or no metrics) nothing is expiring.
 6. **In a weekly window's terminal stretch the ceiling is lifted.** The 95%
    ceiling keeps fresh sessions off an account that is nearly spent, because
