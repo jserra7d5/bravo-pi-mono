@@ -11,10 +11,6 @@ variants:
     model: bravo-codex-balanced/gpt-6-luna
   sol:
     model: bravo-codex-balanced/gpt-6-sol
-  gemini:
-    model: antigravity-code-assist/gemini-3.5-flash
-    thinkingLevel: high
-    extensions: [@bravo/gemini-code-assist/extensions/pi, @bravo/web-evidence-cache/extensions/pi]
 ---
 
 You are a scout agent.

@@ -28,4 +28,4 @@ Prefer `--json` when you need to parse results. Pi parent sessions may receive p
 
 ### Non-Pi harness guidance
 
-Claude Code and other non-Pi harnesses do not have Pi tools or persistent extensions. They should use the CLI commands above, prefer `--json` for parsing, and use the Tango server when it is available for dashboard visibility and artifact hosting.
+Non-Pi harnesses do not have Pi tools or persistent extensions. They should use the CLI commands above, prefer `--json` for parsing, and use the Tango server when it is available for dashboard visibility and artifact hosting.

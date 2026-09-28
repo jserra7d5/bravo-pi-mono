@@ -1,6 +1,6 @@
 ---
 name: pi-async-subagents
-description: Launch and orchestrate named, role-scoped Pi or Claude agents through the durable async-subagents runtime. Use when Claude should delegate repository investigation, planning/spec authoring, bounded implementation, merge-risk review, or broad mixed-mode work to the existing scout, planner, worker, reviewer, or generalist templates; when parallel independent lanes help; or when a prior child should be resumed/continued with its recorded session. Prefer this over raw headless harness commands for work matching a named role.
+description: Launch and orchestrate named, role-scoped Pi agents (GPT-6 Sol and Luna) through the durable async-subagents runtime. Use when Claude should delegate retrieval, bounded planning, bounded implementation, or merge-risk review and audits to the scout, planner, worker, or reviewer templates; when parallel independent lanes help; or when a prior child should be resumed/continued with its recorded session. Prefer this over raw headless harness commands for work matching a named role.
 ---
 
 # Pi Async Subagents
@@ -19,7 +19,7 @@ missing, the install step was skipped — see `packages/async-subagents/README.m
 shell variable for the path: each command runs in a fresh shell, so a binding made in one call is
 gone by the next.
 
-**Roles — pick the narrowest.** `scout` retrieval/source summaries (pinned to Luna deliberately: retrieval is not a judgment task, so a large read surface is never a reason to escalate); `planner` designs/specs/sequencing; `worker` bounded implementation; `reviewer` merge-risk review against an accepted contract; `generalist` only when nothing narrower fits. A child is never another orchestrator. `~/.async-subagents/bin/async-subagents agents --cwd "$PWD"` lists the live catalog.
+**Roles — pick the narrowest.** `scout` retrieval/source summaries (pinned to Luna deliberately: retrieval is not a judgment task, so a large read surface is never a reason to escalate); `planner` sequencing and validation plans for an accepted design; `worker` bounded implementation; `reviewer` merge-risk review and audits against an accepted contract. Open-ended or lead-shaped work goes to an Opus subagent, not a Pi role. A child is never another orchestrator. `~/.async-subagents/bin/async-subagents agents --cwd "$PWD"` lists the live catalog.
 
 **`reviewer --variant astra`** runs GPT-6 Astra at `xhigh`. It is expensive: use it only when Joe or the developer explicitly asks for an Astra pass. It is never a default and never an escalation you choose yourself.
 
@@ -27,7 +27,7 @@ gone by the next.
 
 On Joe's fleet, every role runs on every machine that runs agents (the desktop, the thinkpad, the Mac).
 
-- **What leases:** every built-in role and variant except `gemini` is a Codex model
+- **What leases:** every built-in role and variant is a Codex model
   (`bravo-codex-balanced/*`). It leases its access token from the one machine that holds the
   accounts: the `codex-hub` in `~/fleet/nodes.txt`.
 - **How it reaches the hub:** off the hub, the shell exports two variables, and the child inherits both:
@@ -44,14 +44,6 @@ When a Codex role fails straight away:
 
 Never copy account files between machines: refresh tokens rotate, and two machines refreshing one
 account revoke each other.
-
-**Claude-harness roles.** The runtime runs `harness: claude` templates from the project (`.agents/`) or user layer.
-- Set `claude.authHome: operator-home`, so the child uses this machine's own Claude login, which on
-  fleet nodes goes through the auth hub.
-- Avoid the default, `seeded-run-home`. It copies `~/.claude/.credentials.json` into the run: where
-  that file is absent, `start` fails with `CLAUDE_AUTH_CREDENTIALS_MISSING`, and where it exists,
-  the child gets a copy of a rotating OAuth credential.
-- With `mode: oneshot`, the result body is the raw stream-json transcript, and the answer is in its `"type":"result"` event.
 
 ## Brief and write scope
 

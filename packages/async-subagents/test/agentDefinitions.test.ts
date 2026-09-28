@@ -66,7 +66,7 @@ test("built-in templates are discoverable and declare a Pi harness with a model"
   // themselves are covered below against purpose-built fixtures.
   const w = workspace();
   const definitions = discoverAgentDefinitions({ cwd: w.root, userHome: w.userHome, env: { ...process.env, ASYNC_SUBAGENTS_HOME: w.userHome } });
-  for (const name of ["scout", "planner", "worker", "reviewer", "generalist"]) {
+  for (const name of ["scout", "planner", "worker", "reviewer"]) {
     const definition = definitions.get(name);
     assert.ok(definition, `missing built-in ${name}`);
     assert.equal(definition.source, "builtin", name);

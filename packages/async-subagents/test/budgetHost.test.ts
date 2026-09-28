@@ -20,7 +20,7 @@ async function bounded<T>(promise: Promise<T>, ms = 8_000): Promise<T> { let tim
 test("real Pi loader/session command activates task tools, persists state, and injects prompt", async () => {
   const root = mkdtempSync(join(tmpdir(), "budget-host-")), oldHome = process.env.HOME, oldPath = process.env.PATH; process.env.HOME = root;
   const bin = join(root, "bin"), calls = join(root, "pi-calls.log"); mkdirSync(bin);
-  writeFileSync(join(bin, "pi"), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\ncase " $* " in\n  *" --list-models "*) printf 'provider model context max-out thinking images\\nbravo-codex-balanced gpt-6-luna 128k 32k yes no\\nbravo-codex-balanced gpt-6-sol 128k 32k yes no\\nantigravity-code-assist gemini-3.5-flash 128k 32k yes no\\n' ;;\n  *) printf 'real budget child completed\\n' ;;\nesac\n`); chmodSync(join(bin, "pi"), 0o755); process.env.PATH = `${bin}:${oldPath ?? ""}`;
+  writeFileSync(join(bin, "pi"), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\ncase " $* " in\n  *" --list-models "*) printf 'provider model context max-out thinking images\\nbravo-codex-balanced gpt-6-luna 128k 32k yes no\\nbravo-codex-balanced gpt-6-sol 128k 32k yes no\\nbravo-codex-balanced gpt-6-astra 128k 32k yes no\\n' ;;\n  *) printf 'real budget child completed\\n' ;;\nesac\n`); chmodSync(join(bin, "pi"), 0o755); process.env.PATH = `${bin}:${oldPath ?? ""}`;
   mkdirSync(join(root, ".agents"));
   writeFileSync(join(root, ".agents", "terra.md"), `---\ndescription: terra route fixture\nmodel: custom/base\nvariants:\n  luna:\n    model: google/gemini-terra\n---\nfixture\n`);
   writeFileSync(join(root, ".agents", "custom.md"), `---\ndescription: custom route fixture\nmodel: custom/base\nvariants:\n  luna:\n    model: custom/private\n---\nfixture\n`);
@@ -73,7 +73,7 @@ test("real Pi loader/session command activates task tools, persists state, and i
     let rejectedContext: Context | undefined;
     const runStore = new RunStore({ cwd: root }), beforeRuns = runStore.readRunIndex().length;
     faux.setResponses([
-      fauxAssistantMessage(fauxToolCall("subagent_start", { agent: "worker", variant: "gemini", thinkingLevel: "high", task: "must reject" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("subagent_start", { agent: "reviewer", variant: "astra", thinkingLevel: "high", task: "must reject" }), { stopReason: "toolUse" }),
       (context) => { rejectedContext = context; return fauxAssistantMessage("rejection observed"); },
     ]);
     await bounded(session.prompt("attempt forbidden route"));
@@ -113,7 +113,7 @@ test("real Pi loader/session command activates task tools, persists state, and i
       ["sol high", { variant: "sol", thinkingLevel: "high" }, "BUDGET_SWARM_THINKING_NOT_ALLOWED"],
       ["sol xhigh", { variant: "sol", thinkingLevel: "xhigh" }, "BUDGET_SWARM_THINKING_NOT_ALLOWED"],
       ["sol max", { variant: "sol", thinkingLevel: "max" }, "BUDGET_SWARM_THINKING_NOT_ALLOWED"],
-      ["gemini", { variant: "gemini", thinkingLevel: "high" }, "BUDGET_SWARM_VARIANT_REQUIRED"],
+      ["astra", { agent: "reviewer", variant: "astra", thinkingLevel: "high" }, "BUDGET_SWARM_VARIANT_REQUIRED"],
       ["terra", { agent: "terra", variant: "luna", thinkingLevel: "high" }, "BUDGET_SWARM_MODEL_NOT_ALLOWED"],
       ["noncanonical", { agent: "noncanonical", variant: "luna", thinkingLevel: "high" }, "BUDGET_SWARM_MODEL_NOT_ALLOWED"],
       ["custom", { agent: "custom", variant: "luna", thinkingLevel: "high" }, "BUDGET_SWARM_MODEL_NOT_ALLOWED"],
@@ -167,7 +167,7 @@ test("real Pi loader/session command activates task tools, persists state, and i
     assert.equal(statuses.at(-1)?.[1], BUDGET_BADGE);
 
     await bounded(session.prompt("/budget-auto-swarm off"));
-    for (const route of [{}, { variant: "gemini", thinkingLevel: "high" }]) {
+    for (const route of [{}, { agent: "reviewer", variant: "astra", thinkingLevel: "high" }]) {
       const response: any = await bounded<any>(invokeStart(route));
       assert.equal(response.isError, undefined, JSON.stringify(response));
       await waitResult(response.details.runId as string);

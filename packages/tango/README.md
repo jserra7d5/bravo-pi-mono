@@ -5,7 +5,7 @@
 It provides:
 
 - a `tango` CLI for starting, inspecting, messaging, and stopping agents;
-- harness adapters for Pi, Claude Code, Gemini CLI, and generic shell commands;
+- harness adapters for Pi, Gemini CLI, and generic shell commands;
 - reusable agent roles and shared prompt includes;
 - a Pi extension wrapper that exposes the CLI as Pi tools/commands.
 
@@ -23,37 +23,7 @@ tango watch --json
 tango doctor events
 ```
 
-## Claude Code and Gemini CLI harnesses
-
-Claude roles use `harness: claude` and launch Claude Code under Tango's run directory and tmux conventions.
-
-Example:
-
-```bash
-tango start cc-scout --role claude-scout --model haiku --effort low "Summarize this repo"
-tango result cc-scout
-```
-
-Supported controls:
-
-- `--model` or role `model` maps to `claude --model`.
-- `--effort` or role `effort` maps to `claude --effort`.
-- `mode: oneshot` uses `claude --print --verbose --output-format stream-json` and writes `result.md`.
-- `mode: interactive` runs Claude in Tango's tmux session.
-
-Claude harness behavior:
-
-- uses `--system-prompt-file <runDir>/system.md`;
-- keeps Claude runtime state isolated with `HOME=<runDir>/home`;
-- sets `TANGO_REAL_HOME=<operator-home>` and `TANGO_AGENT_HOME=<runDir>/home`;
-- routes Claude Bash tool commands through `CLAUDE_CODE_SHELL_PREFIX=<runDir>/bin/tango-bash`, so Bash commands see the operator's real `HOME` for Git/SSH/GitHub CLI/npm config;
-- preserves `TANGO_HOME` for recursive Tango CLI calls;
-- seeds minimal Claude auth/config;
-- disables ambient MCP servers with `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`;
-- disables Claude-native subagents with `--disallowed-tools Task` so delegation stays observable through Tango;
-- ignores role `tools` because Pi tools and Claude Code tools are not portable;
-- rejects role `extensions` because Pi extensions are not available in Claude Code;
-- copies role `skills` directories into `<runDir>/home/.claude/skills/`.
+## Gemini CLI harness
 
 Gemini roles use `harness: gemini` and launch Gemini CLI under Tango's run directory and tmux conventions. By default, Gemini starts in `interactive` mode rather than one-shot/headless mode.
 
@@ -85,7 +55,7 @@ Report changes are written to a durable event log at `$TANGO_HOME/events.jsonl`.
 
 Pi-harness Tango children also write best-effort metrics snapshots to `<runDir>/metrics.json` for tool counts, token/context usage, and runtime-oriented TUI summaries. `tango ps --json` and `tango children --json` include these snapshots when available; `tango metrics update --run-dir <dir> --payload <json>` is the internal update surface used by the Pi metrics extension.
 
-Recursive Claude roles receive CLI orchestration instructions and should delegate with `tango ... --json` commands. Loom integration remains outside Tango: Loom can pass context through environment variables and task prompts when it launches Tango agents.
+Loom integration remains outside Tango: Loom can pass context through environment variables and task prompts when it launches Tango agents.
 
 ## Server/dashboard rollout checks
 
@@ -101,4 +71,4 @@ Tango's CLI is designed to remain usable without the optional dashboard server r
   - `npm run check --workspace @bravo/tango`
   - `npm run build --workspace @bravo/tango`
 
-See `../../docs/specs/tango-v1/design.md`, `../../docs/specs/tango-events/design.md`, `../../docs/specs/tango-home-tooling/design.md`, `../../docs/specs/tango-claude-code-runtime/design.md`, and `../../docs/specs/tango-gemini-cli-runtime/design.md` for design details. See `docs/gemini-harness.md` for Gemini harness usage.
+See `../../docs/specs/tango-v1/design.md`, `../../docs/specs/tango-events/design.md`, `../../docs/specs/tango-home-tooling/design.md`, and `../../docs/specs/tango-gemini-cli-runtime/design.md` for design details. See `docs/gemini-harness.md` for Gemini harness usage.

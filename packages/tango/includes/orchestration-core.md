@@ -52,10 +52,6 @@ Tango can run an optional local server:
 
 Status transitions emit Tango events. Attention visibility is currently status-derived in the dashboard; durable attention records and inbox projection are planned. Blocked, error, and `needs` items typically remain visible until resolved or dismissed.
 
-### Claude Code harness limitations
-
-The Claude Code harness does not support Pi persistent extensions. Claude-harness agents must use the Tango CLI (and the server when available) for orchestration, messaging, and status. They cannot rely on Pi tools or custom message renderers.
-
 Delegation guidelines:
 
 1. Give each child a specific name, role, scope, and deliverable.

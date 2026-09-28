@@ -120,16 +120,14 @@ model: openai-codex/gpt-5.4-mini
 thinkingLevel: medium
 tools: [read, grep, find, ls, bash]
 variants:
-  gemini:
-    model: antigravity-code-assist/gemini-3.5-flash
-    thinkingLevel: high
-    extensions: [/absolute/path/to/gemini-code-assist/extensions/pi/index.ts]
+  luna:
+    model: bravo-codex-balanced/gpt-6-luna
 ---
 
 You are a focused reconnaissance agent.
 ```
 
-Every built-in role has pure model variants `luna` (`bravo-codex-balanced/gpt-6-luna`) and `sol` (`bravo-codex-balanced/gpt-6-sol`) in addition to its existing `gemini` variant. Use the default by omitting `variant`; select a variant with `subagent_start({ agent: "scout", variant: "luna", thinkingLevel: "high", task: "..." })`.
+Every built-in role has pure model variants `luna` (`bravo-codex-balanced/gpt-6-luna`) and `sol` (`bravo-codex-balanced/gpt-6-sol`); budget auto swarm requires one of them on every launch. `reviewer` also has `astra` (GPT-6 Astra at `xhigh`, only on explicit request). Use the default by omitting `variant`; select one with `subagent_start({ agent: "worker", variant: "luna", task: "..." })`.
 
 Provider-backed variants must include the provider extension that registers the model because child Pi launches are intentionally isolated with `--no-extensions`. Point `extensions` at a loadable Pi extension module file, such as `extensions/pi/index.ts` or `dist/extensions/pi/index.js`; a package extension directory may not be enough when async-subagents passes it through Pi's `-e` CLI flag.
 
@@ -436,8 +434,7 @@ Redirect stderr with `2>/dev/null` rather than `2>&1` when parsing: node prepend
 
 ## Agent templates
 
-Five built-in role templates ship in `agents/`: `scout`, `planner`, `worker`, `reviewer`,
-`generalist`. Discovery layers three sources, later ones shadowing earlier by name:
+Four built-in role templates ship in `agents/`: `scout`, `planner`, `worker`, `reviewer`. Discovery layers three sources, later ones shadowing earlier by name:
 
 | Source | Location |
 | --- | --- |
