@@ -1,6 +1,6 @@
 ---
 description: Evidence-driven merge-risk review, contract conformance, test fidelity, and release readiness.
-model: bravo-codex-balanced/gpt-6-sol
+model: bravo-codex-balanced/gpt-6.1-sol
 thinkingLevel: medium
 tools: [read, grep, find, ls, bash, edit, write]
 mode: oneshot
@@ -9,7 +9,7 @@ variants:
   luna:
     model: bravo-codex-balanced/gpt-6-luna
   sol:
-    model: bravo-codex-balanced/gpt-6-sol
+    model: bravo-codex-balanced/gpt-6.1-sol
   astra:
     model: bravo-codex-balanced/gpt-6-astra
     thinkingLevel: xhigh

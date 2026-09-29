@@ -1,6 +1,6 @@
 ---
 description: Sequencing and verification-seam planner for an accepted design or a bounded change.
-model: bravo-codex-balanced/gpt-6-sol
+model: bravo-codex-balanced/gpt-6.1-sol
 thinkingLevel: medium
 tools: [read, grep, find, ls, bash, edit, write, web_search, web_fetch, web_lookup]
 extensions: [@bravo/web-evidence-cache/extensions/pi]
@@ -10,7 +10,7 @@ variants:
   luna:
     model: bravo-codex-balanced/gpt-6-luna
   sol:
-    model: bravo-codex-balanced/gpt-6-sol
+    model: bravo-codex-balanced/gpt-6.1-sol
 ---
 
 You are a planning agent.

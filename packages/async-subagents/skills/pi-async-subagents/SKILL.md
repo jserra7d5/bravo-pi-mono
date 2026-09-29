@@ -1,6 +1,6 @@
 ---
 name: pi-async-subagents
-description: Launch and orchestrate named, role-scoped Pi agents (GPT-6 Sol and Luna) through the durable async-subagents runtime. Use when Claude should delegate retrieval, bounded planning, bounded implementation, or merge-risk review and audits to the scout, planner, worker, or reviewer templates; when parallel independent lanes help; or when a prior child should be resumed/continued with its recorded session. Prefer this over raw headless harness commands for work matching a named role.
+description: Launch and orchestrate named, role-scoped Pi agents (GPT-6.1 Sol and GPT-6 Luna) through the durable async-subagents runtime. Use when Claude should delegate retrieval, bounded planning, bounded implementation, or merge-risk review and audits to the scout, planner, worker, or reviewer templates; when parallel independent lanes help; or when a prior child should be resumed/continued with its recorded session. Prefer this over raw headless harness commands for work matching a named role.
 ---
 
 # Pi Async Subagents
@@ -114,7 +114,7 @@ One NDJSON line per lifecycle transition; exits when all runs are terminal-or-at
 
 ## Verification rules
 
-Most lanes use GPT-6 Sol or Luna. Require concrete completion criteria and validation evidence; verify reported files and test results before accepting a run. Tighten an unclear brief before increasing thinking effort. If the same gate fails twice, stop and reassess the approach. Older GPT-5.6 Sol evaluation claims do not establish GPT-6 behavior.
+Most lanes use GPT-6.1 Sol or GPT-6 Luna. Require concrete completion criteria and validation evidence; verify reported files and test results before accepting a run. Tighten an unclear brief before increasing thinking effort. If the same gate fails twice, stop and reassess the approach. Older GPT-5.6 Sol evaluation claims do not establish GPT-6 behavior.
 
 ## Levers
 

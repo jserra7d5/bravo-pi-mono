@@ -1,7 +1,7 @@
 import { SubagentError } from "./errors.js";
 
 export const BUDGET_LUNA_MODEL = "bravo-codex-balanced/gpt-6-luna";
-export const BUDGET_SOL_MODEL = "bravo-codex-balanced/gpt-6-sol";
+export const BUDGET_SOL_MODEL = "bravo-codex-balanced/gpt-6.1-sol";
 export const BUDGET_ALLOWED = {
   luna: ["high", "xhigh", "max"],
   sol: ["low", "medium"],

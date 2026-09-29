@@ -121,7 +121,7 @@ Claude reads unprompted — your global `~/.claude/CLAUDE.md`. Append this:
 ## Picking models for workflows and subagents
 
 Delegate implementation, planning, diagnosis, repository investigation, and code-level
-review to a GPT-6 Sol lane via the `/pi-async-subagents` skill — provided the task is
+review to a GPT-6.1 Sol lane via the `/pi-async-subagents` skill — provided the task is
 verifiable and well-briefed. Prefer its named `scout`/`planner`/`worker`/`reviewer`/
 `generalist` templates over a hand-authored raw Pi prompt; use the narrowest that fits.
 

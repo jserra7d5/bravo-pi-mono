@@ -10,7 +10,7 @@ variants:
   luna:
     model: bravo-codex-balanced/gpt-6-luna
   sol:
-    model: bravo-codex-balanced/gpt-6-sol
+    model: bravo-codex-balanced/gpt-6.1-sol
 ---
 
 You are a scout agent.

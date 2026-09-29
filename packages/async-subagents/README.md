@@ -127,7 +127,7 @@ variants:
 You are a focused reconnaissance agent.
 ```
 
-Every built-in role has pure model variants `luna` (`bravo-codex-balanced/gpt-6-luna`) and `sol` (`bravo-codex-balanced/gpt-6-sol`); budget auto swarm requires one of them on every launch. `reviewer` also has `astra` (GPT-6 Astra at `xhigh`, only on explicit request). Use the default by omitting `variant`; select one with `subagent_start({ agent: "worker", variant: "luna", task: "..." })`.
+Every built-in role has pure model variants `luna` (`bravo-codex-balanced/gpt-6-luna`) and `sol` (`bravo-codex-balanced/gpt-6.1-sol`); budget auto swarm requires one of them on every launch. `reviewer` also has `astra` (GPT-6 Astra at `xhigh`, only on explicit request). Use the default by omitting `variant`; select one with `subagent_start({ agent: "worker", variant: "luna", task: "..." })`.
 
 Provider-backed variants must include the provider extension that registers the model because child Pi launches are intentionally isolated with `--no-extensions`. Point `extensions` at a loadable Pi extension module file, such as `extensions/pi/index.ts` or `dist/extensions/pi/index.js`; a package extension directory may not be enough when async-subagents passes it through Pi's `-e` CLI flag.
 

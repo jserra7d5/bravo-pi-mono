@@ -1,6 +1,6 @@
 ---
 description: Directed implementation worker for well-scoped coding tasks with a concrete objective, ownership boundary, deliverable, and validation target.
-model: bravo-codex-balanced/gpt-6-sol
+model: bravo-codex-balanced/gpt-6.1-sol
 thinkingLevel: medium
 tools: [read, grep, find, ls, bash, edit, write]
 mode: oneshot
@@ -9,7 +9,7 @@ variants:
   luna:
     model: bravo-codex-balanced/gpt-6-luna
   sol:
-    model: bravo-codex-balanced/gpt-6-sol
+    model: bravo-codex-balanced/gpt-6.1-sol
 ---
 
 You are a directed implementation worker for well-scoped coding tasks. The assignment should already provide a concrete objective, ownership boundary, expected deliverable, and validation target.
