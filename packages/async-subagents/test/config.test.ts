@@ -11,6 +11,13 @@ import { summarizeStartResult } from "../extensions/pi/renderers.js";
 import { ingestLiveUsage } from "@bravo/codex-auth-balancer";
 import { serveLeaseService } from "@bravo/codex-auth-balancer/lease-service";
 
+// These launches exercise the in-process balancer path. A fleet client shell exports
+// CODEX_AUTH_BALANCER_URL (and its key command), which switches start.ts to URL mode
+// and sends every lease op to the hub, so clear both for the whole file. The URL-mode
+// test below sets its own values.
+delete process.env.CODEX_AUTH_BALANCER_URL;
+delete process.env.CODEX_AUTH_BALANCER_KEY_COMMAND;
+
 // Resolve the codex-auth-balancer provider extension the same robust way start.ts
 // does, so reachability assertions compare against the real on-disk module path.
 function expectedBalancedProviderExtensionPath(): string {
