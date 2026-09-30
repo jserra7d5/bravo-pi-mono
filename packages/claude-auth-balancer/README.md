@@ -59,6 +59,12 @@ session on one account until it genuinely cannot serve.
    stable slot order. The `5h` and `7d` claims remain hard gates. The ceiling
    in (3) filters this pool first and the terms in (4) and (5) rank ahead of
    pacing.
+   Operator decision 2026-09-30: fresh picks also **keep one full `5h` window
+   of general weekly quota**: `capacity.fiveHour * (demand?.k ?? DEFAULT_K)`
+   W20. Compare it with `claimHeadroom(7d) * capacity.weekly` after reserves,
+   so the floor stacks on top of the configured weekly reserve. It applies
+   only more than 36 clock hours before an observed `7d` reset, and only
+   without surplus. No observed reset or unopened window means no floor.
 3. **95% blocks fresh picks for every model; only Fable evacuates a warm one.**
    An account at or above 95% raw utilization on a claim the requested model is
    gated on takes no new sessions. Existing non-Fable `(session, model)` leases
@@ -67,6 +73,11 @@ session on one account until it genuinely cannot serve.
    auth/token state, because the cache is worth more than the sliver of quota
    left elsewhere. Fable additionally preserves spendable-headroom ranking and
    proactive evacuation of warm sessions at 95%, including its `7d_oi` gate.
+   Fresh picks prefer accounts both below the ceiling and above their weekly
+   floor. If none qualify, fall back to below-ceiling accounts, then all
+   serviceable accounts, using the same ranking. The floor never changes warm
+   affinity or Fable evacuation; compaction, lease expiry and weekly rollover
+   already re-pick fresh. `status` marks held accounts `FLOOR`.
    The ceiling is dropped entirely when every serviceable account is above it:
    at that point moving buys no quota, so ranking decides and the sticky slot
    keeps its cache. A window that refills within the cache TTL never triggers
@@ -124,9 +135,9 @@ session on one account until it genuinely cannot serve.
    weekly window that inverts: the remainder is destroyed at the reset, so one
    re-create per session is cheap against it. A `7d` or `7d_oi` claim at or
    above 95% does not raise the ceiling when the account has surplus, or when
-   its reset is within **8 hours of demand** (`DEFAULT_WEEKLY_TERMINAL_DEMAND_HOURS`:
-   expected demand to the reset over the average hourly demand, so a quiet
-   night counts for little; clock hours without a demand model). The account
+   its reset is within **36 clock hours** (`DEFAULT_WEEKLY_DRAIN_WINDOW_MS`,
+   operator decision 2026-09-30). The same boundary lifts the weekly floor.
+   Surplus lifts both even outside that window. The account
    takes fresh picks until its headroom reaches zero, then stops being
    serviceable and sessions move on by the ordinary rule. `status` marks it
    `BURNDOWN`. The `5h` claim is excluded: it refills on its own and keeps
@@ -219,7 +230,7 @@ function, used by the router and by the statusline badge so they cannot drift:
 | claim | exempt when | why |
 |---|---|---|
 | any | reset within 1h (cache TTL) | a window that refills before the prefix expires is not worth a 20x move |
-| `7d`, `7d_oi` | surplus > 0, or reset within 8 demand-hours | the remainder is destroyed at the reset, so spend it |
+| `7d`, `7d_oi` | surplus > 0, or reset within 36 clock hours | the remainder is destroyed at the reset, so spend it |
 
 ### Plan sizes
 

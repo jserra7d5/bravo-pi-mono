@@ -834,7 +834,7 @@ test('earlier deadlines take their share of the demand first', () => {
 //
 // Observed live 2026-09-21: slot 1 sat at 95.0% weekly with its reset 2.7h
 // away, so the ceiling excluded it from every fresh pick and 5% of a weekly
-// budget was going to reach 04:00 unspent. Within eight hours of demand of the
+// budget was going to reach 04:00 unspent. Within 36 clock hours of the
 // reset that ceiling is backwards, so it is lifted for weekly claims only.
 
 test('a weekly at the ceiling near its reset burns down instead', () => {
@@ -845,14 +845,62 @@ test('a weekly at the ceiling near its reset burns down instead', () => {
   assert.equal(Number(h.headroom.toFixed(3)), 0.05);
 });
 
-test('terminal distance is measured in demand, not on the clock', () => {
-  // 20 clock hours out, but the next 20 hours are nearly idle.
-  const quiet = demandOf(0.05, h => (h < 20 ? 0.001 : 0.05));
-  assert.equal(verdict([account('1', 0.96, 20, 0)], '1', quiet).evacuating, false);
-  assert.equal(verdict([account('1', 0.96, 20, 0)], '1', HEAVY).evacuating, true, '20 busy hours are not terminal');
-  // With no demand model the hours are clock hours: today's 8h rule.
-  assert.equal(verdict([account('1', 0.96, 7.5, 0)], '1', undefined).evacuating, false);
-  assert.equal(verdict([account('1', 0.96, 8.5, 0)], '1', undefined).evacuating, true);
+test('terminal distance is 36 clock hours, independent of demand', () => {
+  for (const demand of [undefined, HEAVY, demandOf(0.05, h => (h < 40 ? 0.001 : 0.05))]) {
+    const terminal = computeHeadroom(account('1', 0.96, 30, 0), 'claude-opus-5', NOW, { demand });
+    assert.equal(terminal.evacuating, false);
+    assert.equal(terminal.weeklyTerminal, true);
+    assert.equal(computeHeadroom(account('1', 0.96, 40, 0), 'claude-opus-5', NOW, { demand }).evacuating, true);
+    assert.equal(computeHeadroom(account('1', 0.96, 36, 0), 'claude-opus-5', NOW, { demand }).weeklyTerminal, true);
+  }
+});
+
+const FLOOR_DEMAND = { ...HEAVY, k: 0.264 };
+
+// Operator decision 2026-09-30: preserve 5h bandwidth until the drain window.
+test('fresh picks preserve a 20x weekly floor while a 5x has room', () => {
+  const twenty = account('2', 0.8, 72, 0);
+  const five = { ...account('1', 0.2, 120, 0), capacity: capacityForTier('default_claude_max_5x') };
+  for (const model of ['claude-opus-5', 'claude-sonnet-5', 'claude-fable-5']) {
+    const sel = selectAccount({ accounts: [twenty, five], model, nowMs: NOW, demand: FLOOR_DEMAND });
+    assert.equal(sel.breakdown.find(h => h.slot === '2')!.belowFloor, true);
+    assert.equal(sel.slot, '1');
+    assert.match(sel.reason, /slot 2 held at its 5h bandwidth floor/);
+    const draining = selectAccount({ accounts: [account('2', 0.8, 30, 0), five], model, nowMs: NOW, demand: FLOOR_DEMAND });
+    assert.equal(draining.breakdown.find(h => h.slot === '2')!.belowFloor, false);
+    assert.equal(draining.slot, '2');
+    assert.doesNotMatch(draining.reason, /bandwidth floor/);
+  }
+});
+
+test('warm non-Fable affinity ignores the weekly floor', () => {
+  const sel = selectAccount({ accounts: [account('2', 0.8, 72, 0), account('1', 0.2, 120, 0)],
+    model: 'claude-opus-5', nowMs: NOW, demand: FLOOR_DEMAND, affinitySlot: '2' });
+  assert.equal(sel.breakdown.find(h => h.slot === '2')!.belowFloor, true);
+  assert.equal(sel.slot, '2');
+  assert.equal(sel.decision, 'affinity-hold');
+});
+
+test('the weekly floor is soft when all serviceable accounts are below it', () => {
+  for (const model of ['claude-opus-5', 'claude-fable-5']) {
+    const sel = selectAccount({ accounts: [account('2', 0.8, 72, 0), account('1', 0.85, 120, 0)], model, nowMs: NOW, demand: FLOOR_DEMAND });
+    assert.ok(sel.breakdown.every(h => h.belowFloor));
+    assert.equal(sel.slot, '2', 'existing reset-order comparator ranks the fallback');
+    assert.doesNotMatch(sel.reason, /bandwidth floor/);
+  }
+});
+
+test('surplus lifts the weekly floor outside the drain window', () => {
+  const h = verdict([account('2', 0.8, 72, 0)], '2', demandOf(0.001));
+  assert.ok(h.surplus > 0);
+  assert.equal(h.belowFloor, false);
+});
+
+test('the weekly floor stacks on the post-reserve remainder and uses demand k', () => {
+  const a = account('2', 0.7, 72, 0);
+  assert.equal(computeHeadroom(a, 'claude-opus-5', NOW, { demand: FLOOR_DEMAND }).belowFloor, false);
+  assert.equal(computeHeadroom({ ...a, weeklyReserve: 0.1 }, 'claude-opus-5', NOW, { demand: FLOOR_DEMAND }).belowFloor, true);
+  assert.equal(computeHeadroom(account('2', 0.79, 72, 0), 'claude-opus-5', NOW, { demand: HEAVY }).belowFloor, false, 'k=0.2 does not hold a 0.21 remainder');
 });
 
 test('the terminal window takes fresh picks from a later deadline', () => {
@@ -873,7 +921,7 @@ test('a terminal remainder is spent by fresh picks but never bought with a cache
 
 test('a weekly reserve is never spent, not even by the burndown', () => {
   // Slot 2 holds 10% back. At 88% it is past its own 95% ceiling (88/90).
-  const reserved = { ...account('2', 0.88, 30, 0), weeklyReserve: 0.1 };
+  const reserved = { ...account('2', 0.88, 40, 0), weeklyReserve: 0.1 };
   const h = computeHeadroom(reserved, 'claude-opus-5', NOW);
   assert.equal(h.evacuating, true, 'fresh picks stop well short of the reserve');
   assert.equal(Number(h.headroom.toFixed(3)), 0.02, 'what is left above the reserve, in W20');

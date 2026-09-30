@@ -104,7 +104,7 @@ function world(accounts: WorldAccount[]): { stateRoot: string; authswapRoot: str
       };
     }
     if (a.u7dOi !== undefined) {
-      byId['7d_oi'] = { id: '7d_oi', status: 'allowed', utilization: a.u7dOi, reset: NOW / 1000 + 86400 };
+      byId['7d_oi'] = { id: '7d_oi', status: 'allowed', utilization: a.u7dOi, reset: NOW / 1000 + (a.reset7d ?? 86400) };
     }
     if (a.overage) byId['overage'] = { id: 'overage', status: a.overage };
     writeFileSync(
@@ -325,7 +325,7 @@ test('effort is one responsive segment and tails drop cost, project, effort, the
 test('every balanced account appears, not just the one that served last', () => {
   const { stateRoot, authswapRoot } = world([
     { slot: '1', email: 'info@nad.com', u5h: 0.34, u7d: 0.07 },
-    { slot: '2', email: 'joseph@gmail.com', u5h: 0, u7d: 0.96, overage: 'allowed' },
+    { slot: '2', email: 'joseph@gmail.com', u5h: 0, u7d: 0.96, reset7d: 40 * 3600, overage: 'allowed' },
   ]);
   const model = gather(
     { model: { id: 'claude-fable-5' } },
@@ -351,7 +351,7 @@ test('every balanced account appears, not just the one that served last', () => 
 
 test('an active evacuating account keeps its active glyph but turns it red', () => {
   const { stateRoot, authswapRoot } = world([
-    { slot: '1', email: 'hot@nad.com', u5h: 0.1, u7d: 0.96 },
+    { slot: '1', email: 'hot@nad.com', u5h: 0.1, u7d: 0.96, reset7d: 40 * 3600 },
   ]);
   new AffinityStore({ stateRoot, now: () => NOW }).touch('sess-hot', '1', 'claude-fable-5');
   const model = gather(
@@ -574,10 +574,10 @@ test('the evacuation marker follows the router and spares a window refilling wit
 });
 
 test('the badge follows the router into the terminal weekly window, and honours a reserve', () => {
-  // With no demand model the terminal window is 8 clock hours; inside it the
+  // The terminal window is 36 clock hours; inside it the
   // router lifts the ceiling, so the badge must stop claiming evacuation.
   const terminal = world([{ slot: '1', email: 'a@b.com', u5h: 0.0, u7d: 0.95, reset7d: 2.7 * 3600 }]);
-  const outside = world([{ slot: '1', email: 'a@b.com', u5h: 0.0, u7d: 0.95, reset7d: 9 * 3600 }]);
+  const outside = world([{ slot: '1', email: 'a@b.com', u5h: 0.0, u7d: 0.95, reset7d: 40 * 3600 }]);
   assert.equal(
     gather({}, { ...terminal, nowMs: NOW }).accounts[0]!.evacuating,
     false,
@@ -590,7 +590,7 @@ test('the badge follows the router into the terminal weekly window, and honours 
   );
   // A 10% reserve moves the ceiling down with it: 88% is 98% of what the
   // balancer may spend.
-  const reserved = world([{ slot: '1', email: 'a@b.com', u5h: 0.0, u7d: 0.88, reset7d: 30 * 3600 }]);
+  const reserved = world([{ slot: '1', email: 'a@b.com', u5h: 0.0, u7d: 0.88, reset7d: 40 * 3600 }]);
   const reserves = new Map([['1', 0.1]]);
   assert.equal(gather({}, { ...reserved, nowMs: NOW }).accounts[0]!.evacuating, false);
   assert.equal(gather({}, { ...reserved, nowMs: NOW, weeklyReserves: reserves }).accounts[0]!.evacuating, true);
@@ -600,7 +600,7 @@ test('the evacuation marker fires on the Fable-only weekly, which has no bar of 
   // 7d_oi drives routing but is not one of the two bars, so without this the
   // user watches two calm bars while every session is being moved off.
   const { stateRoot, authswapRoot } = world([
-    { slot: '1', email: 'a@b.com', u5h: 0.1, u7d: 0.1, u7dOi: 0.99 },
+    { slot: '1', email: 'a@b.com', u5h: 0.1, u7d: 0.1, u7dOi: 0.99, reset7d: 40 * 3600 },
   ]);
   assert.equal(
     gather(

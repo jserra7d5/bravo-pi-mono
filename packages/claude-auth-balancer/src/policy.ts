@@ -20,6 +20,13 @@
 // move buys nothing and the cheapest account is whichever ranking already
 // prefers.
 //
+// Operator decision 2026-09-30: fresh picks also preserve one full 5h
+// window of general weekly quota (capacity.fiveHour * k W20), after reserves.
+// This soft floor applies only more than 36 clock hours before an observed
+// reset and without surplus. Prefer accounts below the ceiling and above the
+// floor; otherwise fall back to below-ceiling, then serviceable accounts.
+// Warm affinity and Fable evacuation ignore the floor.
+//
 // Fresh picks pace the weekly. On a 20x Max plan the 5h window is 4x a 5x
 // plan's but the weekly is only 1.7x, so the weekly is the scarce budget and
 // the 5h window is a self-refilling burst limiter. Every model ranks fresh
@@ -69,13 +76,12 @@
 // affinity included for a large enough surplus. The 95% ceiling is lifted on
 // a weekly claim when the account has surplus (demand cannot exhaust it, so a
 // session started there is not about to be forced off) or when its reset is
-// within eight hours of average demand (the remainder is destroyed at the
+// within 36 clock hours (the remainder is destroyed at the
 // reset). The 5h claim is unaffected: it refills by itself and never expires
 // unspent. A slot with a weekly reserve (CLAUDE_AUTH_BALANCER_WEEKLY_RESERVE)
 // has it removed before any of this runs; see `applyReserve`. With no
 // demand model (under a week of history)
-// there is no surplus and nothing is expiring, and demand hours are clock
-// hours.
+// there is no surplus and nothing is expiring.
 //
 // Accounts need not be the same plan. Utilization is a fraction of that
 // account's OWN budget, and a Max 5x budget is a quarter of a 20x's on `5h` and
@@ -91,7 +97,7 @@
 import type { Claim, ClaimId, Claims } from './claims.js';
 import { claimHasReset, projectExpiredClaims } from './claims.js';
 import type { DemandModel } from './demand.js';
-import { expectedDemand, rateLimitedDemand } from './demand.js';
+import { DEFAULT_K, expectedDemand, rateLimitedDemand } from './demand.js';
 
 /** General-quota claims every request burns, regardless of model. */
 export const GENERAL_CLAIMS: ClaimId[] = ['5h', '7d'];
@@ -275,16 +281,8 @@ export const HEAVY_SESSION_HORIZON_MS = 60 * 60 * 1000;
  */
 export const WEEKLY_CLAIMS: ClaimId[] = ['7d', '7d_oi'];
 
-/**
- * How close a weekly reset must be, in hours of AVERAGE demand, before the 95%
- * ceiling stops applying to that claim. The ceiling keeps fresh sessions off
- * a nearly-spent account so they are not forced off it again; at the end of a
- * week that inverts, because the remainder is destroyed at the reset. Eight
- * average hours is enough to burn a 5% remainder. Measured in demand, a quiet
- * Friday night reaches it well before eight clock hours out, and a Tuesday
- * peak later; with no demand model the hours are clock hours.
- */
-export const DEFAULT_WEEKLY_TERMINAL_DEMAND_HOURS = 8;
+/** Clock window for weekly burndown; outside it, preserve one full 5h window. */
+export const DEFAULT_WEEKLY_DRAIN_WINDOW_MS = 36 * 3_600_000;
 
 /**
  * One account's position in the fleet's weekly deadline order, W20.
@@ -450,6 +448,8 @@ export type HeadroomBreakdown = {
    * picks avoid such accounts for any model; warm Fable sessions leave them.
    */
   evacuating: boolean;
+  /** General weekly remainder is below one full 5h window; fresh picks only. */
+  belowFloor: boolean;
   /**
    * Utilization the 5h window is projected to reach at its reset, assuming the
    * average burn rate so far continues: `utilization / elapsed fraction`,
@@ -562,14 +562,6 @@ export type HeadroomOptions = {
   fleet?: FleetTerm;
 };
 
-/** Hours of average demand until `resetMs`; clock hours without a demand profile. */
-export function demandHoursUntil(demand: DemandModel | undefined, nowMs: number, resetMs: number): number {
-  const clock = Math.max(0, resetMs - nowMs) / 3_600_000;
-  if (!demand?.hourly) return clock;
-  const perHour = demand.hourly.reduce((a, v) => a + v, 0) / demand.hourly.length;
-  return perHour > 0 ? expectedDemand(demand, nowMs, resetMs) / perHour : clock;
-}
-
 /**
  * Whether a claim at or above the threshold should NOT raise the ceiling — the
  * single place this is decided, so the statusline badge and the router cannot
@@ -577,7 +569,7 @@ export function demandHoursUntil(demand: DemandModel | undefined, nowMs: number,
  *
  * Any claim refilling within the cache TTL is exempt: a move would buy nothing
  * before the prefix expired anyway. A weekly claim is also exempt within
- * DEFAULT_WEEKLY_TERMINAL_DEMAND_HOURS of demand before its reset, and
+ * DEFAULT_WEEKLY_DRAIN_WINDOW_MS of clock time before its reset, and
  * whenever the account has surplus (the demand cannot exhaust it before the
  * reset, so a session started there is not about to be forced off). Either
  * way its remainder is otherwise thrown away. On an account with a weekly
@@ -595,7 +587,7 @@ export function ceilingExempt(
   if (!WEEKLY_CLAIMS.includes(claimId as ClaimId)) return false;
   if ((options.fleet?.surplus ?? 0) > 0) return true;
   return claim.reset !== undefined &&
-    demandHoursUntil(options.demand, nowMs, claim.reset * 1000) <= DEFAULT_WEEKLY_TERMINAL_DEMAND_HOURS;
+    claim.reset * 1000 - nowMs <= DEFAULT_WEEKLY_DRAIN_WINDOW_MS;
 }
 
 /** Share of the week's expected demand that still lies before `resetMs`, 0..1. */
@@ -635,6 +627,11 @@ export function computeHeadroom(
     weeklyClaim.utilization !== undefined &&
     weeklyClaim.reset === undefined;
 
+  const belowFloor = weeklyClaim !== undefined && weeklyReset !== undefined &&
+    weeklyReset * 1000 - nowMs > DEFAULT_WEEKLY_DRAIN_WINDOW_MS &&
+    (fleet?.surplus ?? 0) <= 0 &&
+    (claimHeadroom(weeklyClaim, nowMs) ?? 1) * capacity.weekly < capacity.fiveHour * (demand?.k ?? DEFAULT_K);
+
   const base: HeadroomBreakdown = {
     slot: account.slot,
     headroom: 0,
@@ -647,6 +644,7 @@ export function computeHeadroom(
     weeklyExpiring: false,
     weeklyTerminal: false,
     evacuating: false,
+    belowFloor,
     requiresOverage: false,
     overageAvailable,
     eligible: false,
@@ -896,7 +894,9 @@ export function selectAccount(input: SelectInput): Selection {
   const belowCeiling = serviceable.filter(b => !b.evacuating);
   // Fable keeps its dedicated all-evacuating path below, which prefers the
   // sticky slot's cache. Non-Fable has no such path, so it falls back here.
-  const healthy = fable || belowCeiling.length > 0 ? belowCeiling : serviceable;
+  const aboveFloor = belowCeiling.filter(b => !b.belowFloor);
+  const ceilingPool = fable || belowCeiling.length > 0 ? belowCeiling : serviceable;
+  const healthy = aboveFloor.length > 0 ? aboveFloor : ceilingPool;
   // Every model paces the weekly: furthest ahead of pace first, then the most
   // raw headroom, then the earliest known reset, then stable slot order.
   const cmpBase = (a: HeadroomBreakdown, b: HeadroomBreakdown) => {
@@ -1022,6 +1022,13 @@ export function selectAccount(input: SelectInput): Selection {
   const fitting = healthy.filter(fits);
   const pool = pulled ? expiring : fitting.length > 0 ? fitting : healthy;
   const pick = rank(pool)[0];
+  // Replay the same fit/rank decision without the floor, reporting it only
+  // when the floor actually prevented that winner from taking this session.
+  const fittingWithoutFloor = ceilingPool.filter(fits);
+  const withoutFloor = rank(fittingWithoutFloor.length > 0 ? fittingWithoutFloor : ceilingPool)[0];
+  const floorNote = !pulled && pick && withoutFloor?.belowFloor && pick.slot !== withoutFloor.slot
+    ? `; slot ${withoutFloor.slot} held at its 5h bandwidth floor until 36h before reset`
+    : '';
   const unbucketed = rankBase(pool)[0];
   const noResetDay = rankNoResetDay(pool)[0];
   // The reset-day term is reported when it changed the outcome; the bucket
@@ -1065,7 +1072,7 @@ export function selectAccount(input: SelectInput): Selection {
           ? `${expiringNote}; draining it first`
           : allAboveCeiling
             ? `every account at or above ${(threshold * 100).toFixed(0)}%; using ${pick.slot} anyway (moving buys nothing)`
-            : `most spendable ${fable ? 'Fable ' : ''}headroom on ${pick.slot} (${pick.spendableHeadroom.toFixed(3)} ahead of pace, ${pick.headroom.toFixed(3)} raw on ${pick.bindingClaim ?? 'unknown'}${pick.reservedForFable > 0 ? `, ${pick.reservedForFable.toFixed(3)} held for Fable` : ''})`) + bucketNote,
+            : `most spendable ${fable ? 'Fable ' : ''}headroom on ${pick.slot} (${pick.spendableHeadroom.toFixed(3)} ahead of pace, ${pick.headroom.toFixed(3)} raw on ${pick.bindingClaim ?? 'unknown'}${pick.reservedForFable > 0 ? `, ${pick.reservedForFable.toFixed(3)} held for Fable` : ''})`) + bucketNote + floorNote,
       breakdown,
     };
   }
