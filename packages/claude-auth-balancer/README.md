@@ -72,7 +72,15 @@ session on one account until it genuinely cannot serve.
    at compaction or lease expiry. `status` marks it `FLOOR`. A two-week
    hourly simulation from the 09-30 fleet state: at forecast demand, hours
    where the fleet's remaining `5h` bandwidth could not cover the observed
-   peak fell from 28 to 0; at 1.4x demand, unserved demand halved.
+   peak fell from 28 to 0; at 1.4x demand, unserved demand halved. A trace
+   replay of 09-14..09-30 (455k requests, `simulate` from `replay.ts`, both
+   policies on the demand model, costs scaled for load):
+
+   | load | unserved requests old → new | unserved $ | extra re-creates |
+   |---|---|---|---|
+   | 1.0x | 0 → 0 | 0 → 0 | +8 ($1) |
+   | 1.4x | 9,810 → 9,179 | 2,277 → 1,996 | +30 ($55) |
+   | 1.8x | 45,141 → 40,534 | 13,206 → 11,869 | +189 ($241) |
 3. **95% blocks fresh picks for every model; only Fable evacuates a warm one.**
    An account at or above 95% raw utilization on a claim the requested model is
    gated on takes no new sessions. Existing non-Fable `(session, model)` leases
