@@ -59,12 +59,20 @@ session on one account until it genuinely cannot serve.
    stable slot order. The `5h` and `7d` claims remain hard gates. The ceiling
    in (3) filters this pool first and the terms in (4) and (5) rank ahead of
    pacing.
-   Operator decision 2026-09-30: fresh picks also **keep one full `5h` window
-   of general weekly quota**: `capacity.fiveHour * (demand?.k ?? DEFAULT_K)`
-   W20. Compare it with `claimHeadroom(7d) * capacity.weekly` after reserves,
-   so the floor stacks on top of the configured weekly reserve. It applies
-   only more than 36 clock hours before an observed `7d` reset, and only
-   without surplus. No observed reset or unopened window means no floor.
+   **Weekly bandwidth floor** (operator decision 2026-09-30). An account
+   whose weekly runs out loses its `5h` window too, for the rest of its week.
+   A 20x's `5h` window is 4x a 5x's but its weekly is only 1.7x, so draining
+   a 20x's weekly days before its reset throws away the fleet's scarcest
+   resource: burst bandwidth. So until 36 clock hours before its `7d` reset,
+   an account keeps one full `5h` window of general weekly (`5h` size × `k`:
+   about 26% of a 20x's week, 11% of a 5x's, at k=0.26), measured after any
+   weekly reserve. Below that it takes no fresh picks while another account
+   below the ceiling is above its floor. Surplus lifts the floor; so does an
+   unopened or unobserved window. Warm sessions hold through it and re-pick
+   at compaction or lease expiry. `status` marks it `FLOOR`. A two-week
+   hourly simulation from the 09-30 fleet state: at forecast demand, hours
+   where the fleet's remaining `5h` bandwidth could not cover the observed
+   peak fell from 28 to 0; at 1.4x demand, unserved demand halved.
 3. **95% blocks fresh picks for every model; only Fable evacuates a warm one.**
    An account at or above 95% raw utilization on a claim the requested model is
    gated on takes no new sessions. Existing non-Fable `(session, model)` leases

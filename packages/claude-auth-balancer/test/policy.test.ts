@@ -779,7 +779,7 @@ test('an account holding more than the forecast can reach is expiring', () => {
   assert.equal(soon.weeklyExpiring, true);
   assert.equal(Number(soon.surplus.toFixed(3)), 0.53);
   assert.equal(verdict(fleet, '2', HEAVY).weeklyExpiring, false, 'days out: the demand reaches it');
-  // 8.5 demand hours is outside the terminal window, so 95% still means the ceiling.
+  // 5% left 8.5h out is within what the demand reaches: no surplus, not expiring.
   assert.equal(verdict([account('4', 0.95, 8.5)], '4', HEAVY).weeklyExpiring, false, 'above the ceiling on 7d');
   assert.equal(verdict([account('4', 0.13, 8.5, 0.96)], '4', HEAVY).weeklyExpiring, false, 'above the ceiling on 5h');
 });
